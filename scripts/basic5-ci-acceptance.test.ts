@@ -5,10 +5,12 @@ import { mkdir, mkdtemp, readFile, realpath, rm, symlink } from 'node:fs/promise
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { OwnerEditorSavedIds } from '@assistant/persistence';
 import { describe, expect, it, vi } from 'vitest';
 import {
   assertBasic5CiUtilityChildSucceeded,
   assertBasic5CiWorkflowAdmission,
+  BASIC5_CI_EVIDENCE_LABEL,
   type Basic5CiCaseEntryDiagnostic,
   type Basic5CiCaseResult,
   type Basic5CiDirectChildHandle,
@@ -21,6 +23,7 @@ import {
   type Basic5CiQuiescence,
   type Basic5CiTarget,
   type Basic5CiUtilityChildTestDriver,
+  buildBasic5CiEvidence,
   combineBasic5CiPreparationFailures,
   holdForBasic5CiUtilityBootstrapFailure,
   observeBasic5CiChromeVersion,
@@ -96,7 +99,7 @@ function validEvidence(): Basic5CiEvidence {
   const operationIds = [1, 2, 3, 4].map(
     (value) => `00000000-0000-4000-8000-${String(value).padStart(12, '0')}`,
   );
-  return {
+  return buildBasic5CiEvidence({
     result: 'passed',
     standalone: {
       sourceCommit: preflight.sourceCommit,
@@ -163,7 +166,7 @@ function validEvidence(): Basic5CiEvidence {
         statusVersion: index + 1,
         outcome: 'saved',
         uiSavedAfterCleanBaseline: true,
-        ids: ids as unknown as Record<string, string>,
+        ids: ids as OwnerEditorSavedIds,
       };
     }),
     durableReadbacks: {
@@ -207,7 +210,7 @@ function validEvidence(): Basic5CiEvidence {
     standardTestWrapperCleanupIsUnconditional: true,
     testFailure: null,
     cleanupFailure: null,
-  };
+  });
 }
 
 class FakeOps implements Basic5CiOps {
@@ -362,6 +365,78 @@ class FakeDirectChild extends EventEmitter implements Basic5CiDirectChildHandle 
 }
 
 describe('one-shot BASIC5 CI controller', () => {
+  it('accepts producer evidence only after the exact v1 envelope survives JSON roundtrip', async () => {
+    const built = validEvidence();
+    expect(built.schemaVersion).toBe(1);
+    expect(BASIC5_CI_EVIDENCE_LABEL).toBe(
+      'synthetic Auth.js cookie; provider-unqualified local embedding transport',
+    );
+    expect(built.label).toBe(BASIC5_CI_EVIDENCE_LABEL);
+    const evidence = JSON.parse(JSON.stringify(built));
+    const ops = new FakeOps();
+    Object.assign(ops.caseResult, { evidence });
+
+    const result = await runBasic5CiAcceptance(ops);
+
+    expect(result.result).toBe('passed');
+    expect(result.schemaVersion).toBe(5);
+  });
+
+  it.each([
+    {
+      name: 'missing schemaVersion',
+      mutate: (evidence: Record<string, unknown>) => {
+        delete evidence.schemaVersion;
+      },
+    },
+    {
+      name: 'wrong schemaVersion',
+      mutate: (evidence: Record<string, unknown>) => {
+        evidence.schemaVersion = 2;
+      },
+    },
+    {
+      name: 'null schemaVersion',
+      mutate: (evidence: Record<string, unknown>) => {
+        evidence.schemaVersion = null;
+      },
+    },
+    {
+      name: 'string schemaVersion',
+      mutate: (evidence: Record<string, unknown>) => {
+        evidence.schemaVersion = '1';
+      },
+    },
+    {
+      name: 'wrong label',
+      mutate: (evidence: Record<string, unknown>) => {
+        evidence.label = 'provider-backed embedding';
+      },
+    },
+    {
+      name: 'missing label',
+      mutate: (evidence: Record<string, unknown>) => {
+        delete evidence.label;
+      },
+    },
+    {
+      name: 'unknown envelope key',
+      mutate: (evidence: Record<string, unknown>) => {
+        evidence.extraEnvelopeField = true;
+      },
+    },
+  ])('holds for malformed evidence envelope: $name', async ({ mutate }) => {
+    const evidence = JSON.parse(JSON.stringify(validEvidence())) as Record<string, unknown>;
+    mutate(evidence);
+    const ops = new FakeOps();
+    Object.assign(ops.caseResult, { evidence });
+
+    const result = await runBasic5CiAcceptance(ops);
+
+    expect(result.result).toBe('hold');
+    expect(ops.events).toEqual(['preflight', 'prepare', 'case', 'quiesce', 'receipt']);
+  });
+
   function utilityChildDriver(
     child: FakeDirectChild,
     options: {
