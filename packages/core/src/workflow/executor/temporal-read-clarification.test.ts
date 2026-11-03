@@ -224,8 +224,8 @@ async function runFlightContinuation(
           calendar: 'Synthetic Work',
           calendarTimeZone: 'America/Los_Angeles',
           summary: 'Synthetic team meeting',
-          start: '2026-10-13T17:00:00.000Z',
-          end: '2026-10-13T18:00:00.000Z',
+          start: '2026-10-12T17:00:00.000Z',
+          end: '2026-10-12T18:00:00.000Z',
           ownerResponse: 'accepted',
           blocksTime: true,
         };
@@ -725,7 +725,7 @@ describe('unsupported temporal requests through the actual executor step loop', 
   it('keeps a bounded review-only focus plan on calendar evidence when mail contains an unrelated alert', async () => {
     const request =
       'Review the next three working days for two 60-minute focus blocks with 15-minute buffers around meetings. Present the review only; do not change anything.';
-    const { result, state, dispatch } = await runFlightContinuation([], request, {
+    const { result, state, dispatch, rows } = await runFlightContinuation([], request, {
       focusPlanFixture: true,
       modelFinalText: 'A synthetic newsletter alert says the focus plan is ready.',
     });
@@ -741,11 +741,82 @@ describe('unsupported temporal requests through the actual executor step loop', 
         /calendar\.(?:create|update|delete)/.test(call.toolName),
       ),
     ).toBe(false);
+    const availabilityRow = rows.find((row) => row.toolName === 'calendar.availability');
+    const eventListRow = rows.find((row) => row.toolName === 'calendar.list_events');
+    const availabilityArgs = availabilityRow?.args as Record<string, unknown> | undefined;
+    const listedEvents = (eventListRow?.result as { events?: Array<Record<string, unknown>> })
+      ?.events;
+    const meeting = listedEvents?.[0];
+    expect(availabilityArgs).toMatchObject({
+      timeMin: '2026-10-12T07:00:00.000Z',
+      timeMax: '2026-10-15T07:00:00.000Z',
+    });
+    expect(meeting).toMatchObject({
+      start: '2026-10-12T17:00:00.000Z',
+      end: '2026-10-12T18:00:00.000Z',
+    });
+    const windowStart = Date.parse(String(availabilityArgs?.timeMin));
+    const windowEnd = Date.parse(String(availabilityArgs?.timeMax));
+    const meetingStart = Date.parse(String(meeting?.start));
+    const meetingEnd = Date.parse(String(meeting?.end));
+    expect(meetingStart).toBeGreaterThanOrEqual(windowStart);
+    expect(meetingEnd).toBeLessThanOrEqual(windowEnd);
+    const bufferedStart = meetingStart - 15 * 60_000;
+    const bufferedEnd = meetingEnd + 15 * 60_000;
+    const temptingMondaySlotStart = Date.parse('2026-10-12T16:00:00.000Z');
+    const temptingMondaySlotEnd = Date.parse('2026-10-12T17:00:00.000Z');
+    expect(temptingMondaySlotStart).toBeLessThan(bufferedEnd);
+    expect(temptingMondaySlotEnd).toBeGreaterThan(bufferedStart);
+    const dayLabel = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/Los_Angeles',
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
+    }).format(new Date(meetingStart));
+    const minuteOfDay = (time: number) => {
+      const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/Los_Angeles',
+        hour: 'numeric',
+        minute: '2-digit',
+        hour12: true,
+      }).formatToParts(new Date(time));
+      const hour = Number(parts.find((part) => part.type === 'hour')?.value);
+      const minute = Number(parts.find((part) => part.type === 'minute')?.value);
+      const period = parts.find((part) => part.type === 'dayPeriod')?.value;
+      return ((hour % 12) + (period === 'PM' ? 12 : 0)) * 60 + minute;
+    };
+    const bufferedStartMinute = minuteOfDay(meetingStart) - 15;
+    const bufferedEndMinute = minuteOfDay(meetingEnd) + 15;
+    const focusSlots = [
+      ...(state.pendingFinal?.text ?? '').matchAll(
+        /^\| ([A-Za-z]{3}, [A-Za-z]{3} \d{1,2}), (\d{1,2}):(\d{2}) (AM|PM)–(\d{1,2}):(\d{2}) (AM|PM) \(60m\) \| \d+m \|$/gm,
+      ),
+    ];
+    const toMinute = (hour: string, minute: string, period: string) =>
+      ((Number(hour) % 12) + (period === 'PM' ? 12 : 0)) * 60 + Number(minute);
+    expect(focusSlots).toHaveLength(2);
+    for (const slot of focusSlots) {
+      const [, candidateDay, startHour, startMinute, startPeriod, endHour, endMinute, endPeriod] =
+        slot;
+      if (
+        candidateDay !== dayLabel ||
+        !startHour ||
+        !startMinute ||
+        !startPeriod ||
+        !endHour ||
+        !endMinute ||
+        !endPeriod
+      )
+        continue;
+      const candidateStart = toMinute(startHour, startMinute, startPeriod);
+      const candidateEnd = toMinute(endHour, endMinute, endPeriod);
+      expect(candidateStart < bufferedEndMinute && candidateEnd > bufferedStartMinute).toBe(false);
+    }
     expect(state.pendingFinal?.text).toContain('Review-only plan for the next 3 working days');
     expect(state.pendingFinal?.text).toContain('free/busy unavailable for Synthetic Work');
     expect(state.pendingFinal?.text).toContain('15-minute buffers before and after meetings');
     expect(state.pendingFinal?.text.match(/\(60m\)/g)).toHaveLength(2);
-    expect(state.pendingFinal?.text).not.toContain('Tue, Oct 13, 9:00 AM');
+    expect(state.pendingFinal?.text).not.toContain('| Mon, Oct 12, 9:00 AM–10:00 AM (60m) |');
     expect(state.pendingFinal?.text).not.toContain('Synthetic newsletter alert');
   });
 
