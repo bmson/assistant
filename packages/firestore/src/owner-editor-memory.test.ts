@@ -10,7 +10,6 @@ import {
 import { describe, expect, it, vi } from 'vitest';
 import { applyOwnerEditorCommand } from '../../application/src/owner-editor.js';
 import { createOwnerEditorDomain } from '../../application/src/owner-editor-domain.js';
-import { ownerEditorRequestHash } from '../../application/src/owner-editor-hash.js';
 import {
   ownerEditorPath,
   parseOwnerEditorRequest,
@@ -508,4 +507,11 @@ it('suppresses correction attribution when body differs from its valid stored ma
     readOnlyReason: 'memory_content_hash_mismatch',
     ownerCorrection: null,
   });
+});
+
+it('does not return an exact snapshot when the target belongs to another owner', async () => {
+  const f = fixture();
+  f.seed({ agentId: randomUUID() });
+  expect(await f.read()).toBeNull();
+  expect(f.embed).not.toHaveBeenCalled();
 });

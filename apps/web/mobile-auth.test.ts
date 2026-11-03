@@ -38,6 +38,7 @@ import {
   authenticateMobileOwner,
   isMobileAuthed,
   mobileJson,
+  resolveMobileOwner,
 } from './mobile-auth';
 import { secureTokenMatches } from './mobile-token';
 
@@ -277,6 +278,17 @@ describe('typed bearer authentication and owner resolution', () => {
     });
     expect(authState.database).toHaveBeenCalledTimes(1);
     expect(authState.postgresOwner).toHaveBeenCalledWith({ kind: 'fixture-db' });
+  });
+
+  it('distinguishes owner-resolution unavailability from invalid bearer while preserving the wrapper', async () => {
+    const principal = { kind: 'configured_installation_bearer' } as const;
+    authState.config.PERSISTENCE_DRIVER = 'postgres';
+    authState.postgresOwner.mockRejectedValue(new Error('private database diagnostic'));
+
+    expect(await resolveMobileOwner(principal)).toEqual({ ok: false, reason: 'unavailable' });
+    expect(await authenticateMobileOwner(request('Bearer startup-token'))).toBeNull();
+    expect(await authenticateMobileBearer(request('Bearer invalid'))).toBeNull();
+    expect(authState.postgresOwner).toHaveBeenCalledTimes(2);
   });
 
   it('fails closed for invalid Firestore configuration and owner-resolution errors', async () => {

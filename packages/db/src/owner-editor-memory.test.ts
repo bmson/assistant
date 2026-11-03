@@ -161,18 +161,21 @@ function fixture() {
           } else if (table === memories) {
             state.events.push('memory-read');
             if (fields?.memory)
-              rows = [
-                {
-                  memory: state.memory,
-                  native: JSON.parse(
-                    JSON.stringify({
-                      ...state.memory,
-                      embedding: undefined,
-                      created_at: `2026-10-25T00:00:00.${state.nativeSuffix}+00:00`,
-                    }),
-                  ),
-                },
-              ];
+              rows =
+                state.memory.agentId === ownerId
+                  ? [
+                      {
+                        memory: state.memory,
+                        native: JSON.parse(
+                          JSON.stringify({
+                            ...state.memory,
+                            embedding: undefined,
+                            created_at: `2026-10-25T00:00:00.${state.nativeSuffix}+00:00`,
+                          }),
+                        ),
+                      },
+                    ]
+                  : [];
             else if (fields?.id) rows = state.duplicates;
             else rows = [state.memory];
           } else if (table === memoryImportLineage) rows = state.lineage;
@@ -278,6 +281,13 @@ async function prepared(f: ReturnType<typeof fixture>) {
     embeddingSpaceKey: f.state.memory.embeddingSpaceKey,
   };
 }
+
+it('does not return an exact snapshot when the target belongs to another owner', async () => {
+  const f = fixture();
+  f.state.memory.agentId = randomUUID();
+  expect(await f.read()).toBeNull();
+  expect(f.state.events).not.toContain('memory-write');
+});
 describe('actual PG correction/claim/card/receipt on one offline leased transaction', () => {
   it('preserves source identity and uses canonical primitive/marker with no nested/advisory inversion', async () => {
     const f = fixture(),
