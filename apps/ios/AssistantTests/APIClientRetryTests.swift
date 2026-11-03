@@ -5121,6 +5121,184 @@ extension APIClientRetryTests {
     }
 
     @MainActor
+    private func waitForReplyPollFixture(seconds: Double = 3, _ condition: () -> Bool) async throws -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: .milliseconds(Int(seconds * 1_000)))
+        while !condition(), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        return condition()
+    }
+
+    private func replyProgressFixture(status: String? = "working") throws -> Data {
+        try JSONEncoder().encode(ChatUpdates(taskStatus: status, messages: [], refreshed: [], superseded: nil,
+            nextCursor: nil, hasMore: false,
+            activity: [ToolActivity(toolName: "fixture.read", status: "executing", step: 1)]))
+    }
+
+    private func replyFinalFixture(taskID: String, status: String = "done") throws -> Data {
+        try JSONEncoder().encode(ChatUpdates(taskStatus: status,
+            messages: [ChatMessage(id: "final-\(taskID)", role: .assistant,
+                parts: [.init(type: "text", text: "Fixture result")], metadata: ["taskId": .string(taskID)])],
+            refreshed: [], superseded: nil, nextCursor: nil, hasMore: false, activity: []))
+    }
+
+    @MainActor
+    func testChangedActivityStartsAHeldFollowBeforeQuietBackoff() async throws {
+        let model = try await notificationModel()
+        let path = "/api/mobile/v1/chat/status"
+        let taskID = "33333333-3333-4333-8333-333333333333"
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/chat": [.taskStream(body: Data("data: [DONE]\n\n".utf8), taskId: taskID)],
+            path: [.success(status: 200, body: try replyProgressFixture()),
+                   .held(status: 200, body: try replyFinalFixture(taskID: taskID))],
+        ])
+        defer { StubURLProtocol.retireHeldResponse(path: path, testCaseID: testCaseID) }
+        model.send("Show fixture progress")
+        let sawProgress = try await waitForReplyPollFixture { !model.toolActivity.isEmpty }
+        XCTAssertTrue(sawProgress)
+        // Anchor to accepted activity, not send/receipt startup. The previous
+        // 1500ms gap cannot have a held follow inside this 1000ms window.
+        let heldBeforeQuietGap = try await waitForReplyPollFixture(seconds: 1) {
+            StubURLProtocol.isHoldingResponse(path: path)
+        }
+        XCTAssertTrue(heldBeforeQuietGap, "Changed activity should select the existing 250ms news cadence")
+        XCTAssertFalse(model.messages.contains { $0.id == "final-\(taskID)" })
+        StubURLProtocol.releaseHeldResponse(path: path)
+        let settled = try await waitForReplyPollFixture { !model.isSending }
+        XCTAssertTrue(settled)
+        XCTAssertTrue(model.messages.contains { $0.id == "final-\(taskID)" })
+        XCTAssertEqual(StubURLProtocol.urls.filter { $0.path == path }.count, 2)
+    }
+
+    @MainActor
+    func testRepeatedActivityAndOmittedStatusKeepQuietBackoffInAppModel() async throws {
+        let model = try await notificationModel()
+        let path = "/api/mobile/v1/chat/status"
+        let taskID = "33333333-3333-4333-8333-333333333333"
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/chat": [.taskStream(body: Data("data: [DONE]\n\n".utf8), taskId: taskID)],
+            path: [.success(status: 200, body: try replyProgressFixture()),
+                   .success(status: 200, body: try replyProgressFixture(status: nil)),
+                   .held(status: 200, body: try replyFinalFixture(taskID: taskID))],
+        ])
+        defer { StubURLProtocol.retireHeldResponse(path: path, testCaseID: testCaseID) }
+        model.send("Repeat fixture progress")
+        let held = try await waitForReplyPollFixture(seconds: 5) { StubURLProtocol.isHoldingResponse(path: path) }
+        XCTAssertTrue(held)
+        let requests = StubURLProtocol.requestTimeline.filter { $0.path == path }
+        XCTAssertEqual(requests.count, 3)
+        if requests.count == 3 {
+            XCTAssertGreaterThanOrEqual(requests[2].uptime - requests[1].uptime, 1.45,
+                "Repeated activity with an omitted optional status must not use the 250ms news cadence")
+        }
+        StubURLProtocol.releaseHeldResponse(path: path)
+        let settled = try await waitForReplyPollFixture { !model.isSending }
+        XCTAssertTrue(settled)
+    }
+
+    @MainActor
+    func testCancellationDuringChangedProgressSettlesWithoutFurtherReplyPolls() async throws {
+        let model = try await notificationModel()
+        let path = "/api/mobile/v1/chat/status"
+        let taskID = "33333333-3333-4333-8333-333333333333"
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/chat": [.taskStream(body: Data("data: [DONE]\n\n".utf8), taskId: taskID)],
+            path: [.success(status: 200, body: try replyProgressFixture()),
+                   .held(status: 200, body: try replyFinalFixture(taskID: taskID, status: "cancelled"))],
+            "/api/mobile/v1/activity/\(taskID)": [
+                .success(status: 200, body: Data(#"{"ok":true,"cancelled":true,"effectStatus":"unknown"}"#.utf8))],
+        ])
+        defer { StubURLProtocol.retireHeldResponse(path: path, testCaseID: testCaseID) }
+        model.send("Cancel fixture progress")
+        let sawProgress = try await waitForReplyPollFixture { !model.toolActivity.isEmpty }
+        XCTAssertTrue(sawProgress)
+        model.cancelSend()
+        let held = try await waitForReplyPollFixture { StubURLProtocol.isHoldingResponse(path: path) }
+        XCTAssertTrue(held)
+        StubURLProtocol.releaseHeldResponse(path: path)
+        let settled = try await waitForReplyPollFixture { !model.isSending && !model.isCancellingSend }
+        XCTAssertTrue(settled)
+        let count = StubURLProtocol.urls.filter { $0.path == path }.count
+        try await Task.sleep(for: .milliseconds(350))
+        XCTAssertEqual(StubURLProtocol.urls.filter { $0.path == path }.count, count)
+        XCTAssertEqual(StubURLProtocol.urls.filter { $0.path == "/api/mobile/v1/activity/\(taskID)" }.count, 1)
+    }
+
+    @MainActor
+    func testReplacedOwnerCannotPublishHeldReplyProgressIntoNewTurn() async throws {
+        let suite = "assistant.reply-progress-owner.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(true, forKey: "assistant.push-prompted")
+        let model = AppModel(apiClient: makeClient(), defaults: defaults, storeConnectionToken: { _ in })
+        model.scenePhaseDidChange(.background)
+        StubURLProtocol.primeBootstrap(try notificationBootstrap())
+        await model.refreshAll(reportFailure: false)
+        let path = "/api/mobile/v1/chat/status"
+        let taskID = "33333333-3333-4333-8333-333333333333"
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/chat": [
+                .taskStream(body: Data("data: [DONE]\n\n".utf8), taskId: taskID),
+                .stream(body: Data())],
+            path: [.success(status: 200, body: try replyProgressFixture()),
+                   .held(status: 200, body: try replyFinalFixture(taskID: taskID))],
+            "/api/mobile/v1/bootstrap": [.success(status: 200,
+                body: try notificationBootstrap(owner: "replacement-progress-owner"))],
+            "/api/mobile/v1/overview": [.success(status: 401, body: Data())],
+        ])
+        defer { StubURLProtocol.retireHeldResponse(path: path, testCaseID: testCaseID) }
+        model.send("Old owner progress")
+        let held = try await waitForReplyPollFixture { StubURLProtocol.isHoldingResponse(path: path) }
+        XCTAssertTrue(held)
+        let saved = await model.saveConnection(serverURL: "https://candidate.test", token: "fixture-token")
+        XCTAssertTrue(saved)
+        XCTAssertEqual(model.bootstrap?.identity.id, "replacement-progress-owner")
+        model.send("New owner turn")
+        let sent = try await waitForReplyPollFixture {
+            StubURLProtocol.urls.filter { $0.path == "/api/mobile/v1/chat" }.count == 2
+        }
+        XCTAssertTrue(sent)
+        StubURLProtocol.releaseHeldResponse(path: path)
+        try await Task.sleep(for: .milliseconds(350))
+        XCTAssertTrue(model.isSending, "An old response must not settle the replacement owner's turn")
+        XCTAssertFalse(model.messages.contains { $0.id == "final-\(taskID)" })
+        XCTAssertTrue(model.toolActivity.isEmpty, "Old progress must not repopulate the replacement owner")
+        XCTAssertEqual(StubURLProtocol.urls.filter { $0.path == path }.count, 2,
+                       "The retired old poll must not schedule another follow")
+        // End the intentionally open replacement fixture without issuing a write.
+        StubURLProtocol.appendStream(Data("data: [DONE]\n\n".utf8))
+    }
+
+    @MainActor
+    func testNextOrdinaryTurnStartsWithAFreshReplyProgressSnapshot() async throws {
+        let model = try await notificationModel()
+        let path = "/api/mobile/v1/chat/status"
+        let taskIDs = ["33333333-3333-4333-8333-333333333333", "44444444-4444-4444-8444-444444444444"]
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/chat": taskIDs.map { .taskStream(body: Data("data: [DONE]\n\n".utf8), taskId: $0) },
+            path: try taskIDs.flatMap { taskID -> [StubURLProtocol.Outcome] in
+                [.success(status: 200, body: try replyProgressFixture()),
+                 .held(status: 200, body: try replyFinalFixture(taskID: taskID))]
+            },
+        ])
+        defer { StubURLProtocol.retireHeldResponse(path: path, testCaseID: testCaseID) }
+        for (index, taskID) in taskIDs.enumerated() {
+            model.send("Fixture turn \(index)")
+            let sawProgress = try await waitForReplyPollFixture {
+                StubURLProtocol.urls.filter { $0.path == path }.count >= index * 2 + 1 && !model.toolActivity.isEmpty
+            }
+            XCTAssertTrue(sawProgress)
+            let held = try await waitForReplyPollFixture(seconds: 1) { StubURLProtocol.isHoldingResponse(path: path) }
+            XCTAssertTrue(held, "Even identical progress is new in a new poll invocation")
+            StubURLProtocol.releaseHeldResponse(path: path)
+            let settled = try await waitForReplyPollFixture { !model.isSending }
+            XCTAssertTrue(settled)
+            XCTAssertTrue(model.messages.contains { $0.id == "final-\(taskID)" })
+        }
+        XCTAssertEqual(StubURLProtocol.urls.filter { $0.path == path }.count, 4)
+    }
+
+    @MainActor
     func testStopAfterToolStartsWaitsForTaskStatusAndWarnsEffectsMayRemain() async throws {
         let model = try await notificationModel()
         let working = ChatUpdates(taskStatus: "working", messages: [], refreshed: [], superseded: nil,

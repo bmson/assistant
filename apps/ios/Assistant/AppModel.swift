@@ -5210,6 +5210,7 @@ final class AppModel {
         // Kept at the top of the loop, where the old fixed interval was, so
         // that every `continue` below still backs off rather than spinning.
         var gapMilliseconds: Int64 = 0
+        var progress = PollingPolicy.ReplyProgress()
         while Date() < deadline {
             attempt += 1
             guard connectionIsCurrent(client, version: version), self.conversationId == conversationId,
@@ -5249,13 +5250,22 @@ final class AppModel {
                     messages.removeAll { $0.id == streamID }
                     if sendDisplayState?.streamID == streamID { sendDisplayState = nil }
                 }
+                // Track only accepted responses for this poll invocation, after
+                // the connection/conversation/ordinary-turn guards above.
+                let progressChanged = progress.observe(
+                    activity: updates.activity.map {
+                        .init(toolName: $0.toolName, step: $0.step, status: $0.status)
+                    },
+                    taskStatus: updates.taskStatus
+                )
                 gapMilliseconds = PollingPolicy.gapMilliseconds(
                     elapsedMilliseconds: elapsedMilliseconds,
                     // `superseded` is optional on the wire — a server that sent
                     // no retractions omits it entirely.
                     carriedNews: !updates.messages.isEmpty
                         || !updates.refreshed.isEmpty
-                        || !(updates.superseded?.isEmpty ?? true),
+                        || !(updates.superseded?.isEmpty ?? true)
+                        || progressChanged,
                     attempt: attempt,
                     hasTaskID: taskId != nil
                 )
