@@ -2987,8 +2987,17 @@ struct CatalogModel: Codable, Identifiable, Sendable, Hashable {
     }
 
     private func formattedPrice(_ value: Double?) -> String {
-        guard let value else { return "unavailable" }
-        return String(format: "$%.2f", value)
+        guard let value, value.isFinite, value >= 0 else { return "unavailable" }
+        guard value != 0 else { return "$0.00" }
+        guard value >= 0.0001 else { return "<$0.0001" }
+
+        let formatter = NumberFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.numberStyle = .decimal
+        formatter.usesGroupingSeparator = false
+        formatter.minimumFractionDigits = 2
+        formatter.maximumFractionDigits = 4
+        return formatter.string(from: NSNumber(value: value)).map { "$\($0)" } ?? "unavailable"
     }
 }
 

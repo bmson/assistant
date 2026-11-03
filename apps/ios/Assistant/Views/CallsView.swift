@@ -43,7 +43,7 @@ struct CallsView: View {
                                 Text(call.occurrenceDetails)
                                     .font(.caption2)
                                     .foregroundStyle(.secondary)
-                                    .lineLimit(1)
+                                    .fixedSize(horizontal: false, vertical: true)
                             }
                         }
                     }
@@ -71,7 +71,7 @@ struct CallsView: View {
     }
 }
 
-private extension PhoneCall {
+extension PhoneCall {
     var occurrenceDetails: String {
         let parsedDate = createdAt.assistantDate
             ?? AssistantFormatters.internetDateTime.date(from: createdAt)

@@ -1283,19 +1283,25 @@ struct WorkspaceView: View {
         }
     }
 
-    @ViewBuilder
     private func billingFreshnessSummary(_ report: WorkspaceProviderBilling) -> some View {
-        let checkedAt = report.checkedAt.flatMap(billingDate)
+        let checkedSummary: String?
+        if let rawCheckedAt = report.checkedAt {
+            checkedSummary = billingDate(rawCheckedAt).map {
+                "Checked \($0.formatted(date: .abbreviated, time: .shortened)) (local time)"
+            } ?? "Checked time unavailable"
+        } else {
+            checkedSummary = nil
+        }
         let sourceTimestamp = report.latestUsageAt.map { ("Latest usage", billingDate($0)) }
             ?? report.latestExportAt.map { ("Latest export", billingDate($0)) }
         let parts = [
-            checkedAt.map { "Checked \($0.formatted(date: .abbreviated, time: .shortened))" },
+            checkedSummary,
             sourceTimestamp.map { source in
-                source.1.map { "\(source.0) \($0.formatted(date: .abbreviated, time: .shortened))" }
+                source.1.map { "\(source.0) \($0.formatted(date: .abbreviated, time: .shortened)) (local time)" }
                     ?? "\(source.0) time unavailable"
             }
         ].compactMap { $0 }
-        Text(parts.isEmpty ? "Freshness not reported" : parts.joined(separator: " · "))
+        return Text(parts.isEmpty ? "Freshness not reported" : parts.joined(separator: " · "))
             .font(.caption)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
