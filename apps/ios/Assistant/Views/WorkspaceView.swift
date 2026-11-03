@@ -2746,7 +2746,7 @@ struct WorkspaceView: View {
                     if !skill.preconditions.isEmpty && !expandedSkillIDs.contains(skill.id) {
                         Text(skill.preconditions)
                             .font(.subheadline)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
                             .lineLimit(usesAccessibilityLayout ? nil : 2)
                     }
                     Text(expandedSkillIDs.contains(skill.id) ? "Hide procedure" : "View procedure")

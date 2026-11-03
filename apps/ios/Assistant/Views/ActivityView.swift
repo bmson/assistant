@@ -734,7 +734,7 @@ struct ActivityView: View {
                          ? "More records remain. Continue searching before concluding that a task is absent."
                          : "Reached the end of this search.")
                         .font(.footnote).foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
-                    Text("Detailed audit evidence may be unavailable or redacted. Legacy records without creation times cannot match date filters.")
+                    Text("Detailed audit evidence may be unavailable or redacted.")
                         .font(.footnote).foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
                     if discovery.nextCursor != nil {
                         Button("Continue to older records") { loadDiscovery(reset: false) }
@@ -1026,7 +1026,7 @@ struct ActivityView: View {
 
     private var emptyStateTitle: String {
         if discovery != nil {
-            return showingArchived ? "No matches in these archived records" : "No matches in these records"
+            return "No matching recorded work"
         }
         if filter == .all {
             return showingArchived ? "No archived activity" : "No activity yet"
@@ -1036,8 +1036,7 @@ struct ActivityView: View {
 
     private var emptyStateDescription: String {
         if discovery != nil {
-            return "Continue to older records if available, or change the filters."
-                + " Legacy records without creation times cannot match date filters."
+            return "Submit a search or change the activity filter. If more records are available, continue to older records."
         }
         if showingArchived {
             return filter == .all
@@ -1050,7 +1049,7 @@ struct ActivityView: View {
     }
 
     private func activityCard(_ item: ActivityItem) -> some View {
-        VStack(alignment: .leading, spacing: AssistantTheme.cardContentSpacing) {
+        VStack(alignment: .leading, spacing: item.status == "done" ? 8 : AssistantTheme.cardContentSpacing) {
             activityHeader(item)
             if let ownerID = model.bootstrap?.identity.id,
                let notice = activityStatusAvailability.notice(
@@ -1062,9 +1061,9 @@ struct ActivityView: View {
                     .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
                     .accessibilityIdentifier("activity-status-unavailable-\(item.id)")
             }
-            DisclosureGroup("Details") {
+            DisclosureGroup("Task record") {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Task \(item.id)")
+                    Text("Task ID: \(item.id)")
                     if let source = item.source { Text("Source: \(source)") }
                     if let created = item.createdAt { Text("Created: \(created)") }
                     if let event = item.externalEventId { Text("Source record: \(event)") }
