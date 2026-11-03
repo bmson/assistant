@@ -20,9 +20,11 @@ struct GoalsView: View {
                     AssistantLoadingState(title: "Loading goals…")
                 } else if goals.isEmpty {
                     AssistantEmptyState(
-                        "No goals yet",
+                        showingArchived ? "No archived goals" : "No goals yet",
                         systemImage: "scope",
-                        description: "Give the assistant an outcome in chat and it can keep moving it forward on a schedule."
+                        description: showingArchived
+                            ? "Use More goal actions to return to Current goals."
+                            : "Tap Add goal to create one here, or give the assistant an outcome in chat and it can keep moving it forward on a schedule."
                     )
                 } else {
                     digest
