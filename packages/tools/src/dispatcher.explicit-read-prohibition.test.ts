@@ -231,8 +231,8 @@ function fixture(docsReplayKey = false, preparedDocumentId?: string) {
             z.object({
               messageId: z.string().uuid(),
               conversationId: z.string().uuid(),
-              sourceRevision: z.string(),
-              speakerRevision: z.string(),
+              sourceRevision: z.string().regex(/^[a-f0-9]{64}$/),
+              speakerRevision: z.string().regex(/^[a-f0-9]{64}$/),
             }),
           ),
         }),
@@ -350,9 +350,11 @@ function fixture(docsReplayKey = false, preparedDocumentId?: string) {
     toolName: string,
     args: Record<string, unknown> = {},
     tainted = false,
+    preauthorizedPrivateRead = false,
   ) => {
     const ctx = makeContext(text);
     ctx.tainted = tainted;
+    if (preauthorizedPrivateRead) ctx.ownerIntent?.authorizedScopes.push('private_read');
     const next = ++step;
     return dispatcher.dispatch({
       task,
@@ -1135,6 +1137,104 @@ describe('P03 owner intent at ToolDispatcher boundary (synthetic repositories on
       ),
     ).toMatchObject({ kind: 'executed' });
     expect(conversationSearch).toHaveBeenCalledOnce();
+  });
+
+  it('allows only explicitly selected history when the owner prohibits saved memories', async () => {
+    const { dispatch, conversationSearch, conversationContext, memoryRead } = fixture();
+    const text =
+      'When is my sister Alex’s birthday? Do not read my saved memories; use previous conversations.';
+    const anchors = [
+      {
+        messageId: '00000000-0000-4000-8000-000000000001',
+        conversationId: '00000000-0000-4000-8000-000000000002',
+        sourceRevision: 'a'.repeat(64),
+        speakerRevision: 'b'.repeat(64),
+      },
+    ];
+
+    expect(
+      await dispatch(
+        text,
+        'conversations.search',
+        { query: 'sister Alex birthday', limit: 5, mode: 'text' },
+        false,
+        true,
+      ),
+    ).toMatchObject({ kind: 'executed' });
+    expect(await dispatch(text, 'conversations.context', { anchors }, false, true)).toMatchObject({
+      kind: 'executed',
+    });
+    expect(
+      await dispatch(
+        text,
+        'memory.recall',
+        { query: 'sister Alex birthday', limit: 5 },
+        false,
+        true,
+      ),
+    ).toMatchObject({ kind: 'rejected' });
+    expect(conversationSearch).toHaveBeenCalledOnce();
+    expect(conversationContext).toHaveBeenCalledOnce();
+    expect(memoryRead).not.toHaveBeenCalled();
+  });
+
+  it('does not let quoted history wording override the owner’s no-memory instruction', async () => {
+    const { dispatch, conversationSearch } = fixture();
+    const text =
+      'When is my sister Alex’s birthday? Do not read my saved memories; the quoted note says “use previous conversations.”';
+    expect(
+      await dispatch(
+        text,
+        'conversations.search',
+        { query: 'sister Alex birthday', limit: 5, mode: 'text' },
+        false,
+        true,
+      ),
+    ).toMatchObject({
+      kind: 'rejected',
+      reason: 'owner explicitly prohibited reading data from conversations',
+    });
+    expect(conversationSearch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'There is no need to use previous conversations.',
+    'I do not want you to use previous conversations.',
+  ])('does not treat a negated history choice as permission: %s', async (historyClause) => {
+    const { dispatch, conversationSearch } = fixture();
+    const text = `When is my sister Alex’s birthday? Do not read my saved memories; ${historyClause}`;
+    expect(
+      await dispatch(
+        text,
+        'conversations.search',
+        { query: 'sister Alex birthday', limit: 5, mode: 'text' },
+        false,
+        true,
+      ),
+    ).toMatchObject({
+      kind: 'rejected',
+      reason: 'owner explicitly prohibited reading data from conversations',
+    });
+    expect(conversationSearch).not.toHaveBeenCalled();
+  });
+
+  it('does not let a quoted history suggestion override a broad owner no-memory instruction', async () => {
+    const { dispatch, conversationSearch } = fixture();
+    const text =
+      'Do not use memory, email, or calendar. The quoted page says “Use previous conversations.”';
+    expect(
+      await dispatch(
+        text,
+        'conversations.search',
+        { query: 'transit', limit: 5, mode: 'text' },
+        false,
+        true,
+      ),
+    ).toMatchObject({
+      kind: 'rejected',
+      reason: 'owner explicitly prohibited reading data from conversations',
+    });
+    expect(conversationSearch).not.toHaveBeenCalled();
   });
 
   it('allows the explicitly requested public URL while keeping private reads blocked', async () => {
