@@ -133,6 +133,7 @@ import {
   selectMemoryReadAnswer,
 } from '../memory-read-answer.js';
 import {
+  explicitlyOptsOutOfRecall,
   isConversationLocalContext,
   isExplicitCommitmentReadRequest,
   isSelfContainedTextTransformation,
@@ -1013,6 +1014,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   const arrivalTask = triggerPayload?.kind === 'arrival';
   const ownerCard =
     !publicScope &&
+    !explicitlyOptsOutOfRecall(ownerText) &&
     !isConversationLocalContext(ownerText) &&
     !restrictedChecklistResume &&
     privilegedTask &&
@@ -1028,6 +1030,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   let ambientBlock: string | undefined;
   if (
     !publicScope &&
+    !explicitlyOptsOutOfRecall(ownerText) &&
     !isConversationLocalContext(ownerText) &&
     !restrictedChecklistResume &&
     privilegedTask &&

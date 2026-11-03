@@ -83,6 +83,18 @@ const MISSION_ROOT_TOOLS = new Set([
 ]);
 
 const OWNER_READ_PROHIBITION_SOURCES: Readonly<Record<string, readonly string[]>> = {
+  memory: ['memory', 'memories', 'saved memory', 'saved memories'],
+  conversations: [
+    'memory',
+    'memories',
+    'history',
+    'past chats',
+    'old messages',
+    'older messages',
+    'previous conversations',
+    'old conversations',
+    'anything up',
+  ],
   gmail: [
     'gmail',
     'email',
@@ -131,7 +143,7 @@ const OWNER_READ_PROHIBITION_SOURCES: Readonly<Record<string, readonly string[]>
 };
 
 const EXPLICIT_READ_PROHIBITION =
-  /\b(?:do\s+not|don['’]t|never|without)\s+(?:(?:want\s+you\s+to|you\s+to)\s+)?(?:read(?:ing)?|search(?:ing)?|access(?:ing)?|check(?:ing)?|open(?:ing)?|review(?:ing)?|fetch(?:ing)?|scan(?:ning)?|look(?:\s+(?:at|through|up))?)(?:\s+through)?[\s:]+([^.!?;\n]{0,120})/giu;
+  /\b(?:do\s+not|don['’]t|never|without)\s+(?:(?:want\s+you\s+to|you\s+to)\s+)?(?:read(?:ing)?|search(?:ing)?|access(?:ing)?|check(?:ing)?|open(?:ing)?|review(?:ing)?|fetch(?:ing)?|scan(?:ning)?|use|using|look(?:\s+(?:at|through|up))?)(?:\s+through)?[\s:]+([^.!?;\n]{0,120})/giu;
 
 function ownerExplicitlyProhibitsPrivateRead(
   toolName: string,
@@ -253,7 +265,23 @@ function ownerExplicitlyProhibitsPrivateRead(
     const prohibitedTargets = sourcePhrase
       .split(/\b(?:about|regarding|for|with|of|on|in|at|from|containing|named|called)\b/i, 1)[0]
       ?.trim();
-    if (prohibitedTargets && sourcePattern.test(prohibitedTargets)) return true;
+    if (prohibitedTargets && sourcePattern.test(prohibitedTargets)) {
+      const savedMemoriesOnly =
+        toolFamily === 'conversations' &&
+        /^\s*(?:(?:my|our|the)\s+)?saved memor(?:y|ies)\s*$/i.test(prohibitedTargets);
+      const ownerSelectedHistory = authoredText
+        .split(/[;\n]|[.!?](?=\s)|\b(?:but|however|instead|then)\b/i)
+        .some((clause) =>
+          /^(?:(?:and|but|however|instead|then)\s+)*(?:please\s+)?(?:use|search|read|look\s+up|consult|review|retrieve|check|find)\s+(?:(?:my|our|previous|past|earlier|old|older)\s+)*(?:conversations?|chats?|history|messages)\b/i.test(
+            clause.trim(),
+          ),
+        );
+      // A source-specific saved-memory prohibition can coexist with an explicit
+      // owner choice to read chat history. Broad memory opt-outs still prohibit
+      // conversations, and quoted history choices are absent from authoredText.
+      if (savedMemoriesOnly && ownerSelectedHistory) continue;
+      return true;
+    }
   }
   return false;
 }
