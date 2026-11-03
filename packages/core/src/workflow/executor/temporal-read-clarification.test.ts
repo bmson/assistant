@@ -157,6 +157,7 @@ async function runFlightContinuation(
     personCalendar?: boolean;
     weeklyCalendarIncomplete?: boolean;
     weeklyBusy?: unknown[];
+    focusPlanFixture?: boolean;
     modelIgnoresNoTools?: boolean;
     modelFinalText?: string;
     compoundTripReadBatch?: boolean;
@@ -203,7 +204,46 @@ async function runFlightContinuation(
   const dispatch = vi.fn(
     async ({ toolName, args }: { toolName: string; args: Record<string, unknown> }) => {
       let result: Record<string, unknown>;
-      if (toolName === 'calendar.list_events' && options.personCalendar) {
+      if (toolName === 'calendar.availability' && options.focusPlanFixture) {
+        result = {
+          busy: [],
+          complete: false,
+          calendarsChecked: ['Synthetic Work'],
+          calendarRosterComplete: true,
+          calendarIdsRequested: ['synthetic-work'],
+          calendarCoverage: [
+            { calendarId: 'synthetic-work', name: 'Synthetic Work', status: 'unavailable' },
+          ],
+          coverageWindow: { timeMin: args.timeMin, timeMax: args.timeMax },
+          unavailable: ['Synthetic Work'],
+        };
+      } else if (toolName === 'calendar.list_events' && options.focusPlanFixture) {
+        const event = {
+          eventId: 'synthetic-meeting',
+          calendarId: 'synthetic-work',
+          calendar: 'Synthetic Work',
+          calendarTimeZone: 'America/Los_Angeles',
+          summary: 'Synthetic team meeting',
+          start: '2026-10-13T17:00:00.000Z',
+          end: '2026-10-13T18:00:00.000Z',
+          ownerResponse: 'accepted',
+          blocksTime: true,
+        };
+        result = {
+          events: [event],
+          complete: true,
+          calendarRosterComplete: true,
+          calendarsSearchedIds: ['synthetic-work'],
+          calendarsResolved: [{ id: 'synthetic-work', name: 'Synthetic Work' }],
+          unavailable: [],
+        };
+      } else if (toolName === 'calendar.search_events' && options.focusPlanFixture) {
+        result = {
+          events: [],
+          complete: true,
+          calendarsSearched: ['Synthetic Work'],
+        };
+      } else if (toolName === 'calendar.list_events' && options.personCalendar) {
         result = {
           events: [
             {
@@ -682,6 +722,33 @@ async function runFlightContinuation(
 }
 
 describe('unsupported temporal requests through the actual executor step loop', () => {
+  it('keeps a bounded review-only focus plan on calendar evidence when mail contains an unrelated alert', async () => {
+    const request =
+      'Review the next three working days for two 60-minute focus blocks with 15-minute buffers around meetings. Present the review only; do not change anything.';
+    const { result, state, dispatch } = await runFlightContinuation([], request, {
+      focusPlanFixture: true,
+      modelFinalText: 'A synthetic newsletter alert says the focus plan is ready.',
+    });
+
+    expect(result.outcome).toBe('done');
+    expect(dispatch.mock.calls.map(([call]) => call.toolName)).toEqual([
+      'calendar.availability',
+      'calendar.list_events',
+    ]);
+    expect(dispatch.mock.calls.some(([call]) => call.toolName.startsWith('gmail.'))).toBe(false);
+    expect(
+      dispatch.mock.calls.some(([call]) =>
+        /calendar\.(?:create|update|delete)/.test(call.toolName),
+      ),
+    ).toBe(false);
+    expect(state.pendingFinal?.text).toContain('Review-only plan for the next 3 working days');
+    expect(state.pendingFinal?.text).toContain('free/busy unavailable for Synthetic Work');
+    expect(state.pendingFinal?.text).toContain('15-minute buffers before and after meetings');
+    expect(state.pendingFinal?.text.match(/\(60m\)/g)).toHaveLength(2);
+    expect(state.pendingFinal?.text).not.toContain('Tue, Oct 13, 9:00 AM');
+    expect(state.pendingFinal?.text).not.toContain('Synthetic newsletter alert');
+  });
+
   it('allocates a bounded named-person read and defeats model absence/roster claims in the real step loop', async () => {
     const { state, result, dispatch } = await runFlightContinuation(
       [],

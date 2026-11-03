@@ -38,19 +38,21 @@ function count(value: string | undefined): number | undefined {
 /** Only bounded read-only focus proposals; write requests remain ordinary action planning. */
 export function requestedCalendarPlanOptions(text: string): CalendarPlanOptions | undefined {
   const positive = text.replace(/\b(?:do\s+not|don['’]?t|never)\b[^.!?;\n]*/gi, '');
-  if (
-    !/\b(?:calendar|schedule)\b/i.test(positive) ||
-    !/\bfocus\s+(?:blocks?|slots?|periods?|sessions?|time)\b/i.test(positive)
-  )
-    return undefined;
-  if (/\b(?:create|add|book|schedule|move)\s+(?:\w+\s+){0,3}focus\b/i.test(positive))
-    return undefined;
+  const focusSurface = /\bfocus\s+(?:blocks?|slots?|periods?|sessions?|time)\b/i.test(positive);
   const nextWeek = /\b(?:next|coming|following)\s+week\b/i.test(positive);
   const days =
     /\bnext\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)\s+(?:working|work|business)\s+days\b/i.exec(
       positive,
     );
   const workingDays = count(days?.[1]);
+  const boundedFocusReview =
+    focusSurface &&
+    Boolean(nextWeek || workingDays) &&
+    /\b(?:review|look\s+at|check|find|identify|suggest|propose)\b/i.test(positive);
+  if (!focusSurface || (!/\b(?:calendar|schedule)\b/i.test(positive) && !boundedFocusReview))
+    return undefined;
+  if (/\b(?:create|add|book|schedule|move)\s+(?:\w+\s+){0,3}focus\b/i.test(positive))
+    return undefined;
   if (!nextWeek && !workingDays) return undefined;
   const duration = /\b(\d{2,3})[ -]minute\s+focus\s+(?:blocks?|slots?|periods?|sessions?)\b/i.exec(
     positive,
@@ -64,8 +66,24 @@ export function requestedCalendarPlanOptions(text: string): CalendarPlanOptions 
   const slotCount = slots ? count(slots[1]) : 3;
   if (!slotCount) return undefined;
   const breaks = /\b(\d{1,2})[ -]minute\s+breaks?\b/i.exec(positive);
+  const meetingBuffer =
+    /\b(\d{1,2})[ -]minute\s+buffers?\s+(?:before|after|around)\s+(?:my\s+)?(?:meetings?|appointments?|events?)\b/i.exec(
+      positive,
+    );
   const breakMinutes = breaks ? Number(breaks[1]) : 15;
   if (!Number.isInteger(breakMinutes) || breakMinutes < 0 || breakMinutes > 60) return undefined;
+  const meetingBufferMinutes = meetingBuffer
+    ? Number(meetingBuffer[1])
+    : breaks && /\bbreaks?\s+around\s+(?:meetings?|appointments?|events?)\b/i.test(positive)
+      ? breakMinutes
+      : undefined;
+  if (
+    meetingBufferMinutes !== undefined &&
+    (!Number.isInteger(meetingBufferMinutes) ||
+      meetingBufferMinutes < 0 ||
+      meetingBufferMinutes > 60)
+  )
+    return undefined;
   const includeWorkloadAssessment =
     /\b(?:overload(?:ed)?|workload|busy days?|evening load|after[- ]hours load)\b/i.test(positive);
   const includeTravelBuffers =
@@ -80,8 +98,6 @@ export function requestedCalendarPlanOptions(text: string): CalendarPlanOptions 
     ...(workingDays ? { workingDays } : {}),
     includeWorkloadAssessment,
     includeTravelBuffers,
-    ...(breaks && /\bbreaks?\s+around\s+(?:meetings?|appointments?|events?)\b/i.test(positive)
-      ? { meetingBufferMinutes: breakMinutes }
-      : {}),
+    ...(meetingBufferMinutes !== undefined ? { meetingBufferMinutes } : {}),
   };
 }

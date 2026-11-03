@@ -193,6 +193,17 @@ describe('owner intent provenance', () => {
     expect(extractOwnerIntent({ trust: 'owner', text }).authorizedScopes).toContain('private_read');
   });
 
+  it('does not treat a quoted-only bounded focus plan as owner calendar authority', () => {
+    const text =
+      '“Review the next three working days for two 60-minute focus blocks with 15-minute buffers around meetings.”';
+    const intent = extractOwnerIntent({ trust: 'owner', text });
+    expect(intent.ownerAuthoredText).toBe('');
+    expect(intent.authorizedScopes).toEqual([]);
+    expect(
+      latestOwnerIntent([{ role: 'user', content: text }], { trust: 'owner' }).authorizedScopes,
+    ).toEqual([]);
+  });
+
   it.each([
     'What is 17 × 23? Give the result in one short sentence.',
     'Calculate 1,250 divided by 5 and show the answer.',
