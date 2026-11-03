@@ -5,7 +5,7 @@
     "packages/config/src/index.ts": "1775232bbff153dc4bbfb9dc9fec659a38fd0afdce7f0e67f50d8c6c1822c6d7",
     "apps/agent/src/deps.ts": "fb30df8600bbcf24da0d5cfa9ef1c92e28700b663429cdbbe37d65ecee0ea655",
     "apps/agent/src/index.ts": "6da57b60f853ca6622142a12b70bb31a73e8155eac30dd7d905218c19ca2fd56",
-    "apps/web/lib/server.ts": "47c3906445e13f73f70ee9c341aef7d3279b8a50fd8e120a088f4528fdd57c61",
+    "apps/web/lib/server.ts": "0dcff7b64c70a35f830cf797b616b143d06c8db9b5cc0d7d4b32e0384050022a",
     "apps/web/proxy.ts": "0d3bae71bd7a094b3e70615c89bd82db8b2fa1196e7ccde8a1d7b2e6c4872cc6",
     "packages/db/drizzle/meta/_journal.json": "ac17b3e7559af6f8d95401ca274579fec87011f3c17cb62ca996f91acae3bb72",
     "infra/gcp/release-contracts.json": "7e9166bef85bb64fb010d04301af4338fbd1aa861d44b1644b9512b28fae18f8"
@@ -75,7 +75,7 @@
     }
   },
   "agentWebSchemaCompatible": true,
-  "webApiRouteCount": 99,
+  "webApiRouteCount": 100,
   "routes": {
     "apps/web/app/api/audit/[id]/route.ts": {
       "methods": ["GET"],
@@ -284,6 +284,10 @@
     "apps/web/app/api/mobile/v1/memory/[id]/route.ts": {
       "methods": ["PATCH", "POST"],
       "sha256": "244df7dfae65ae1be31586a1e779bb5699010e31d244e917f4ac9c5908acbd3e"
+    },
+    "apps/web/app/api/mobile/v1/memory/[id]/snapshot/route.ts": {
+      "methods": ["GET"],
+      "sha256": "2e0cfa4850cf41c2afdd57b32f3a6c6020d71036b889274296a7b786bc25c35b"
     },
     "apps/web/app/api/mobile/v1/memory/commitments/route.ts": {
       "methods": ["GET", "POST"],
