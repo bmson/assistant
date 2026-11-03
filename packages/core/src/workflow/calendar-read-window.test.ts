@@ -65,12 +65,24 @@ describe('calendarSourceInterval', () => {
   it.each([
     ['impossible calendar date', { start: '2026-02-30T09:00:00Z', end: '2026-02-30T10:00:00Z' }],
     ['impossible wall time', { start: '2026-10-15T25:00:00Z', end: '2026-10-15T26:00:00Z' }],
-    ['out-of-range offset hour', { start: '2026-10-15T09:00:00+25:00', end: '2026-10-15T10:00:00+25:00' }],
-    ['out-of-range offset minute', { start: '2026-10-15T09:00:00+07:60', end: '2026-10-15T10:00:00+07:60' }],
+    [
+      'out-of-range offset hour',
+      { start: '2026-10-15T09:00:00+25:00', end: '2026-10-15T10:00:00+25:00' },
+    ],
+    [
+      'out-of-range offset minute',
+      { start: '2026-10-15T09:00:00+07:60', end: '2026-10-15T10:00:00+07:60' },
+    ],
     ['missing end offset', { start: '2026-10-15T09:00:00Z', end: '2026-10-15T10:00:00' }],
     ['missing start offset', { start: '2026-10-15T09:00:00', end: '2026-10-15T10:00:00Z' }],
-    ['mixed date-only and timed start', { start: '2026-10-15', end: '2026-10-15T10:00:00Z', calendarTimeZone: LA }],
-    ['mixed timed and date-only end', { start: '2026-10-15T09:00:00Z', end: '2026-10-16', calendarTimeZone: LA }],
+    [
+      'mixed date-only and timed start',
+      { start: '2026-10-15', end: '2026-10-15T10:00:00Z', calendarTimeZone: LA },
+    ],
+    [
+      'mixed timed and date-only end',
+      { start: '2026-10-15T09:00:00Z', end: '2026-10-16', calendarTimeZone: LA },
+    ],
     ['missing end', { start: '2026-10-15T09:00:00Z' }],
     ['missing start', { end: '2026-10-15T10:00:00Z' }],
   ])('rejects %s', (_description, interval) => {
