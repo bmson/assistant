@@ -125,7 +125,7 @@ struct SituationPacksView: View {
                     if let creationError {
                         Text(creationError).font(.footnote).foregroundStyle(.red)
                     }
-                    Text("Closing keeps this title draft while you stay on Situation packs. Clear the title first if you don’t want to reuse it.")
+                    Text("Closing keeps this title draft while you stay on Situation packs.")
                         .font(.footnote).foregroundStyle(.secondary)
                     Button(busy ? "Creating…" : "Create pack") { Task { await create() } }
                         .disabled(
