@@ -1173,19 +1173,20 @@ struct WorkspaceView: View {
             providerBillingStatusAndAmount(report)
             Text([report.scope, report.period, report.periodTimezone.map { "\($0) period" } ?? "period timezone not reported", report.source].joined(separator: " · "))
                 .font(.caption).foregroundStyle(.secondary)
+            billingFreshnessSummary(report)
             if report.status == "stale" {
                 Label("Stale snapshot", systemImage: "clock.badge.exclamationmark")
                     .font(.subheadline)
                     .foregroundStyle(AssistantTheme.warningInk(for: colorScheme))
             }
             Text(report.message).font(.footnote).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            billingTimestampLine("Last checked", value: report.checkedAt)
-            billingTimestampLine("Fetched", value: report.fetchedAt)
-            billingTimestampLine("Latest export", value: report.latestExportAt)
-            billingTimestampLine("Latest usage", value: report.latestUsageAt)
-            if report.forecast != nil || !report.lines.isEmpty {
-                DisclosureGroup("Run rate and service details") {
+            if report.forecast != nil || !report.lines.isEmpty || report.checkedAt != nil || report.fetchedAt != nil || report.latestExportAt != nil || report.latestUsageAt != nil {
+                DisclosureGroup("Run rate, service, and timestamp details") {
                     VStack(alignment: .leading, spacing: 12) {
+                        billingTimestampLine("Last checked", value: report.checkedAt)
+                        billingTimestampLine("Fetched", value: report.fetchedAt)
+                        billingTimestampLine("Latest export", value: report.latestExportAt)
+                        billingTimestampLine("Latest usage", value: report.latestUsageAt)
                         if let forecast = report.forecast {
                             ForEach(forecast.totals, id: \.currency) { total in
                                 VStack(alignment: .leading, spacing: 4) {
@@ -1280,6 +1281,28 @@ struct WorkspaceView: View {
         } else {
             Text("\(label): time not reported").font(.caption2).foregroundStyle(.secondary)
         }
+    }
+
+    @ViewBuilder
+    private func billingFreshnessSummary(_ report: WorkspaceProviderBilling) -> some View {
+        let checkedAt = report.checkedAt.flatMap(billingDate)
+        let sourceTimestamp = report.latestUsageAt.map { ("Latest usage", billingDate($0)) }
+            ?? report.latestExportAt.map { ("Latest export", billingDate($0)) }
+        let parts = [
+            checkedAt.map { "Checked \($0.formatted(date: .abbreviated, time: .shortened))" },
+            sourceTimestamp.map { source in
+                source.1.map { "\(source.0) \($0.formatted(date: .abbreviated, time: .shortened))" }
+                    ?? "\(source.0) time unavailable"
+            }
+        ].compactMap { $0 }
+        Text(parts.isEmpty ? "Freshness not reported" : parts.joined(separator: " · "))
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func billingDate(_ value: String) -> Date? {
+        value.assistantDate ?? AssistantFormatters.internetDateTime.date(from: value)
     }
 
     @ViewBuilder

@@ -2980,12 +2980,15 @@ struct CatalogModel: Codable, Identifiable, Sendable, Hashable {
     let audioOutputPerMTok: Double?
 
     var priceLabel: String {
-        if realtime == true, let audioIn = audioInputPerMTok, let audioOut = audioOutputPerMTok {
-            return String(format: "audio $%.2f / $%.2f per M tokens", audioIn, audioOut)
+        if realtime == true {
+            return "Audio input \(formattedPrice(audioInputPerMTok)) · Audio output \(formattedPrice(audioOutputPerMTok)) per M tokens"
         }
-        let input = Double(promptCostPerMTok ?? "") ?? 0
-        let output = Double(completionCostPerMTok ?? "") ?? 0
-        return String(format: "$%.2f / $%.2f per M tokens", input, output)
+        return "Input \(formattedPrice(promptCostPerMTok.flatMap(Double.init))) · Output \(formattedPrice(completionCostPerMTok.flatMap(Double.init))) per M tokens"
+    }
+
+    private func formattedPrice(_ value: Double?) -> String {
+        guard let value else { return "unavailable" }
+        return String(format: "$%.2f", value)
     }
 }
 

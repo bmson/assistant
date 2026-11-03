@@ -890,7 +890,9 @@ final class APIModelsTests: XCTestCase {
         // Embeddings, unpriced models, and models behind a turned-off connection are not choosable.
         XCTAssertEqual(settings.choosableGroups.map(\.connection.id), ["openai"])
         XCTAssertEqual(settings.choosableGroups.first?.models.map(\.id), ["openai:gpt-5.1"])
-        XCTAssertEqual(settings.models.first?.priceLabel, "$1.25 / $10.00 per M tokens")
+        XCTAssertEqual(settings.models.first?.priceLabel, "Input $1.25 · Output $10.00 per M tokens")
+        XCTAssertEqual(settings.models[1].priceLabel, "Input $0.02 · Output $0.00 per M tokens")
+        XCTAssertEqual(settings.models[2].priceLabel, "Input unavailable · Output unavailable per M tokens")
         XCTAssertEqual(settings.connections.last?.kindLabel, "OpenAI-compatible")
     }
 
