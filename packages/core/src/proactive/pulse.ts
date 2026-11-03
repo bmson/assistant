@@ -663,6 +663,9 @@ export function calendarChangeMoments(
     // Collapsed once, at the point the provider's summary enters — the same
     // discipline as `calendar-salience.ts`'s `describeSalience`.
     const summary = collapseWhitespace(change.summary);
+    const eventLabel = summary ? `"${summary}"` : 'An event';
+    const declinedEventLabel = summary ? `"${summary}"` : 'an event';
+    const cardTitle = summary || 'Calendar event';
     const urgency = now ? timeUrgency(change.start, now, CALENDAR_WINDOW_HOURS * 60) : undefined;
     const withUrgency = <T extends PulseMoment>(moment: T): T =>
       urgency === undefined ? moment : { ...moment, urgency };
@@ -671,14 +674,14 @@ export function calendarChangeMoments(
       return withUrgency({
         kind: 'calendar-unverified',
         key,
-        text: `"${summary}" is no longer in this calendar window. I could not confirm whether it moved or was cancelled; keep the existing plan until you verify it.`,
+        text: `${eventLabel} is no longer in this calendar window. I could not confirm whether it moved or was cancelled; keep the existing plan until you verify it.`,
         priority: 80,
         card: {
           kind: 'proactive-alert',
           id: key,
           category: 'event',
           urgencyLabel: 'Unconfirmed change',
-          title: summary,
+          title: cardTitle,
           summary: 'Missing from the current window; cancellation has not been confirmed.',
           details: [{ label: 'Last confirmed start', value: change.start }],
         },
@@ -688,14 +691,14 @@ export function calendarChangeMoments(
       return withUrgency({
         kind: 'calendar-cancelled',
         key: id,
-        text: `"${summary}" (was ${ownerDateTime(change.start, timeZone)}) has been cancelled.`,
+        text: `${eventLabel} (was ${ownerDateTime(change.start, timeZone)}) has been cancelled.`,
         priority: CANCELLED_OR_LEAD_PRIORITY,
         card: {
           kind: 'proactive-alert',
           id,
           category: 'event',
           urgencyLabel: 'Cancelled',
-          title: summary,
+          title: cardTitle,
           summary: `Was scheduled for ${ownerDateTime(change.start, timeZone)}.`,
         },
       });
@@ -706,14 +709,14 @@ export function calendarChangeMoments(
       return withUrgency({
         kind: 'calendar-moved',
         key,
-        text: `"${summary}" moved from ${previous} to ${ownerDateTime(change.start, timeZone)}.`,
+        text: `${eventLabel} moved from ${previous} to ${ownerDateTime(change.start, timeZone)}.`,
         priority: MOVED_PRIORITY,
         card: {
           kind: 'proactive-alert',
           id: key,
           category: 'event',
           urgencyLabel: 'Moved',
-          title: summary,
+          title: cardTitle,
           startsAt: change.start,
           summary: `Was ${previous}, now ${ownerDateTime(change.start, timeZone)}.`,
           details: [
@@ -730,14 +733,14 @@ export function calendarChangeMoments(
     return withUrgency({
       kind: 'calendar-declined',
       key,
-      text: `${who} declined "${summary}" (${ownerDateTime(change.start, timeZone)}), having previously accepted.`,
+      text: `${who} declined ${declinedEventLabel} (${ownerDateTime(change.start, timeZone)}), having previously accepted.`,
       priority: DECLINED_PRIORITY,
       card: {
         kind: 'proactive-alert',
         id: key,
         category: 'event',
         urgencyLabel: 'Declined',
-        title: summary,
+        title: cardTitle,
         summary: `${who} had accepted, now declined.`,
       },
     });
