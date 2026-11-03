@@ -35,19 +35,26 @@ function fixture(tables: Record<string, Row[]>) {
   const queryDocuments: Record<string, number> = {};
   const decodedDocuments: Record<string, number> = {};
   const pointDocuments: Record<string, number> = {};
+  const getAllBatches: Record<string, number> = {};
   const control = {
     repeat: false,
     invalidSize: false,
     missingContactUpdateTime: false,
     error: null as Error | null,
+    getAllErrorOnce: null as Error | null,
     memoryErrorOnce: null as Error | null,
     fence: 0,
     changed: false,
     holdFenceAt: 0,
+    holdContacts: false,
   };
   let releaseHeldFence: (() => void) | undefined;
   const heldFence = new Promise<void>((resolve) => {
     releaseHeldFence = resolve;
+  });
+  let releaseHeldContacts: (() => void) | undefined;
+  const heldContacts = new Promise<void>((resolve) => {
+    releaseHeldContacts = resolve;
   });
   const contactUpdateTime = () =>
     control.missingContactUpdateTime ? undefined : new Timestamp(1_798_000_000, 123_456_789);
@@ -139,19 +146,28 @@ function fixture(tables: Record<string, Row[]>) {
       },
     }),
     db: {
-      getAll: async (...refs: Array<{ table: string; id: string }>) =>
-        refs.map(({ table, id }) => {
+      getAll: async (...refs: Array<{ table: string; id: string }>) => {
+        const table = refs[0]?.table;
+        if (table) getAllBatches[table] = (getAllBatches[table] ?? 0) + 1;
+        if (table === 'contacts' && control.holdContacts) await heldContacts;
+        if (table === 'contacts' && control.getAllErrorOnce) {
+          const error = control.getAllErrorOnce;
+          control.getAllErrorOnce = null;
+          throw error;
+        }
+        return refs.map(({ table, id }) => {
           pointCalls.push(table);
           pointDocuments[table] = (pointDocuments[table] ?? 0) + 1;
           return new Doc(
             documentKey(id),
-            tables[table]?.find((row) => row.id === id),
+            tables[table]?.find((row) => String(row.physicalId ?? row.id) === id),
             table === 'contacts' ? contactUpdateTime() : undefined,
             () => {
               decodedDocuments[table] = (decodedDocuments[table] ?? 0) + 1;
             },
           );
-        }),
+        });
+      },
     },
   } as unknown as InstallationStore;
   return {
@@ -162,7 +178,9 @@ function fixture(tables: Record<string, Row[]>) {
     queryDocuments,
     decodedDocuments,
     pointDocuments,
+    getAllBatches,
     releaseFence: () => releaseHeldFence?.(),
+    releaseContacts: () => releaseHeldContacts?.(),
   };
 }
 function rows(count: number, extra: Row = {}): Row[] {
@@ -302,7 +320,22 @@ describe('bounded actual profile repository reads (offline)', () => {
   });
 
   it('shares library memory scans, preserves owner filters and actual pre/post erasure fences', async () => {
-    const f = fixture({ memories: rows(401, memory()) });
+    const contact = {
+      id: 'person',
+      name: 'Person',
+      createdAt: new Date(0),
+      updatedAt: new Date(0),
+      trust: 'owner',
+      aliases: [],
+      emails: [],
+      phones: [],
+      relationship: '',
+      notes: '',
+    };
+    const f = fixture({
+      memories: rows(401, memory({ subjectContactId: 'person' })),
+      contacts: [contact],
+    });
     const repo = new FirestoreProfileLibraryRepository(f.store);
     const [list, filters] = await Promise.all([
       repo.list('owner', input),
@@ -310,7 +343,7 @@ describe('bounded actual profile repository reads (offline)', () => {
     ]);
     expect(list.total).toBe(401);
     expect(list.rows).toHaveLength(60);
-    expect(filters.subjects).toEqual([]);
+    expect(filters.subjects).toEqual([{ id: 'person', label: 'Person', trust: 'owner' }]);
     expect(f.calls.filter((call) => call.table === 'memories')).toHaveLength(2);
     expect(
       f.calls.every((call) =>
@@ -349,6 +382,183 @@ describe('bounded actual profile repository reads (offline)', () => {
     f.control.fence = 0;
     f.control.changed = true;
     await expect(repo.listFilters('owner')).rejects.toThrow('Privacy erasure changed during read');
+  });
+
+  it('singleflights overlapping wave contacts by owner, keeps getAll batching, and starts fresh next wave', async () => {
+    const contacts = rows(401, {
+      createdAt: new Date(0),
+      updatedAt: new Date(0),
+      trust: 'owner',
+      aliases: [],
+      emails: [],
+      phones: [],
+      relationship: '',
+      notes: '',
+    });
+    const memories = contacts.map((contact, index) =>
+      memory({ id: `memory-${String(index).padStart(5, '0')}`, subjectContactId: contact.id }),
+    );
+    const f = fixture({ memories, contacts });
+    f.control.holdFenceAt = 2;
+    const repo = new FirestoreProfileLibraryRepository(f.store);
+    const listPromise = repo.list('owner', input);
+    const filtersPromise = repo.listFilters('owner');
+    const list = await listPromise;
+    expect(list.rows[0]?.subject).toEqual({ id: 'row-00400', name: 'Person 400', trust: 'owner' });
+    f.releaseFence();
+    expect((await filtersPromise).subjects).toEqual([
+      ...contacts
+        .map((contact) => ({ id: String(contact.id), label: String(contact.name), trust: 'owner' }))
+        .sort((a, b) => a.label.localeCompare(b.label) || a.id.localeCompare(b.id)),
+    ]);
+    expect(f.pointDocuments.contacts).toBe(401);
+    expect(f.getAllBatches.contacts).toBeLessThanOrEqual(3);
+
+    await repo.listFilters('owner');
+    expect(f.pointDocuments.contacts).toBe(802);
+    expect(f.getAllBatches.contacts).toBeLessThanOrEqual(6);
+
+    const pageOnly = fixture({
+      memories,
+      contacts,
+    });
+    await new FirestoreProfileLibraryRepository(pageOnly.store).list('owner', input);
+    expect(pageOnly.pointDocuments.contacts).toBe(input.pageSize);
+    expect(pageOnly.getAllBatches.contacts).toBe(1);
+
+    const filtersOnly = fixture({ memories, contacts });
+    await new FirestoreProfileLibraryRepository(filtersOnly.store).listFilters('owner');
+    expect(filtersOnly.pointDocuments.contacts).toBe(401);
+    expect(filtersOnly.getAllBatches.contacts).toBe(2);
+  });
+
+  it('keeps missing/invalid contacts and getAll failures wave local without hidden retry', async () => {
+    const referenced = rows(3).map((row) => String(row.id));
+    const contactRows = [
+      {
+        id: referenced[0],
+        name: 'Person 0',
+        createdAt: new Date(0),
+        updatedAt: new Date(0),
+        trust: 'owner',
+        aliases: [],
+        emails: [],
+        phones: [],
+        relationship: '',
+        notes: '',
+      },
+      {
+        id: 'wrong-identity',
+        physicalId: referenced[1],
+        name: 'Must not leak',
+        createdAt: new Date(0),
+        updatedAt: new Date(0),
+        trust: 'owner',
+        aliases: [],
+        emails: [],
+        phones: [],
+        relationship: '',
+        notes: '',
+      },
+    ];
+    const f = fixture({
+      memories: referenced.map((id, index) =>
+        memory({ id: `memory-${index}`, subjectContactId: id }),
+      ),
+      contacts: contactRows,
+    });
+    const repo = new FirestoreProfileLibraryRepository(f.store);
+    const failure = new Error('synthetic contact read interruption');
+    f.control.getAllErrorOnce = failure;
+    f.control.holdContacts = true;
+    const listPromise = repo.list('owner', input);
+    const filtersPromise = repo.listFilters('owner');
+    const listResult = listPromise.then(
+      (value) => ({ status: 'fulfilled' as const, value }),
+      (reason: unknown) => ({ status: 'rejected' as const, reason }),
+    );
+    const filtersResult = filtersPromise.then(
+      (value) => ({ status: 'fulfilled' as const, value }),
+      (reason: unknown) => ({ status: 'rejected' as const, reason }),
+    );
+    for (let attempt = 0; attempt < 20 && !f.getAllBatches.contacts; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(f.getAllBatches.contacts).toBe(1);
+    f.releaseContacts();
+    const outcomes = await Promise.all([listResult, filtersResult]);
+    expect(outcomes.every((entry) => entry.status === 'rejected' && entry.reason === failure)).toBe(
+      true,
+    );
+    expect(f.getAllBatches.contacts).toBe(1);
+    f.control.holdContacts = false;
+    expect((await repo.listFilters('owner')).subjects).toEqual([
+      { id: referenced[0], label: 'Person 0', trust: 'owner' },
+    ]);
+    expect(f.getAllBatches.contacts).toBe(2);
+    const firstContact = contactRows[0];
+    if (!firstContact) throw new Error('Expected contact fixture');
+    firstContact.name = 'Updated name';
+    expect((await repo.listFilters('owner')).subjects).toEqual([
+      { id: referenced[0], label: 'Updated name', trust: 'owner' },
+    ]);
+    contactRows.splice(0, 1);
+    expect((await repo.listFilters('owner')).subjects).toEqual([]);
+  });
+
+  it('isolates simultaneous contact identities by agent inside a shared wave', async () => {
+    const sharedContact = {
+      id: 'shared',
+      name: 'Shared ID',
+      createdAt: new Date(0),
+      updatedAt: new Date(0),
+      trust: 'owner',
+      aliases: [],
+      emails: [],
+      phones: [],
+      relationship: '',
+      notes: '',
+    };
+    const f = fixture({
+      memories: [
+        memory({ id: 'owner-memory', subjectContactId: 'shared' }),
+        memory({ id: 'other-memory', agentId: 'other', subjectContactId: 'shared' }),
+      ],
+      contacts: [sharedContact],
+    });
+    const repo = new FirestoreProfileLibraryRepository(f.store);
+    const [owner, other] = await Promise.all([
+      repo.listFilters('owner'),
+      repo.listFilters('other'),
+    ]);
+    expect(owner.subjects).toEqual([{ id: 'shared', label: 'Shared ID', trust: 'owner' }]);
+    expect(other.subjects).toEqual([{ id: 'shared', label: 'Shared ID', trust: 'owner' }]);
+    expect(f.pointDocuments.contacts).toBe(2);
+    expect(f.getAllBatches.contacts).toBe(2);
+  });
+
+  it('charges only unique contact snapshots against the shared aggregate cap', async () => {
+    const count = 5001;
+    const contacts = rows(count, {
+      createdAt: new Date(0),
+      updatedAt: new Date(0),
+      trust: 'owner',
+      aliases: [],
+      emails: [],
+      phones: [],
+      relationship: '',
+      notes: '',
+    });
+    const memories = contacts.map((contact, index) =>
+      memory({ id: `memory-${String(index).padStart(5, '0')}`, subjectContactId: contact.id }),
+    );
+    const f = fixture({ memories, contacts });
+    await expect(
+      new FirestoreProfileLibraryRepository(f.store).listFilters('owner'),
+    ).rejects.toBeInstanceOf(FirestoreProfileReadLimitError);
+    expect(f.queryDocuments.memories).toBe(5001);
+    expect(f.pointDocuments.contacts).toBeLessThanOrEqual(4999);
+    expect(f.getAllBatches.contacts).toBeLessThan(20);
   });
 
   it('keeps asymmetric near-budget public list and filters within the existing read cap', async () => {
