@@ -49,6 +49,10 @@ export interface AuthenticatedMobileOwner {
   ownerId: string;
 }
 
+export type MobileOwnerResolution =
+  | { ok: true; ownerId: string }
+  | { ok: false; reason: 'unavailable' };
+
 /**
  * Resolve only the configured bearer credential. This preserves the existing
  * rotation and warm-cache behavior used by legacy mobile routes.
@@ -110,19 +114,30 @@ export async function authenticateMobileOwner(
   const principal = await authenticateMobileBearer(request);
   if (!principal) return null;
 
+  const owner = await resolveMobileOwner(principal);
+  return owner.ok ? { principal, ownerId: owner.ownerId } : null;
+}
+
+/** Resolve the installation owner after bearer authentication, preserving outage state. */
+export async function resolveMobileOwner(
+  _principal: MobileBearerPrincipal,
+): Promise<MobileOwnerResolution> {
   try {
     const config = loadConfig();
     if (config.PERSISTENCE_DRIVER !== 'firestore') {
       const { assertPostgresInstallationOwner, getDb } = await import('./lib/server');
       const ownerId = await assertPostgresInstallationOwner(getDb());
-      return typeof ownerId === 'string' && ownerId.length > 0 ? { principal, ownerId } : null;
+      return typeof ownerId === 'string' && ownerId.length > 0
+        ? { ok: true, ownerId }
+        : { ok: false, reason: 'unavailable' };
     }
 
     const { validateAgentPersistenceConfig } = await import('@assistant/config');
-    if (validateAgentPersistenceConfig(config).length || !config.FIRESTORE_AGENT_ID) return null;
-    return { principal, ownerId: config.FIRESTORE_AGENT_ID };
+    if (validateAgentPersistenceConfig(config).length || !config.FIRESTORE_AGENT_ID)
+      return { ok: false, reason: 'unavailable' };
+    return { ok: true, ownerId: config.FIRESTORE_AGENT_ID };
   } catch {
-    return null;
+    return { ok: false, reason: 'unavailable' };
   }
 }
 

@@ -1926,3 +1926,23 @@ export async function loadOwnerMemoryEditorView(
     return finish(snapshot, context);
   });
 }
+
+/** One exact owner-scoped saved-note read with no editor context or grant issuance. */
+export async function loadOwnerMemorySnapshot(ownerId: string, memoryId: string) {
+  const [{ readPostgresOwnerMemoryEditorSnapshot }, { readFirestoreOwnerMemoryEditorSnapshot }] =
+    await Promise.all([import('@assistant/db'), import('@assistant/firestore')]);
+  const config = loadConfig();
+  if (config.PERSISTENCE_DRIVER !== 'firestore')
+    return withPostgresMemoryBrowseRead(async (tx) => {
+      const currentOwnerId = await assertPostgresInstallationOwner(tx);
+      if (currentOwnerId !== ownerId) throw new Error('Installation owner changed');
+      return readPostgresOwnerMemoryEditorSnapshot(tx, ownerId, memoryId);
+    });
+
+  if (validateAgentPersistenceConfig(config).length || config.FIRESTORE_AGENT_ID !== ownerId)
+    throw new Error('Memory persistence is unavailable');
+  const store = getFirestoreInstallationStore();
+  return store.db.runTransaction((tx) =>
+    readFirestoreOwnerMemoryEditorSnapshot(store, ownerId, memoryId, tx),
+  );
+}
