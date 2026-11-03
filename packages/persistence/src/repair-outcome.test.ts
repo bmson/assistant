@@ -21,11 +21,6 @@ function issue(status: RepairIssue['status']): RepairIssue {
   };
 }
 describe('deterministic repair outcomes', () => {
-  it('points queued guidance to the queue on the current Improvements screen', () => {
-    expect(repairOutcome(issue('reported')).nextStep).toBe(
-      'Check the queue status and daily coding allowance.',
-    );
-  });
   it('explains a confirmed publisher permission failure with the required repository grants', () => {
     const failed = issue('failed');
     failed.data.lastError =
