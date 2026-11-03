@@ -13,7 +13,8 @@ struct MemoryLibraryScreen: View {
 
     @State private var query = MemoryLibraryQuery()
     @State private var search = ""
-    private var response: MemoryLibraryResponse { model.cachedMemoryLibrary(query) ?? .empty }
+    private var cachedResponse: MemoryLibraryResponse? { model.cachedMemoryLibrary(query) }
+    private var response: MemoryLibraryResponse { cachedResponse ?? .empty }
     @State private var responseQuery = MemoryLibraryQuery()
     @State private var loading = false
     @State private var loaded = false
@@ -43,19 +44,23 @@ struct MemoryLibraryScreen: View {
                 if loadFailed {
                     AssistantLoadFailureState(
                         title: "Your memory library couldn’t be loaded",
-                        message: response.rows.isEmpty ? "Try again to see your saved memories." : "Your previous results are shown below."
+                        message: cachedResponse == nil ? "Try again to see your saved memories." : "Your previous results are shown below."
                     ) { reload() }
                 }
-                if loading && response.rows.isEmpty {
+                if loading && cachedResponse == nil {
                     AssistantLoadingState(title: "Loading your memory library")
-                } else if response.rows.isEmpty && !loadFailed {
+                } else if cachedResponse == nil {
+                    if !loadFailed {
+                        AssistantLoadingState(title: "Loading your memory library")
+                    }
+                } else if response.rows.isEmpty && !loadFailed && !loading {
                     AssistantEmptyState(
                         loaded ? "Nothing matches those filters" : "Memory library",
                         systemImage: "tray",
                         description: loaded ? "Clear a filter to widen the search." : nil
                     )
                 } else {
-                    resultSummary
+                    resultSummary(isStale: loading || loadFailed)
                     ForEach(response.rows) { row in
                         factCard(row)
                     }
@@ -137,8 +142,10 @@ struct MemoryLibraryScreen: View {
         .assistantPanel(in: colorScheme)
     }
 
-    private var resultSummary: some View {
-        Text("\(response.total) \(response.total == 1 ? "memory" : "memories")")
+    private func resultSummary(isStale: Bool) -> some View {
+        Text(isStale
+             ? "Last loaded · \(response.total) \(response.total == 1 ? "memory" : "memories")"
+             : "\(response.total) \(response.total == 1 ? "memory" : "memories")")
             .font(.caption)
             .foregroundStyle(.secondary)
     }
