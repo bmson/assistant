@@ -17,6 +17,11 @@ import {
   readPrivacyErasureFence,
 } from '@assistant/firestore';
 import {
+  type MemoryLibraryDiagnosticContext,
+  type MemoryLibraryPhase,
+  withMemoryLibraryPhase,
+} from '@/lib/memory-library-diagnostics';
+import {
   correctOwnerKnowledgeGraphFactForCurrentPersistence,
   getFirestoreInstallationStore,
 } from '@/lib/server';
@@ -63,18 +68,28 @@ export function correctFirestoreKnowledgeRelation(
 /** The memory library page and its filters, fenced by the owner and privacy erasure. */
 export async function loadFirestoreMemoryLibrary(
   input: Parameters<ReturnType<typeof profileLibraryQueries>['list']>[0],
+  diagnostics?: MemoryLibraryDiagnosticContext,
 ) {
-  const { store, agentId } = firestoreOwner();
-  const fence = await readPrivacyErasureFence(store, agentId);
-  const agents = await store.collection('agents').limit(2).get();
-  if (
-    agents.size !== 1 ||
-    agents.docs[0]?.id !== store.doc('agents', agentId).id ||
-    agents.docs[0]?.get('id') !== agentId
-  )
-    throw new Error('Memory library requires one matching configured owner');
+  const run = <T>(phase: MemoryLibraryPhase, operation: () => T | Promise<T>) =>
+    diagnostics ? withMemoryLibraryPhase(diagnostics, phase, operation) : operation();
+  const { store, agentId } = diagnostics
+    ? await run('config', () => firestoreOwner())
+    : firestoreOwner();
+  const fence = await run('pre_fence', () => readPrivacyErasureFence(store, agentId));
+  await run('owner_guard', async () => {
+    const agents = await store.collection('agents').limit(2).get();
+    if (
+      agents.size !== 1 ||
+      agents.docs[0]?.id !== store.doc('agents', agentId).id ||
+      agents.docs[0]?.get('id') !== agentId
+    )
+      throw new Error('Memory library requires one matching configured owner');
+  });
   const queries = profileLibraryQueries(new FirestoreProfileLibraryRepository(store), agentId);
-  const result = await Promise.all([queries.list(input), queries.listFilters()] as const);
-  await assertPrivacyErasureFenceUnchanged(store, agentId, fence);
+  const result = await Promise.all([
+    run('list', () => queries.list(input)),
+    run('filters', () => queries.listFilters()),
+  ] as const);
+  await run('post_fence', () => assertPrivacyErasureFenceUnchanged(store, agentId, fence));
   return result;
 }
