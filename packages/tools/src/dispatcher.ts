@@ -310,18 +310,19 @@ function hasOwnerPersonalReadForToolFamily(
   const text = intent.ownerAuthoredText;
   const request = detectPersonalReadRequest([{ role: 'user', content: text }]);
   const sourceReads = request?.sourceReads ?? [];
+  const publicEmailRead = hasPublicSourceQualifiedEmailRead(text);
   if (toolFamily === 'gmail')
     return (
-      request?.kind === 'email' ||
-      request?.kind === 'calendar_email' ||
-      sourceReads.some((source) => source.kind === 'email') ||
+      (!publicEmailRead && (request?.kind === 'email' || request?.kind === 'calendar_email')) ||
+      (!publicEmailRead && sourceReads.some((source) => source.kind === 'email')) ||
       hasExplicitOwnerMailReadSource(text) ||
       hasAffirmativePersonalConfirmationEmailRead(text)
     );
   if (toolFamily === 'calendar')
     return (
       request?.kind === 'calendar' ||
-      request?.kind === 'calendar_email' ||
+      (request?.kind === 'calendar_email' &&
+        (!publicEmailRead || hasExplicitOwnerCalendarReadSource(text))) ||
       sourceReads.some((source) => source.kind === 'calendar') ||
       hasExplicitOwnerCalendarReadSource(text)
     );

@@ -2419,7 +2419,13 @@ function detectPersonalReadRequestInternal(
         positiveLatest,
       ) ||
         /\bwhen\s+is\s+my\s+next\s+meeting\b/i.test(positiveLatest)));
-  if (historyReadProhibited && !historyReadAllowed && !independentAccountReadRequest) return null;
+  if (
+    historyReadProhibited &&
+    !historyReadAllowed &&
+    !savedMemoryReadAllowed &&
+    !independentAccountReadRequest
+  )
+    return null;
   // A fictional or hypothetical subject can still be an explicit history
   // lookup. The content qualifier describes what to find; it does not revoke
   // the requested conversation-history source. Other private sources remain

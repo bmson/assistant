@@ -463,7 +463,7 @@ export function hasPublicSourceQualifiedEmailRead(text: string): boolean {
     const clauses = sentence.split(/(?:,|\b(?:and|then|also|but)\b)/i);
     return clauses.some((clause, index) => {
       const confirmationEmail =
-        /\b(?:ticket|booking|reservation|order|purchase|payment|delivery)\s+confirmation\s+email\b/i.test(
+        /\b(?:ticket|booking|reservation|order|purchase|payment|delivery|flight)\s+confirmation\s+email\b/i.test(
           clause,
         );
       const publicSourceQualifier =
@@ -512,11 +512,14 @@ export function hasAffirmativePersonalConfirmationEmailRead(text: string): boole
       const inheritedPublicSource = clauses
         .slice(0, index)
         .some((previous) => /\b(?:public|online|website|webpage|internet)\b/i.test(previous));
+      const explicitlyOwnedArtifact =
+        /\b(?:my|our)\s+(?:[\p{L}\p{M}\d-]+\s+){0,4}confirmation\s+email\b/iu.test(clause);
       return (
         affirmativeAction(clause, '(?:search|check|find|look up|read|review)') &&
-        /\b(?:ticket|booking|reservation|order|purchase|payment|delivery)\s+confirmation\s+email\b/i.test(
-          clause,
-        ) &&
+        (explicitlyOwnedArtifact ||
+          /\b(?:ticket|booking|reservation|order|purchase|payment|delivery|flight)\s+confirmation\s+email\b/i.test(
+            clause,
+          )) &&
         !/\b(?:public|online|website|webpage|internet|template|templates|example|examples|sample|samples)\b/i.test(
           clause,
         ) &&
@@ -589,12 +592,20 @@ function scopesFor(text: string): OwnerIntentScope[] {
   )
     scopes.add('private_read');
   const personalRead = detectPersonalReadRequest([{ role: 'user', content: text }]);
+  const publicEmailReadWithoutAnOwnerMailbox =
+    personalRead !== null &&
+    (personalRead.kind === 'email' || personalRead.kind === 'calendar_email') &&
+    hasPublicSourceQualifiedEmailRead(text) &&
+    !hasExplicitOwnerMailReadSource(text) &&
+    !hasExplicitOwnerCalendarReadSource(text) &&
+    !hasAffirmativePersonalConfirmationEmailRead(text);
   const broadLookupProhibition =
     /\b(?:do not|don't|never)\s+look\s+anything\s+up\b|\bwithout\s+(?:looking|checking|searching)\s+anything\s+up\b/i.test(
       text,
     );
   if (
     personalRead &&
+    !publicEmailReadWithoutAnOwnerMailbox &&
     (!explicitlyOptsOutOfRecall(text) ||
       (!broadLookupProhibition &&
         (personalRead.kind !== 'memory' || personalRead.explicitSource !== 'history')))

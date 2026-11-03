@@ -73,6 +73,26 @@ describe('task-bound checklist correction resume projection', () => {
     ).toMatchObject({ kind: 'email', firstToolName: 'gmail.search' });
   });
 
+  it('keeps the flight lookup authorized in the original mixed lookup/send request', () => {
+    const original =
+      'Find my flight confirmation email to Paris on 2026-12-21 and send an email to Alice';
+    const intent = extractOwnerIntent({ trust: 'owner', text: original });
+    expect(intent.authorizedScopes).toContain('private_read');
+    expect(intent.authorizedScopes).toContain('external_send');
+    const task = {
+      createdAt: new Date('2026-09-12T12:00:00Z'),
+    };
+    const checklist = buildRequestChecklist(original);
+    expect(checklist?.items.map(({ kind }) => kind)).toEqual(['lookup', 'send']);
+    expect(
+      taskBoundCorrectionReadRequest('Find my flight confirmation email to Paris on 2026-12-21', {
+        now: task.createdAt,
+        timeZone: 'UTC',
+        authorizedScopes: intent.authorizedScopes,
+      }),
+    ).toBeDefined();
+  });
+
   it('accepts only direct private lookup corrections within the original scope', () => {
     const options = {
       now: new Date('2026-10-11T12:00:00Z'),

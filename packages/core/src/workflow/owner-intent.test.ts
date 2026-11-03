@@ -865,6 +865,11 @@ describe('owner intent provenance', () => {
       ['What is a good schedule for the fictional exercise?', false],
       ['Do not read my Gmail; explain what Gmail labels mean.', false],
       ['Find the museum ticket confirmation email.', true],
+      [
+        'Find my flight confirmation email to Paris on 2026-12-21 and send an email to Alice.',
+        true,
+      ],
+      ['Find a flight confirmation email template online.', false],
       ['Find the museum email address to contact the ticket office.', false],
       ['Find a ticket confirmation email template online.', false],
       ['Search the public museum website for ticket confirmation email examples.', false],
@@ -882,6 +887,14 @@ describe('owner intent provenance', () => {
       ],
       [
         'Read my Gmail for the invoice. Find the public museum email address to contact the ticket office.',
+        true,
+      ],
+      [
+        'What do my saved memories say about telescope preferences? Find the public museum email address to contact the ticket office.',
+        true,
+      ],
+      [
+        'What do our past chats say about Nimbus? Find the public museum email address to contact the ticket office.',
         true,
       ],
       ['For a fictional exercise, show a sample museum ticket confirmation email.', false],
