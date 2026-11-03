@@ -97,7 +97,7 @@ export async function unknownAttemptSummary(
   );
 }
 
-/** One bounded snapshot of reservations whose provider call is still in flight. */
+/** One bounded snapshot of reservations with the retained dispatching status. */
 export async function dispatchingAttemptSummary(
   store: Pick<InstallationStore, 'collection'>,
 ): Promise<UnknownAttemptSummary> {

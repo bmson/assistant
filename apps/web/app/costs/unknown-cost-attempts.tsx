@@ -37,17 +37,17 @@ export function DispatchingCostAttempts({ summary }: { summary: UnknownCostAttem
   return (
     <div className="mt-4 rounded-xl bg-raised px-3 py-2 text-sm">
       {!summary.countComplete && summary.count === 0 ? (
-        <p>In-flight reservation coverage unavailable.</p>
+        <p>Dispatching reservation coverage unavailable.</p>
       ) : (
         <>
           <p className="font-medium">
-            In-flight reservations:{' '}
+            Dispatching reservations:{' '}
             {summary.countComplete ? summary.count : `at least ${summary.count}`}
           </p>
           {summary.estimateComplete && summary.estimatedUsd !== null ? (
             <p className="mt-1 text-muted">
-              Retained reservation estimate {formatUsdExposure(summary.estimatedUsd)}. Estimate
-              only, not confirmed spend. Included in budget holds above.
+              Retained estimate {formatUsdExposure(summary.estimatedUsd)}, based on dispatching
+              status. Estimate only, not confirmed provider spend. Included in budget holds above.
             </p>
           ) : (
             <p className="mt-1 text-muted">
