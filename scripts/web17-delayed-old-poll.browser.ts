@@ -589,6 +589,8 @@ async function verifyDelayedTerminalPoll(status: 'done' | 'cancelled' | 'failed'
 async function verifyUnmountedPollDoesNotPublishAfterRemount(): Promise<void> {
   const page = await context.newPage();
   const browserErrors: string[] = [];
+  let web17DiagnosticStage = 'setup';
+  let web17DiagnosticPollId: string | undefined;
   const conversationId = await createConversation(page);
   const taskId = await fixture.insertTerminalTask(conversationId, 'done');
   const cursor = fixture.cursorAt(new Date(0));
@@ -772,10 +774,12 @@ async function verifyUnmountedPollDoesNotPublishAfterRemount(): Promise<void> {
         `/chat/${conversationId}?task=${taskId}&cursor=${encodeURIComponent(cursor)}`,
         origin,
       ).toString();
+    web17DiagnosticStage = 'initial-chat-navigation';
     await page.goto(deepLink(), { waitUntil: 'domcontentloaded', timeout: 90_000 });
     const composer = page.getByRole('combobox', { name: 'Message', exact: true });
     await composer.waitFor({ timeout: 10_000 });
     await page.getByRole('button', { name: 'Stop this task', exact: true }).waitFor();
+    web17DiagnosticStage = 'wait-initial-held-poll';
     await waitFor(oldStarted, 'Task A initial poll did not start');
     const abortsBeforeUnmount = await page.evaluate(
       () => (window as Window & { __web17TaskPollAborts?: string[] }).__web17TaskPollAborts ?? [],
@@ -785,10 +789,14 @@ async function verifyUnmountedPollDoesNotPublishAfterRemount(): Promise<void> {
       .reverse()
       .find((pollId) => !abortsBeforeUnmount.includes(pollId));
     assert.ok(pollIdToAbort, 'Task A must have an outstanding request before unmount');
+    web17DiagnosticPollId = pollIdToAbort;
 
+    web17DiagnosticStage = 'all-chats-navigation';
     await page.getByRole('link', { name: 'All chats', exact: true }).click();
     await page.waitForURL((url) => url.pathname === '/chat/all', { timeout: 20_000 });
+    web17DiagnosticStage = 'composer-detach';
     await composer.waitFor({ state: 'detached', timeout: 10_000 });
+    web17DiagnosticStage = 'old-poll-abort';
     await page.waitForFunction(
       (expectedPollId) =>
         (window as Window & { __web17TaskPollAborts?: string[] }).__web17TaskPollAborts?.includes(
@@ -809,9 +817,11 @@ async function verifyUnmountedPollDoesNotPublishAfterRemount(): Promise<void> {
     // The ordinary list link intentionally drops task/cursor query state. Use
     // the same supported task deep link to restore the exact persisted A poll.
     remounted = true;
+    web17DiagnosticStage = 'remount-navigation';
     await page.goto(deepLink(), { waitUntil: 'domcontentloaded', timeout: 90_000 });
     await composer.waitFor({ timeout: 10_000 });
     await page.getByRole('button', { name: 'Stop this task', exact: true }).waitFor();
+    web17DiagnosticStage = 'fresh-poll-start';
     await waitFor(freshStarted, 'Task A fresh poll did not start after remount');
 
     // Keep the aborted response unresolved until the fresh poll is active. This
@@ -828,7 +838,9 @@ async function verifyUnmountedPollDoesNotPublishAfterRemount(): Promise<void> {
     freshGateReleased = true;
     releaseFreshRequest();
     maybeSettleFreshRoutes();
+    web17DiagnosticStage = 'fresh-poll-settle';
     await waitFor(freshSettled, 'Fresh task A route did not settle');
+    web17DiagnosticStage = 'fresh-result-render';
     await page.getByText(freshResult, { exact: true }).waitFor({ timeout: 20_000 });
     await page.getByRole('button', { name: 'Send', exact: true }).waitFor();
     assert.equal(await page.getByText(oldResult, { exact: true }).count(), 0);
@@ -843,6 +855,53 @@ async function verifyUnmountedPollDoesNotPublishAfterRemount(): Promise<void> {
     );
     assert.equal(effectiveFreshPollIds.length, 1, 'Exactly one fresh Task A poll must complete');
     assert.deepEqual(browserErrors, []);
+  } catch (primaryError) {
+    try {
+      const boundedText = (value: string, maxChars: number) =>
+        Array.from(value).slice(0, maxChars).join('');
+      let currentPath = 'unavailable';
+      try {
+        currentPath = boundedText(new URL(page.url()).pathname, 128);
+      } catch {}
+      let primaryErrorText = 'unavailable';
+      try {
+        primaryErrorText = boundedText(
+          primaryError instanceof Error ? primaryError.message : String(primaryError),
+          240,
+        );
+      } catch {}
+      const diagnostic = {
+        kind: 'WEB17_FAILURE',
+        stage: boundedText(web17DiagnosticStage, 64),
+        currentPath,
+        expectedPath: '/chat/all',
+        chatPath: boundedText(`/chat/${conversationId}`, 128),
+        allChatsPath: '/chat/all',
+        pollId: web17DiagnosticPollId ? boundedText(web17DiagnosticPollId, 128) : undefined,
+        primaryError: primaryErrorText,
+        pageErrors: browserErrors.slice(-3).map((message) => boundedText(message, 80)),
+      };
+      const prefix = '[WEB-17] ';
+      let line = JSON.stringify(diagnostic);
+      while (Buffer.byteLength(prefix + line, 'utf8') > 4096 && diagnostic.pageErrors.length > 0) {
+        diagnostic.pageErrors.shift();
+        line = JSON.stringify(diagnostic);
+      }
+      while (
+        Buffer.byteLength(prefix + line, 'utf8') > 4096 &&
+        diagnostic.primaryError.length > 0
+      ) {
+        diagnostic.primaryError = Array.from(diagnostic.primaryError).slice(0, -16).join('');
+        line = JSON.stringify(diagnostic);
+      }
+      if (Buffer.byteLength(prefix + line, 'utf8') <= 4096) console.error(prefix + line);
+      else console.error(`${prefix}{"kind":"WEB17_FAILURE","diagnostic":"exceeded-byte-cap"}`);
+    } catch {
+      try {
+        console.error('[WEB-17] {"kind":"WEB17_FAILURE","diagnostic":"capture-failed"}');
+      } catch {}
+    }
+    throw primaryError;
   } finally {
     oldGateReleased = true;
     releaseOldRequest();
