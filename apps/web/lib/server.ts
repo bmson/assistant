@@ -1946,3 +1946,34 @@ export async function loadOwnerMemorySnapshot(ownerId: string, memoryId: string)
     readFirestoreOwnerMemoryEditorSnapshot(store, ownerId, memoryId, tx),
   );
 }
+
+/** Snapshot and current editor epoch/privacy context from one driver transaction/lease. */
+export async function loadOwnerMemoryCorrectionAuthorizationState(
+  ownerId: string,
+  memoryId: string,
+) {
+  const [
+    { readPostgresOwnerEditorIssuanceContext, readPostgresOwnerMemoryEditorSnapshot },
+    { readFirestoreOwnerEditorIssuanceContext, readFirestoreOwnerMemoryEditorSnapshot },
+  ] = await Promise.all([import('@assistant/db'), import('@assistant/firestore')]);
+  const config = loadConfig();
+  if (config.PERSISTENCE_DRIVER !== 'firestore')
+    return withPostgresMemoryBrowseRead(async (tx) => {
+      const currentOwnerId = await assertPostgresInstallationOwner(tx);
+      if (currentOwnerId !== ownerId) throw new Error('Memory correction owner changed');
+      const snapshot = await readPostgresOwnerMemoryEditorSnapshot(tx, ownerId, memoryId);
+      if (!snapshot) return null;
+      const context = await readPostgresOwnerEditorIssuanceContext(tx, ownerId);
+      return { snapshot, context };
+    });
+
+  if (validateAgentPersistenceConfig(config).length || config.FIRESTORE_AGENT_ID !== ownerId)
+    throw new Error('Memory correction persistence is unavailable');
+  const store = getFirestoreInstallationStore();
+  return store.db.runTransaction(async (tx) => {
+    const snapshot = await readFirestoreOwnerMemoryEditorSnapshot(store, ownerId, memoryId, tx);
+    if (!snapshot) return null;
+    const context = await readFirestoreOwnerEditorIssuanceContext(store, ownerId, tx);
+    return { snapshot, context };
+  });
+}
