@@ -300,16 +300,28 @@ describe('BASIC5 canonical stored receipt plus observed saved UI contract', () =
 
 describe('task-specific BASIC5 control and presentation request budgets', () => {
   const baseUrl = 'http://127.0.0.1:3107';
+  const budgetCounts = (
+    snapshot: ReturnType<ReturnType<typeof createBasic5BrowserRequestBudget>['snapshot']>,
+  ) => ({
+    browserHttpRequests: snapshot.browserHttpRequests,
+    browserControlHttpRequests: snapshot.browserControlHttpRequests,
+    browserPresentationHttpRequests: snapshot.browserPresentationHttpRequests,
+    browserBudgetExceeded: snapshot.browserBudgetExceeded,
+  });
   const checkTotals = (budget: ReturnType<typeof createBasic5BrowserRequestBudget>) => {
     const snapshot = budget.snapshot();
     expect(snapshot.browserHttpRequests).toBe(
       snapshot.browserControlHttpRequests + snapshot.browserPresentationHttpRequests,
     );
-    return snapshot;
+    return budgetCounts(snapshot);
   };
-  function fakeRoute(url: string, method: string, events: string[]) {
+  function fakeRoute(url: string, method: string, events: string[], resourceType?: string) {
     return {
-      request: () => ({ url: () => url, method: () => method }),
+      request: () => ({
+        url: () => url,
+        method: () => method,
+        resourceType: () => resourceType ?? 'fetch',
+      }),
       continue: vi.fn(async () => {
         events.push('continue');
       }),
@@ -356,7 +368,7 @@ describe('task-specific BASIC5 control and presentation request budgets', () => 
       await routeBasic5BrowserRequest(budget, route, (allowed, snapshot) => {
         events.push('decision');
         expect(allowed).toBe(true);
-        expect(snapshot).toEqual(budget.snapshot());
+        expect(budgetCounts(snapshot)).toEqual(budgetCounts(budget.snapshot()));
         oldCombinedWouldBlock ||= snapshot.browserHttpRequests > 64;
       });
       expect(events).toEqual(['decision', 'continue']);
@@ -373,6 +385,98 @@ describe('task-specific BASIC5 control and presentation request budgets', () => 
     });
   });
 
+  it('retains only closed request classes and fixed navigation buckets while counting repeated URLs', async () => {
+    const budget = createBasic5BrowserRequestBudget(baseUrl);
+    const routeOne = async (pathname: string, resourceType: string) => {
+      const route = fakeRoute(`${baseUrl}${pathname}`, 'GET', [], resourceType);
+      await routeBasic5BrowserRequest(budget, route, () => {});
+      expect(route.continue).toHaveBeenCalledOnce();
+    };
+    await routeOne('/people/person', 'document');
+    budget.setNavigationBucket(1);
+    await routeOne('/people/person', 'document');
+    await routeOne('/_next/static/chunks/app.js', 'script');
+    await routeOne('/public/logo.svg', 'image');
+    await routeOne('/people/person?_rsc=private-query-value', 'fetch');
+    await routeOne('/people/person?_rsc=prefetch-query-value', 'fetch');
+    budget.setNavigationBucket(6);
+    await routeOne('/people/person', 'fetch');
+    checkTotals(budget);
+    const diagnostics = budget.snapshot().browserPresentationDiagnostics;
+    expect(diagnostics).toEqual({
+      bucketMostRecentNavigation: 6,
+      byNavigation: [
+        { document: 1, next_static_asset: 0, public_asset: 0, rsc_or_prefetch: 0, other: 0 },
+        { document: 1, next_static_asset: 1, public_asset: 1, rsc_or_prefetch: 2, other: 0 },
+        { document: 0, next_static_asset: 0, public_asset: 0, rsc_or_prefetch: 0, other: 0 },
+        { document: 0, next_static_asset: 0, public_asset: 0, rsc_or_prefetch: 0, other: 0 },
+        { document: 0, next_static_asset: 0, public_asset: 0, rsc_or_prefetch: 0, other: 0 },
+        { document: 0, next_static_asset: 0, public_asset: 0, rsc_or_prefetch: 0, other: 0 },
+        { document: 0, next_static_asset: 0, public_asset: 0, rsc_or_prefetch: 0, other: 1 },
+      ],
+      totals: { document: 2, next_static_asset: 1, public_asset: 1, rsc_or_prefetch: 2, other: 1 },
+    });
+    expect(JSON.stringify(diagnostics)).not.toContain('private-query-value');
+    expect(JSON.stringify(diagnostics)).not.toContain('prefetch-query-value');
+    expect(budget.snapshot().browserPresentationHttpRequests).toBe(7);
+    const laterSnapshot = budget.snapshot().browserPresentationDiagnostics;
+    expect(laterSnapshot).not.toBe(diagnostics);
+    expect(laterSnapshot?.byNavigation).not.toBe(diagnostics?.byNavigation);
+    expect(laterSnapshot?.byNavigation[0]).not.toBe(diagnostics?.byNavigation[0]);
+  });
+
+  it('keeps diagnostic counts unknown if request metadata is invalid without changing fail-closed routing', async () => {
+    const budget = createBasic5BrowserRequestBudget(baseUrl);
+    const events: string[] = [];
+    const route = fakeRoute(`${baseUrl}/people/person`, 'GET', events, 'unknown');
+    await routeBasic5BrowserRequest(budget, route, (allowed) => {
+      events.push('decision');
+      expect(allowed).toBe(true);
+    });
+    expect(events).toEqual(['decision', 'continue']);
+    expect(budget.snapshot()).toMatchObject({
+      browserHttpRequests: 1,
+      browserControlHttpRequests: 0,
+      browserPresentationHttpRequests: 1,
+      browserBudgetExceeded: false,
+      browserPresentationDiagnostics: null,
+    });
+  });
+
+  it('keeps routing intact if optional request metadata throws', async () => {
+    const budget = createBasic5BrowserRequestBudget(baseUrl);
+    const events: string[] = [];
+    const route = fakeRoute(`${baseUrl}/people/person`, 'GET', events);
+    route.request = () => ({
+      url: () => `${baseUrl}/people/person`,
+      method: () => 'GET',
+      resourceType: () => {
+        throw new Error('sensitive diagnostic-only value');
+      },
+    });
+    await routeBasic5BrowserRequest(budget, route, (allowed) => {
+      events.push('decision');
+      expect(allowed).toBe(true);
+    });
+    expect(events).toEqual(['decision', 'continue']);
+    expect(budget.snapshot().browserPresentationDiagnostics).toBeNull();
+    expect(JSON.stringify(budget.snapshot())).not.toContain('sensitive diagnostic-only value');
+  });
+
+  it('marks diagnostics unknown for oversized request metadata without retaining it', async () => {
+    const budget = createBasic5BrowserRequestBudget(baseUrl);
+    const events: string[] = [];
+    const longQuery = 'private-query-value'.repeat(600);
+    const route = fakeRoute(`${baseUrl}/people/person?value=${longQuery}`, 'GET', events, 'fetch');
+    await routeBasic5BrowserRequest(budget, route, (allowed) => {
+      events.push('decision');
+      expect(allowed).toBe(true);
+    });
+    expect(events).toEqual(['decision', 'continue']);
+    expect(budget.snapshot().browserPresentationDiagnostics).toBeNull();
+    expect(JSON.stringify(budget.snapshot())).not.toContain('private-query-value');
+  });
+
   it('counts control request 65 before the adapter records and aborts it, with no later reset', async () => {
     const budget = createBasic5BrowserRequestBudget(baseUrl);
     for (let count = 1; count <= 64; count++)
@@ -382,11 +486,18 @@ describe('task-specific BASIC5 control and presentation request budgets', () => 
     await routeBasic5BrowserRequest(budget, route, (allowed, snapshot) => {
       events.push('decision');
       expect(allowed).toBe(false);
-      expect(snapshot).toEqual({
+      expect(budgetCounts(snapshot)).toEqual({
         browserHttpRequests: 65,
         browserControlHttpRequests: 65,
         browserPresentationHttpRequests: 0,
         browserBudgetExceeded: true,
+      });
+      expect(snapshot.browserPresentationDiagnostics?.totals).toEqual({
+        document: 0,
+        next_static_asset: 0,
+        public_asset: 0,
+        rsc_or_prefetch: 0,
+        other: 0,
       });
     });
     expect(events).toEqual(['decision', 'abort:blockedbyclient']);
@@ -401,16 +512,28 @@ describe('task-specific BASIC5 control and presentation request budgets', () => 
     });
   });
 
-  it('counts and blocks presentation GET 257 even when it is a person page rather than an asset', () => {
+  it('counts and blocks presentation GET 257 in the actual route adapter', async () => {
     const budget = createBasic5BrowserRequestBudget(baseUrl);
-    for (let count = 1; count <= 256; count++)
-      expect(budget.observe(`${baseUrl}/people/person`, 'GET')).toBe(true);
-    expect(budget.observe(`${baseUrl}/people/person?_rsc=synthetic`, 'GET')).toBe(false);
+    for (let count = 1; count <= 257; count++) {
+      const events: string[] = [];
+      const route = fakeRoute(`${baseUrl}/people/person`, 'GET', events, 'document');
+      await routeBasic5BrowserRequest(budget, route, (allowed) => {
+        expect(allowed).toBe(count <= 256);
+      });
+      expect(events).toEqual(count <= 256 ? ['continue'] : ['abort:blockedbyclient']);
+    }
     expect(checkTotals(budget)).toEqual({
       browserHttpRequests: 257,
       browserControlHttpRequests: 0,
       browserPresentationHttpRequests: 257,
       browserBudgetExceeded: true,
+    });
+    expect(budget.snapshot().browserPresentationDiagnostics?.totals).toEqual({
+      document: 257,
+      next_static_asset: 0,
+      public_asset: 0,
+      rsc_or_prefetch: 0,
+      other: 0,
     });
   });
 
@@ -517,7 +640,7 @@ describe('task-specific BASIC5 control and presentation request budgets', () => 
       await routeBasic5BrowserRequest(budget, route, (allowed, snapshot) => {
         events.push('decision');
         expect(allowed).toBe(false);
-        expect(snapshot).toEqual({
+        expect(budgetCounts(snapshot)).toEqual({
           browserHttpRequests: 1,
           browserControlHttpRequests: 1,
           browserPresentationHttpRequests: 0,
@@ -564,6 +687,7 @@ describe('task-specific BASIC5 control and presentation request budgets', () => 
       browserControlHttpRequests: 0,
       browserPresentationHttpRequests: 1,
       browserBudgetExceeded: false,
+      browserPresentationDiagnostics: null,
     });
     expect(JSON.stringify(budget.snapshot())).not.toContain(baseUrl);
     expect(JSON.stringify(budget.snapshot())).not.toContain('/people');

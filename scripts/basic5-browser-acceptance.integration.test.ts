@@ -40,6 +40,7 @@ import {
   BASIC5_SAVED_STATUS_PATTERN,
   type Basic5BrowserRequestBudgetSnapshot,
   type Basic5ObservedPost,
+  type Basic5PresentationRequestDiagnostics,
   basic5BrowserLaunchOptions,
   basic5EmbeddingResponse,
   basic5IsolatedWebEnvironment,
@@ -521,6 +522,7 @@ browserTest(
     let browserControlHttpRequests = 0;
     let browserPresentationHttpRequests = 0;
     let browserBudgetExceeded = false;
+    let browserPresentationDiagnostics: Basic5PresentationRequestDiagnostics | null = null;
     let embeddingRequests = 0;
     let embeddingResponsesFinished = 0;
     let fixtureCountersAtSettlement: Basic5FixtureCounters | undefined;
@@ -534,6 +536,7 @@ browserTest(
       browserControlHttpRequests: boundedBasic5ObservedCount(browserControlHttpRequests),
       browserPresentationHttpRequests: boundedBasic5ObservedCount(browserPresentationHttpRequests),
       browserBudgetExceeded,
+      browserPresentationDiagnostics,
       localEmbeddingReceived: boundedBasic5ObservedCount(embeddingRequests),
       localEmbeddingFinished: boundedBasic5ObservedCount(embeddingResponsesFinished),
     });
@@ -990,6 +993,7 @@ browserTest(
           browserControlHttpRequests,
           browserPresentationHttpRequests,
           browserBudgetExceeded,
+          browserPresentationDiagnostics,
         } = snapshot);
       };
       const isIntendedPost = (request: BrowserRequest): boolean => {
@@ -1198,6 +1202,8 @@ browserTest(
 
       const personUrl = `${baseUrl}/people/${personId}`;
       const navigate = async (href: string) => {
+        browserRequestBudget.setNavigationBucket(checkpointAuthenticatedNavigationCount + 1);
+        retainBrowserRequestCounts(browserRequestBudget.snapshot());
         await recordFreshPage(page, href);
         authenticatedPageNavigations += 1;
         checkpointAuthenticatedNavigationCount = authenticatedPageNavigations;

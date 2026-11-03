@@ -32,11 +32,33 @@ export const BASIC5_BROWSER_CONTROL_REQUEST_LIMIT = 64;
 export const BASIC5_BROWSER_PRESENTATION_REQUEST_LIMIT = 256;
 export const BASIC5_BROWSER_TOTAL_REQUEST_LIMIT = 320;
 
+export const BASIC5_PRESENTATION_REQUEST_CLASSES = [
+  'document',
+  'next_static_asset',
+  'public_asset',
+  'rsc_or_prefetch',
+  'other',
+] as const;
+export type Basic5PresentationRequestClass = (typeof BASIC5_PRESENTATION_REQUEST_CLASSES)[number];
+export type Basic5PresentationRequestClassCounts = Record<Basic5PresentationRequestClass, number>;
+export type Basic5PresentationRequestDiagnostics = {
+  /** Most recent goto attempt bucket at observation time; not the request initiator. */
+  bucketMostRecentNavigation: number;
+  /** Index 0 is before the first goto; indices 1 through 6 are goto generations. */
+  byNavigation: Basic5PresentationRequestClassCounts[];
+  totals: Basic5PresentationRequestClassCounts;
+};
+
+type Basic5PresentationRequestMetadata = {
+  resourceType: string;
+};
+
 export interface Basic5BrowserRequestBudgetSnapshot {
   browserHttpRequests: number;
   browserControlHttpRequests: number;
   browserPresentationHttpRequests: number;
   browserBudgetExceeded: boolean;
+  browserPresentationDiagnostics: Basic5PresentationRequestDiagnostics | null;
 }
 
 /** Validate the raw URL before WHATWG parsing can hide path normalization. */
@@ -80,8 +102,65 @@ function canonicalBasic5RequestUrl(value: string): URL | null {
 }
 
 export interface Basic5BrowserRequestBudget {
-  observe(url: string, method: string, anonymousProbe?: boolean): boolean;
+  observe(
+    url: string,
+    method: string,
+    anonymousProbe?: boolean,
+    metadata?: Basic5PresentationRequestMetadata,
+  ): boolean;
+  setNavigationBucket(bucket: number): void;
   snapshot(): Basic5BrowserRequestBudgetSnapshot;
+}
+
+const PLAYWRIGHT_RESOURCE_TYPES = new Set([
+  'document',
+  'stylesheet',
+  'image',
+  'media',
+  'font',
+  'script',
+  'texttrack',
+  'xhr',
+  'fetch',
+  'eventsource',
+  'websocket',
+  'manifest',
+  'other',
+]);
+
+function emptyPresentationClassCounts(): Basic5PresentationRequestClassCounts {
+  return {
+    document: 0,
+    next_static_asset: 0,
+    public_asset: 0,
+    rsc_or_prefetch: 0,
+    other: 0,
+  };
+}
+
+function classifyPresentationRequest(
+  url: string,
+  metadata: Basic5PresentationRequestMetadata | undefined,
+): Basic5PresentationRequestClass | null {
+  if (
+    !url ||
+    url.length > 8_192 ||
+    !metadata ||
+    typeof metadata.resourceType !== 'string' ||
+    !PLAYWRIGHT_RESOURCE_TYPES.has(metadata.resourceType)
+  )
+    return null;
+  const parsed = canonicalBasic5RequestUrl(url);
+  if (!parsed) return null;
+  if (metadata.resourceType === 'document') return 'document';
+  if (parsed.pathname.startsWith('/_next/static/')) return 'next_static_asset';
+  if (parsed.searchParams.has('_rsc')) return 'rsc_or_prefetch';
+  if (
+    ['stylesheet', 'image', 'media', 'font', 'manifest'].includes(metadata.resourceType) ||
+    (metadata.resourceType === 'script' && !parsed.pathname.startsWith('/_next/'))
+  )
+    return 'public_asset';
+  return 'other';
 }
 
 /** Presentation GETs may read application data; this is accounting, not auth proof. */
@@ -93,8 +172,12 @@ export function createBasic5BrowserRequestBudget(baseUrl: string): Basic5Browser
   let browserControlHttpRequests = 0;
   let browserPresentationHttpRequests = 0;
   let browserBudgetExceeded = false;
+  let navigationBucket = 0;
+  let presentationDiagnosticsKnown = true;
+  const presentationByNavigation = Array.from({ length: 7 }, emptyPresentationClassCounts);
+  const presentationTotals = emptyPresentationClassCounts();
   return {
-    observe(url, method, anonymousProbe = false) {
+    observe(url, method, anonymousProbe = false, metadata) {
       browserHttpRequests += 1;
       const parsed = canonicalBasic5RequestUrl(url);
       const sameOrigin = parsed?.origin === origin;
@@ -108,7 +191,22 @@ export function createBasic5BrowserRequestBudget(baseUrl: string): Basic5Browser
         path?.startsWith('/api/')
       )
         browserControlHttpRequests += 1;
-      else browserPresentationHttpRequests += 1;
+      else {
+        browserPresentationHttpRequests += 1;
+        const requestClass = classifyPresentationRequest(url, metadata);
+        const navigationCounts = presentationByNavigation[navigationBucket];
+        if (!requestClass || !navigationCounts) {
+          presentationDiagnosticsKnown = false;
+        } else {
+          navigationCounts[requestClass] += 1;
+          presentationTotals[requestClass] += 1;
+          if (
+            navigationCounts[requestClass] > 1_000_000 ||
+            presentationTotals[requestClass] > 1_000_000
+          )
+            presentationDiagnosticsKnown = false;
+        }
+      }
       browserBudgetExceeded ||= Boolean(
         browserControlHttpRequests > BASIC5_BROWSER_CONTROL_REQUEST_LIMIT ||
           browserPresentationHttpRequests > BASIC5_BROWSER_PRESENTATION_REQUEST_LIMIT ||
@@ -116,11 +214,25 @@ export function createBasic5BrowserRequestBudget(baseUrl: string): Basic5Browser
       );
       return sameOrigin && !browserBudgetExceeded;
     },
+    setNavigationBucket(bucket) {
+      if (!Number.isSafeInteger(bucket) || bucket < 0 || bucket > 6) {
+        presentationDiagnosticsKnown = false;
+        return;
+      }
+      navigationBucket = bucket;
+    },
     snapshot: () => ({
       browserHttpRequests,
       browserControlHttpRequests,
       browserPresentationHttpRequests,
       browserBudgetExceeded,
+      browserPresentationDiagnostics: presentationDiagnosticsKnown
+        ? {
+            bucketMostRecentNavigation: navigationBucket,
+            byNavigation: presentationByNavigation.map((counts) => ({ ...counts })),
+            totals: { ...presentationTotals },
+          }
+        : null,
     }),
   };
 }
@@ -129,14 +241,25 @@ export function createBasic5BrowserRequestBudget(baseUrl: string): Basic5Browser
 export async function routeBasic5BrowserRequest(
   budget: Basic5BrowserRequestBudget,
   route: {
-    request(): { url(): string; method(): string };
+    request(): {
+      url(): string;
+      method(): string;
+      resourceType?(): string;
+    };
     continue(): Promise<unknown>;
     abort(errorCode: 'blockedbyclient'): Promise<unknown>;
   },
   onDecision: (allowed: boolean, snapshot: Basic5BrowserRequestBudgetSnapshot) => void,
 ): Promise<void> {
   const request = route.request();
-  const allowed = budget.observe(request.url(), request.method());
+  let metadata: Basic5PresentationRequestMetadata | undefined;
+  try {
+    const resourceType = request.resourceType?.();
+    if (typeof resourceType === 'string') metadata = { resourceType };
+  } catch {
+    // Diagnostics are optional and must not change routing on metadata failure.
+  }
+  const allowed = budget.observe(request.url(), request.method(), false, metadata);
   onDecision(allowed, budget.snapshot());
   if (allowed) await route.continue();
   else await route.abort('blockedbyclient');

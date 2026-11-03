@@ -480,6 +480,119 @@ describe('BASIC5 bounded failed Vitest report diagnostics', () => {
     expect(unknown.diagnostic.checkpoint?.saveTransport?.routeBlocked).toBeNull();
   });
 
+  it('accepts optional closed request-class diagnostics while preserving legacy/current checkpoints', () => {
+    const blank = {
+      document: 0,
+      next_static_asset: 0,
+      public_asset: 0,
+      rsc_or_prefetch: 0,
+      other: 0,
+    };
+    const firstNavigation = { ...blank, document: 1, next_static_asset: 1 };
+    const diagnostics = {
+      bucketMostRecentNavigation: 1,
+      byNavigation: [firstNavigation, ...Array.from({ length: 6 }, () => ({ ...blank }))],
+      totals: { ...firstNavigation },
+    };
+    const checkpoint = {
+      schemaVersion: 1,
+      stage: 'browser_launched',
+      authenticatedNavigationCount: 0,
+      applyCount: 0,
+      durableReadbackCount: 0,
+      freshPageReadbackCount: 0,
+      fixtureCounters: {
+        observedAt: 'checkpoint',
+        browserHttpRequests: 2,
+        browserControlHttpRequests: 0,
+        browserPresentationHttpRequests: 2,
+        browserPresentationDiagnostics: diagnostics,
+        browserBudgetExceeded: false,
+        localEmbeddingReceived: 0,
+        localEmbeddingFinished: 0,
+      },
+    };
+    const output = (value: unknown) =>
+      observe(`BASIC5_ACCEPTANCE_CHECKPOINT ${JSON.stringify(value)}\n${JSON.stringify(report())}`);
+    const valid = output(checkpoint);
+    expect(valid.validOutput).toBe(true);
+    expect(valid.diagnostic.checkpoint?.fixtureCounters).toMatchObject({
+      browserHttpRequests: 2,
+      browserControlHttpRequests: 0,
+      browserPresentationHttpRequests: 2,
+      browserPresentationDiagnostics: diagnostics,
+    });
+
+    const unknownDiagnostics = output({
+      ...checkpoint,
+      fixtureCounters: { ...checkpoint.fixtureCounters, browserPresentationDiagnostics: null },
+    });
+    expect(unknownDiagnostics.validOutput).toBe(true);
+    expect(
+      unknownDiagnostics.diagnostic.checkpoint?.fixtureCounters?.browserPresentationDiagnostics,
+    ).toBeNull();
+
+    for (const invalidDiagnostics of [
+      { ...diagnostics, rawUrl: privateText },
+      {
+        ...diagnostics,
+        totals: { ...diagnostics.totals, document: '1' },
+      },
+      {
+        ...diagnostics,
+        totals: { ...diagnostics.totals, document: 1_000_001 },
+      },
+      {
+        ...diagnostics,
+        totals: { ...diagnostics.totals, unexpected_class: 0 },
+      },
+      { ...diagnostics, bucketMostRecentNavigation: 1.5 },
+      { ...diagnostics, bucketMostRecentNavigation: 7 },
+      { ...diagnostics, byNavigation: diagnostics.byNavigation.slice(1) },
+      {
+        ...diagnostics,
+        totals: { ...diagnostics.totals, document: 2 },
+      },
+      {
+        ...diagnostics,
+        totals: { ...diagnostics.totals, next_static_asset: -1 },
+      },
+      {
+        ...diagnostics,
+        byNavigation: [
+          { ...firstNavigation, document: 1.5 },
+          ...Array.from({ length: 6 }, () => ({ ...blank })),
+        ],
+      },
+    ]) {
+      const bad = output({
+        ...checkpoint,
+        fixtureCounters: {
+          ...checkpoint.fixtureCounters,
+          browserPresentationDiagnostics: invalidDiagnostics,
+        },
+      });
+      expect(bad.validOutput).toBe(false);
+      expect(bad.diagnostic.checkpoint).toBeNull();
+      expect(JSON.stringify(bad.diagnostic)).not.toContain(privateText);
+    }
+
+    for (const countKey of ['browserControlHttpRequests', 'browserPresentationHttpRequests']) {
+      for (const invalidCount of [-1, 1.5, '2']) {
+        const bad = output({
+          ...checkpoint,
+          fixtureCounters: {
+            ...checkpoint.fixtureCounters,
+            [countKey]: invalidCount,
+            browserPresentationDiagnostics: null,
+          },
+        });
+        expect(bad.validOutput).toBe(false);
+        expect(bad.diagnostic.checkpoint).toBeNull();
+      }
+    }
+  });
+
   it('retains sticky over-limit route attempts in the failure checkpoint buckets', async () => {
     const baseUrl = 'http://127.0.0.1:3107';
     const budget = createBasic5BrowserRequestBudget(baseUrl);
@@ -514,6 +627,7 @@ describe('BASIC5 bounded failed Vitest report diagnostics', () => {
       browserControlHttpRequests: 66,
       browserPresentationHttpRequests: 55,
       browserBudgetExceeded: true,
+      browserPresentationDiagnostics: null,
     });
     const checkpoint = {
       schemaVersion: 1,
