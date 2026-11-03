@@ -76,6 +76,51 @@ describe('weeklyCalendarPlan', () => {
     expect(text).not.toContain('no overlapping attended events');
   });
 
+  it('rejects offsetless availability busy intervals while retaining explicit-offset busy data', () => {
+    const offsetless = weeklyCalendarPlanResult({
+      timeMin,
+      timeMax,
+      timeZone: 'America/Los_Angeles',
+      evidence: evidence({
+        busy: [
+          {
+            start: '2026-10-12T09:00:00',
+            end: '2026-10-12T10:00:00',
+            calendar: 'Synthetic',
+          },
+        ],
+      }) as never,
+    });
+    const explicitOffset = weeklyCalendarPlanResult({
+      timeMin,
+      timeMax,
+      timeZone: 'America/Los_Angeles',
+      evidence: evidence({
+        busy: [
+          {
+            start: '2026-10-12T09:00:00-07:00',
+            end: '2026-10-12T10:00:00-07:00',
+            calendar: 'Synthetic',
+          },
+        ],
+      }) as never,
+    });
+
+    expect(offsetless.coverageComplete).toBe(false);
+    expect(offsetless.slotCount).toBe(0);
+    expect(offsetless.text).toContain('Free/busy coverage could not be fully verified');
+    expect(offsetless.text).toContain('proposed times are tentative, not confirmed free');
+    expect(offsetless.text).toContain(
+      'I did not suggest focus times because usable free/busy intervals were unavailable.',
+    );
+    expect(offsetless.text).not.toContain('Conflicts: none found in checked calendar data.');
+
+    expect(explicitOffset.coverageComplete).toBe(true);
+    expect(explicitOffset.slotCount).toBe(3);
+    expect(explicitOffset.text).toContain('| Tue, Oct 13, 9:00 AM–10:30 AM (90m) |');
+    expect(explicitOffset.text).not.toContain('| Mon, Oct 12, 9:00 AM–10:30 AM (90m) |');
+  });
+
   it('keeps offsetless timed rows out of interval math and marks proposed times tentative', () => {
     const result = weeklyCalendarPlanResult({
       timeMin,

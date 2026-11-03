@@ -1,7 +1,11 @@
 import { calendarOccurrenceKey, sameCalendarOccurrence } from '@assistant/persistence';
 import type { BriefingCalendarEvent } from './briefing.js';
 import type { CalendarPlanOptions } from './calendar-plan-intent.js';
-import { calendarCivilBoundary, calendarSourceInterval } from './calendar-read-window.js';
+import {
+  calendarCivilBoundary,
+  calendarSourceInstant,
+  calendarSourceInterval,
+} from './calendar-read-window.js';
 import {
   calendarRelationship,
   verifiedOwnerParticipation,
@@ -763,23 +767,25 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
     Array.isArray(busyRaw) &&
     busyRaw.every((value) => {
       const item = record(value);
-      return (
-        dateMs(item?.start) !== undefined &&
-        dateMs(item?.end) !== undefined &&
-        (dateMs(item?.end) as number) > (dateMs(item?.start) as number)
-      );
+      const start = typeof item?.start === 'string' ? calendarSourceInstant(item.start) : undefined;
+      const end = typeof item?.end === 'string' ? calendarSourceInstant(item.end) : undefined;
+      return start !== undefined && end !== undefined && end > start;
     });
   const busy: BusyInterval[] = busyValid
     ? (busyRaw as unknown[]).flatMap((value) => {
         const item = record(value);
-        const interval = item
-          ? {
-              start: dateMs(item.start) as number,
-              end: dateMs(item.end) as number,
-              ...(typeof item.calendar === 'string' ? { calendar: item.calendar } : {}),
-              ...(typeof item.calendarId === 'string' ? { calendarId: item.calendarId } : {}),
-            }
-          : undefined;
+        const start =
+          typeof item?.start === 'string' ? calendarSourceInstant(item.start) : undefined;
+        const end = typeof item?.end === 'string' ? calendarSourceInstant(item.end) : undefined;
+        const interval =
+          item && start !== undefined && end !== undefined
+            ? {
+                start,
+                end,
+                ...(typeof item.calendar === 'string' ? { calendar: item.calendar } : {}),
+                ...(typeof item.calendarId === 'string' ? { calendarId: item.calendarId } : {}),
+              }
+            : undefined;
         return interval ? [interval] : [];
       })
     : [];
