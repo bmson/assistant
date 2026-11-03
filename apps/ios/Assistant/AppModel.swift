@@ -116,10 +116,10 @@ enum AssistantRoute: String, Hashable, Identifiable, CaseIterable, Sendable {
     var id: Self { self }
 }
 
-/// All pushed screens share one ordered path. Mixing an item-based submenu
-/// with value-based person links inserts the person beneath the submenu.
+/// All pushed screens share one ordered path so Back follows the visible parent.
 enum AssistantDestination: Hashable {
     case route(AssistantRoute)
+    case peopleConnections
     case person(id: String)
 }
 

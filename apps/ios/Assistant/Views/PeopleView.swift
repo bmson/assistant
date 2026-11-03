@@ -109,9 +109,7 @@ struct PeopleView: View {
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
-                    NavigationLink {
-                        PeopleConnectionsScreen()
-                    } label: {
+                    NavigationLink(value: AssistantDestination.peopleConnections) {
                         Label("Explore connections", systemImage: "person.2")
                     }
                     Button("Relationship graph", systemImage: "circle.hexagongrid") {
@@ -206,7 +204,7 @@ struct PeopleView: View {
 }
 
 /// Connection exploration stays available without taking over the directory.
-private struct PeopleConnectionsScreen: View {
+struct PeopleConnectionsScreen: View {
     @Environment(AppModel.self) private var model
     @State private var query = ""
     @State private var focusedPersonID: String?
