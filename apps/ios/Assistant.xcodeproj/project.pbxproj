@@ -89,6 +89,9 @@
 		B000000000000000000000B5 /* PhoneCalendarStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000B5 /* PhoneCalendarStoreTests.swift */; };
 		B000000000000000000000C2 /* Models/PhoneCalendarSharing.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000C2 /* Models/PhoneCalendarSharing.swift */; };
 		B000000000000000000000C3 /* System/PhoneCalendarSharingCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000C3 /* System/PhoneCalendarSharingCoordinator.swift */; };
+		B13A99000000000000000001 /* Models/MemoryCorrectionPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = C13A99000000000000000001 /* Models/MemoryCorrectionPresentation.swift */; };
+		B13A99000000000000000002 /* Views/MemoryCorrectionReview.swift in Sources */ = {isa = PBXBuildFile; fileRef = C13A99000000000000000002 /* Views/MemoryCorrectionReview.swift */; };
+		B13A99000000000000000003 /* MemoryCorrectionPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C13A99000000000000000003 /* MemoryCorrectionPresentationTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -209,6 +212,9 @@
 		C000000000000000000000B5 /* PhoneCalendarStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneCalendarStoreTests.swift; sourceTree = "<group>"; };
 		C000000000000000000000C2 /* Models/PhoneCalendarSharing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models/PhoneCalendarSharing.swift; sourceTree = "<group>"; };
 		C000000000000000000000C3 /* System/PhoneCalendarSharingCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = System/PhoneCalendarSharingCoordinator.swift; sourceTree = "<group>"; };
+		C13A99000000000000000001 /* Models/MemoryCorrectionPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models/MemoryCorrectionPresentation.swift; sourceTree = "<group>"; };
+		C13A99000000000000000002 /* Views/MemoryCorrectionReview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/MemoryCorrectionReview.swift; sourceTree = "<group>"; };
+		C13A99000000000000000003 /* MemoryCorrectionPresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryCorrectionPresentationTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -299,6 +305,8 @@
 				C00000000000000000000010 /* Views/ConnectionView.swift */,
 				C00000000000000000000023 /* Views/WorkspaceView.swift */,
 				C00000000000000000000025 /* Views/MemoryView.swift */,
+				C13A99000000000000000002 /* Views/MemoryCorrectionReview.swift */,
+				C13A99000000000000000001 /* Models/MemoryCorrectionPresentation.swift */,
 				C00000000000000000000076 /* Views/MemoryDataView.swift */,
 				C00000000000000000000078 /* Views/CommitmentsView.swift */,
 				C00000000000000000000077 /* Views/MemoryLibraryView.swift */,
@@ -334,6 +342,7 @@
 			isa = PBXGroup;
 			children = (
 				C00000000000000000000020 /* APIModelsTests.swift */,
+				C13A99000000000000000003 /* MemoryCorrectionPresentationTests.swift */,
 				C000000000000000000000BD /* OptimisticEditsTests.swift */,
 				C000000000000000000000B5 /* PhoneCalendarStoreTests.swift */,
 				C000000000000000000000A2 /* ConversationDraftsTests.swift */,
@@ -531,6 +540,8 @@
 				B00000000000000000000010 /* Views/ConnectionView.swift in Sources */,
 				B0000000000000000000001A /* Views/WorkspaceView.swift in Sources */,
 				B0000000000000000000001C /* Views/MemoryView.swift in Sources */,
+				B13A99000000000000000002 /* Views/MemoryCorrectionReview.swift in Sources */,
+				B13A99000000000000000001 /* Models/MemoryCorrectionPresentation.swift in Sources */,
 				B00000000000000000000076 /* Views/MemoryDataView.swift in Sources */,
 				B00000000000000000000078 /* Views/CommitmentsView.swift in Sources */,
 				B00000000000000000000077 /* Views/MemoryLibraryView.swift in Sources */,
@@ -561,6 +572,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				B00000000000000000000012 /* APIModelsTests.swift in Sources */,
+				B13A99000000000000000003 /* MemoryCorrectionPresentationTests.swift in Sources */,
 				B000000000000000000000BD /* OptimisticEditsTests.swift in Sources */,
 				B000000000000000000000B5 /* PhoneCalendarStoreTests.swift in Sources */,
 				B000000000000000000000A2 /* ConversationDraftsTests.swift in Sources */,
