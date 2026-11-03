@@ -2087,6 +2087,47 @@ describe('requested focus-plan variations', () => {
     expect(answer.text).toContain('no calendar changes made');
   });
 
+  it('recognizes a bounded review-only focus plan without the calendar noun and reads meeting buffers', () => {
+    expect(
+      requestedCalendarPlanOptions(
+        'Review the next three working days for two 60-minute focus blocks with 15-minute buffers around meetings. Present the review only; do not change anything.',
+      ),
+    ).toEqual({
+      focusMinutes: 60,
+      slotCount: 2,
+      breakMinutes: 15,
+      meetingBufferMinutes: 15,
+      workingDays: 3,
+      windowLabel: 'the next 3 working days',
+      includeWorkloadAssessment: false,
+      includeTravelBuffers: false,
+    });
+  });
+
+  it.each([
+    {
+      prompt:
+        'Review the next two working days for one 45-minute focus slot with 10-minute buffers before meetings. Show a review-only proposal.',
+      expected: { focusMinutes: 45, slotCount: 1, workingDays: 2, meetingBufferMinutes: 10 },
+    },
+    {
+      prompt:
+        'Review my calendar next week for ten 240-minute focus blocks with 60-minute buffers around meetings.',
+      expected: { focusMinutes: 240, slotCount: 10, meetingBufferMinutes: 60 },
+    },
+  ])('keeps valid focus-plan boundary variation $prompt', ({ prompt, expected }) => {
+    expect(requestedCalendarPlanOptions(prompt)).toMatchObject(expected);
+  });
+
+  it.each([
+    'Review the next three working days for two 241-minute focus blocks with 15-minute buffers around meetings.',
+    'Review the next three working days for eleven focus blocks with 15-minute buffers around meetings.',
+    'Review the next three working days for two 60-minute focus blocks with 61-minute buffers around meetings.',
+    'Can you suggest how I might create focus blocks around meetings next month?',
+  ])('does not infer an out-of-bounds or ambiguous focus plan: %s', (prompt) => {
+    expect(requestedCalendarPlanOptions(prompt)).toBeUndefined();
+  });
+
   it('bounds a dense conflict and source list while stating how many details were omitted', () => {
     const end = '2026-10-13T07:00:00.000Z';
     const events = Array.from({ length: 50 }, (_, index) => ({

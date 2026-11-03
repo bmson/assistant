@@ -1039,6 +1039,46 @@ describe('detectPersonalReadRequest', () => {
     });
   });
 
+  it('routes a bounded review-only focus proposal to calendar availability without mailbox scope', () => {
+    const prompt =
+      'Review the next three working days for two 60-minute focus blocks with 15-minute buffers around meetings. Present the review only; do not change anything.';
+    const request = detectPersonalReadRequest(turn(prompt), {
+      now: new Date('2026-10-09T12:00:00.000Z'),
+      timeZone: 'America/Los_Angeles',
+    });
+
+    expect(request).toMatchObject({
+      kind: 'calendar',
+      weeklyCalendarPlan: true,
+      firstToolName: 'calendar.availability',
+      queryTerms: [],
+      calendarPlanOptions: {
+        focusMinutes: 60,
+        slotCount: 2,
+        workingDays: 3,
+        meetingBufferMinutes: 15,
+      },
+      timeWindow: {
+        timeMin: '2026-10-12T07:00:00.000Z',
+        timeMax: '2026-10-15T07:00:00.000Z',
+      },
+    });
+    expect(request?.mailQuery).toBeUndefined();
+  });
+
+  it.each([
+    'For a hypothetical exercise, review the next three working days for two 60-minute focus blocks with 15-minute buffers around meetings; use only supplied sample data.',
+    'Review the next three working days for two 60-minute focus blocks with 15-minute buffers around meetings, but do not check my real calendar; use only supplied sample data.',
+    'Can you suggest how I might create focus blocks around meetings next month?',
+  ])('does not turn local or ambiguous focus planning into a calendar read: %s', (prompt) => {
+    expect(
+      detectPersonalReadRequest(turn(prompt), {
+        now: new Date('2026-10-09T12:00:00.000Z'),
+        timeZone: 'America/Los_Angeles',
+      }),
+    ).toBeNull();
+  });
+
   it('skips the weekend when the next-working-days focus request arrives Saturday', () => {
     const request = detectPersonalReadRequest(
       turn(
