@@ -467,34 +467,119 @@ describe('actual FS domain + actual canonical writer + actual claim/receipt tran
     expect(f.rows('memories')).toHaveLength(1);
     expect(f.rows('knowledgeGraphAssertionEvidence')).toHaveLength(1);
   });
-  it('allows same-target meaning via displayed target CAS without rejecting its own replacement canonical statement', async () => {
-    const f = fixture(),
-      request = await f.family(),
-      saved = await f.run(request);
-    if (saved.outcome !== 'saved') throw new Error(JSON.stringify(saved));
-    const target = await readFirestoreOwnerEditorGraphScope(
-      f.store,
-      f.ownerId,
-      saved.ids.relationId!,
-    );
-    const result = await f.run({
-      version: 1,
-      intent: 'apply',
-      command: 'correct_owner_family_relationship',
-      operationId: randomUUID(),
-      targetRelationId: saved.ids.relationId!,
-      expectedTargetRevision: target!.revision,
-      replacement: {
-        ...familyFields(request),
-        note: 'Corrected owner note',
-        expectedCanonicalState: { kind: 'absent' },
-      },
-    });
-    expect(result).toMatchObject({ outcome: 'saved', ids: { assertionId: saved.ids.assertionId } });
-    expect(f.rows('knowledgeGraphAssertions')).toHaveLength(1);
-    expect(f.rows('knowledgeGraphAssertions')[0]?.reviewStatus).toBe('confirmed');
-    expect(f.rows('knowledgeGraphRelations')).toHaveLength(2);
-  });
+  it.each(['parent_of', 'sibling_of'] as const)(
+    'retires the old %s relation on a note-only correction while preserving one confirmed canonical statement (fake Firestore, not PostgreSQL proof)',
+    async (predicate) => {
+      const f = fixture();
+      const original = await f.family();
+      const request = {
+        ...original,
+        predicate,
+        validity:
+          predicate === 'sibling_of' ? { validFrom: null, validUntil: null } : original.validity,
+      };
+      const saved = await f.run(request);
+      if (saved.outcome !== 'saved') throw new Error(JSON.stringify(saved));
+      const originalRelationId = saved.ids.relationId;
+      if (!originalRelationId || !saved.ids.memoryId || !saved.ids.assertionId)
+        throw new Error('Missing original saved family identities');
+      const target = await readFirestoreOwnerEditorGraphScope(
+        f.store,
+        f.ownerId,
+        originalRelationId,
+      );
+      if (!target) throw new Error('Missing displayed correction target');
+      const originalAssertion = f.rows('knowledgeGraphAssertions')[0];
+      if (!originalAssertion) throw new Error('Missing original canonical assertion');
+      const result = await f.run({
+        version: 1,
+        intent: 'apply',
+        command: 'correct_owner_family_relationship',
+        operationId: randomUUID(),
+        targetRelationId: originalRelationId,
+        expectedTargetRevision: target.revision,
+        replacement: {
+          ...familyFields(request),
+          note: 'Corrected owner note',
+          expectedCanonicalState: { kind: 'absent' },
+        },
+      });
+      expect(result).toMatchObject({
+        outcome: 'saved',
+        ids: { assertionId: saved.ids.assertionId, previousRelationId: saved.ids.relationId },
+      });
+      if (result.outcome !== 'saved') throw new Error(JSON.stringify(result));
+      expect(result.ids.relationId).not.toBe(saved.ids.relationId);
+      expect(result.ids.memoryId).not.toBe(saved.ids.memoryId);
+
+      const relations = f.rows('knowledgeGraphRelations');
+      expect(relations).toHaveLength(2);
+      const oldRelation = relations.find((row) => row.id === saved.ids.relationId);
+      const newRelation = relations.find((row) => row.id === result.ids.relationId);
+      expect(oldRelation).toMatchObject({
+        id: saved.ids.relationId,
+        agentId: f.ownerId,
+        reviewStatus: 'rejected',
+        assertionId: saved.ids.assertionId,
+        sourceMemoryId: saved.ids.memoryId,
+        correctedByRelationId: result.ids.relationId,
+        correctionDisposition: 'whole_fact',
+        correctionSourceContentHash: target.source.contentHash,
+      });
+      expect(newRelation).toMatchObject({
+        id: result.ids.relationId,
+        agentId: f.ownerId,
+        reviewStatus: 'confirmed',
+        assertionId: saved.ids.assertionId,
+        sourceMemoryId: result.ids.memoryId,
+        subjectEntityId: oldRelation?.subjectEntityId,
+        objectEntityId: oldRelation?.objectEntityId,
+        predicate,
+        ...request.validity,
+        correctedByRelationId: null,
+        correctionDisposition: null,
+        correctionSourceContentHash: null,
+      });
+
+      const memories = f.rows('memories');
+      expect(memories).toHaveLength(2);
+      const oldMemory = memories.find((row) => row.id === saved.ids.memoryId);
+      const newMemory = memories.find((row) => row.id === result.ids.memoryId);
+      expect(oldMemory).toMatchObject({
+        agentId: f.ownerId,
+        contentHash: target.source.contentHash,
+        supersededById: result.ids.memoryId,
+      });
+      expect(oldMemory?.content).toContain(request.note);
+      expect(newMemory).toMatchObject({
+        agentId: f.ownerId,
+        source: 'knowledge-graph-owner',
+        ownerConfirmed: true,
+        originTrust: 'owner',
+        supersededById: null,
+      });
+      expect(newMemory?.content).toContain('Corrected owner note');
+      expect(newMemory?.content).not.toContain(request.note);
+
+      const assertions = f.rows('knowledgeGraphAssertions');
+      expect(assertions).toHaveLength(1);
+      const current = assertions[0];
+      expect(current).toMatchObject({
+        id: saved.ids.assertionId,
+        agentId: f.ownerId,
+        semanticKey: originalAssertion.semanticKey,
+        semanticRevision: originalAssertion.semanticRevision,
+        lifecycle: 'current',
+        reviewStatus: 'confirmed',
+        ownerAuthored: true,
+        reviewedRevision: originalAssertion.semanticRevision,
+        reviewedPayloadHash: originalAssertion.semanticKey,
+        supersededById: null,
+      });
+      expect(f.embed).toHaveBeenCalledTimes(2);
+      expect(f.stats.readsAfterWrites).toBe(0);
+    },
+  );
   it('touches only the existing epoch at final commit, never reservation or receipt GET, without retiring scopes', async () => {
     const f = fixture(),
       request: OwnerEditorApply = {
