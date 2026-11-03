@@ -890,8 +890,44 @@ final class APIModelsTests: XCTestCase {
         // Embeddings, unpriced models, and models behind a turned-off connection are not choosable.
         XCTAssertEqual(settings.choosableGroups.map(\.connection.id), ["openai"])
         XCTAssertEqual(settings.choosableGroups.first?.models.map(\.id), ["openai:gpt-5.1"])
-        XCTAssertEqual(settings.models.first?.priceLabel, "$1.25 / $10.00 per M tokens")
+        XCTAssertEqual(settings.models.first?.priceLabel, "Input $1.25 · Output $10.00 per M tokens")
+        XCTAssertEqual(settings.models[1].priceLabel, "Input $0.02 · Output $0.00 per M tokens")
+        XCTAssertEqual(settings.models[2].priceLabel, "Input unavailable · Output unavailable per M tokens")
         XCTAssertEqual(settings.connections.last?.kindLabel, "OpenAI-compatible")
+    }
+
+    func testCatalogModelPriceLabelKeepsSubcentAndRejectsInvalidRates() {
+        func model(input: String?, output: String?, realtime: Bool? = false, audioInput: Double? = nil, audioOutput: Double? = nil) -> CatalogModel {
+            CatalogModel(
+                id: "test", label: "Test", connectionId: "provider", enabled: true,
+                routable: true, embedding: false, realtime: realtime,
+                promptCostPerMTok: input, completionCostPerMTok: output,
+                audioInputPerMTok: audioInput, audioOutputPerMTok: audioOutput
+            )
+        }
+
+        XCTAssertEqual(model(input: "0", output: "0.0000").priceLabel, "Input $0.00 · Output $0.00 per M tokens")
+        XCTAssertEqual(model(input: "0.001", output: "0.00001").priceLabel, "Input $0.001 · Output <$0.0001 per M tokens")
+        XCTAssertEqual(model(input: "-0.25", output: "1").priceLabel, "Input unavailable · Output $1.00 per M tokens")
+        XCTAssertEqual(model(input: "NaN", output: "inf").priceLabel, "Input unavailable · Output unavailable per M tokens")
+        XCTAssertEqual(model(input: nil, output: nil).priceLabel, "Input unavailable · Output unavailable per M tokens")
+        XCTAssertEqual(
+            model(input: nil, output: nil, realtime: true, audioInput: 0.001, audioOutput: 0).priceLabel,
+            "Audio input $0.001 · Audio output $0.00 per M tokens"
+        )
+    }
+
+    func testCallOccurrenceDetailsKeepsKnownZeroDurationVisible() {
+        let call = PhoneCall(
+            id: "call-zero", to: "+15550100000", contactName: nil, status: "ended", active: false,
+            outcome: "completed", summary: nil,
+            brief: .init(goal: "Check the appointment", context: "", mayAgreeTo: "", mustNot: ""),
+            maxMinutes: 3, createdAt: "2026-01-01T12:00:00Z", durationSeconds: 0,
+            costUsd: nil, transcript: [], notes: [], checkins: [], openCheckin: nil
+        )
+
+        XCTAssertFalse(call.occurrenceDetails.contains("Duration unavailable"))
+        XCTAssertFalse(call.occurrenceDetails.hasSuffix(" · "))
     }
 
     func testSituationPackMissingRouteHasActionableCopy() {

@@ -2980,12 +2980,24 @@ struct CatalogModel: Codable, Identifiable, Sendable, Hashable {
     let audioOutputPerMTok: Double?
 
     var priceLabel: String {
-        if realtime == true, let audioIn = audioInputPerMTok, let audioOut = audioOutputPerMTok {
-            return String(format: "audio $%.2f / $%.2f per M tokens", audioIn, audioOut)
+        if realtime == true {
+            return "Audio input \(formattedPrice(audioInputPerMTok)) · Audio output \(formattedPrice(audioOutputPerMTok)) per M tokens"
         }
-        let input = Double(promptCostPerMTok ?? "") ?? 0
-        let output = Double(completionCostPerMTok ?? "") ?? 0
-        return String(format: "$%.2f / $%.2f per M tokens", input, output)
+        return "Input \(formattedPrice(promptCostPerMTok.flatMap(Double.init))) · Output \(formattedPrice(completionCostPerMTok.flatMap(Double.init))) per M tokens"
+    }
+
+    private func formattedPrice(_ value: Double?) -> String {
+        guard let value, value.isFinite, value >= 0 else { return "unavailable" }
+        guard value != 0 else { return "$0.00" }
+        guard value >= 0.0001 else { return "<$0.0001" }
+
+        let formatter = NumberFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.numberStyle = .decimal
+        formatter.usesGroupingSeparator = false
+        formatter.minimumFractionDigits = 2
+        formatter.maximumFractionDigits = 4
+        return formatter.string(from: NSNumber(value: value)).map { "$\($0)" } ?? "unavailable"
     }
 }
 

@@ -40,6 +40,10 @@ struct CallsView: View {
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                     .lineLimit(2)
+                                Text(call.occurrenceDetails)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
                             }
                         }
                     }
@@ -64,6 +68,25 @@ struct CallsView: View {
         let result = await model.loadPhoneCalls()
         guard !Task.isCancelled else { return }
         loadFailed = result == nil
+    }
+}
+
+extension PhoneCall {
+    var occurrenceDetails: String {
+        let parsedDate = createdAt.assistantDate
+            ?? AssistantFormatters.internetDateTime.date(from: createdAt)
+        let dateText = parsedDate?.formatted(date: .abbreviated, time: .shortened) ?? "Time unavailable"
+        let durationText: String
+        if let durationSeconds, durationSeconds >= 0 {
+            let formatter = DateComponentsFormatter()
+            formatter.unitsStyle = .abbreviated
+            formatter.allowedUnits = durationSeconds >= 60 ? [.minute, .second] : [.second]
+            formatter.zeroFormattingBehavior = [.dropLeading, .dropTrailing]
+            durationText = formatter.string(from: TimeInterval(durationSeconds)) ?? "Duration unavailable"
+        } else {
+            durationText = "Duration unavailable"
+        }
+        return "\(dateText) · \(durationText)"
     }
 }
 
