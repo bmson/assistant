@@ -479,22 +479,33 @@ describe('response cards', () => {
   });
 
   it('does not pair a successful flight update with an obsolete flight card', () => {
+    const searched = {
+      toolName: 'calendar.search_events',
+      status: 'succeeded',
+      result: {
+        events: [
+          {
+            eventId: 'flight',
+            summary: 'SFO to BER flight',
+            start: '2026-10-09T09:15:00-07:00',
+            end: '2026-10-09T11:15:00-07:00',
+          },
+          {
+            eventId: 'lunch',
+            summary: 'Lunch',
+            start: '2026-10-09T12:00:00-07:00',
+            end: '2026-10-09T13:00:00-07:00',
+          },
+        ],
+      },
+    };
+    const flightCardsWithoutUpdate = responseCardsForFinal({ evidence: [searched] });
+    expect(flightCardsWithoutUpdate.filter((card) => card.kind === 'calendar-event')).toMatchObject(
+      [{ title: 'SFO to BER flight' }, { title: 'Lunch' }],
+    );
     const cards = responseCardsForFinal({
       evidence: [
-        {
-          toolName: 'calendar.search_events',
-          status: 'succeeded',
-          result: {
-            events: [
-              {
-                eventId: 'flight',
-                summary: 'SFO to BER flight',
-                start: '2026-10-09T09:15:00-07:00',
-              },
-              { eventId: 'lunch', summary: 'Lunch', start: '2026-10-09T12:00:00-07:00' },
-            ],
-          },
-        },
+        searched,
         {
           toolName: 'calendar.update_event',
           status: 'succeeded',

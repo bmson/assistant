@@ -1,7 +1,11 @@
 import { calendarOccurrenceKey, sameCalendarOccurrence } from '@assistant/persistence';
 import type { BriefingCalendarEvent } from './briefing.js';
 import type { CalendarPlanOptions } from './calendar-plan-intent.js';
-import { calendarCivilBoundary, calendarSourceInterval } from './calendar-read-window.js';
+import {
+  calendarCivilBoundary,
+  calendarSourceInstant,
+  calendarSourceInterval,
+} from './calendar-read-window.js';
 import {
   calendarRelationship,
   verifiedOwnerParticipation,
@@ -384,9 +388,18 @@ function attendance(event: PlainRecord): 'attending' | 'potential' | 'not-attend
 }
 
 function parseEventInterval(event: PlainRecord): { start: number; end: number } | undefined {
-  const start = dateMs(event.start);
-  const end = dateMs(event.end);
-  return start !== undefined && end !== undefined && end > start ? { start, end } : undefined;
+  // Date-only all-day rows keep their existing roster path so the caller can
+  // conservatively block the full request if their source zone is unresolved.
+  if (
+    event.allDay === true &&
+    /^\d{4}-\d{2}-\d{2}$/.test(String(event.start)) &&
+    /^\d{4}-\d{2}-\d{2}$/.test(String(event.end))
+  ) {
+    const start = dateMs(event.start);
+    const end = dateMs(event.end);
+    return start !== undefined && end !== undefined && end > start ? { start, end } : undefined;
+  }
+  return calendarSourceInterval(event);
 }
 
 function isExtendedContext(interval: { start: number; end: number }): boolean {
@@ -749,28 +762,38 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
   const providerMalformed =
     Array.isArray(availabilityResult?.calendarCoverage) &&
     availabilityResult.calendarCoverage.some((value) => record(value)?.status === 'malformed');
-  const busyValid =
-    !providerMalformed &&
+  const busyIntervalsValid =
     Array.isArray(busyRaw) &&
     busyRaw.every((value) => {
       const item = record(value);
-      return (
-        dateMs(item?.start) !== undefined &&
-        dateMs(item?.end) !== undefined &&
-        (dateMs(item?.end) as number) > (dateMs(item?.start) as number)
-      );
+      const start = typeof item?.start === 'string' ? calendarSourceInstant(item.start) : undefined;
+      const end = typeof item?.end === 'string' ? calendarSourceInstant(item.end) : undefined;
+      return start !== undefined && end !== undefined && end > start;
     });
-  const busy: BusyInterval[] = busyValid
-    ? (busyRaw as unknown[]).flatMap((value) => {
+  const busyValid = !providerMalformed && busyIntervalsValid;
+  const invalidBusyIntervals = Array.isArray(busyRaw) && !busyIntervalsValid;
+  const availabilityDeclaredComplete =
+    !providerMalformed &&
+    Array.isArray(busyRaw) &&
+    availabilityResult?.complete === true &&
+    (availabilityResult.unavailable === undefined ||
+      (Array.isArray(availabilityResult.unavailable) &&
+        availabilityResult.unavailable.length === 0));
+  const busy: BusyInterval[] = Array.isArray(busyRaw)
+    ? busyRaw.flatMap((value) => {
         const item = record(value);
-        const interval = item
-          ? {
-              start: dateMs(item.start) as number,
-              end: dateMs(item.end) as number,
-              ...(typeof item.calendar === 'string' ? { calendar: item.calendar } : {}),
-              ...(typeof item.calendarId === 'string' ? { calendarId: item.calendarId } : {}),
-            }
-          : undefined;
+        const start =
+          typeof item?.start === 'string' ? calendarSourceInstant(item.start) : undefined;
+        const end = typeof item?.end === 'string' ? calendarSourceInstant(item.end) : undefined;
+        const interval =
+          item && start !== undefined && end !== undefined
+            ? {
+                start,
+                end,
+                ...(typeof item.calendar === 'string' ? { calendar: item.calendar } : {}),
+                ...(typeof item.calendarId === 'string' ? { calendarId: item.calendarId } : {}),
+              }
+            : undefined;
         return interval ? [interval] : [];
       })
     : [];
@@ -788,6 +811,8 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
   const events: PlainRecord[] = [];
   let eventRowsValid = allPages.length > 0;
   let unresolvedAllDayBlockingEvent = false;
+  const unresolvedAllDayEvents: PlainRecord[] = [];
+  const unresolvedTimedEvents: PlainRecord[] = [];
   for (const row of allPages) {
     const result = resultOf(row);
     if (!Array.isArray(result?.events)) {
@@ -796,8 +821,19 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
     }
     for (const value of result.events) {
       const event = record(value);
-      if (!event || !parseEventInterval(event)) {
+      if (!event) {
         eventRowsValid = false;
+        continue;
+      }
+      const interval = parseEventInterval(event);
+      if (!interval) {
+        eventRowsValid = false;
+        if (event.allDay === true && attendance(event) !== 'not-attending') {
+          unresolvedAllDayBlockingEvent = true;
+          unresolvedAllDayEvents.push(event);
+        } else if (event.allDay !== true) {
+          unresolvedTimedEvents.push(event);
+        }
         continue;
       }
       if (
@@ -807,18 +843,14 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
       ) {
         eventRowsValid = false;
         unresolvedAllDayBlockingEvent = true;
+        unresolvedAllDayEvents.push(event);
       }
       events.push(event);
     }
   }
 
   const uniqueEvents = uniqueCanonicalEvents(events);
-  const availabilityComplete =
-    busyValid &&
-    availabilityResult?.complete === true &&
-    (availabilityResult.unavailable === undefined ||
-      (Array.isArray(availabilityResult.unavailable) &&
-        availabilityResult.unavailable.length === 0));
+  const availabilityComplete = busyValid && availabilityDeclaredComplete;
   const lastPage = allPages.at(-1);
   const lastEventResult = lastPage ? resultOf(lastPage) : undefined;
   let expectedPageToken: string | undefined;
@@ -830,8 +862,7 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
     expectedPageToken = typeof next === 'string' && next.length > 0 ? next : undefined;
     return matches;
   });
-  const eventComplete =
-    eventRowsValid &&
+  const eventPageCoverageComplete =
     allPages.length > 0 &&
     pageSequenceValid &&
     lastEventResult?.complete === true &&
@@ -840,6 +871,7 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
     lastEventResult.unavailable.length === 0 &&
     typeof lastEventResult.nextPageToken !== 'string' &&
     lastEventResult.paginationUnavailable !== true;
+  const eventComplete = eventRowsValid && eventPageCoverageComplete;
   const unavailableCalendars = [
     ...(Array.isArray(availabilityResult?.unavailable) ? availabilityResult.unavailable : []),
     ...allPages.flatMap((row) => {
@@ -1328,14 +1360,73 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
       'Multi-day lodging is excluded from meeting workload; conditional slots still rely on the feed’s busy interval being lodging context.',
     );
   if (!complete) {
-    const missing =
-      unavailableCalendars.length > 0
-        ? `Unavailable free/busy or event coverage: ${[...new Set(unavailableCalendars)].join(', ')}`
-        : !availabilityComplete
-          ? 'Free/busy coverage could not be fully verified'
-          : 'Event listing is incomplete or reached its bounded page limit';
+    const reasons: string[] = [];
+    if (unavailableCalendars.length > 0)
+      reasons.push(
+        `Unavailable free/busy or event coverage: ${[...new Set(unavailableCalendars)].join(', ')}`,
+      );
+    if (invalidBusyIntervals)
+      reasons.push('Some returned free/busy intervals lacked valid explicit source instants');
+    else if (!availabilityDeclaredComplete && unavailableCalendars.length === 0)
+      reasons.push('Free/busy coverage could not be fully verified');
+    if (!eventPageCoverageComplete)
+      reasons.push('Event listing is incomplete or reached its bounded page limit');
+    if (unresolvedTimedEvents.length > 0 || unresolvedAllDayEvents.length > 0)
+      reasons.push(
+        'Some returned calendar event intervals could not be resolved from explicit source instants',
+      );
+    else if (!eventRowsValid && eventPageCoverageComplete)
+      reasons.push('Some returned calendar event rows could not be validated');
+    if (reasons.length === 0) reasons.push('Calendar coverage could not be fully verified');
+    const sourceTimestampsUnresolved =
+      invalidBusyIntervals || unresolvedTimedEvents.length > 0 || unresolvedAllDayEvents.length > 0;
+    const coverageGapsRemain =
+      unavailableCalendars.length > 0 ||
+      !eventPageCoverageComplete ||
+      (!availabilityDeclaredComplete && !invalidBusyIntervals);
+    const invalidEventRowsOnly =
+      !eventRowsValid &&
+      eventPageCoverageComplete &&
+      unresolvedTimedEvents.length === 0 &&
+      unresolvedAllDayEvents.length === 0 &&
+      unavailableCalendars.length === 0 &&
+      availabilityDeclaredComplete &&
+      !invalidBusyIntervals;
+    const nextStep = sourceTimestampsUnresolved
+      ? unavailableCalendars.length > 0
+        ? 'Verify the unresolved source timestamps and time zone; confirm the unavailable calendars before relying on this review'
+        : coverageGapsRemain
+          ? 'Verify the unresolved source timestamps and time zone; confirm the remaining calendar coverage before relying on this review'
+          : 'Verify the unresolved source timestamps and time zone before relying on this review'
+      : unavailableCalendars.length > 0
+        ? 'Confirm the missing calendars before relying on this review'
+        : invalidEventRowsOnly
+          ? 'Review the returned calendar data before relying on this review'
+          : 'Confirm the remaining calendar coverage before relying on this review';
     coverageNotes.push(
-      `${missing}; proposed times are tentative, not confirmed free. Confirm the missing calendars before relying on this review`,
+      `${reasons.join('; ')}; proposed times are tentative, not confirmed free. ${nextStep}`,
+    );
+  }
+  if (unresolvedTimedEvents.length > 0) {
+    const examples = unresolvedTimedEvents.slice(0, 3).map((event) => {
+      const title = safeText(event.summary, 100) || 'Untitled event';
+      const rawStart = safeText(event.start, 80) || 'start unavailable';
+      const rawEnd = safeText(event.end, 80) || 'end unavailable';
+      return `${title} (${rawStart} – ${rawEnd})`;
+    });
+    coverageNotes.push(
+      `Timed event intervals could not be resolved from explicit source instants, so they were retained for review and excluded from overlap calculations: ${examples.join('; ')}${unresolvedTimedEvents.length > examples.length ? `; ${unresolvedTimedEvents.length - examples.length} more` : ''}`,
+    );
+  }
+  if (unresolvedAllDayEvents.length > 0) {
+    const titles = unresolvedAllDayEvents.slice(0, 3).map((event) => {
+      const title = safeText(event.summary, 100) || 'Untitled all-day event';
+      const rawStart = safeText(event.start, 80) || 'start unavailable';
+      const rawEnd = safeText(event.end, 80) || 'end unavailable';
+      return `${title} (${rawStart} – ${rawEnd})`;
+    });
+    coverageNotes.push(
+      `Blocking all-day source dates could not be mapped to instants; the request was conservatively held for planning and the rows were not compared as dated overlaps: ${titles.join('; ')}${unresolvedAllDayEvents.length > titles.length ? `; ${unresolvedAllDayEvents.length - titles.length} more` : ''}`,
     );
   }
   if (availabilityNotes.length > 0) {

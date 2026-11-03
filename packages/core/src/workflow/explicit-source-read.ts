@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { ModelRouter } from '../model-router/router.js';
-import { calendarSourceInterval } from './calendar-read-window.js';
+import { calendarSourceInstant, calendarSourceInterval } from './calendar-read-window.js';
 import { safeCalendarSourceUrl } from './calendar-source-link.js';
 import { compoundTripSourceMessages } from './compound-trip-extraction.js';
 import { boundedMailSearchPages, compoundTripCompleteSourceThreads } from './compound-trip-read.js';
@@ -233,16 +233,41 @@ function assessExplicitReadSources(
           // Provider search bounds alone do not license an out-of-window event.
           const minimum = child.timeWindow?.timeMin;
           const maximum = child.timeWindow?.timeMax ?? child.sourceReadBefore;
+          const maximumInstant = maximum ? Date.parse(maximum) : NaN;
+          // An explicitly timestamped start beyond the upper bound cannot
+          // overlap this bounded read, even when the provider's end is bad.
+          const startInstant = calendarSourceInstant(start);
           if (
-            [start, end].some(
-              (value) =>
-                !/^\d{4}-\d{2}-\d{2}$/u.test(value) && !/(?:Z|[+-]\d{2}:\d{2})$/u.test(value),
-            )
+            startInstant !== undefined &&
+            Number.isFinite(maximumInstant) &&
+            startInstant >= maximumInstant
           )
             continue;
           const interval = calendarSourceInterval(event);
+          if (!interval) {
+            unassessed(
+              'calendar',
+              'A returned calendar event had no valid source interval and could not be placed in the requested window.',
+            );
+            if (index < 50) {
+              const body = [
+                string(event.summary),
+                `Source identity: calendar ${calendarId}, event ${id}`,
+                `Local interval unresolved (raw source values: ${start || 'start unavailable'} – ${end || 'end unavailable'})`,
+              ]
+                .filter(Boolean)
+                .join('\n');
+              sources.push({
+                key: `calendar:${calendarId}:${id}`,
+                body: body.slice(0, 4000),
+                label: `${string(event.calendar) ? `${string(event.calendar)} — ` : ''}${string(event.summary) || 'Calendar event'} (time unresolved)`,
+                url: calendarLink(event),
+                owner: false,
+              });
+            }
+            continue;
+          }
           if (
-            !interval ||
             !maximum ||
             interval.start >= Date.parse(maximum) ||
             (minimum && interval.end <= Date.parse(minimum))

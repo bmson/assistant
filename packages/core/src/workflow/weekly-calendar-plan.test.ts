@@ -73,7 +73,240 @@ describe('weeklyCalendarPlan', () => {
     expect(text).toContain('Limits:');
     expect(text).toContain('Shared calendar');
     expect(text).toContain('not confirmed free');
+    expect(text).toContain('Confirm the missing calendars before relying on this review');
     expect(text).not.toContain('no overlapping attended events');
+  });
+
+  it('rejects offsetless availability busy intervals while retaining explicit-offset busy data', () => {
+    const offsetless = weeklyCalendarPlanResult({
+      timeMin,
+      timeMax,
+      timeZone: 'America/Los_Angeles',
+      evidence: evidence({
+        busy: [
+          {
+            start: '2026-10-12T09:00:00',
+            end: '2026-10-12T10:00:00',
+            calendar: 'Synthetic',
+          },
+        ],
+      }) as never,
+    });
+    const explicitOffset = weeklyCalendarPlanResult({
+      timeMin,
+      timeMax,
+      timeZone: 'America/Los_Angeles',
+      evidence: evidence({
+        busy: [
+          {
+            start: '2026-10-12T09:00:00-07:00',
+            end: '2026-10-12T10:00:00-07:00',
+            calendar: 'Synthetic',
+          },
+        ],
+      }) as never,
+    });
+    const mixed = weeklyCalendarPlanResult({
+      timeMin,
+      timeMax,
+      timeZone: 'America/Los_Angeles',
+      evidence: evidence({
+        availabilityComplete: false,
+        unavailable: ['Shared calendar'],
+        busy: [
+          {
+            start: '2026-10-12T09:00:00',
+            end: '2026-10-12T10:00:00',
+            calendar: 'Synthetic unresolved',
+          },
+          {
+            start: '2026-10-12T09:00:00-07:00',
+            end: '2026-10-12T15:00:00-07:00',
+            calendar: 'Synthetic valid',
+          },
+        ],
+        pages: [
+          {
+            toolName: 'calendar.list_events',
+            status: 'succeeded',
+            args: { timeMin, timeMax, maxResults: 50 },
+            result: {
+              events: [
+                {
+                  eventId: 'unknown-time',
+                  calendarId: 'work',
+                  summary: 'Unresolved event',
+                  start: '2026-10-12T11:00:00',
+                  end: '2026-10-12T12:00:00',
+                  calendarTimeZone: 'America/Los_Angeles',
+                  blocksTime: true,
+                },
+              ],
+              complete: true,
+              calendarRosterComplete: true,
+              unavailable: [],
+            },
+          },
+        ],
+      }) as never,
+    });
+
+    expect(offsetless.coverageComplete).toBe(false);
+    expect(offsetless.slotCount).toBe(0);
+    expect(offsetless.text).toContain(
+      'Some returned free/busy intervals lacked valid explicit source instants',
+    );
+    expect(offsetless.text).toContain('proposed times are tentative, not confirmed free');
+    expect(offsetless.text).toContain(
+      'I did not suggest focus times because usable free/busy intervals were unavailable.',
+    );
+    expect(offsetless.text).toContain(
+      'Verify the unresolved source timestamps and time zone before relying on this review',
+    );
+    expect(offsetless.text).not.toContain(
+      'Confirm the missing calendars before relying on this review',
+    );
+    expect(offsetless.text).not.toContain('Conflicts: none found in checked calendar data.');
+
+    expect(explicitOffset.coverageComplete).toBe(true);
+    expect(explicitOffset.slotCount).toBe(3);
+    expect(explicitOffset.text).toContain('| Tue, Oct 13, 9:00 AM–10:30 AM (90m) |');
+    expect(explicitOffset.text).not.toContain('| Mon, Oct 12, 9:00 AM–10:30 AM (90m) |');
+
+    expect(mixed.coverageComplete).toBe(false);
+    expect(mixed.slotCount).toBe(0);
+    expect(mixed.text).toContain(
+      'Overloaded-day estimate: Mon, Oct 12: at least 6 merged busy hours (9–5 heuristic).',
+    );
+    expect(mixed.text).toContain(
+      'Some returned free/busy intervals lacked valid explicit source instants',
+    );
+    expect(mixed.text).toContain('Some returned calendar event intervals could not be resolved');
+    expect(mixed.text).toContain('Shared calendar');
+    expect(mixed.text).toContain('confirm the unavailable calendars before relying on this review');
+    expect(mixed.text).not.toContain('Conflicts: none found in checked calendar data.');
+  });
+
+  it('keeps offsetless timed rows out of interval math and marks proposed times tentative', () => {
+    const result = weeklyCalendarPlanResult({
+      timeMin,
+      timeMax,
+      timeZone: 'America/Los_Angeles',
+      evidence: evidence({
+        pages: [
+          {
+            toolName: 'calendar.list_events',
+            status: 'succeeded',
+            args: { timeMin, timeMax, maxResults: 50 },
+            result: {
+              events: [
+                {
+                  eventId: 'floating-meeting',
+                  calendarId: 'work',
+                  summary: 'Floating meeting',
+                  start: '2026-10-12T09:00:00',
+                  end: '2026-10-12T10:00:00',
+                  calendarTimeZone: 'America/Los_Angeles',
+                  blocksTime: true,
+                },
+              ],
+              complete: true,
+              calendarRosterComplete: true,
+              unavailable: [],
+            },
+          },
+        ],
+      }) as never,
+    });
+
+    expect(result.coverageComplete).toBe(false);
+    expect(result.text).toContain('Floating meeting (2026-10-12T09:00:00 – 2026-10-12T10:00:00)');
+    expect(result.text).toContain('excluded from overlap calculations');
+    expect(result.text).toContain('proposed times are tentative, not confirmed free');
+    expect(result.text).not.toContain('Conflicts: none found in checked calendar data.');
+    expect(result.text).not.toContain(
+      'Event listing is incomplete or reached its bounded page limit',
+    );
+    expect(result.text).toContain(
+      'Verify the unresolved source timestamps and time zone before relying on this review',
+    );
+    expect(result.text).not.toContain(
+      'Confirm the missing calendars before relying on this review',
+    );
+  });
+
+  it('asks to review returned data when a complete page contains an invalid event row shape', () => {
+    const result = weeklyCalendarPlanResult({
+      timeMin,
+      timeMax,
+      timeZone: 'America/Los_Angeles',
+      evidence: evidence({
+        pages: [
+          {
+            toolName: 'calendar.list_events',
+            status: 'succeeded',
+            args: { timeMin, timeMax, maxResults: 50 },
+            result: {
+              events: [null],
+              complete: true,
+              calendarRosterComplete: true,
+              unavailable: [],
+            },
+          },
+        ],
+      }) as never,
+    });
+
+    expect(result.coverageComplete).toBe(false);
+    expect(result.text).toContain('Some returned calendar event rows could not be validated');
+    expect(result.text).toContain(
+      'Review the returned calendar data before relying on this review',
+    );
+    expect(result.text).not.toContain(
+      'Confirm the missing calendars before relying on this review',
+    );
+    expect(result.text).not.toContain(
+      'Confirm the remaining calendar coverage before relying on this review',
+    );
+  });
+
+  it('keeps an unresolved all-day blocking row as a conservative full-window hold', () => {
+    const result = weeklyCalendarPlanResult({
+      timeMin,
+      timeMax,
+      timeZone: 'America/Los_Angeles',
+      evidence: evidence({
+        pages: [
+          {
+            toolName: 'calendar.list_events',
+            status: 'succeeded',
+            args: { timeMin, timeMax, maxResults: 50 },
+            result: {
+              events: [
+                {
+                  eventId: 'unknown-zone-all-day',
+                  calendarId: 'travel',
+                  summary: 'Unzoned travel hold',
+                  start: '2026-10-12',
+                  end: '2026-10-13',
+                  allDay: true,
+                  blocksTime: true,
+                },
+              ],
+              complete: true,
+              calendarRosterComplete: true,
+              unavailable: [],
+            },
+          },
+        ],
+      }) as never,
+    });
+
+    expect(result.coverageComplete).toBe(false);
+    expect(result.slotCount).toBe(0);
+    expect(result.text).toContain('Unzoned travel hold');
+    expect(result.text).toContain('I couldn’t identify suitable 90-minute blocks');
+    expect(result.text).toContain('request was conservatively held for planning');
   });
 
   it('groups availability caveats, assumptions, and conflict actions without dropping event references', () => {
@@ -546,7 +779,9 @@ describe('weeklyCalendarPlan', () => {
       timeZone: 'America/Los_Angeles',
       evidence: evidence({ busy: [{ start: 'not-a-date', end: 'also-not-a-date' }] }) as never,
     });
-    expect(text).toContain('Free/busy coverage could not be fully verified');
+    expect(text).toContain(
+      'Some returned free/busy intervals lacked valid explicit source instants',
+    );
     expect(text).toContain('did not suggest focus times');
     expect(text).not.toContain('Tentative focus blocks');
     expect(text).not.toContain('I found no overlapping attended events');
@@ -2604,6 +2839,36 @@ describe('exact-ID event-list recovery of missing free/busy', () => {
     last.args.pageToken = 'page-2';
     (first.result as Record<string, unknown>).unavailable = ['Shared'];
     expect(render().coverageComplete).toBe(false);
+
+    const pageGap = weeklyCalendarPlanResult({
+      timeMin,
+      timeMax,
+      timeZone: 'America/Los_Angeles',
+      evidence: evidence({
+        pages: [
+          {
+            toolName: 'calendar.list_events',
+            status: 'succeeded',
+            args: { timeMin, timeMax, maxResults: 50 },
+            result: {
+              events: [],
+              complete: false,
+              nextPageToken: 'remaining',
+              calendarRosterComplete: true,
+              unavailable: [],
+            },
+          },
+        ],
+      }) as never,
+    });
+    expect(pageGap.coverageComplete).toBe(false);
+    expect(pageGap.text).toContain('Event listing is incomplete or reached its bounded page limit');
+    expect(pageGap.text).toContain(
+      'Confirm the remaining calendar coverage before relying on this review',
+    );
+    expect(pageGap.text).not.toContain(
+      'Confirm the missing calendars before relying on this review',
+    );
   });
 
   it('does not offer focus times when malformed provider data has no usable busy rows', () => {

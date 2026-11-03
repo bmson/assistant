@@ -1,10 +1,35 @@
 import type { PersonalReadRequest } from './read-intent.js';
 
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+const ISO_INSTANT = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})$/i;
 const boundaryFormatters = new Map<string, Intl.DateTimeFormat>();
 const MAX_BOUNDARY_FORMATTERS = 16;
 const field = (event: Record<string, unknown>, key: string) =>
   typeof event[key] === 'string' ? (event[key] as string) : '';
+
+/** Parse only a complete ISO instant; Date.parse alone accepts host-local values and normalizes invalid fields. */
+export function calendarSourceInstant(value: string): number | undefined {
+  const match = ISO_INSTANT.exec(value);
+  if (!match) return undefined;
+  const [, date, hour, minute, second, , offset] = match;
+  if (!date || !hour || !minute || !second || !offset) return undefined;
+  const dateValue = Date.parse(`${date}T00:00:00.000Z`);
+  if (
+    !Number.isFinite(dateValue) ||
+    new Date(dateValue).toISOString().slice(0, 10) !== date ||
+    Number(hour) > 23 ||
+    Number(minute) > 59 ||
+    Number(second) > 59
+  )
+    return undefined;
+  if (offset.toUpperCase() !== 'Z') {
+    const offsetHours = Number(offset.slice(1, 3));
+    const offsetMinutes = Number(offset.slice(4, 6));
+    if (offsetHours > 23 || offsetMinutes > 59) return undefined;
+  }
+  const instant = Date.parse(value);
+  return Number.isFinite(instant) ? instant : undefined;
+}
 
 /** Date-only values are civil source dates, never UTC midnight instants. */
 export function calendarCivilBoundary(day: string, timeZone: string): number | undefined {
@@ -62,11 +87,14 @@ export function calendarSourceInterval(
 ): { start: number; end: number } | undefined {
   const start = field(event, 'start');
   const end = field(event, 'end');
-  const dateOnly = DATE_ONLY.test(start) || DATE_ONLY.test(end);
+  const startDateOnly = DATE_ONLY.test(start);
+  const endDateOnly = DATE_ONLY.test(end);
   const zone = field(event, 'calendarTimeZone');
-  if (dateOnly && !zone) return undefined;
-  const from = dateOnly ? calendarCivilBoundary(start, zone) : Date.parse(start);
-  const to = dateOnly ? calendarCivilBoundary(end, zone) : Date.parse(end);
+  if (startDateOnly || endDateOnly) {
+    if (!startDateOnly || !endDateOnly || !zone) return undefined;
+  }
+  const from = startDateOnly ? calendarCivilBoundary(start, zone) : calendarSourceInstant(start);
+  const to = endDateOnly ? calendarCivilBoundary(end, zone) : calendarSourceInstant(end);
   return from !== undefined &&
     to !== undefined &&
     Number.isFinite(from) &&
@@ -83,11 +111,15 @@ export function calendarWindowMembership(
   event: Record<string, unknown>,
   request?: PersonalReadRequest | null,
 ): CalendarWindowMembership {
+  const start = field(event, 'start');
+  const end = field(event, 'end');
+  const dateOnly = DATE_ONLY.test(start) && DATE_ONLY.test(end);
+  const interval = calendarSourceInterval(event);
+  if (!interval && (!dateOnly || request?.timeWindow)) return 'source-date-only';
   if (!request?.timeWindow) return 'confirmed';
   const from = Date.parse(request.timeWindow.timeMin);
   const to = Date.parse(request.timeWindow.timeMax);
   if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from) return 'source-date-only';
-  const interval = calendarSourceInterval(event);
   if (!interval) return 'source-date-only';
   return interval.start < to && interval.end > from ? 'confirmed' : 'outside';
 }

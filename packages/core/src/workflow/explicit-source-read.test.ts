@@ -158,6 +158,44 @@ describe('explicit private-source orchestration', () => {
     );
   });
 
+  it.each([
+    {
+      description: 'out-of-range offset',
+      start: '2025-10-11T07:00:00+25:00',
+      end: '2025-10-11T08:00:00Z',
+    },
+    {
+      description: 'impossible calendar date beyond the upper bound',
+      start: '2030-02-30T07:00:00Z',
+      end: '2030-02-30T08:00:00Z',
+    },
+  ])(
+    'marks a returned calendar interval with $description unassessed and retains raw values',
+    (scenario) => {
+      const read = request(germany);
+      const rows = completedEvidence(read);
+      const calendar = rows.find((row) => row.toolName === 'calendar.search_events');
+      if (!calendar) throw new Error('Missing calendar evidence');
+      const event = (calendar.result as { events: Array<Record<string, unknown>> }).events[0];
+      if (!event) throw new Error('Missing calendar event');
+      event.start = scenario.start;
+      event.end = scenario.end;
+
+      expect(
+        explicitSourceCoverage(read, rows).find((source) => source.source === 'calendar'),
+      ).toMatchObject({
+        complete: false,
+        issue: expect.stringContaining('no valid source interval'),
+      });
+      const source = explicitReadSources(read, rows).find(
+        (item) => item.key === 'calendar:owner:event-1',
+      );
+      expect(source?.body).toContain('Local interval unresolved');
+      expect(source?.body).toContain(`${scenario.start} – ${scenario.end}`);
+      expect(source?.label).toContain('time unresolved');
+    },
+  );
+
   it.each([20, 21])(
     'reports unassessed history at the shared or underlying record limit: %s',
     (count) => {
