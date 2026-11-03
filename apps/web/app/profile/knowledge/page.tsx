@@ -31,10 +31,8 @@ import {
   inputClass,
   PageHeader,
   PageShell,
-  segmentedControlClass,
-  segmentedItemActiveClass,
-  segmentedItemClass,
   selectClass,
+  summaryClass,
 } from '@/lib/ui';
 import { ConnectionsFilters } from './connections-filters';
 import { ConnectionsList } from './connections-list';
@@ -167,6 +165,14 @@ export default async function KnowledgePage({
       ? raw.connectivity
       : 'all';
   const source = bounded(raw.source);
+  const activeLibraryFilters =
+    Number(state !== 'in-use') +
+    Number(filter !== 'all') +
+    Number(Boolean(subject)) +
+    Number(Boolean(domain)) +
+    Number(Boolean(source)) +
+    Number(age !== undefined) +
+    Number(connectivity !== 'all');
   const retained = {
     q: query,
     state,
@@ -209,7 +215,18 @@ export default async function KnowledgePage({
   } catch {
     return (
       <PageShell size="reading">
-        <PageHeader back={{ href: '/profile', label: 'Memory' }} title="Knowledge" />
+        <PageHeader
+          back={{ href: '/profile', label: 'Memory' }}
+          title={
+            view === 'library' ? 'Saved notes' : view === 'connections' ? 'Connections' : 'Map'
+          }
+        />
+        <MemoryNavigation
+          current={view === 'library' ? 'notes' : view === 'connections' ? 'connections' : 'map'}
+          notesHref={href({ ...retained, view: 'library' })}
+          connectionsHref={href({ ...retained, view: 'connections' })}
+          mapHref={href({ ...retained, view: 'map' })}
+        />
         <p role="alert" className="mt-4 text-muted">
           Could not load this view. Your filters are preserved.
         </p>
@@ -225,31 +242,21 @@ export default async function KnowledgePage({
     <PageShell size="wide">
       <PageHeader
         back={{ href: '/profile', label: 'Memory' }}
-        title={view === 'connections' ? 'Connections' : 'Knowledge'}
+        title={view === 'library' ? 'Saved notes' : view === 'connections' ? 'Connections' : 'Map'}
         intro="Browse saved notes and their connections."
       />
-      <MemoryNavigation current={view === 'library' ? 'notes' : 'connections'} />
+      <MemoryNavigation
+        current={view === 'library' ? 'notes' : view === 'connections' ? 'connections' : 'map'}
+        notesHref={href({ ...retained, view: 'library' })}
+        connectionsHref={href({ ...retained, view: 'connections' })}
+        mapHref={href({ ...retained, view: 'map' })}
+      />
       {view !== 'connections' ? (
         <p className="mt-4 text-sm text-muted">
           Open a saved note or person to review available edits. Editing availability is checked
           with its source.
         </p>
       ) : null}
-      <nav aria-label="Knowledge views" className={`${segmentedControlClass} mt-5`}>
-        {(view === 'connections'
-          ? (['connections', 'map'] as const)
-          : (['library', 'connections', 'map'] as const)
-        ).map((item) => (
-          <Link
-            key={item}
-            href={href({ ...retained, view: item })}
-            aria-current={view === item ? 'page' : undefined}
-            className={view === item ? segmentedItemActiveClass : segmentedItemClass}
-          >
-            {item === 'library' ? 'Library' : item === 'connections' ? 'Connections list' : 'Map'}
-          </Link>
-        ))}
-      </nav>
       {view === 'connections' ? (
         <ConnectionsFilters
           query={query}
@@ -263,7 +270,11 @@ export default async function KnowledgePage({
         <form
           method="get"
           action="/profile/knowledge"
-          className="mt-5 grid min-w-0 gap-3 rounded-2xl bg-sunken/35 p-3 md:grid-cols-3"
+          className={
+            view === 'library'
+              ? 'mt-5 min-w-0 space-y-3 rounded-2xl bg-sunken/35 p-3'
+              : 'mt-5 grid min-w-0 gap-3 rounded-2xl bg-sunken/35 p-3 md:grid-cols-3'
+          }
         >
           <input type="hidden" name="view" value={view} />
           {Object.entries(retained)
@@ -280,81 +291,109 @@ export default async function KnowledgePage({
             .map(([key, value]) => (
               <input key={key} type="hidden" name={key} value={String(value)} />
             ))}
-          <label className="grid min-w-0 gap-1 text-sm">
-            Search {view === 'library' ? 'saved notes' : 'items by name'}
-            <input name="q" maxLength={120} defaultValue={query} className={inputClass} />
-          </label>
-          {view === 'library' && filters ? (
-            <>
-              <label className="grid gap-1 text-sm">
-                Status
-                <select name="state" defaultValue={state} className={selectClass}>
-                  <option value="in-use">In use</option>
-                  <option value="review">Held for review</option>
-                </select>
+          {view === 'library' ? (
+            <div className="flex flex-wrap items-end gap-2">
+              <label className="grid min-w-0 flex-1 gap-1 text-sm">
+                Search saved notes
+                <input name="q" maxLength={120} defaultValue={query} className={inputClass} />
               </label>
-              <label className="grid gap-1 text-sm">
-                Verification
-                <select name="filter" defaultValue={filter} className={selectClass}>
-                  <option value="all">All</option>
-                  <option value="verified">Verified</option>
-                  <option value="untidied">Not tidied</option>
-                </select>
-              </label>
-              <label className="grid gap-1 text-sm">
-                Subject
-                <select name="subject" defaultValue={subject ?? ''} className={selectClass}>
-                  <option value="">Everyone</option>
-                  {filters.subjects.map((item) => (
-                    <option key={item.id} value={item.id}>
-                      {item.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="grid gap-1 text-sm">
-                Domain
-                <select name="domain" defaultValue={domain ?? ''} className={selectClass}>
-                  <option value="">Every domain</option>
-                  {domains.map((item) => (
-                    <option key={item} value={item}>
-                      {item}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="grid gap-1 text-sm">
-                Source
-                <select name="source" defaultValue={source} className={selectClass}>
-                  <option value="">Every source</option>
-                  {filters.sources.map((item) => (
-                    <option key={item} value={item}>
-                      {item}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="grid gap-1 text-sm">
-                Age
-                <select name="age" defaultValue={age ?? ''} className={selectClass}>
-                  <option value="">Any age</option>
-                  {[30, 90, 365].map((item) => (
-                    <option key={item} value={item}>
-                      Last {item} days
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="grid gap-1 text-sm">
-                Connections
-                <select name="connectivity" defaultValue={connectivity} className={selectClass}>
-                  <option value="all">Any status</option>
-                  <option value="connected">Connected</option>
-                  <option value="unconnected">Not connected</option>
-                </select>
-              </label>
-            </>
+              <button className={btn.primary} type="submit">
+                Search
+              </button>
+            </div>
           ) : (
+            <label className="grid min-w-0 gap-1 text-sm">
+              Search items by name
+              <input name="q" maxLength={120} defaultValue={query} className={inputClass} />
+            </label>
+          )}
+          {view === 'library' && filters ? (
+            <details
+              className="rounded-xl border border-edge/60 px-3"
+              open={activeLibraryFilters > 0}
+            >
+              <summary className={`${summaryClass} py-2`}>
+                Filters ({activeLibraryFilters} active)
+              </summary>
+              <div className="grid gap-3 pb-3 md:grid-cols-3">
+                <label className="grid gap-1 text-sm">
+                  Status
+                  <select name="state" defaultValue={state} className={selectClass}>
+                    <option value="in-use">In use</option>
+                    <option value="review">Held for review</option>
+                  </select>
+                </label>
+                <label className="grid gap-1 text-sm">
+                  Verification
+                  <select name="filter" defaultValue={filter} className={selectClass}>
+                    <option value="all">All</option>
+                    <option value="verified">Verified</option>
+                    <option value="untidied">Not tidied</option>
+                  </select>
+                </label>
+                <label className="grid gap-1 text-sm">
+                  Subject
+                  <select name="subject" defaultValue={subject ?? ''} className={selectClass}>
+                    <option value="">Everyone</option>
+                    {filters.subjects.map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="grid gap-1 text-sm">
+                  Domain
+                  <select name="domain" defaultValue={domain ?? ''} className={selectClass}>
+                    <option value="">Every domain</option>
+                    {domains.map((item) => (
+                      <option key={item} value={item}>
+                        {item}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="grid gap-1 text-sm">
+                  Source
+                  <select name="source" defaultValue={source} className={selectClass}>
+                    <option value="">Every source</option>
+                    {filters.sources.map((item) => (
+                      <option key={item} value={item}>
+                        {item}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="grid gap-1 text-sm">
+                  Age
+                  <select name="age" defaultValue={age ?? ''} className={selectClass}>
+                    <option value="">Any age</option>
+                    {[30, 90, 365].map((item) => (
+                      <option key={item} value={item}>
+                        Last {item} days
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="grid gap-1 text-sm">
+                  Connections
+                  <select name="connectivity" defaultValue={connectivity} className={selectClass}>
+                    <option value="all">Any status</option>
+                    <option value="connected">Connected</option>
+                    <option value="unconnected">Not connected</option>
+                  </select>
+                </label>
+              </div>
+              <div className="flex flex-wrap gap-2 pb-3">
+                <button className={btn.outline} type="submit">
+                  Apply filters
+                </button>
+                <Link className={btn.outline} href={href({ view })}>
+                  Clear filters
+                </Link>
+              </div>
+            </details>
+          ) : view === 'map' ? (
             <>
               <label className="grid gap-1 text-sm">
                 Item type
@@ -388,16 +427,16 @@ export default async function KnowledgePage({
                   <option value="unreviewed">Unreviewed</option>
                 </select>
               </label>
+              <div className="flex flex-wrap items-end gap-2 md:col-span-3">
+                <button className={btn.primary} type="submit">
+                  Apply
+                </button>
+                <Link className={btn.outline} href={href({ view })}>
+                  Clear filters
+                </Link>
+              </div>
             </>
-          )}
-          <div className="flex flex-wrap items-end gap-2">
-            <button className={btn.primary} type="submit">
-              Apply
-            </button>
-            <Link className={btn.outline} href={href({ view })}>
-              Clear filters
-            </Link>
-          </div>
+          ) : null}
         </form>
       )}
       {(raw.entity && !entity) || (raw.memory && !memory) || (raw.subject && !subject) ? (
@@ -419,14 +458,14 @@ export default async function KnowledgePage({
         state !== 'in-use' ||
         filter !== 'all') ? (
         <p className="mt-3 text-sm text-muted">
-          Library filters are retained for the Library view; they do not filter this map.
+          Saved-note filters are retained for Saved notes; they do not filter this map.
         </p>
       ) : null}
       {memory ? (
         <p className="mt-3 text-sm text-muted">
           {view !== 'library'
             ? 'Source note filter'
-            : 'Map source note filter retained (not applied to the Library)'}
+            : 'Map source note filter retained (not applied to Saved notes)'}
           : {memory} ·{' '}
           <Link className="underline" href={href({ ...retained, view, memory: undefined })}>
             Remove source filter
@@ -449,7 +488,7 @@ export default async function KnowledgePage({
             ))}
           </div>
           {!library.rows.length ? <EmptyState>No matching notes in this view.</EmptyState> : null}
-          <nav aria-label="Memory library pages" className="mt-5 flex flex-wrap items-center gap-4">
+          <nav aria-label="Saved notes pages" className="mt-5 flex flex-wrap items-center gap-4">
             {library.page > 1 ? (
               <Link
                 className={btn.outline}
@@ -509,7 +548,7 @@ export default async function KnowledgePage({
           />
           {!map.nodes.length ? (
             <EmptyState>
-              No matching items in this view. Try clearing filters or opening the Library.
+              No matching items in this view. Try clearing filters or opening Saved notes.
             </EmptyState>
           ) : null}
         </section>

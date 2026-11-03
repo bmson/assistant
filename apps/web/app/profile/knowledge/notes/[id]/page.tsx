@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
+import { MemoryNavigation } from '@/app/profile/memory-navigation';
 import { requireOwner } from '@/auth';
 import { memoryNoteReturnTo } from '@/lib/memory-note-context';
 import { ownerEditorAvailability } from '@/lib/owner-editor-availability';
@@ -36,6 +37,7 @@ export default async function SavedNotePage({
     return (
       <PageShell size="reading">
         <PageHeader back={{ href: back, label: 'Memory' }} title="Saved note" />
+        <MemoryNavigation current="notes" />
         <p role="status" className="mt-4 text-sm text-muted">
           This saved note could not be checked. Return to Memory and try again.
         </p>
@@ -60,6 +62,7 @@ export default async function SavedNotePage({
         title="Saved note"
         intro="Review the saved information and its source before making a correction."
       />
+      <MemoryNavigation current="notes" />
       <article className={`${cardShellClass} mt-5 p-4 sm:p-5`}>
         {snapshot.ownerCorrection ? (
           <Badge tone="accent" size="xs">

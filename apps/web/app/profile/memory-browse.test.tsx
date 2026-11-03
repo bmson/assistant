@@ -416,6 +416,7 @@ describe.each(['postgres', 'firestore'])('synthetic retained page journey (%s)',
     const person = data.dossier.profile.contact;
     const memory = data.library.rows[0]?.memory;
     if (!memory) throw new Error('Expected synthetic source note');
+    const pageTwoLibrary = { ...data.library, page: 2, totalPages: 3 };
     const filters = {
       subjects: [{ id: person.id, label: person.name, trust: person.trust }],
       sources: ['manual'],
@@ -424,9 +425,9 @@ describe.each(['postgres', 'firestore'])('synthetic retained page journey (%s)',
     mocks.fsPeople.mockResolvedValue(data.people);
     mocks.person.mockResolvedValue(data.dossier);
     mocks.fsPerson.mockResolvedValue(data.dossier);
-    mocks.library.mockResolvedValue(data.library);
+    mocks.library.mockResolvedValue(pageTwoLibrary as never);
     mocks.filters.mockResolvedValue(filters);
-    mocks.fsLibrary.mockResolvedValue([data.library, filters]);
+    mocks.fsLibrary.mockResolvedValue([pageTwoLibrary, filters] as never);
     mocks.map.mockResolvedValue(data.map);
     mocks.fsMap.mockResolvedValue(data.map);
     const trace: string[] = [];
@@ -473,15 +474,42 @@ describe.each(['postgres', 'firestore'])('synthetic retained page journey (%s)',
       'https://assistant.test',
     );
     libraryURL.searchParams.set('q', 'Alex');
+    libraryURL.searchParams.set('state', 'review');
     libraryURL.searchParams.set('filter', 'verified');
+    libraryURL.searchParams.set('subject', person.id);
     libraryURL.searchParams.set('domain', 'home');
     libraryURL.searchParams.set('source', 'manual');
+    libraryURL.searchParams.set('age', '90');
     libraryURL.searchParams.set('connectivity', 'connected');
+    libraryURL.searchParams.set('page', '2');
     const libraryPath = `${libraryURL.pathname}${libraryURL.search}`;
     const library = await get(libraryPath, (url) =>
       Knowledge({ searchParams: Promise.resolve(Object.fromEntries(url.searchParams)) }),
     );
     expect(library).toContain('method="get"');
+    expect(library).toContain('Filters (7 active)');
+    expect(library).toContain('Search saved notes');
+    expect(library).toContain('Open saved note');
+    expect(library).toMatch(/<a\b[^>]*class="[^"]*bg-accent[^"]*"[^>]*>Open saved note<\/a>/);
+    expect(library).not.toContain('Review / edit saved note');
+    expect(library).toContain('Page 2 of 3');
+    expect(library).toContain('<details class="rounded-xl border border-edge/60 px-3" open="">');
+    const libraryForm = /<form\b[\s\S]*?<\/form>/.exec(library)?.[0] ?? '';
+    const filtersStart = libraryForm.indexOf('<details');
+    expect(filtersStart).toBeGreaterThan(0);
+    expect(libraryForm.indexOf('name="q"')).toBeLessThan(filtersStart);
+    for (const field of [
+      'q',
+      'state',
+      'filter',
+      'subject',
+      'domain',
+      'source',
+      'age',
+      'connectivity',
+    ]) {
+      expect([...libraryForm.matchAll(new RegExp(`name="${field}"`, 'g'))]).toHaveLength(1);
+    }
     for (const field of ['q', 'filter', 'subject', 'domain', 'source', 'connectivity'])
       expect(library).toContain(`name="${field}"`);
     expect(library).toContain(memory.content);
@@ -489,11 +517,32 @@ describe.each(['postgres', 'firestore'])('synthetic retained page journey (%s)',
       driver === 'postgres' ? mocks.library.mock.calls[0]?.[1] : mocks.fsLibrary.mock.calls[0]?.[0];
     expect(libraryInput).toMatchObject({
       query: 'Alex',
+      state: 'review',
       filter: 'verified',
+      subjectId: person.id,
       domain: 'home',
       source: 'manual',
+      ageDays: 90,
       connectivity: 'connected',
+      page: 2,
     });
+    const nextPageHref = savedHref(
+      library,
+      (url) => url.pathname === '/profile/knowledge' && url.searchParams.get('page') === '3',
+    );
+    const nextPageURL = new URL(nextPageHref, 'https://assistant.test');
+    for (const [key, value] of Object.entries({
+      q: 'Alex',
+      state: 'review',
+      filter: 'verified',
+      subject: person.id,
+      domain: 'home',
+      source: 'manual',
+      age: '90',
+      connectivity: 'connected',
+    })) {
+      expect(nextPageURL.searchParams.get(key)).toBe(value);
+    }
     const sourceMapPath = savedHref(
       library,
       (url) =>
@@ -624,17 +673,28 @@ it.each(firestoreFailureCases)(
   },
 );
 
-function activeKnowledgeTab(html: string): string[] {
-  const nav = knowledgeViewNav(html);
+function activeMemoryTab(html: string): string[] {
+  const nav = memoryNavigation(html);
   return [...nav.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a>/g)]
     .filter((match) => match[1]?.includes('aria-current="page"'))
     .map((match) => (match[2] ?? '').replace(/<[^>]*>/g, '').trim());
 }
 
-function knowledgeViewNav(html: string): string {
-  const nav = /<nav\b[^>]*aria-label="Knowledge views"[\s\S]*?<\/nav>/.exec(html)?.[0];
-  if (!nav) throw new Error('Expected actual knowledge-view tabs');
+function memoryNavigation(html: string): string {
+  const nav = /<nav\b[^>]*aria-label="Memory"[\s\S]*?<\/nav>/.exec(html)?.[0];
+  if (!nav) throw new Error('Expected shared Memory navigation');
   return nav;
+}
+
+function secondaryMapLink(html: string): { attrs: string; href: string } {
+  const match = [...html.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a>/g)].find(
+    ([, , content]) => (content ?? '').replace(/<[^>]*>/g, '').trim() === 'Map',
+  );
+  if (!match) throw new Error('Expected secondary Map link');
+  const attrs = match[1] ?? '';
+  const href = /\bhref="([^"]+)"/.exec(attrs)?.[1]?.replaceAll('&amp;', '&');
+  if (!href) throw new Error('Expected Map destination');
+  return { attrs, href };
 }
 
 it.each(['postgres', 'firestore'])(
@@ -677,19 +737,21 @@ it.each(['postgres', 'firestore'])(
     const focused = renderToStaticMarkup(
       await Knowledge({ searchParams: Promise.resolve(context) }),
     );
-    expect(activeKnowledgeTab(focused)).toEqual(['Map']);
+    expect(activeMemoryTab(focused)).toEqual([]);
+    expect(secondaryMapLink(focused).attrs).toContain('aria-current="page"');
     expect(mapRead).toHaveBeenCalledTimes(1);
     expect(libraryRead).not.toHaveBeenCalled();
     expect(mapInput()).toMatchObject({ entityId: selected.id, sourceMemoryId: source.id });
     const libraryHref = savedHref(
-      knowledgeViewNav(focused),
+      memoryNavigation(focused),
       (url) => url.pathname === '/profile/knowledge' && url.searchParams.get('view') === 'library',
     );
     const libraryURL = new URL(libraryHref, 'https://assistant.test');
     for (const [key, value] of Object.entries(context))
       expect(libraryURL.searchParams.get(key)).toBe(value);
     const library = await renderTab(libraryHref);
-    expect(activeKnowledgeTab(library)).toEqual(['Library']);
+    expect(activeMemoryTab(library)).toEqual(['Saved notes']);
+    expect(library).toContain('Saved notes</h1>');
     expect(libraryRead).toHaveBeenCalledTimes(1);
     expect(mapRead).toHaveBeenCalledTimes(1);
     const libraryInput =
@@ -700,17 +762,20 @@ it.each(['postgres', 'firestore'])(
     expect(library).toContain(
       'Map filters are retained for the Map view; they do not filter these notes.',
     );
-    expect(library).toContain('Map source note filter retained (not applied to the Library)');
+    expect(library).toContain('Map source note filter retained (not applied to Saved notes)');
     expect(library).not.toContain('aria-label="Selected knowledge item"');
-    const mapHref = savedHref(
-      knowledgeViewNav(library),
-      (url) => url.pathname === '/profile/knowledge' && url.searchParams.get('view') === 'map',
-    );
+    expect(library).toContain('Filters (0 active)');
+    const collapsedFilters = /<details\b[^>]*>[\s\S]*?Filters \(0 active\)[\s\S]*?<\/details>/.exec(
+      library,
+    )?.[0];
+    expect(collapsedFilters).toBeDefined();
+    expect(collapsedFilters).not.toContain(' open=""');
+    const mapHref = secondaryMapLink(library).href;
     const mapURL = new URL(mapHref, 'https://assistant.test');
     for (const [key, value] of Object.entries(context))
       expect(mapURL.searchParams.get(key)).toBe(value);
     const restored = await renderTab(mapHref);
-    expect(activeKnowledgeTab(restored)).toEqual(['Map']);
+    expect(activeMemoryTab(restored)).toEqual([]);
     expect(mapRead).toHaveBeenCalledTimes(2);
     expect(libraryRead).toHaveBeenCalledTimes(1);
     expect(mapInput()).toMatchObject({ entityId: selected.id, sourceMemoryId: source.id });
@@ -739,12 +804,16 @@ it.each(['postgres', 'firestore'])(
         }),
       }),
     );
-    expect(activeKnowledgeTab(html)).toEqual(['Connections list']);
-    const nav = /<nav[^>]*aria-label="Knowledge views"[\s\S]*?<\/nav>/.exec(html)?.[0] ?? '';
+    expect(activeMemoryTab(html)).toEqual(['Connections']);
+    const nav = memoryNavigation(html);
     expect(nav).not.toContain('Library');
-    expect(nav).toContain('Map');
+    expect(nav).toContain('Saved notes');
+    expect(nav).toContain('Connections');
+    expect(nav).not.toContain('Map');
     expect(html).toContain('aria-label="Memory"');
-    expect(html).toContain('Saved notes');
+    expect([...html.matchAll(/aria-label="Memory"/g)]).toHaveLength(1);
+    expect(html).not.toContain('aria-label="Knowledge views"');
+    expect(secondaryMapLink(html).href).toContain('view=map');
     expect(html.match(/Add connection/g)).toHaveLength(1);
     expect(html.match(/<form/g)).toHaveLength(1);
     expect(html).toContain('Filters (3 active)');
