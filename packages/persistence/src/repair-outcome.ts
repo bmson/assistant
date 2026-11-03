@@ -38,7 +38,7 @@ const names: Record<RepairStage, string> = {
   unknown: 'Repair',
 };
 const next: Record<RepairStage, string> = {
-  queued: 'Open Improvements to check the queue and coding allowance.',
+  queued: 'Check the queue status and daily coding allowance.',
   investigation:
     'Add the missing steps and expected behavior in Improvements, then request a new investigation.',
   coding_dispatch:

@@ -703,13 +703,9 @@ struct ActivityView: View {
                     AssistantLoadingState(title: "Loading activity…")
                 } else if filteredItems.isEmpty {
                     AssistantEmptyState(
-                        discovery != nil ? "No matches in these records" : (filter == .all ? "No activity yet" : "Nothing here"),
+                        emptyStateTitle,
                         systemImage: "waveform.path.ecg",
-                        description: discovery != nil
-                            ? "Continue to older records if available, or change the filters. Legacy records without creation times cannot match date filters."
-                            : filter == .all
-                            ? "Work you hand off in chat will appear here with its evidence and decisions."
-                            : "Try another activity filter."
+                        description: emptyStateDescription
                     )
                 } else if isLandscape {
                     LazyVGrid(
@@ -755,7 +751,7 @@ struct ActivityView: View {
             .padding(.bottom, 28)
             .frame(maxWidth: isLandscape ? 760 : .infinity, alignment: .leading)
         }
-        .navigationTitle("Activity")
+        .navigationTitle(showingArchived ? "Archived activity" : "Activity")
         .onAppear { updateChecklistCorrectionEligibility() }
         .onChange(of: showingArchived) { _, _ in
             discoveryTask?.cancel()
@@ -1026,6 +1022,31 @@ struct ActivityView: View {
             case .completed: ["done", "failed", "cancelled"].contains(item.status)
             }
         }
+    }
+
+    private var emptyStateTitle: String {
+        if discovery != nil {
+            return showingArchived ? "No matches in these archived records" : "No matches in these records"
+        }
+        if filter == .all {
+            return showingArchived ? "No archived activity" : "No activity yet"
+        }
+        return showingArchived ? "No archived activity matches this filter" : "Nothing here"
+    }
+
+    private var emptyStateDescription: String {
+        if discovery != nil {
+            return "Continue to older records if available, or change the filters."
+                + " Legacy records without creation times cannot match date filters."
+        }
+        if showingArchived {
+            return filter == .all
+                ? "Archived tasks appear here. Show current activity to browse tasks that aren’t archived."
+                : "Try another filter or show current activity."
+        }
+        return filter == .all
+            ? "Work you hand off in chat will appear here with its evidence and decisions."
+            : "Try another activity filter."
     }
 
     private func activityCard(_ item: ActivityItem) -> some View {
