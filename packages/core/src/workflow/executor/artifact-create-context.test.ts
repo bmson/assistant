@@ -112,7 +112,7 @@ function makeRunContext(
     window: [{ role: 'user', content: request }],
   } as unknown as RunContext;
 
-  return { context, dispatch, rows, router, ownerIntent, artifactIntent };
+  return { context, dispatch, rows, router, ownerIntent, artifactIntent, tasks };
 }
 
 function successfulCreateResult(title: string) {
@@ -304,5 +304,48 @@ describe('forced direct-artifact step-loop context and retry characterization', 
     expect(observedModelCalls).toHaveLength(2);
     expect(observedModelCalls[1]?.system).toContain('Call docs.create now');
     expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it('marks a requested artifact unavailable when its tool is missing', async () => {
+    const request =
+      'Create a document titled "Project North" with this content: "Draft the launch plan."';
+    const router = {
+      step: vi.fn(async () => {
+        throw new Error('The router must not run when docs.create is unavailable');
+      }),
+      embeddingSpace: vi.fn(async () => ({
+        provider: 'synthetic',
+        model: 'artifact-context-test',
+        dimensions: 1536,
+        revision: '1',
+      })),
+      embed: vi.fn(async (texts: string[]) => texts.map(() => new Array(1536).fill(0.01))),
+    };
+    const dispatch = vi.fn(async () => {
+      throw new Error('The dispatcher must not run when docs.create is unavailable');
+    });
+    const fixture = makeRunContext(request, router, dispatch);
+    (fixture.context.dispatcher.toolDefs as ReturnType<typeof vi.fn>).mockReturnValue([
+      { name: 'gmail.send', description: 'Send email', inputSchema: {} },
+    ]);
+
+    const result = await runStepLoop(fixture.context, {
+      action: 'reply',
+      reasoning: 'Create the explicitly requested synthetic document.',
+      steps: [],
+      missingInfo: [],
+    });
+
+    expect.soft(result.outcome).toBe('needs_attention');
+    expect.soft(fixture.context.state.pendingFinal?.terminalStatus).toBe('needs_attention');
+    expect.soft(fixture.tasks.markTaskNeedsAttention).toHaveBeenCalledOnce();
+    expect.soft(fixture.tasks.completeTask).not.toHaveBeenCalled();
+    expect.soft(router.step).not.toHaveBeenCalled();
+    expect.soft(dispatch).not.toHaveBeenCalled();
+    expect(fixture.context.window[0]).toEqual({ role: 'user', content: request });
+    expect.soft(fixture.context.state.pendingFinal?.text).toContain('not available to this task');
+    expect
+      .soft(fixture.context.state.pendingFinal?.text)
+      .toContain('No request was sent to Google and no Google Doc was created');
   });
 });
