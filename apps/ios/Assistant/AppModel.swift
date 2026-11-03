@@ -4383,6 +4383,7 @@ final class AppModel {
                 if Self.isAmbiguousChatAdmissionError(error) {
                     self.isSending = false
                     self.clearSendDisplayState(turnToken: turnToken)
+                    self.removeEmptyStreamPlaceholder(streamID)
                     self.errorMessage = "This turn’s outcome is unknown. Check the same turn before sending another message."
                     self.setActivityThought(.thinking, proposedDetail: "Turn status unknown. Check this same operation.")
                     return
@@ -4803,6 +4804,15 @@ final class AppModel {
     private func clearSendDisplayState(turnToken: UUID) {
         guard ordinaryTurn?.token == turnToken else { return }
         sendDisplayState = nil
+    }
+
+    private func removeEmptyStreamPlaceholder(_ streamID: String) {
+        guard let message = messages.first(where: { $0.id == streamID }),
+              message.parts.count == 1,
+              message.parts[0].type == "text",
+              (message.parts[0].text ?? "").isEmpty else { return }
+        messages.removeAll { $0.id == streamID }
+        if sendDisplayState?.streamID == streamID { sendDisplayState = nil }
     }
 
     private func settleCancelledBeforeAdmission(turnToken: UUID, text: String, draftScope: ComposerDraftScope) {
@@ -5292,9 +5302,14 @@ final class AppModel {
             isSending = false
             isCancellingSend = false
             if let ordinaryTurnToken { clearSendDisplayState(turnToken: ordinaryTurnToken) }
+            removeEmptyStreamPlaceholder(streamID)
             errorMessage = "The task outcome is unknown. Reconnect to reconcile its status before starting another turn."
             setActivityThought(.thinking, proposedDetail: "Task status unknown. Reconnect to check the outcome.")
             return
+        }
+        if finalStatus != nil {
+            removeEmptyStreamPlaceholder(streamID)
+            if sendDisplayState?.streamID == streamID { sendDisplayState = nil }
         }
         if finalStatus == "cancelled" {
             // A cancelled task status does not prove that an external handler
@@ -5374,7 +5389,6 @@ final class AppModel {
             await syncNotificationBadge()
         } else {
             let completedWithoutReply = finalStatus == "done" && !receivedCurrentReply
-            if completedWithoutReply { messages.removeAll { $0.id == streamID } }
             let succeeded = finalStatus != "failed" && finalStatus != "cancelled" && !completedWithoutReply
             let thought: AssistantThought = completedWithoutReply
                 ? .replyUnavailable

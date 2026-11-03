@@ -5169,6 +5169,8 @@ extension APIClientRetryTests {
 
         XCTAssertFalse(model.isSending)
         XCTAssertFalse(model.isCancellingSend)
+        XCTAssertFalse(model.messages.contains(where: { $0.id.hasPrefix("stream-") }),
+            "A terminal cancellation without reply removes the empty provisional row instead of showing a no-reply fallback")
         XCTAssertEqual(StubURLProtocol.urls.first(where: { $0.path == "/api/mobile/v1/activity/\(taskId)" })?.path,
                        "/api/mobile/v1/activity/\(taskId)")
         XCTAssertEqual(model.errorMessage,
@@ -5250,6 +5252,62 @@ extension APIClientRetryTests {
     }
 
     @MainActor
+    func testTaskFailureAndAttentionWithoutReplyRemoveOnlyTheEmptyProvisionalRow() async throws {
+        let taskId = "33333333-3333-4333-8333-333333333333"
+        for status in ["failed", "needs_attention"] {
+            let model = try await notificationModel()
+            let updates = try JSONEncoder().encode(ChatUpdates(
+                taskStatus: status, messages: [], refreshed: [], superseded: nil,
+                nextCursor: nil, hasMore: false, activity: []
+            ))
+            StubURLProtocol.prime([], paths: [
+                "/api/mobile/v1/chat": [.taskStream(body: Data("data: [DONE]\n\n".utf8), taskId: taskId)],
+                "/api/mobile/v1/chat/status": Array(repeating: .success(status: 200, body: updates), count: 4),
+                "/api/mobile/v1/overview": [.success(status: 200, body: try overviewBody(pending: []))],
+                "/api/mobile/v1/workspace": [.success(status: 401, body: Data())],
+            ])
+
+            model.send("Check a task with no readable reply")
+            let deadline = ContinuousClock.now.advanced(by: .seconds(12))
+            while model.hasUnresolvedTurn && ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+
+            XCTAssertFalse(model.hasUnresolvedTurn, "The \(status) status should settle in the held fixture")
+            XCTAssertFalse(model.messages.contains(where: { $0.id.hasPrefix("stream-") }),
+                "\(status) with no reply must not leave an empty row that renders ‘No readable reply’")
+            XCTAssertNil(model.sendDisplayState)
+            XCTAssertFalse(model.errorMessage?.localizedCaseInsensitiveContains("no readable reply") ?? false)
+        }
+    }
+
+    @MainActor
+    func testUnknownChatAdmissionRemovesEmptyPlaceholderButKeepsOriginalTurnFenced() async throws {
+        let model = try await notificationModel()
+        StubURLProtocol.prime([.failure(URLError(.timedOut))])
+
+        model.send("Keep this uncertain request recoverable")
+        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while !((model.errorMessage ?? "").localizedCaseInsensitiveContains("outcome is unknown")),
+              ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        XCTAssertTrue(model.hasUnresolvedTurn, "A timeout after POST keeps the same operation unresolved")
+        XCTAssertFalse(model.messages.contains(where: { $0.id.hasPrefix("stream-") }),
+            "Unknown admission removes only the empty placeholder, avoiding a false no-reply claim")
+        XCTAssertTrue(model.messages.contains(where: {
+            $0.role == .user && $0.text == "Keep this uncertain request recoverable"
+        }), "The original submitted words remain visible for same-operation recovery")
+        XCTAssertNil(model.sendDisplayState)
+        XCTAssertEqual(StubURLProtocol.urls.filter { $0.path == "/api/mobile/v1/chat" }.count, 1)
+
+        model.send("Do not create a second turn")
+        XCTAssertEqual(StubURLProtocol.urls.filter { $0.path == "/api/mobile/v1/chat" }.count, 1,
+            "An unresolved original operation must block a blind retry")
+    }
+
+    @MainActor
     func testDoneTaskWithoutItsOwnReplyNeverUsesAnOlderOrForeignReply() async throws {
         let recorder = LocalNotificationRecorder()
         let model = try await notificationModel(scheduleLocalNotification: { title, body, route, approvalId, agentID, conversationID in
@@ -5306,6 +5364,8 @@ extension APIClientRetryTests {
         XCTAssertEqual(model.activityThought, .replyUnavailable)
         XCTAssertEqual(model.errorMessage, "This task is marked complete, but its reply has not appeared yet.")
         XCTAssertFalse(model.isSending)
+        XCTAssertFalse(model.messages.contains(where: { $0.id.hasPrefix("stream-") }),
+            "Completed without reply removes the empty provisional row")
         XCTAssertTrue(model.messages.contains(where: { $0.id == unrelated.id }))
         XCTAssertTrue(model.messages.contains(where: { $0.id == intermediateToolRow.id }))
         XCTAssertTrue(model.messages.contains(where: { $0.id == unsupportedCardRow.id }))
