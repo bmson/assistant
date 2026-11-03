@@ -8,8 +8,21 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { createUIMessageStream, createUIMessageStreamResponse } from 'ai';
-import { chromium, type Page, type Route } from 'playwright';
+import {
+  chromium,
+  type Page,
+  type Frame as PlaywrightFrame,
+  type Request as PlaywrightRequest,
+  type Response as PlaywrightResponse,
+  type Route,
+} from 'playwright';
 import { createWeb17Fixture } from './web17-delayed-old-poll-fixture.js';
+import {
+  classifyWeb17Path,
+  createWeb17NavigationDiagnostics,
+  observeWeb17AllChatsLinks,
+  projectWeb17NavigationDiagnostics,
+} from './web17-navigation-diagnostics.js';
 
 const baseUrl = process.env.SMOKE_BASE_URL;
 assert(baseUrl, 'Set SMOKE_BASE_URL to the running loopback production web app');
@@ -586,12 +599,110 @@ async function verifyDelayedTerminalPoll(status: 'done' | 'cancelled' | 'failed'
   }
 }
 
+function classifyWeb17Error(
+  error: unknown,
+): 'timeout' | 'assertion' | 'type_error' | 'other' | 'unknown' {
+  if (!(error instanceof Error)) return 'unknown';
+  try {
+    if (error.name === 'TimeoutError') return 'timeout';
+    if (error.name === 'AssertionError') return 'assertion';
+    if (error.name === 'TypeError') return 'type_error';
+    return 'other';
+  } catch {
+    return 'unknown';
+  }
+}
+
+function observeAllChatsNavigation(
+  page: Page,
+  diagnostics: ReturnType<typeof createWeb17NavigationDiagnostics>,
+): () => void {
+  const safely = (observe: () => void) => {
+    try {
+      observe();
+    } catch {
+      diagnostics.setObserverAvailable(false);
+    }
+  };
+  const onFrameNavigated = (frame: PlaywrightFrame) =>
+    safely(() => {
+      if (frame === page.mainFrame()) diagnostics.recordMainFrameNavigation(frame.url());
+    });
+  const onRequest = (request: PlaywrightRequest) =>
+    safely(() =>
+      diagnostics.recordRequestStarted(
+        request.url(),
+        request.resourceType(),
+        request.isNavigationRequest(),
+      ),
+    );
+  const onRequestFinished = (request: PlaywrightRequest) =>
+    safely(() =>
+      diagnostics.recordRequestFinished(
+        request.url(),
+        request.resourceType(),
+        request.isNavigationRequest(),
+      ),
+    );
+  const onRequestFailed = (request: PlaywrightRequest) =>
+    safely(() =>
+      diagnostics.recordRequestFailed(
+        request.url(),
+        request.resourceType(),
+        request.isNavigationRequest(),
+        request.failure()?.errorText,
+      ),
+    );
+  const onResponse = (response: PlaywrightResponse) =>
+    safely(() => {
+      const request = response.request();
+      diagnostics.recordResponse(
+        response.url(),
+        request.resourceType(),
+        request.isNavigationRequest(),
+        response.status(),
+      );
+    });
+  const remove = () => {
+    try {
+      page.off('framenavigated', onFrameNavigated);
+    } catch {}
+    try {
+      page.off('request', onRequest);
+    } catch {}
+    try {
+      page.off('requestfinished', onRequestFinished);
+    } catch {}
+    try {
+      page.off('requestfailed', onRequestFailed);
+    } catch {}
+    try {
+      page.off('response', onResponse);
+    } catch {}
+  };
+  try {
+    page.on('framenavigated', onFrameNavigated);
+    page.on('request', onRequest);
+    page.on('requestfinished', onRequestFinished);
+    page.on('requestfailed', onRequestFailed);
+    page.on('response', onResponse);
+    diagnostics.setObserverAvailable(true);
+  } catch {
+    diagnostics.setObserverAvailable(false);
+    remove();
+  }
+  return remove;
+}
+
 async function verifyUnmountedPollDoesNotPublishAfterRemount(): Promise<void> {
   const page = await context.newPage();
   const browserErrors: string[] = [];
+  const navigationDiagnostics = createWeb17NavigationDiagnostics(origin.origin);
+  let browserErrorObserverInstalled = false;
   let web17DiagnosticStage = 'setup';
-  let web17DiagnosticPollId: string | undefined;
+  let stopNavigationObservers: (() => void) | undefined;
   const conversationId = await createConversation(page);
+  navigationDiagnostics.setFixtureChatPath(`/chat/${conversationId}`);
   const taskId = await fixture.insertTerminalTask(conversationId, 'done');
   const cursor = fixture.cursorAt(new Date(0));
   const oldResult = 'WEB-17 stale result from the unmounted request';
@@ -645,8 +756,9 @@ async function verifyUnmountedPollDoesNotPublishAfterRemount(): Promise<void> {
     }
   };
 
-  page.on('pageerror', (error) => browserErrors.push(error.message));
   const pollTokenPrefix = randomUUID();
+  page.on('pageerror', (error) => browserErrors.push(error.message));
+  browserErrorObserverInstalled = true;
   await page.addInitScript(
     ({ expectedTaskId, tokenPrefix }: { expectedTaskId: string; tokenPrefix: string }) => {
       const stateWindow = window as Window & { __web17TaskPollAborts?: string[] };
@@ -789,10 +901,30 @@ async function verifyUnmountedPollDoesNotPublishAfterRemount(): Promise<void> {
       .reverse()
       .find((pollId) => !abortsBeforeUnmount.includes(pollId));
     assert.ok(pollIdToAbort, 'Task A must have an outstanding request before unmount');
-    web17DiagnosticPollId = pollIdToAbort;
 
     web17DiagnosticStage = 'all-chats-navigation';
-    await page.getByRole('link', { name: 'All chats', exact: true }).click();
+    const allChatsLink = page.getByRole('link', { name: 'All chats', exact: true });
+    try {
+      const linkObservation = await allChatsLink.evaluateAll(
+        observeWeb17AllChatsLinks,
+        origin.origin,
+      );
+      navigationDiagnostics.setAllChatsLinkObservation(
+        linkObservation.count,
+        linkObservation.matches,
+      );
+    } catch {
+      navigationDiagnostics.setAllChatsLinkObservation(null, null);
+    }
+    stopNavigationObservers = observeAllChatsNavigation(page, navigationDiagnostics);
+    navigationDiagnostics.markClickAttempted();
+    try {
+      await allChatsLink.click();
+      navigationDiagnostics.setClickCompleted(true);
+    } catch (error) {
+      navigationDiagnostics.setClickCompleted(false);
+      throw error;
+    }
     await page.waitForURL((url) => url.pathname === '/chat/all', { timeout: 20_000 });
     web17DiagnosticStage = 'composer-detach';
     await composer.waitFor({ state: 'detached', timeout: 10_000 });
@@ -857,43 +989,27 @@ async function verifyUnmountedPollDoesNotPublishAfterRemount(): Promise<void> {
     assert.deepEqual(browserErrors, []);
   } catch (primaryError) {
     try {
-      const boundedText = (value: string, maxChars: number) =>
-        Array.from(value).slice(0, maxChars).join('');
-      let currentPath = 'unavailable';
+      if (web17DiagnosticStage === 'all-chats-navigation')
+        navigationDiagnostics.finalizeExpectedRouteObservation();
+      if (browserErrorObserverInstalled)
+        navigationDiagnostics.setPageErrorCount(browserErrors.length);
+      let currentURL: string | null = null;
       try {
-        currentPath = boundedText(new URL(page.url()).pathname, 128);
+        currentURL = page.url();
       } catch {}
-      let primaryErrorText = 'unavailable';
-      try {
-        primaryErrorText = boundedText(
-          primaryError instanceof Error ? primaryError.message : String(primaryError),
-          240,
-        );
-      } catch {}
+      const navigation = projectWeb17NavigationDiagnostics(navigationDiagnostics.snapshot());
       const diagnostic = {
         kind: 'WEB17_FAILURE',
-        stage: boundedText(web17DiagnosticStage, 64),
-        currentPath,
-        expectedPath: '/chat/all',
-        chatPath: boundedText(`/chat/${conversationId}`, 128),
-        allChatsPath: '/chat/all',
-        pollId: web17DiagnosticPollId ? boundedText(web17DiagnosticPollId, 128) : undefined,
-        primaryError: primaryErrorText,
-        pageErrors: browserErrors.slice(-3).map((message) => boundedText(message, 80)),
+        stage: web17DiagnosticStage,
+        currentPathClass: currentURL
+          ? classifyWeb17Path(currentURL, origin.origin, `/chat/${conversationId}`)
+          : 'unknown',
+        expectedPathClass: 'all_chats',
+        primaryErrorClass: classifyWeb17Error(primaryError),
+        navigation,
       };
       const prefix = '[WEB-17] ';
-      let line = JSON.stringify(diagnostic);
-      while (Buffer.byteLength(prefix + line, 'utf8') > 4096 && diagnostic.pageErrors.length > 0) {
-        diagnostic.pageErrors.shift();
-        line = JSON.stringify(diagnostic);
-      }
-      while (
-        Buffer.byteLength(prefix + line, 'utf8') > 4096 &&
-        diagnostic.primaryError.length > 0
-      ) {
-        diagnostic.primaryError = Array.from(diagnostic.primaryError).slice(0, -16).join('');
-        line = JSON.stringify(diagnostic);
-      }
+      const line = JSON.stringify(diagnostic);
       if (Buffer.byteLength(prefix + line, 'utf8') <= 4096) console.error(prefix + line);
       else console.error(`${prefix}{"kind":"WEB17_FAILURE","diagnostic":"exceeded-byte-cap"}`);
     } catch {
@@ -910,6 +1026,9 @@ async function verifyUnmountedPollDoesNotPublishAfterRemount(): Promise<void> {
     releaseFreshRequest();
     maybeSettleFreshRoutes();
     try {
+      try {
+        stopNavigationObservers?.();
+      } catch {}
       if (oldRouteEntered) await waitFor(oldSettled, 'Old task A route did not drain', 5_000);
       if (freshRouteEntered) await waitFor(freshSettled, 'Fresh task A route did not drain', 5_000);
     } finally {
