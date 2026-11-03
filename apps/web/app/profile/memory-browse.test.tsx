@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   owner: vi.fn(),
+  noteEditorView: vi.fn(),
   driver: 'postgres',
   people: vi.fn(),
   person: vi.fn(),
@@ -28,6 +29,9 @@ const mocks = vi.hoisted(() => ({
 const firestoreStore = Object.freeze({ db: Object.freeze({ terminate: mocks.terminate }) });
 mocks.getStore.mockReturnValue(firestoreStore);
 vi.mock('@/auth', () => ({ requireOwner: mocks.owner }));
+vi.mock('@/lib/owner-memory-editor-server', () => ({
+  loadOwnerMemoryEditorView: mocks.noteEditorView,
+}));
 vi.mock('@assistant/config', async (original) => ({
   ...(await original<Record<string, unknown>>()),
   loadConfig: () => ({
@@ -79,12 +83,14 @@ vi.mock('next/navigation', () => ({
   notFound: () => {
     throw new Error('NOT_FOUND');
   },
+  useRouter: () => ({ refresh: vi.fn() }),
 }));
 
 import { proxy } from '@/proxy';
 import Person from '../people/[id]/page';
 import People from '../people/page';
 import { createProductVisualData } from '../product-visual-data';
+import SavedNotePage from './knowledge/notes/[id]/page';
 import Knowledge from './knowledge/page';
 import Hub from './page';
 
@@ -498,6 +504,7 @@ describe.each(['postgres', 'firestore'])('synthetic retained page journey (%s)',
     const filtersStart = libraryForm.indexOf('<details');
     expect(filtersStart).toBeGreaterThan(0);
     expect(libraryForm.indexOf('name="q"')).toBeLessThan(filtersStart);
+    expect(libraryForm).not.toContain('name="page"');
     for (const field of [
       'q',
       'state',
@@ -543,11 +550,66 @@ describe.each(['postgres', 'firestore'])('synthetic retained page journey (%s)',
     })) {
       expect(nextPageURL.searchParams.get(key)).toBe(value);
     }
+    const openNoteHref = savedHref(
+      library,
+      (url) => url.pathname === `/profile/knowledge/notes/${memory.id}`,
+    );
+    const openNoteURL = new URL(openNoteHref, 'https://assistant.test');
+    const returnTo = openNoteURL.searchParams.get('returnTo');
+    expect(returnTo).not.toBeNull();
+    const expectedBackParams = {
+      view: 'library',
+      q: 'Alex',
+      state: 'review',
+      filter: 'verified',
+      subject: person.id,
+      domain: 'home',
+      source: 'manual',
+      age: '90',
+      connectivity: 'connected',
+      page: '2',
+    };
+    const noteReturnURL = new URL(returnTo ?? '', 'https://assistant.test');
+    expect(noteReturnURL.pathname).toBe('/profile/knowledge');
+    for (const [key, value] of Object.entries(expectedBackParams)) {
+      expect(noteReturnURL.searchParams.get(key)).toBe(value);
+    }
+    mocks.noteEditorView.mockResolvedValue({
+      snapshot: {
+        memoryId: memory.id,
+        ownerId: 'synthetic-owner',
+        content: memory.content,
+        contentHash: 'synthetic-content-hash',
+        revision: 'synthetic-revision',
+        ownerCorrection: null,
+        sourceLabel: 'Synthetic source',
+        eligible: false,
+      },
+      session: null,
+      grant: null,
+      unavailableReason: 'maintenance',
+    });
+    const noteDetail = await get(openNoteHref, (url) =>
+      SavedNotePage({
+        params: Promise.resolve({ id: memory.id }),
+        searchParams: Promise.resolve({ returnTo: url.searchParams.get('returnTo') ?? undefined }),
+      }),
+    );
+    const renderedBackHref = savedHref(
+      noteDetail,
+      (url) => url.pathname === '/profile/knowledge' && url.searchParams.get('page') === '2',
+    );
+    const renderedBackURL = new URL(renderedBackHref, 'https://assistant.test');
+    for (const [key, value] of Object.entries(expectedBackParams)) {
+      expect(renderedBackURL.searchParams.get(key)).toBe(value);
+    }
+    expect(mocks.noteEditorView).toHaveBeenCalledWith(memory.id, undefined);
     const sourceMapPath = savedHref(
       library,
       (url) =>
         url.searchParams.get('view') === 'map' && url.searchParams.get('memory') === memory.id,
     );
+    expect(new URL(sourceMapPath, 'https://assistant.test').searchParams.has('page')).toBe(false);
     const map = await get(sourceMapPath, (url) =>
       Knowledge({ searchParams: Promise.resolve(Object.fromEntries(url.searchParams)) }),
     );
@@ -569,6 +631,8 @@ describe.each(['postgres', 'firestore'])('synthetic retained page journey (%s)',
       'HEAD /people?q=Sam',
       `GET ${libraryPath}`,
       `HEAD ${libraryPath}`,
+      `GET ${openNoteURL.pathname}${openNoteURL.search}`,
+      `HEAD ${openNoteURL.pathname}${openNoteURL.search}`,
       `GET ${sourceMapPath}`,
       `HEAD ${sourceMapPath}`,
     ]);
@@ -585,7 +649,7 @@ describe.each(['postgres', 'firestore'])('synthetic retained page journey (%s)',
       expect(response.headers.get('x-middleware-next')).toBeNull();
     }
     expect(writeHandler).not.toHaveBeenCalled();
-    expect(mocks.owner).toHaveBeenCalledTimes(6);
+    expect(mocks.owner).toHaveBeenCalledTimes(7);
     if (driver === 'firestore') {
       expect(mocks.pgRead).not.toHaveBeenCalled();
       expect(mocks.people).not.toHaveBeenCalled();

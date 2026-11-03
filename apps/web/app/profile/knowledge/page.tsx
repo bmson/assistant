@@ -58,6 +58,7 @@ function fact(
   subjectLabel: string | null,
   now: Date,
   context: Record<string, string | number | undefined>,
+  page: number,
 ): FactView {
   return {
     id: memory.id,
@@ -77,7 +78,7 @@ function fact(
     createdLabel: savedNoteCreatedLabel(memory.createdAt, now),
     validityLabel: savedNoteValidityLabel(memory.validFrom, memory.validUntil),
     mapHref: href({ ...context, view: 'map', memory: memory.id }),
-    noteHref: memoryNoteHref(memory.id, href({ ...context, view: 'library' })) ?? undefined,
+    noteHref: memoryNoteHref(memory.id, href({ ...context, view: 'library', page })) ?? undefined,
   };
 }
 /** Reuse bounded queries; no cleanup/header scan is needed for PostgreSQL browse. */
@@ -484,7 +485,10 @@ export default async function KnowledgePage({
           </p>
           <div className="mt-3 grid gap-3 lg:grid-cols-2">
             {library.rows.map(({ memory: note, subjectLabel }) => (
-              <BrowseFact key={note.id} fact={fact(note, subjectLabel, now, retained)} />
+              <BrowseFact
+                key={note.id}
+                fact={fact(note, subjectLabel, now, retained, library.page)}
+              />
             ))}
           </div>
           {!library.rows.length ? <EmptyState>No matching notes in this view.</EmptyState> : null}
