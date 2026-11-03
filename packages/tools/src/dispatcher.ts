@@ -5,6 +5,10 @@ import {
   autonomyFloorBlocks,
   BrowserPlanSchema,
   extractOwnerIntent,
+  hasAffirmativePersonalConfirmationEmailRead,
+  hasExplicitOwnerCalendarReadSource,
+  hasExplicitOwnerMailReadSource,
+  hasPublicSourceQualifiedEmailRead,
   isGoalWorkEvidence,
   isJobPending,
   isReadOnlyPlan,
@@ -13,7 +17,10 @@ import {
 } from '@assistant/core';
 import { createApproval } from '@assistant/core/workflow/approvals';
 import { detectLiveLookups } from '@assistant/core/workflow/live-lookup';
-import { detectPersonalReadRequest } from '@assistant/core/workflow/read-intent';
+import {
+  detectPersonalReadRequest,
+  isPublicTransitScheduleRequest,
+} from '@assistant/core/workflow/read-intent';
 import {
   createPostgresApprovalPolicyRepository,
   createPostgresApprovalRepository,
@@ -162,6 +169,12 @@ function ownerExplicitlyProhibitsPrivateRead(
   }
 
   const toolFamily = toolName.split('.', 1)[0]?.toLowerCase();
+  if (
+    !hasOwnerPersonalReadForToolFamily(toolFamily, intent) &&
+    ((toolFamily === 'gmail' && hasPublicSourceQualifiedEmailRead(intent.ownerAuthoredText)) ||
+      (toolFamily === 'calendar' && isPublicTransitScheduleRequest(intent.ownerAuthoredText)))
+  )
+    return true;
   const aliases = OWNER_READ_PROHIBITION_SOURCES[toolFamily ?? ''];
   if (!aliases) return false;
   const sourcePattern = new RegExp(
@@ -288,6 +301,32 @@ function ownerExplicitlyProhibitsPrivateRead(
 
 function readProhibitionReason(toolName: string): string {
   return `owner explicitly prohibited reading data from ${toolName.split('.', 1)[0]}`;
+}
+
+function hasOwnerPersonalReadForToolFamily(
+  toolFamily: string | undefined,
+  intent: NonNullable<ToolContext['ownerIntent']>,
+): boolean {
+  const text = intent.ownerAuthoredText;
+  const request = detectPersonalReadRequest([{ role: 'user', content: text }]);
+  const sourceReads = request?.sourceReads ?? [];
+  const publicEmailRead = hasPublicSourceQualifiedEmailRead(text);
+  if (toolFamily === 'gmail')
+    return (
+      (!publicEmailRead && (request?.kind === 'email' || request?.kind === 'calendar_email')) ||
+      (!publicEmailRead && sourceReads.some((source) => source.kind === 'email')) ||
+      hasExplicitOwnerMailReadSource(text) ||
+      hasAffirmativePersonalConfirmationEmailRead(text)
+    );
+  if (toolFamily === 'calendar')
+    return (
+      request?.kind === 'calendar' ||
+      (request?.kind === 'calendar_email' &&
+        (!publicEmailRead || hasExplicitOwnerCalendarReadSource(text))) ||
+      sourceReads.some((source) => source.kind === 'calendar') ||
+      hasExplicitOwnerCalendarReadSource(text)
+    );
+  return false;
 }
 
 function requiredOwnerIntentScopes(

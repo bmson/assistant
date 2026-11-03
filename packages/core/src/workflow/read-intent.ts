@@ -497,6 +497,13 @@ const EXPLICIT_CALENDAR_DETAIL =
   /\b(?:full(?:\s+(?:event\s+)?list)?|detailed?|in\s+detail|every\s+(?:event|appointment)|all\s+(?:events|appointments)|complete\s+(?:event\s+)?list)\b/i;
 const SCHEDULED_THING =
   /\b(interviews?|meetings?|appointments?|calls?|chats?|flights?|reservations?|bookings?|events?)\b/i;
+const PUBLIC_TRANSIT_SCHEDULE =
+  /\b(?:published|public)\b[^.!?;\n]{0,40}\b(?:train|bus|transit)\b[^.!?;\n]{0,40}\b(?:schedule|timetable)\b|\b(?:train|bus|transit)\b[^.!?;\n]{0,40}\b(?:schedule|timetable)\b/i;
+
+export function isPublicTransitScheduleRequest(text: string): boolean {
+  return PUBLIC_TRANSIT_SCHEDULE.test(text);
+}
+
 const READ_OR_QUESTION =
   /\b(?:what|when|where|which|who|do i|did i|is there|are there|check|checked|look|find|found|search|searched|show|tell|review|reviewed|read|scan|open|pull up|bring up|see)\b/i;
 const WHY_LOOKUP = /\bwhy\b/i;
@@ -2402,7 +2409,28 @@ function detectPersonalReadRequestInternal(
   const memoryReadProhibited =
     (historyReadProhibited || savedMemoryReadProhibited) &&
     !(historyReadAllowed || savedMemoryReadAllowed);
-  if (isConversationLocalContext(latest)) return null;
+  const independentAccountReadRequest =
+    (!emailReadProhibited &&
+      /\b(?:search|check|find|look\s+up|read|review|show|what|which|who|when|where|how)\b[^.!?;\n]{0,120}\b(?:my|our)\s+(?:gmail|e-?mails?|mail|inboxes|mailboxes|messages?|threads?)\b/i.test(
+        positiveLatest,
+      )) ||
+    (!calendarReadProhibited &&
+      (/\b(?:search|check|find|look\s+up|read|review|show|what|which|who|when|where|how)\b[^.!?;\n]{0,120}\b(?:my|our)\s+(?:calendars?|schedules?|agendas?)\b/i.test(
+        positiveLatest,
+      ) ||
+        /\bwhen\s+is\s+my\s+next\s+meeting\b/i.test(positiveLatest)));
+  if (
+    historyReadProhibited &&
+    !historyReadAllowed &&
+    !savedMemoryReadAllowed &&
+    !independentAccountReadRequest
+  )
+    return null;
+  // A fictional or hypothetical subject can still be an explicit history
+  // lookup. The content qualifier describes what to find; it does not revoke
+  // the requested conversation-history source. Other private sources remain
+  // governed by their own prohibition checks below.
+  if (isConversationLocalContext(latest) && !historyReadAllowed) return null;
   const flightContinuation =
     clarificationDepth < 2 && !calendarReadProhibited && !emailReadProhibited
       ? flightScopeClarificationContinuation(
@@ -2845,6 +2873,7 @@ function detectPersonalReadRequestInternal(
     /\b(?:my|our|the|this|that|do i|did i|is there|are there)\b/i.test(latest) ||
     (verification && flightLanguage.test(latest)) ||
     terms.some((term) => !SCHEDULED_THING.test(term));
+  const publicTransitSchedule = isPublicTransitScheduleRequest(latest);
   const namedSchedule =
     !calendarReadProhibited &&
     !calendarDayList &&
@@ -2860,10 +2889,61 @@ function detectPersonalReadRequestInternal(
       daySchedule ||
       namedSchedule ||
       (CALENDAR_SURFACE.test(latest) &&
+        (!publicTransitSchedule || /\b(?:my|our)\s+(?:calendar|schedule|agenda)\b/i.test(latest)) &&
         (READ_OR_QUESTION.test(latest) || verification || whyLookup)) ||
       (verification && CALENDAR_SURFACE.test(recentContext)));
+  const personalMailAction =
+    /\b(?:search|check|find|look\s+up|read|review)\s+(?:my|our)\s+(?:inbox|email|mail|gmail)\b/i.test(
+      latest,
+    );
+  const sourceSentences = latest
+    .split(/[.!?;\n]+/)
+    .map((sentence) => sentence.split(/(?:,|\b(?:and|then|also|but)\b)/i));
+  const ownerConfirmationEmailAction = sourceSentences.some((clauses) =>
+    clauses.some((clause, index) => {
+      const inheritedPublicSource = clauses
+        .slice(0, index)
+        .some((previous) => /\b(?:public|online|website|webpage|internet)\b/i.test(previous));
+      return (
+        /\b(?:search|check|find|look\s+up|read|review)\b/i.test(clause) &&
+        /\b(?:ticket|booking|reservation|order|purchase|payment|delivery)\s+confirmation\s+email\b/i.test(
+          clause,
+        ) &&
+        !inheritedPublicSource &&
+        !/\b(?:public|online|website|webpage|internet|template|templates|example|examples|sample|samples)\b/i.test(
+          clause,
+        ) &&
+        !/\bemail\s+address(?:es)?\b/i.test(clause)
+      );
+    }),
+  );
+  const publicEmailLookup =
+    !personalMailAction &&
+    !ownerConfirmationEmailAction &&
+    sourceSentences.some((clauses) =>
+      clauses.some((clause, index) => {
+        const inheritedPublicSource = clauses
+          .slice(0, index)
+          .some((previous) => /\b(?:public|online|website|webpage|internet)\b/i.test(previous));
+        const emailAddress = /\b(?:e-?mail)\s+address(?:es)?\b/i.test(clause);
+        const confirmationEmail =
+          /\b(?:ticket|booking|reservation|order|purchase|payment|delivery)\s+confirmation\s+email\b/i.test(
+            clause,
+          );
+        return (
+          (emailAddress &&
+            /\b(?:public|contact|reach|website|webpage|ticket office)\b/i.test(clause)) ||
+          (confirmationEmail &&
+            (inheritedPublicSource ||
+              /\b(?:public|online|website|webpage|internet|template|templates|example|examples|sample|samples)\b/i.test(
+                clause,
+              )))
+        );
+      }),
+    );
   const email =
     !emailReadProhibited &&
+    !publicEmailLookup &&
     (upcomingFlightDiscovery ||
       (EMAIL_SURFACE.test(latest) &&
         (READ_OR_QUESTION.test(latest) || receiptQuestion(latest) || verification)) ||

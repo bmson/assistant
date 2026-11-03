@@ -3,13 +3,96 @@ import { describe, expect, it } from 'vitest';
 import {
   isParkedUnknownChecklistCorrectionFinal,
   isRetryableChecklistCorrectionFinal,
+  projectChecklistCancellationResume,
   projectChecklistCorrectionResume,
   taskBoundCorrectionReadRequest,
 } from './checklist-correction-resume.js';
-import type { OwnerIntent } from './owner-intent.js';
-import { buildRequestChecklist, revisePendingRequestChecklistItem } from './request-checklist.js';
+import { extractOwnerIntent, type OwnerIntent } from './owner-intent.js';
+import { detectPersonalReadRequest } from './read-intent.js';
+import {
+  buildRequestChecklist,
+  recordOwnerChecklistCancellation,
+  revisePendingRequestChecklistItem,
+} from './request-checklist.js';
 
 describe('task-bound checklist correction resume projection', () => {
+  it('replays a retained ticket confirmation lookup within the original multi-action authority', () => {
+    const original =
+      'Find the museum ticket confirmation email and remind me about check-in tomorrow';
+    const intent = extractOwnerIntent({ trust: 'owner', text: original });
+    expect(intent.authorizedScopes).toContain('private_read');
+    expect(intent.authorizedScopes).toContain('personal_write');
+    expect(detectPersonalReadRequest([{ role: 'user', content: original }])).toBeNull();
+    const task = {
+      id: randomUUID(),
+      agentId: randomUUID(),
+      conversationId: randomUUID(),
+      createdAt: new Date('2026-09-12T12:00:00Z'),
+    };
+    const checklist = buildRequestChecklist(original);
+    if (!checklist) throw new Error('ticket lookup checklist is invalid');
+    const ownerMessage = {
+      id: randomUUID(),
+      taskId: task.id,
+      agentId: task.agentId,
+      conversationId: task.conversationId,
+      role: 'user' as const,
+      origin: 'owner' as const,
+      text: 'Cancel the reminder.',
+      createdAt: new Date('2026-09-12T12:01:00Z'),
+    };
+    const cancelled = recordOwnerChecklistCancellation(checklist, {
+      taskId: task.id,
+      agentId: task.agentId,
+      conversationId: task.conversationId,
+      ownerMessageId: ownerMessage.id,
+      text: ownerMessage.text,
+    });
+    if (!cancelled) throw new Error('reminder cancellation was not recorded');
+    const projection = projectChecklistCancellationResume({
+      task,
+      checklist: cancelled,
+      ownerMessage,
+      latestConversationOwnerMessageId: ownerMessage.id,
+      originalIntent: intent,
+    });
+    expect(projection).toMatchObject({
+      authorizedScopes: intent.authorizedScopes,
+      activeOutcomes: [{ label: 'Find the museum ticket confirmation email', kind: 'lookup' }],
+    });
+    if (!projection) throw new Error('retained lookup projection was rejected');
+    expect(projection.cancelledOutcomeIds).toEqual([
+      checklist.items.find((item) => item.kind === 'reminder')?.id,
+    ]);
+    expect(
+      taskBoundCorrectionReadRequest('Find the museum ticket confirmation email', {
+        now: task.createdAt,
+        timeZone: 'UTC',
+        authorizedScopes: projection.authorizedScopes,
+      }),
+    ).toMatchObject({ kind: 'email', firstToolName: 'gmail.search' });
+  });
+
+  it('keeps the flight lookup authorized in the original mixed lookup/send request', () => {
+    const original =
+      'Find my flight confirmation email to Paris on 2026-12-21 and send an email to Alice';
+    const intent = extractOwnerIntent({ trust: 'owner', text: original });
+    expect(intent.authorizedScopes).toContain('private_read');
+    expect(intent.authorizedScopes).toContain('external_send');
+    const task = {
+      createdAt: new Date('2026-09-12T12:00:00Z'),
+    };
+    const checklist = buildRequestChecklist(original);
+    expect(checklist?.items.map(({ kind }) => kind)).toEqual(['lookup', 'send']);
+    expect(
+      taskBoundCorrectionReadRequest('Find my flight confirmation email to Paris on 2026-12-21', {
+        now: task.createdAt,
+        timeZone: 'UTC',
+        authorizedScopes: intent.authorizedScopes,
+      }),
+    ).toBeDefined();
+  });
+
   it('accepts only direct private lookup corrections within the original scope', () => {
     const options = {
       now: new Date('2026-10-11T12:00:00Z'),
@@ -33,6 +116,9 @@ describe('task-bound checklist correction resume projection', () => {
         ...options,
         authorizedScopes: ['external_read'],
       }),
+    ).toBeUndefined();
+    expect(
+      taskBoundCorrectionReadRequest('“Find the museum ticket confirmation email.”', options),
     ).toBeUndefined();
   });
 

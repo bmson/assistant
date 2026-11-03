@@ -19,6 +19,7 @@ import {
   resolveRecallMode,
   shouldRunFallbackRecall,
 } from './owner-intent.js';
+import { detectPersonalReadRequest } from './read-intent.js';
 
 describe('shared recall mode', () => {
   const ownerIntent = extractOwnerIntent({
@@ -106,6 +107,18 @@ describe('shared recall mode', () => {
         clarificationContinuation: { ...continuation, ...override },
       }),
     ).toBe('disabled');
+    expect(
+      extractOwnerIntent({
+        trust: 'owner',
+        text: 'Do not read our past chats. What is on my calendar Friday?',
+      }).authorizedScopes,
+    ).toContain('private_read');
+    expect(
+      extractOwnerIntent({
+        trust: 'owner',
+        text: 'Do not look anything up. What is on my calendar Friday?',
+      }).authorizedScopes,
+    ).not.toContain('private_read');
   });
 });
 
@@ -413,7 +426,84 @@ describe('owner intent provenance', () => {
     expect(explicitlyOptsOutOfRecall('Answer without looking anything up.')).toBe(true);
     expect(explicitlyOptsOutOfRecall("Don't look anything up.")).toBe(true);
     expect(explicitlyOptsOutOfRecall('Do not look anything up.')).toBe(true);
+    expect(explicitlyOptsOutOfRecall('Do not save new memories.')).toBe(false);
+    expect(explicitlyOptsOutOfRecall('Search our past chats. Do not save new memories.')).toBe(
+      false,
+    );
+    expect(
+      explicitlyOptsOutOfRecall(
+        'Search our past chats. Do not use history, and do not save new memories.',
+      ),
+    ).toBe(true);
+    expect(
+      explicitlyOptsOutOfRecall('Do not save new memories, and do not read our past chats.'),
+    ).toBe(true);
+    expect(explicitlyOptsOutOfRecall('Do not save this report, and do not use memory.')).toBe(true);
+    expect(
+      explicitlyOptsOutOfRecall('Do not use email or calendar, and do not save new memories.'),
+    ).toBe(false);
+    expect(explicitlyOptsOutOfRecall('Do not use email and memory.')).toBe(true);
+    expect(explicitlyOptsOutOfRecall('Do not read email or calendar and our past chats.')).toBe(
+      true,
+    );
     expect(explicitlyOptsOutOfRecall('Please search my calendar for Friday.')).toBe(false);
+    const noHistory = extractOwnerIntent({
+      trust: 'owner',
+      text: 'Do not save new memories, and do not read our past chats.',
+    });
+    expect(noHistory.authorizedScopes).not.toContain('private_read');
+    expect(
+      detectPersonalReadRequest([{ role: 'user', content: noHistory.ownerAuthoredText }]),
+    ).toBe(null);
+    expect(
+      resolveRecallMode({
+        resolvedReadIntent: { kind: 'none' } as ResolvedReadIntent,
+        ownerIntent: noHistory,
+        enabled: true,
+        untrustedContext: false,
+        trustedTask: true,
+        taskType: 'chat_turn',
+        conversationId: 'conversation-1',
+      }),
+    ).toBe('disabled');
+    const sharedMemoryDenial = extractOwnerIntent({
+      trust: 'owner',
+      text: 'Do not use email and memory.',
+    });
+    expect(sharedMemoryDenial.authorizedScopes).not.toContain('private_read');
+    expect(
+      detectPersonalReadRequest([{ role: 'user', content: sharedMemoryDenial.ownerAuthoredText }]),
+    ).toBeNull();
+    expect(
+      resolveRecallMode({
+        resolvedReadIntent: { kind: 'none' } as ResolvedReadIntent,
+        ownerIntent: sharedMemoryDenial,
+        enabled: true,
+        untrustedContext: false,
+        trustedTask: true,
+        taskType: 'chat_turn',
+        conversationId: 'conversation-1',
+      }),
+    ).toBe('disabled');
+    const sharedSourceDenial = extractOwnerIntent({
+      trust: 'owner',
+      text: 'Do not read email or calendar and our past chats.',
+    });
+    expect(sharedSourceDenial.authorizedScopes).not.toContain('private_read');
+    expect(
+      detectPersonalReadRequest([{ role: 'user', content: sharedSourceDenial.ownerAuthoredText }]),
+    ).toBeNull();
+    expect(
+      resolveRecallMode({
+        resolvedReadIntent: { kind: 'none' } as ResolvedReadIntent,
+        ownerIntent: sharedSourceDenial,
+        enabled: true,
+        untrustedContext: false,
+        trustedTask: true,
+        taskType: 'chat_turn',
+        conversationId: 'conversation-1',
+      }),
+    ).toBe('disabled');
   });
 
   it('continues only a positive answer to the exact persisted clarification slot', () => {
@@ -767,6 +857,77 @@ describe('owner intent provenance', () => {
     expect(article.authorizedScopes).toContain('external_read');
     expect(article.authorizedScopes).not.toContain('private_read');
     expect(calendar.authorizedScopes).toContain('private_read');
+  });
+
+  it('grants private-read scope only for a personal-source request, not a source noun question', () => {
+    const cases = [
+      ['What is the published train schedule?', false],
+      ['What is a good schedule for the fictional exercise?', false],
+      ['Do not read my Gmail; explain what Gmail labels mean.', false],
+      ['Find the museum ticket confirmation email.', true],
+      [
+        'Find my flight confirmation email to Paris on 2026-12-21 and send an email to Alice.',
+        true,
+      ],
+      ['Find a flight confirmation email template online.', false],
+      ['Find the museum email address to contact the ticket office.', false],
+      ['Find a ticket confirmation email template online.', false],
+      ['Search the public museum website for ticket confirmation email examples.', false],
+      ['Search the public museum website and find the ticket confirmation email.', false],
+      ['Find the public museum email address to contact the ticket office.', false],
+      ['Find the public email address for the museum ticket confirmation office.', false],
+      ['Which email address sent my reservation confirmation?', true],
+      [
+        'Search my email for my reservation confirmation. Find the public museum email address to contact the ticket office.',
+        true,
+      ],
+      [
+        'Find the museum ticket confirmation email. Find the public museum email address to contact the ticket office.',
+        true,
+      ],
+      [
+        'Read my Gmail for the invoice. Find the public museum email address to contact the ticket office.',
+        true,
+      ],
+      [
+        'What do my saved memories say about telescope preferences? Find the public museum email address to contact the ticket office.',
+        true,
+      ],
+      [
+        'What do our past chats say about Nimbus? Find the public museum email address to contact the ticket office.',
+        true,
+      ],
+      ['For a fictional exercise, show a sample museum ticket confirmation email.', false],
+      ['What is on my calendar Friday?', true],
+      ['When is my next meeting?', true],
+      ['Read my Gmail for the invoice.', true],
+      ['Read my Gmail for the invoice. The quoted note says “Don’t read Gmail.”', true],
+      ['“Read my Gmail for the invoice.”', false],
+      ['“Find the museum ticket confirmation email.”', false],
+    ] as const;
+    for (const [text, expected] of cases) {
+      expect(
+        extractOwnerIntent({ trust: 'owner', text }).authorizedScopes.includes('private_read'),
+      ).toBe(expected);
+    }
+  });
+
+  it('authorizes only explicit conversation-history reads about hypothetical content', () => {
+    const requests = [
+      'Find the earlier hypothetical planning exercise called Nimbus in our past chats. Recall its project name, budget, deadline, and travel constraint, citing the conversation source. Clearly distinguish the fictional exercise from facts about me. Do not use email or calendar, and do not save new memories.',
+      'Look back at the earlier hypothetical Nimbus exercise. Did I earmark its project budget for public transport, or was that an Assistant inference? Separate my original budget and travel constraint from the Assistant’s suggested next step, citing the relevant conversation messages. Keep the fictional exercise separate from my real plans, and do not save new memories.',
+    ];
+    for (const text of requests) {
+      expect(extractOwnerIntent({ trust: 'owner', text }).authorizedScopes).toContain(
+        'private_read',
+      );
+    }
+    expect(
+      extractOwnerIntent({
+        trust: 'owner',
+        text: 'Find a hypothetical exercise. Do not use history.',
+      }).authorizedScopes,
+    ).not.toContain('private_read');
   });
 
   it('rejects negated action language as authorization', () => {

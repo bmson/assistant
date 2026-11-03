@@ -432,6 +432,136 @@ afterEach(() => {
 });
 
 describe('P03 owner intent at ToolDispatcher boundary (synthetic repositories only)', () => {
+  it('blocks a quoted-only ticket confirmation lookup before Gmail dispatch', async () => {
+    const { dispatch, read } = fixture();
+    const text = '“Find the museum ticket confirmation email.”';
+    const intent = extractOwnerIntent({ trust: 'owner', text });
+    expect(intent.ownerAuthoredText).toBe('');
+    expect(intent.authorizedScopes).not.toContain('private_read');
+    expect(await dispatch(text, 'gmail.search', {}, true)).toMatchObject({ kind: 'rejected' });
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it('blocks a confirmation email lookup qualified by a public website before Gmail dispatch', async () => {
+    const { dispatch, read } = fixture();
+    const text = 'Search the public museum website and find the ticket confirmation email.';
+    const intent = extractOwnerIntent({ trust: 'owner', text });
+    expect(intent.authorizedScopes).not.toContain('private_read');
+    expect(await dispatch(text, 'gmail.search')).toMatchObject({ kind: 'rejected' });
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'Find the museum email address to contact the ticket office.',
+    'Find a ticket confirmation email template online.',
+    'Find a flight confirmation email template online.',
+  ])('blocks public mailbox-adjacent lookup before Gmail dispatch: %s', async (text) => {
+    const { dispatch, read, calendarRead } = fixture();
+    expect(extractOwnerIntent({ trust: 'owner', text }).authorizedScopes).not.toContain(
+      'private_read',
+    );
+    expect(await dispatch(text, 'gmail.search')).toMatchObject({ kind: 'rejected' });
+    expect(read).not.toHaveBeenCalled();
+    expect(await dispatch(text, 'calendar.search_events')).toMatchObject({ kind: 'rejected' });
+    expect(calendarRead).not.toHaveBeenCalled();
+  });
+
+  it('preserves a separate owner confirmation lookup beside a public address request', async () => {
+    const { dispatch, read } = fixture();
+    const text =
+      'Find the museum ticket confirmation email. Find the public museum email address to contact the ticket office.';
+    expect(await dispatch(text, 'gmail.search')).toMatchObject({ kind: 'executed' });
+    expect(read).toHaveBeenCalledOnce();
+  });
+
+  it('preserves an explicit Gmail read beside a public address request', async () => {
+    const { dispatch, read } = fixture();
+    const text =
+      'Read my Gmail for the invoice. Find the public museum email address to contact the ticket office.';
+    expect(await dispatch(text, 'gmail.search')).toMatchObject({ kind: 'executed' });
+    expect(read).toHaveBeenCalledOnce();
+  });
+
+  it('does not let a calendar read authorize Gmail for a public address request', async () => {
+    const { dispatch, read, calendarRead } = fixture();
+    const text =
+      'What is on my calendar Friday? Find the public museum email address to contact the ticket office.';
+    expect(extractOwnerIntent({ trust: 'owner', text }).authorizedScopes).toContain('private_read');
+    expect(await dispatch(text, 'gmail.search')).toMatchObject({ kind: 'rejected' });
+    expect(read).not.toHaveBeenCalled();
+    expect(await dispatch(text, 'calendar.list_events')).toMatchObject({ kind: 'executed' });
+    expect(calendarRead).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    {
+      text: 'What do our past chats say about Nimbus? Find the public museum email address to contact the ticket office.',
+      sourceTool: 'conversations.search',
+      sourceRead: 'conversationSearch',
+      sourceArgs: { query: 'Nimbus', limit: 20, mode: 'text' as const },
+    },
+    {
+      text: 'What do my saved memories say about telescope preferences? Find the public museum email address to contact the ticket office.',
+      sourceTool: 'memory.recall',
+      sourceRead: 'memoryRead',
+      sourceArgs: {},
+    },
+  ])(
+    'preserves the requested $sourceRead beside a public email lookup without granting Gmail: $text',
+    async ({ text, sourceTool, sourceRead, sourceArgs }) => {
+      const { dispatch, read, memoryRead, conversationSearch } = fixture();
+      expect(extractOwnerIntent({ trust: 'owner', text }).authorizedScopes).toContain(
+        'private_read',
+      );
+      expect(await dispatch(text, sourceTool, sourceArgs)).toMatchObject({ kind: 'executed' });
+      expect(await dispatch(text, 'gmail.search')).toMatchObject({ kind: 'rejected' });
+      expect(read).not.toHaveBeenCalled();
+      expect(sourceRead === 'memoryRead' ? memoryRead : conversationSearch).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('does not let a Gmail read authorize calendar access for a public transit schedule', async () => {
+    const { dispatch, read, calendarRead } = fixture();
+    const text = 'Read my Gmail for the invoice. What is the published train schedule?';
+    expect(extractOwnerIntent({ trust: 'owner', text }).authorizedScopes).toContain('private_read');
+    expect(await dispatch(text, 'calendar.list_events')).toMatchObject({ kind: 'rejected' });
+    expect(calendarRead).not.toHaveBeenCalled();
+    expect(await dispatch(text, 'gmail.search')).toMatchObject({ kind: 'executed' });
+    expect(read).toHaveBeenCalledOnce();
+  });
+
+  it('preserves an owner calendar read beside a public transit schedule', async () => {
+    const { dispatch, calendarRead } = fixture();
+    const text =
+      'Check my calendar for Friday and use the public transit schedule to plan around it.';
+    expect(extractOwnerIntent({ trust: 'owner', text }).authorizedScopes).toContain('private_read');
+    expect(await dispatch(text, 'calendar.list_events')).toMatchObject({ kind: 'executed' });
+    expect(calendarRead).toHaveBeenCalledOnce();
+  });
+
+  it('does not dispatch a public train schedule to the personal calendar', async () => {
+    const { dispatch, calendarRead } = fixture();
+    expect(
+      await dispatch('What is the published train schedule?', 'calendar.list_events', {}, true),
+    ).toMatchObject({ kind: 'rejected' });
+    expect(calendarRead).not.toHaveBeenCalled();
+
+    expect(
+      await dispatch('What is on my calendar Friday?', 'calendar.list_events', {}, true),
+    ).toMatchObject({ kind: 'executed' });
+    expect(calendarRead).toHaveBeenCalledOnce();
+  });
+
+  it('blocks a public transit schedule from the calendar on a clean owner turn', async () => {
+    const { dispatch, calendarRead } = fixture();
+    const text = 'What is the published train schedule?';
+    expect(extractOwnerIntent({ trust: 'owner', text }).authorizedScopes).not.toContain(
+      'private_read',
+    );
+    expect(await dispatch(text, 'calendar.list_events')).toMatchObject({ kind: 'rejected' });
+    expect(calendarRead).not.toHaveBeenCalled();
+  });
+
   it('executes the direct authorized Gmail read positive control', async () => {
     const { dispatch, read, task, repositories } = fixture();
     const disabledPolicy: Records['approvalPolicies'] = {
