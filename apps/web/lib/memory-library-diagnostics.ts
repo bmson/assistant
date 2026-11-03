@@ -11,6 +11,10 @@ export type MemoryLibraryPhase =
   | 'post_fence'
   | 'serialize';
 
+// This route invokes at most ten phases: route overall/auth/config/serialize plus Firestore
+// config/pre_fence/owner_guard/list/filters/post_fence. At most three can fail and log in one
+// request: list and filters may fail together, followed by overall. Successes emit no records.
+
 export interface MemoryLibraryDiagnosticContext {
   readonly requestId: string;
   readonly revision?: string;
@@ -74,28 +78,23 @@ export async function withMemoryLibraryPhase<T>(
   operation: () => T | Promise<T>,
 ): Promise<T> {
   const startedAt = performance.now();
-  let outcome: 'ok' | 'error' = 'ok';
-  let errorCode: string | undefined;
   try {
     return await operation();
   } catch (error) {
-    outcome = 'error';
-    errorCode = safeErrorCode(error);
-    throw error;
-  } finally {
     const event = {
       event: 'memory_library_phase',
       requestId: context.requestId,
       ...(context.revision ? { revision: context.revision } : {}),
       phase,
-      outcome,
+      outcome: 'error',
       elapsedMs: Math.round(Math.max(0, performance.now() - startedAt) * 100) / 100,
-      ...(errorCode ? { errorCode } : {}),
+      errorCode: safeErrorCode(error),
     };
     try {
       console.info(JSON.stringify(event));
     } catch {
-      // Diagnostics must never change the library's success or failure result.
+      // Diagnostics must never replace the library's original error.
     }
+    throw error;
   }
 }

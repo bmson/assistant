@@ -68,7 +68,7 @@ function result() {
 }
 
 describe('mobile memory library diagnostic integration (synthetic, database-free)', () => {
-  it('returns the original row while phase records omit query, owner data, and client request IDs', async () => {
+  it('returns the original row without logging on successful requests', async () => {
     vi.stubEnv('K_REVISION', 'assistant-web-diagnostic-test');
     mocks.authenticated.mockResolvedValue(true);
     mocks.loadConfig.mockReturnValue({ PERSISTENCE_DRIVER: 'firestore' });
@@ -92,31 +92,60 @@ describe('mobile memory library diagnostic integration (synthetic, database-free
       total: 1,
     });
 
-    const lines = info.mock.calls.map(([line]) => String(line));
-    const events = lines.map((line) => JSON.parse(line) as Record<string, unknown>);
-    expect(events.map((event) => event.phase)).toEqual(['auth', 'config', 'serialize', 'overall']);
-    expect(lines.join('\n')).not.toContain('synthetic-query-sentinel');
-    expect(lines.join('\n')).not.toContain('synthetic private row sentinel');
-    expect(lines.join('\n')).not.toContain('synthetic-memory-id');
-    expect(lines.join('\n')).not.toContain('client-supplied-id');
-    expect(lines.join('\n')).toContain('assistant-web-diagnostic-test');
+    expect(info).not.toHaveBeenCalled();
   });
 
   it('rethrows the original library failure rather than converting it to an empty success', async () => {
     const failure = Object.assign(new Error('private query and owner content'), { code: 8 });
+    let contextRequestId = '';
     mocks.authenticated.mockResolvedValue(true);
     mocks.loadConfig.mockReturnValue({ PERSISTENCE_DRIVER: 'firestore' });
-    mocks.loadLibrary.mockRejectedValue(failure);
+    mocks.loadLibrary.mockImplementation(async (_input, context) => {
+      contextRequestId = context.requestId;
+      throw failure;
+    });
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+
+    await expect(
+      GET(
+        new Request('https://example.invalid/api/mobile/v1/memory/library?q=synthetic-query', {
+          headers: { 'x-request-id': 'client-supplied-id' },
+        }),
+      ),
+    ).rejects.toBe(failure);
+    expect(contextRequestId).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(contextRequestId).not.toBe('client-supplied-id');
+    const lines = info.mock.calls.map(([line]) => String(line));
+    const events = lines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(events.map((event) => event.phase)).toEqual(['overall']);
+    expect(events.at(-1)).toMatchObject({
+      requestId: contextRequestId,
+      outcome: 'error',
+      errorCode: 'RESOURCE_EXHAUSTED',
+    });
+    expect(lines.join('\n')).not.toContain('private query and owner content');
+    expect(lines.join('\n')).not.toContain('synthetic-query');
+    expect(lines.join('\n')).not.toContain('client-supplied-id');
+  });
+
+  it('emits at most three failure records when both independent list reads reject', async () => {
+    const failure = new Error('synthetic sibling read failure');
+    mocks.authenticated.mockResolvedValue(true);
+    mocks.loadConfig.mockReturnValue({ PERSISTENCE_DRIVER: 'postgres' });
+    mocks.getDb.mockReturnValue({});
+    mocks.listMemoryLibrary.mockRejectedValue(failure);
+    mocks.listMemoryLibraryFilters.mockRejectedValue(failure);
     const info = vi.spyOn(console, 'info').mockImplementation(() => {});
 
     await expect(
       GET(new Request('https://example.invalid/api/mobile/v1/memory/library')),
     ).rejects.toBe(failure);
+
     const lines = info.mock.calls.map(([line]) => String(line));
     const events = lines.map((line) => JSON.parse(line) as Record<string, unknown>);
-    expect(events.map((event) => event.phase)).toEqual(['auth', 'config', 'overall']);
-    expect(events.at(-1)).toMatchObject({ outcome: 'error', errorCode: 'RESOURCE_EXHAUSTED' });
-    expect(lines.join('\n')).not.toContain('private query and owner content');
+    expect(events).toHaveLength(3);
+    expect(events.map((event) => event.phase).sort()).toEqual(['filters', 'list', 'overall']);
+    expect(lines.join('\n')).not.toContain('synthetic sibling read failure');
   });
 
   it('keeps authentication failures on the existing 401 response path', async () => {
@@ -126,8 +155,6 @@ describe('mobile memory library diagnostic integration (synthetic, database-free
 
     expect(response.status).toBe(401);
     expect(mocks.loadConfig).not.toHaveBeenCalled();
-    expect(
-      info.mock.calls.map(([line]) => (JSON.parse(String(line)) as { phase: string }).phase),
-    ).toEqual(['auth', 'overall']);
+    expect(info).not.toHaveBeenCalled();
   });
 });

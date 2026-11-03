@@ -64,19 +64,21 @@ describe('memory library phase diagnostics', () => {
     expect(String(line)).not.toContain('hostile code getter');
   });
 
-  it('keeps the original operation result or error if the logger itself fails', async () => {
+  it('does not log successful operations and keeps the original error if logging fails', async () => {
     const context = createMemoryLibraryDiagnosticContext();
-    vi.spyOn(console, 'info').mockImplementation(() => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {
       throw new Error('synthetic logger failure');
     });
     const value = { total: 1 };
     const failure = new Error('synthetic repository failure');
 
     await expect(withMemoryLibraryPhase(context, 'list', async () => value)).resolves.toBe(value);
+    expect(info).not.toHaveBeenCalled();
     await expect(
       withMemoryLibraryPhase(context, 'filters', async () => {
         throw failure;
       }),
     ).rejects.toBe(failure);
+    expect(info).toHaveBeenCalledOnce();
   });
 });

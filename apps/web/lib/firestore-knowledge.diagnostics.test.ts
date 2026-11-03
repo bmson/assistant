@@ -80,7 +80,7 @@ afterEach(() => {
 });
 
 describe('Firestore memory library diagnostic integration (synthetic, database-free)', () => {
-  it('records successful fence, owner, list, and filter phases without logging result data', async () => {
+  it('returns successful fenced library data without logging', async () => {
     const { libraryResult, filtersResult } = setup();
     const info = vi.spyOn(console, 'info').mockImplementation(() => {});
 
@@ -91,11 +91,7 @@ describe('Firestore memory library diagnostic integration (synthetic, database-f
       ),
     ).resolves.toEqual([libraryResult, filtersResult]);
 
-    const lines = info.mock.calls.map(([line]) => String(line));
-    const phases = lines.map((line) => (JSON.parse(line) as { phase: string }).phase);
-    expect(phases).toEqual(['config', 'pre_fence', 'owner_guard', 'list', 'filters', 'post_fence']);
-    expect(lines.join('\n')).not.toContain('configured-owner');
-    expect(lines.join('\n')).not.toContain('synthetic memory content');
+    expect(info).not.toHaveBeenCalled();
   });
 
   it('logs owner validation failures at the owner guard and preserves the original failure', async () => {
@@ -111,8 +107,6 @@ describe('Firestore memory library diagnostic integration (synthetic, database-f
 
     const lines = info.mock.calls.map(([line]) => String(line));
     expect(lines.map((line) => (JSON.parse(line) as { phase: string }).phase)).toEqual([
-      'config',
-      'pre_fence',
       'owner_guard',
     ]);
     expect(JSON.parse(lines.at(-1) ?? '{}')).toMatchObject({
@@ -141,6 +135,7 @@ describe('Firestore memory library diagnostic integration (synthetic, database-f
 
     const lines = info.mock.calls.map(([line]) => String(line));
     const events = lines.map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(events.map((event) => event.phase)).toEqual(['filters']);
     expect(events.find((event) => event.phase === 'filters')).toMatchObject({
       outcome: 'error',
       errorCode: 'FIRESTORE_PROFILE_READ_LIMIT',
@@ -164,7 +159,6 @@ describe('Firestore memory library diagnostic integration (synthetic, database-f
 
     const lines = info.mock.calls.map(([line]) => String(line));
     expect(lines.map((line) => (JSON.parse(line) as { phase: string }).phase)).toEqual([
-      'config',
       'pre_fence',
     ]);
     expect(JSON.parse(lines.at(-1) ?? '{}')).toMatchObject({
@@ -192,14 +186,7 @@ describe('Firestore memory library diagnostic integration (synthetic, database-f
 
     const lines = info.mock.calls.map(([line]) => String(line));
     const events = lines.map((line) => JSON.parse(line) as Record<string, unknown>);
-    expect(events.map((event) => event.phase)).toEqual([
-      'config',
-      'pre_fence',
-      'owner_guard',
-      'list',
-      'filters',
-      'post_fence',
-    ]);
+    expect(events.map((event) => event.phase)).toEqual(['post_fence']);
     expect(events.at(-1)).toMatchObject({ outcome: 'error', errorCode: 'UNCLASSIFIED' });
   });
 });
