@@ -1026,12 +1026,7 @@ struct ActivityView: View {
 
     private var emptyStateTitle: String {
         if discovery != nil {
-            let scope = showingArchived ? "archived activity" : "activity"
-            let query = discoveryQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-            let filterName = filter == .all ? nil : filter.rawValue.lowercased()
-            let qualifiers = [query.isEmpty ? nil : "“\(query)”", filterName].compactMap { $0 }
-            let search = qualifiers.isEmpty ? "No matches" : "No matches for " + qualifiers.joined(separator: " · ")
-            return "\(search) in \(scope)"
+            return "No matching recorded work"
         }
         if filter == .all {
             return showingArchived ? "No archived activity" : "No activity yet"
@@ -1041,7 +1036,7 @@ struct ActivityView: View {
 
     private var emptyStateDescription: String {
         if discovery != nil {
-            return "Continue to older records if available, or change the search or activity filter."
+            return "Submit a search or change the activity filter. If more records are available, continue to older records."
         }
         if showingArchived {
             return filter == .all
