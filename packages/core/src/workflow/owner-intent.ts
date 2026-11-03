@@ -50,6 +50,11 @@ export interface OwnerIntent {
   separation: 'clear' | 'none' | 'unknown';
 }
 
+/** Planning-only view of balanced inline quotes; it never participates in authorization. */
+export type OwnerIntentPlannerSegment =
+  | { kind: 'owner_text'; text: string }
+  | { kind: 'quoted_data'; value: string };
+
 export type RecallMode = 'automatic' | 'explicit' | 'continuation' | 'disabled';
 
 /** An explicit private read of the owner's open commitment list, by purpose. */
@@ -353,6 +358,60 @@ function splitQuoted(text: string): { authored: string; external: string; clear:
     };
   }
   return { authored: text.trim(), external: '', clear: true };
+}
+
+/**
+ * Preserve the relation between owner prose and a quoted literal for planner
+ * context. This intentionally handles only the same balanced inline quote
+ * form that splitQuoted treats as data. Authorization continues to use only
+ * OwnerIntent.ownerAuthoredText and OwnerIntent.authorizedScopes.
+ */
+export function ownerIntentPlannerSegments(
+  text: string,
+  intent: OwnerIntent,
+): OwnerIntentPlannerSegment[] | null {
+  if (
+    (intent.sourceActor !== 'owner' && intent.sourceActor !== 'mixed') ||
+    intent.separation === 'unknown' ||
+    externalBoundary.test(text) ||
+    /^\s*>/m.test(text) ||
+    /```[^\n]*\n[\s\S]{1,12000}?\n```/g.test(text) ||
+    hasUnmatchedQuote(text)
+  ) {
+    return null;
+  }
+
+  const quote = /[“"]([^“”"]{1,12000})[”"]/g;
+  const matches = [...text.matchAll(quote)];
+  if (!matches.length) return null;
+
+  let cursor = 0;
+  let authored = '';
+  const external: string[] = [];
+  const segments: OwnerIntentPlannerSegment[] = [];
+  for (const match of matches) {
+    const start = match.index;
+    const rawValue = match[1] ?? '';
+    if (start === undefined || !rawValue.trim()) return null;
+    const end = start + match[0].length;
+    const ownerText = text.slice(cursor, start);
+    segments.push({ kind: 'owner_text', text: ownerText });
+    segments.push({ kind: 'quoted_data', value: rawValue });
+    authored += `${ownerText} `;
+    external.push(rawValue.trim());
+    cursor = end;
+  }
+  const trailingOwnerText = text.slice(cursor);
+  segments.push({ kind: 'owner_text', text: trailingOwnerText });
+  authored += trailingOwnerText;
+
+  if (
+    authored.replace(/\s+/g, ' ').trim() !== intent.ownerAuthoredText ||
+    external.join('\n') !== intent.externalText
+  ) {
+    return null;
+  }
+  return segments;
 }
 
 function hasUnmatchedQuote(text: string): boolean {
