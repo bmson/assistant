@@ -723,4 +723,48 @@ describe('calendarChangeMoments', () => {
     expect(moment?.text).toContain('12:00 PM');
     expect(moment?.text).toContain('3:30 PM');
   });
+
+  it.each(['', ' \n\t '])('uses a clear fallback for a blank event summary (%j)', (summary) => {
+    const changes = [
+      change({ kind: 'unverified', summary }),
+      change({ kind: 'cancelled', summary }),
+      change({
+        kind: 'moved',
+        summary,
+        calendar: 'Work\nCalendar',
+        previousStart: '2026-03-04T20:00:00Z',
+      }),
+      change({ kind: 'declined', summary, declinedEmails: ['guest@example.test'] }),
+    ];
+
+    const moments = calendarChangeMoments(changes, 'America/Los_Angeles', NOW);
+
+    expect(moments.map(({ text }) => text)).toEqual([
+      'An event is no longer in this calendar window. I could not confirm whether it moved or was cancelled; keep the existing plan until you verify it.',
+      'An event (was Wed, Mar 4 3:30 PM) has been cancelled.',
+      'An event moved from Wed, Mar 4 12:00 PM to Wed, Mar 4 3:30 PM.',
+      'guest@example.test declined an event (Wed, Mar 4 3:30 PM), having previously accepted.',
+    ]);
+    expect(moments.map(({ card }) => card?.title)).toEqual([
+      'Calendar event',
+      'Calendar event',
+      'Calendar event',
+      'Calendar event',
+    ]);
+    expect(moments[2]?.card?.summary).toBe('Was Wed, Mar 4 12:00 PM, now Wed, Mar 4 3:30 PM.');
+    expect(moments[2]?.card?.details).toEqual([{ label: 'Calendar', value: 'Work Calendar' }]);
+  });
+
+  it('keeps a named event title in prose and cards', () => {
+    const [moment] = calendarChangeMoments(
+      [change({ kind: 'moved', previousStart: '2026-03-04T20:00:00Z' })],
+      'America/Los_Angeles',
+      NOW,
+    );
+
+    expect(moment?.text).toBe(
+      '"Fall Practice" moved from Wed, Mar 4 12:00 PM to Wed, Mar 4 3:30 PM.',
+    );
+    expect(moment?.card?.title).toBe('Fall Practice');
+  });
 });
