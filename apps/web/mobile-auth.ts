@@ -19,20 +19,7 @@ export async function isMobileAuthed(request: Request): Promise<boolean> {
   const config = loadConfig();
   const token = bearerToken(request);
   if (token && !token.startsWith('asd1_')) {
-    try {
-      if (secureTokenMatches(await getMobileAccessToken(), token)) return true;
-      // A freshly rotated token must work even on an instance with a warm cache.
-      if (
-        process.env.K_SERVICE &&
-        config.GCP_PROJECT &&
-        secureTokenMatches(await getMobileAccessToken('mismatch'), token)
-      )
-        return true;
-    } catch {
-      // Do not accept the stale startup secret when the current secret cannot
-      // be checked. Owner sessions and independent device keys remain usable.
-      console.error('[mobile-auth] could not verify mobile access token');
-    }
+    if (await configuredMobileBearerMatches(token, config)) return true;
   }
   // Passkey installations issue revocable per-device credentials from /security.
   if (config.OWNER_AUTH_MODE === 'passkey' && token.startsWith('asd1_')) {
@@ -51,6 +38,92 @@ export async function isMobileAuthed(request: Request): Promise<boolean> {
     }
   }
   return Boolean(await isAuthed());
+}
+
+export type MobileBearerPrincipal =
+  | { kind: 'configured_installation_bearer' }
+  | { kind: 'owner_device_bearer'; deviceId: string };
+
+export interface AuthenticatedMobileOwner {
+  principal: MobileBearerPrincipal;
+  ownerId: string;
+}
+
+/**
+ * Resolve only the configured bearer credential. This preserves the existing
+ * rotation and warm-cache behavior used by legacy mobile routes.
+ */
+async function configuredMobileBearerMatches(
+  token: string,
+  config: ReturnType<typeof loadConfig>,
+): Promise<boolean> {
+  try {
+    if (secureTokenMatches(await getMobileAccessToken(), token)) return true;
+    // A freshly rotated token must work even on an instance with a warm cache.
+    return Boolean(
+      process.env.K_SERVICE &&
+        config.GCP_PROJECT &&
+        secureTokenMatches(await getMobileAccessToken('mismatch'), token),
+    );
+  } catch {
+    // Do not accept the stale startup secret when the current secret cannot
+    // be checked. Owner sessions and independent device keys remain usable.
+    console.error('[mobile-auth] could not verify mobile access token');
+    return false;
+  }
+}
+
+/**
+ * Authenticate a bearer without the Auth.js cookie fallback. Device tokens
+ * are checked fresh here so a cached legacy Boolean cannot be mistaken for a
+ * current revocation check. The configured bearer has no per-user scope.
+ */
+export async function authenticateMobileBearer(
+  request: Request,
+): Promise<MobileBearerPrincipal | null> {
+  const config = loadConfig();
+  const token = bearerToken(request);
+  if (!token) return null;
+
+  // Reserve this prefix for per-device credentials, even when the token is
+  // malformed or this installation uses another owner-auth mode.
+  if (token.startsWith('asd1_')) {
+    if (config.OWNER_AUTH_MODE !== 'passkey') return null;
+    try {
+      const { ownerAuthService } = await import('./lib/owner-auth/runtime');
+      const deviceId = await ownerAuthService().verifyDeviceToken(token);
+      return deviceId ? { kind: 'owner_device_bearer', deviceId } : null;
+    } catch {
+      return null;
+    }
+  }
+
+  return (await configuredMobileBearerMatches(token, config))
+    ? { kind: 'configured_installation_bearer' }
+    : null;
+}
+
+/** Resolve installation ownership only after this request's bearer is valid. */
+export async function authenticateMobileOwner(
+  request: Request,
+): Promise<AuthenticatedMobileOwner | null> {
+  const principal = await authenticateMobileBearer(request);
+  if (!principal) return null;
+
+  try {
+    const config = loadConfig();
+    if (config.PERSISTENCE_DRIVER !== 'firestore') {
+      const { assertPostgresInstallationOwner, getDb } = await import('./lib/server');
+      const ownerId = await assertPostgresInstallationOwner(getDb());
+      return typeof ownerId === 'string' && ownerId.length > 0 ? { principal, ownerId } : null;
+    }
+
+    const { validateAgentPersistenceConfig } = await import('@assistant/config');
+    if (validateAgentPersistenceConfig(config).length || !config.FIRESTORE_AGENT_ID) return null;
+    return { principal, ownerId: config.FIRESTORE_AGENT_ID };
+  } catch {
+    return null;
+  }
 }
 
 export function mobileUnauthorized(): Response {
