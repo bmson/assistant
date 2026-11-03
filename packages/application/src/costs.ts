@@ -12,6 +12,7 @@ import { count, desc, eq, gte, sql, sum } from 'drizzle-orm';
 
 export interface CostsDashboard {
   byEvidence: CostEvidenceTotal[];
+  dispatchingAttempts: UnknownCostAttemptSummary;
   unknownAttempts: UnknownCostAttemptSummary;
   timezone: string;
   totals: CostTotals;
@@ -118,7 +119,7 @@ export async function getCostsDashboard(db: Db): Promise<CostsDashboard> {
         .where(eq(budgets.scope, 'task_default')),
     ]);
 
-  const [evidenceRows, [unknownReservations]] = await Promise.all([
+  const [evidenceRows, [dispatchingReservations], [unknownReservations]] = await Promise.all([
     db
       .select({
         basis: sql<string>`${costEvents.evidence}->>'basis'`,
@@ -131,6 +132,10 @@ export async function getCostsDashboard(db: Db): Promise<CostsDashboard> {
     db
       .select({ count: count(), estimatedUsd: sum(costReservations.estimatedUsd) })
       .from(costReservations)
+      .where(eq(costReservations.status, 'dispatching')),
+    db
+      .select({ count: count(), estimatedUsd: sum(costReservations.estimatedUsd) })
+      .from(costReservations)
       .where(eq(costReservations.status, 'unknown')),
   ]);
 
@@ -140,6 +145,12 @@ export async function getCostsDashboard(db: Db): Promise<CostsDashboard> {
       usd: row.usd ?? '0',
       count: Number(row.count),
     })),
+    dispatchingAttempts: {
+      count: Number(dispatchingReservations?.count ?? 0),
+      countComplete: true,
+      estimatedUsd: dispatchingReservations?.estimatedUsd ?? '0.000000',
+      estimateComplete: true,
+    },
     unknownAttempts: {
       count: Number(unknownReservations?.count ?? 0),
       countComplete: true,

@@ -568,6 +568,12 @@ export function createProductVisualData(empty: boolean) {
       softPct: 80,
     },
     byEvidence: empty ? [] : [{ basis: 'token_rate', usd: '8.42', count: 128 }],
+    dispatchingAttempts: {
+      count: 0,
+      countComplete: true,
+      estimatedUsd: '0.000000',
+      estimateComplete: true,
+    },
     unknownAttempts: {
       count: 0,
       countComplete: true,

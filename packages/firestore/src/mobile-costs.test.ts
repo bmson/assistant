@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  dispatchingAttemptSummary,
   getFirestoreMobileCosts,
   summarizeUnknownAttemptEstimates,
   unknownAttemptSummary,
@@ -185,13 +186,66 @@ describe('unknown reservation Firestore query', () => {
   });
 });
 
+describe('dispatching reservation Firestore query', () => {
+  it('uses a bounded status query and returns its estimate separately from spend', async () => {
+    const calls: unknown[][] = [];
+    const query = {
+      where: (...args: unknown[]) => {
+        calls.push(['where', ...args]);
+        return query;
+      },
+      select: (...args: unknown[]) => {
+        calls.push(['select', ...args]);
+        return query;
+      },
+      limit: (...args: unknown[]) => {
+        calls.push(['limit', ...args]);
+        return query;
+      },
+      get: async () => ({
+        size: 1,
+        docs: [
+          {
+            get: (field: string) => {
+              calls.push(['doc.get', field]);
+              return '0.020000';
+            },
+          },
+        ],
+      }),
+    };
+    const store = {
+      collection: (name: string) => {
+        calls.push(['collection', name]);
+        return query;
+      },
+    };
+
+    await expect(dispatchingAttemptSummary(store as unknown as InstallationStore)).resolves.toEqual(
+      {
+        count: 1,
+        countComplete: true,
+        estimatedUsd: '0.020000',
+        estimateComplete: true,
+      },
+    );
+    expect(calls).toEqual([
+      ['collection', 'costReservations'],
+      ['where', 'status', '==', 'dispatching'],
+      ['select', 'estimatedUsd'],
+      ['limit', 501],
+      ['doc.get', 'estimatedUsd'],
+    ]);
+  });
+});
+
 describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore mobile cost dashboard', () => {
   let store: InstallationStore;
   beforeEach(async () => {
     store = emulatorStore(() => new Date('2026-09-22T12:00:00Z'));
     await seedBudget(store);
     await Promise.all([
-      store.doc('coordination', 'budget-holds').set({ heldMicros: 20_000 }),
+      store.doc('coordination', 'budget-holds').set({ heldMicros: 60_000 }),
       store.doc('budgetPeriods', 'day:2026-09-22').set({ spentMicros: 50_200 }),
       store.doc('budgetPeriods', 'month:2026-09').set({ spentMicros: 50_200 }),
       store.doc('budgets', 'task_default').set({ scope: 'task_default', limitUsd: '0.50' }),
@@ -217,9 +271,41 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore mobile cost das
         id: 'hold',
         source: 'model',
         description: 'Next call',
-        estimatedUsd: '0.020000',
+        estimatedUsd: '0.010000',
         status: 'held',
         createdAt: new Date('2026-09-22T11:00:00Z'),
+      }),
+      store.doc('costReservations', 'dispatching').set({
+        id: 'dispatching',
+        source: 'model',
+        description: 'In flight',
+        estimatedUsd: '0.020000',
+        status: 'dispatching',
+        createdAt: new Date('2026-09-22T11:01:00Z'),
+      }),
+      store.doc('costReservations', 'unknown').set({
+        id: 'unknown',
+        source: 'model',
+        description: 'Uncertain',
+        estimatedUsd: '0.030000',
+        status: 'unknown',
+        createdAt: new Date('2026-09-22T11:02:00Z'),
+      }),
+      store.doc('costReservations', 'reconciled').set({
+        id: 'reconciled',
+        source: 'model',
+        description: 'Settled',
+        estimatedUsd: '0.040000',
+        status: 'reconciled',
+        createdAt: new Date('2026-09-22T11:03:00Z'),
+      }),
+      store.doc('costReservations', 'released').set({
+        id: 'released',
+        source: 'model',
+        description: 'Released',
+        estimatedUsd: '0.050000',
+        status: 'released',
+        createdAt: new Date('2026-09-22T11:04:00Z'),
       }),
     ]);
   });
@@ -271,7 +357,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore mobile cost das
 
     const dashboard = await getFirestoreMobileCosts(store, 'owner');
     expect(dashboard.timezone).toBe('America/Los_Angeles');
-    expect(dashboard.totals).toMatchObject({ monthlySpentUsd: 0.0502, heldUsd: 0.02 });
+    expect(dashboard.totals).toMatchObject({ monthlySpentUsd: 0.0502, heldUsd: 0.06 });
     expect(dashboard.bySource).toEqual([
       { source: 'model', usd: '0.050100', count: 501 },
       { source: 'external_api', usd: '0.000100', count: 1 },
@@ -286,8 +372,20 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore mobile cost das
       { taskId: 'task-a', usd: '0.050100', type: 'chat', progress: 'Running' },
     ]);
     expect(dashboard.held).toEqual([
-      { id: 'hold', source: 'model', description: 'Next call', estimatedUsd: '0.020000' },
+      { id: 'hold', source: 'model', description: 'Next call', estimatedUsd: '0.010000' },
     ]);
+    expect(dashboard.dispatchingAttempts).toEqual({
+      count: 1,
+      countComplete: true,
+      estimatedUsd: '0.020000',
+      estimateComplete: true,
+    });
+    expect(dashboard.unknownAttempts).toEqual({
+      count: 1,
+      countComplete: true,
+      estimatedUsd: '0.030000',
+      estimateComplete: true,
+    });
     expect(dashboard.recent[0]?.id).toBe('other');
     expect(dashboard.parkedTasks).toBe(1);
     expect(dashboard.taskDefaultLimit).toBe('0.50');
