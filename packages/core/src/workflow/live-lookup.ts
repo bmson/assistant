@@ -1277,10 +1277,17 @@ export function liveLookupFailure(
       return "Calendar coverage is incomplete, so I haven't verified an airport or estimated the route.";
     const input = airportRouteInput(lookup, coverage, lookupContext);
     const attempts = input ? rows.filter((row) => matchingAirportRoute(row, input)) : [];
-    if (attempts.length)
-      return attempts.some(successfulLookup)
-        ? undefined
-        : "I couldn't get a route from Apple Maps using the confirmed airport, origin, and departure time, so I haven't estimated travel time.";
+    if (attempts.length) {
+      if (attempts.some(successfulLookup)) return undefined;
+      const airportLabel =
+        typeof input?.destination === 'string'
+          ? input.destination.replace(/\s+/gu, ' ').trim()
+          : '';
+      const airportNote = airportLabel
+        ? `Your calendar lists ${airportLabel} as the confirmed airport. `
+        : '';
+      return `${airportNote}I couldn't get a route from Apple Maps using the confirmed airport, origin, and departure time, so I haven't estimated travel time. If you'd like me to try again, ask me to retry the route lookup.`;
+    }
     // A full read with missing or ambiguous route details is an ordinary
     // clarification, not a failed provider lookup. The model is instructed to
     // ask only for the fields that are still absent.

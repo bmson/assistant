@@ -1206,6 +1206,78 @@ describe('a trip to a generic airport', () => {
     },
   );
 
+  it('preserves the resolved calendar airport and gives a retry action after route failure', () => {
+    const lookup = detectLiveLookup([
+      {
+        role: 'user',
+        content:
+          'How long to get to the airport tomorrow from 123 Market Street, San Francisco, CA 94103, leaving at 8am?',
+      },
+    ]);
+    if (!lookup) throw new Error('Expected airport lookup');
+    const page = calendar([returnFlight]);
+    const routeInput = nextLiveLookup(lookup, [page], context)?.input;
+    if (!routeInput) throw new Error('Expected a route grounded in the completed calendar read');
+    const failedRoute = {
+      toolName: 'maps.directions',
+      status: 'failed' as const,
+      args: routeInput,
+      result: { error: 'Synthetic route unavailable' },
+    };
+
+    const failure = liveLookupFailure(lookup, [page, failedRoute], context);
+
+    expect
+      .soft(failure)
+      .toContain('Your calendar lists Berlin Brandenburg Airport as the confirmed airport.');
+    expect.soft(failure).toContain('ask me to retry the route lookup');
+    expect.soft(failure).not.toMatch(/\b\d+\s*(?:minutes?|hours?)\b/i);
+    expect.soft(failure).not.toContain('Synthetic route unavailable');
+    const staleCalendarFailure = liveLookupFailure(
+      lookup,
+      [{ ...page, fromCurrentTask: false }, failedRoute],
+      context,
+    );
+    expect(staleCalendarFailure).toMatch(/couldn't read the requested calendar window/i);
+    expect(staleCalendarFailure).not.toContain('Berlin Brandenburg Airport');
+    expect(staleCalendarFailure).not.toMatch(/retry/i);
+
+    const wrongRangeCalendar = {
+      ...page,
+      args: { ...range, timeMin: '2026-10-01T00:00:00Z' },
+    };
+    const wrongRangeFailure = liveLookupFailure(lookup, [wrongRangeCalendar, failedRoute], context);
+    expect(wrongRangeFailure).toMatch(/couldn't read the requested calendar window/i);
+    expect(wrongRangeFailure).not.toContain('Berlin Brandenburg Airport');
+    expect(wrongRangeFailure).not.toMatch(/retry/i);
+
+    const noAirportFailure = liveLookupFailure(
+      lookup,
+      [calendar([{ ...returnFlight, location: 'Berlin' }]), failedRoute],
+      context,
+    );
+    expect(noAirportFailure).toBeUndefined();
+
+    const unrelatedRoute = {
+      ...failedRoute,
+      args: { ...routeInput, destination: 'Another Airport' },
+    };
+    expect(liveLookupFailure(lookup, [page, unrelatedRoute], context)).toBeUndefined();
+    expect(nextLiveLookup(lookup, [page, unrelatedRoute], context)).toMatchObject({
+      toolName: 'maps.directions',
+      input: routeInput,
+    });
+
+    const incompleteCalendarFailure = liveLookupFailure(
+      lookup,
+      [calendar([returnFlight], { calendarRosterComplete: false }), failedRoute],
+      context,
+    );
+    expect(incompleteCalendarFailure).toMatch(/coverage is incomplete/i);
+    expect(incompleteCalendarFailure).not.toContain('Berlin Brandenburg Airport');
+    expect(incompleteCalendarFailure).not.toMatch(/retry/i);
+  });
+
   it.each(['origin', 'destination', 'departAt', 'arriveBy', 'mode', 'stale'])(
     'does not consume another route as the requested airport trip: %s',
     (mismatch) => {
