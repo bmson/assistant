@@ -92,7 +92,7 @@ describe('real PersonPage saved-note destinations with fake storage ports', () =
       );
 
       expect(noteId).toBeTruthy();
-      expect(html).toContain('Review / edit saved note');
+      expect(html).toContain('Open saved note');
       expect(html).toContain(
         `href="/profile/knowledge/notes/${noteId}?returnTo=${encodeURIComponent(returnTo)}"`,
       );
