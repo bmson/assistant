@@ -139,6 +139,82 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       expect((await repository.listMessages(agentId, conversation.id))?.messages).toHaveLength(1);
     });
 
+    it('rejects a stored conversation identity mismatch before returning an owned conversation', async () => {
+      const conversation = await repository.createConversation(agentId);
+      await store.doc('conversations', conversation.id).update({ id: randomUUID() });
+      await expect(repository.getConversation(agentId, conversation.id)).resolves.toBeNull();
+
+      await store.doc('conversations', conversation.id).update({
+        id: conversation.id,
+        agentId: randomUUID(),
+      });
+      await expect(repository.getConversation(agentId, conversation.id)).resolves.toBeNull();
+
+      await store.doc('conversations', conversation.id).update({
+        agentId,
+        channel: 'sms',
+      });
+      await expect(repository.getConversation(agentId, conversation.id)).resolves.toBeNull();
+    });
+
+    it('wakes a read-only chat watch after an actual durable message append and unsubscribes', async () => {
+      const conversation = await repository.createConversation(agentId);
+      const taskId = randomUUID();
+      await store.doc('tasks', taskId).set({
+        id: taskId,
+        agentId,
+        conversationId: conversation.id,
+        status: 'running',
+      });
+      const controller = new AbortController();
+      let changes = 0;
+      let resolveChange!: () => void;
+      let rejectChange!: (error: unknown) => void;
+      const changed = new Promise<void>((resolve, reject) => {
+        resolveChange = resolve;
+        rejectChange = reject;
+      });
+      const watch = await repository.watchChatChanges({
+        agentId,
+        conversationId: conversation.id,
+        taskId,
+        signal: controller.signal,
+        onChange: () => {
+          changes++;
+          resolveChange();
+        },
+        onError: rejectChange,
+      });
+      expect(watch).not.toBeNull();
+      const timeout = setTimeout(() => rejectChange(new Error('chat watch did not wake')), 3_000);
+      try {
+        await repository.appendOwned(agentId, {
+          conversationId: conversation.id,
+          taskId,
+          role: 'assistant',
+          origin: 'assistant',
+          parts: [{ type: 'text', text: 'Committed response' }],
+          text: 'Committed response',
+        });
+        await changed;
+      } finally {
+        clearTimeout(timeout);
+        watch?.close();
+      }
+      expect(changes).toBe(1);
+
+      await repository.appendOwned(agentId, {
+        conversationId: conversation.id,
+        taskId,
+        role: 'assistant',
+        origin: 'assistant',
+        parts: [{ type: 'text', text: 'After unsubscribe' }],
+        text: 'After unsubscribe',
+      });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(changes).toBe(1);
+    });
+
     it('atomically deduplicates chat operation admissions and preserves distinct identical sends', async () => {
       const conversation = await repository.createConversation(agentId);
       const operationId = randomUUID();

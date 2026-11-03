@@ -55,6 +55,7 @@ const GOAL_BLOCKED_PREFIX = 'Waiting on the owner:';
 const DIRECT_CHAT_LEASE_MS = 10 * 60_000;
 const FIRST_APPEND_ID = '00000000-0000-0000-0000-000000000000';
 const MAX_COMPOSER_CANCELLATION_TASKS = 64;
+const MAX_CHAT_WATCH_CALLBACKS = 64;
 
 function conciseTitle(value: string | undefined): string | undefined {
   const title = value?.replace(/\s+/g, ' ').trim() ?? '';
@@ -126,6 +127,18 @@ function boundedIds(values: string[]): string[] {
 
 function isOwnedChat(data: FirebaseFirestore.DocumentData | undefined, agentId: string): boolean {
   return Boolean(data && data.agentId === agentId && data.channel === 'chat');
+}
+
+function conversationSnapshotVersion(snapshot: FirebaseFirestore.DocumentSnapshot): string {
+  const updateTime = snapshot.updateTime;
+  const updatedAt = snapshot.get('updatedAt');
+  const fieldVersion =
+    updatedAt instanceof Timestamp
+      ? `${updatedAt.seconds}:${updatedAt.nanoseconds}`
+      : updatedAt instanceof Date
+        ? String(updatedAt.getTime())
+        : String(updatedAt ?? '');
+  return `${updateTime ? `${updateTime.seconds}:${updateTime.nanoseconds}` : ''}|${fieldVersion}`;
 }
 
 async function assertRecalledMessagesCurrent(
@@ -369,7 +382,13 @@ export class FirestoreApplicationChatPersistence implements ApplicationChatPersi
 
   async getConversation(agentId: string, conversationId: string) {
     const snapshot = await this.store.doc('conversations', conversationId).get();
-    if (!snapshot.exists || !isOwnedChat(snapshot.data(), agentId)) return null;
+    if (
+      !snapshot.exists ||
+      snapshot.id !== documentKey(conversationId) ||
+      snapshot.get('id') !== conversationId ||
+      !isOwnedChat(snapshot.data(), agentId)
+    )
+      return null;
     return decodeRecord<ApplicationChatConversation>(snapshot.data());
   }
 
@@ -593,6 +612,179 @@ export class FirestoreApplicationChatPersistence implements ApplicationChatPersi
     )
       return null;
     return typeof task.status === 'string' ? task.status : null;
+  }
+
+  async watchChatChanges(input: {
+    agentId: string;
+    conversationId: string;
+    taskId: string;
+    signal: AbortSignal;
+    onChange: () => void;
+    onError: (error: unknown) => void;
+  }): Promise<{ close(): void } | null> {
+    const { agentId, conversationId, taskId, signal, onChange, onError } = input;
+    if (signal.aborted) return null;
+    const reportSetupError = (error: unknown) => {
+      if (signal.aborted) return;
+      try {
+        onError(error);
+      } catch {
+        // A consumer callback must not make a read-only setup failure escape.
+      }
+    };
+
+    const conversationRef = this.store.doc('conversations', conversationId);
+    const taskRef = this.store.doc('tasks', taskId);
+    let conversationVersion: string;
+    let taskStatus: string;
+    try {
+      const [conversation, task] = await this.store.db.getAll(conversationRef, taskRef);
+      if (signal.aborted) return null;
+      if (
+        !conversation?.exists ||
+        conversation.id !== documentKey(conversationId) ||
+        conversation.get('id') !== conversationId ||
+        !isOwnedChat(conversation.data(), agentId)
+      ) {
+        reportSetupError(new Error('Chat conversation watch is outside the requested owner scope'));
+        return null;
+      }
+      const taskRow = task?.exists ? decodeRecord<Record<string, unknown>>(task.data()) : null;
+      if (
+        !task?.exists ||
+        !taskRow ||
+        task.id !== documentKey(taskId) ||
+        taskRow.id !== taskId ||
+        taskRow.agentId !== agentId ||
+        taskRow.conversationId !== conversationId ||
+        isChatAdmissionCancellationProjection(taskRow) ||
+        typeof taskRow.status !== 'string'
+      ) {
+        reportSetupError(new Error('Chat task watch is outside the requested owner scope'));
+        return null;
+      }
+      conversationVersion = conversationSnapshotVersion(conversation);
+      taskStatus = taskRow.status;
+    } catch (error) {
+      reportSetupError(error);
+      return null;
+    }
+    if (signal.aborted) return null;
+
+    let closed = false;
+    let callbacks = 0;
+    const unsubscribe: Array<() => void> = [];
+    const close = () => {
+      if (closed) return;
+      closed = true;
+      signal.removeEventListener('abort', close);
+      for (const release of unsubscribe.splice(0)) {
+        try {
+          release();
+        } catch {
+          // Listener cleanup is best-effort; close stays idempotent.
+        }
+      }
+    };
+    const register = (release: () => void) => {
+      if (closed) {
+        try {
+          release();
+        } catch {
+          // A synchronous callback may close before onSnapshot returns.
+        }
+      } else {
+        unsubscribe.push(release);
+      }
+    };
+    const fail = (error: unknown) => {
+      if (closed) return;
+      close();
+      if (!signal.aborted) {
+        try {
+          onError(error);
+        } catch {
+          // Consumer callbacks must not keep a failed Firestore watch alive.
+        }
+      }
+    };
+    const changed = () => {
+      if (closed || signal.aborted) return;
+      try {
+        onChange();
+      } catch (error) {
+        fail(error);
+      }
+    };
+    const countCallback = () => {
+      if (closed) return false;
+      callbacks++;
+      if (callbacks <= MAX_CHAT_WATCH_CALLBACKS) return true;
+      fail(new Error('Chat change watch callback limit reached'));
+      return false;
+    };
+    signal.addEventListener('abort', close, { once: true });
+    if (signal.aborted) close();
+    if (closed) return null;
+
+    try {
+      const stopConversation = conversationRef.onSnapshot((snapshot) => {
+        if (!countCallback()) return;
+        try {
+          if (
+            !snapshot.exists ||
+            snapshot.id !== documentKey(conversationId) ||
+            snapshot.get('id') !== conversationId ||
+            !isOwnedChat(snapshot.data(), agentId)
+          ) {
+            fail(new Error('Chat conversation watch scope changed'));
+            return;
+          }
+          const nextVersion = conversationSnapshotVersion(snapshot);
+          if (nextVersion === conversationVersion) return;
+          conversationVersion = nextVersion;
+          changed();
+        } catch (error) {
+          fail(error);
+        }
+      }, fail);
+      register(stopConversation);
+      if (closed) return null;
+
+      const stopTask = taskRef.onSnapshot((snapshot) => {
+        if (!countCallback()) return;
+        try {
+          if (!snapshot.exists || snapshot.id !== documentKey(taskId)) {
+            fail(new Error('Chat task watch scope changed'));
+            return;
+          }
+          const taskRow = decodeRecord<Record<string, unknown>>(snapshot.data());
+          if (
+            taskRow.id !== taskId ||
+            taskRow.agentId !== agentId ||
+            taskRow.conversationId !== conversationId ||
+            isChatAdmissionCancellationProjection(taskRow) ||
+            typeof taskRow.status !== 'string'
+          ) {
+            fail(new Error('Chat task watch scope changed'));
+            return;
+          }
+          // Task leases and progress change more often than the answer. Status
+          // transitions are useful hints; canonical updates remain authoritative.
+          if (taskRow.status === taskStatus) return;
+          taskStatus = taskRow.status;
+          changed();
+        } catch (error) {
+          fail(error);
+        }
+      }, fail);
+      register(stopTask);
+      if (closed) return null;
+      return { close };
+    } catch (error) {
+      fail(error);
+      return null;
+    }
   }
 
   async listTaskActivity(

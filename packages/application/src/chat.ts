@@ -873,6 +873,29 @@ export async function getChatUpdates(
 }
 
 /**
+ * Open an optional read-change hint after the caller's canonical poll has
+ * authorized this exact task scope.
+ * Hints are never chat data: callers must read this canonical view again after
+ * subscribing and after every wake. Resolve the agent from the same chat store
+ * passed to getChatUpdates so the hook cannot inherit a different identity.
+ */
+export async function watchAuthorizedChatChanges(
+  store: ChatStore,
+  input: {
+    conversationId: string;
+    taskId: string;
+    signal: AbortSignal;
+    onChange: () => void;
+    onError: (error: unknown) => void;
+  },
+) {
+  const persistence = chatPersistence(store);
+  if (!persistence.watchChatChanges) return null;
+  const agent = await persistence.resolveAgent();
+  return persistence.watchChatChanges({ agentId: agent.id, ...input });
+}
+
+/**
  * How far the poll may remember having read. Never past a row young enough
  * that a slower transaction could still commit behind it (CURSOR_SETTLE_MS
  * above explains why that happens), and never backwards — the client loops
