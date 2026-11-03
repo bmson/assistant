@@ -23,12 +23,12 @@ import type {
 } from '@assistant/persistence/owner-editor';
 import type { OwnerMemoryEditorSnapshot } from '@assistant/persistence/owner-memory-correction';
 import { z } from 'zod';
-import type { MobileBearerPrincipal, MobileOwnerResolution } from '@/mobile-auth';
+import type { MobileBearerPrincipal, MobileOwnerResolution } from './mobile-auth-types.js';
 import {
   issueMobileOwnerMemoryCorrectionAuthorization,
   MOBILE_OWNER_MEMORY_CORRECTION_REPLAY_MS,
   verifyMobileOwnerMemoryCorrectionAuthorization,
-} from './mobile-owner-memory-correction-proof';
+} from './mobile-owner-memory-correction-proof.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const HASH = /^[a-f0-9]{64}$/;

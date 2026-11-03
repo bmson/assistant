@@ -1,7 +1,10 @@
 import { loadConfig } from '@assistant/config';
 import { isAuthed } from './auth';
 import { getMobileAccessToken } from './lib/mobile-access-token';
+import type { MobileBearerPrincipal, MobileOwnerResolution } from './lib/mobile-auth-types';
 import { secureTokenMatches } from './mobile-token';
+
+export type { MobileBearerPrincipal, MobileOwnerResolution } from './lib/mobile-auth-types';
 
 function bearerToken(request: Request): string {
   const authorization = request.headers.get('authorization') ?? '';
@@ -40,18 +43,10 @@ export async function isMobileAuthed(request: Request): Promise<boolean> {
   return Boolean(await isAuthed());
 }
 
-export type MobileBearerPrincipal =
-  | { kind: 'configured_installation_bearer' }
-  | { kind: 'owner_device_bearer'; deviceId: string };
-
 export interface AuthenticatedMobileOwner {
   principal: MobileBearerPrincipal;
   ownerId: string;
 }
-
-export type MobileOwnerResolution =
-  | { ok: true; ownerId: string }
-  | { ok: false; reason: 'unavailable' };
 
 /**
  * Resolve only the configured bearer credential. This preserves the existing

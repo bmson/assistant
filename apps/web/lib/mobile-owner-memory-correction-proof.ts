@@ -1,7 +1,7 @@
 import { createHash, createHmac, hkdfSync, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { OwnerEditorScope } from '@assistant/persistence/owner-editor';
 import { z } from 'zod';
-import type { MobileBearerPrincipal } from '@/mobile-auth';
+import type { MobileBearerPrincipal } from './mobile-auth-types.js';
 
 const HANDLE_PREFIX = 'omc1';
 const PURPOSE = 'mobile_owner_memory_correction';
