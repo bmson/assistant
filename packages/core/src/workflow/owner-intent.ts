@@ -493,12 +493,12 @@ function scopesFor(text: string): OwnerIntentScope[] {
     scopes.add('external_read');
   if (/(?:^|[.!?;\n])\s*(?:what|which|who|when|where|why|how|is|are|does|did|can)\b/i.test(text))
     scopes.add('external_read');
+  // A private source noun in a question is not owner authorization by itself.
+  // Preserve affirmative direct requests for a named personal source even
+  // when the canonical read-intent parser does not yet recognize its wording.
   if (
-    /\b(?:(?:my|our|the|configured)\s+)?(?:calendar|schedule|inbox|email|mail|gmail|mailbox|meeting|appointment|interview)\b/i.test(
-      text,
-    ) &&
-    (scopes.has('external_read') ||
-      /\b(?:what|when|where|who|which|is|are|search|check|find|look up|read|review)\b/i.test(text))
+    affirmativeAction(text, '(?:search|check|find|look up|read|review)') &&
+    /\b(?:my|our)\s+(?:calendar|schedule|agenda|inbox|email|mail|gmail|mailbox)\b/i.test(text)
   )
     scopes.add('private_read');
   if (

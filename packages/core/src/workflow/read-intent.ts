@@ -2845,6 +2845,10 @@ function detectPersonalReadRequestInternal(
     /\b(?:my|our|the|this|that|do i|did i|is there|are there)\b/i.test(latest) ||
     (verification && flightLanguage.test(latest)) ||
     terms.some((term) => !SCHEDULED_THING.test(term));
+  const publicTransitSchedule =
+    /\b(?:published|public)\b[^.!?;\n]{0,40}\b(?:train|bus|transit)\b[^.!?;\n]{0,40}\b(?:schedule|timetable)\b|\b(?:train|bus|transit)\b[^.!?;\n]{0,40}\b(?:schedule|timetable)\b/i.test(
+      latest,
+    );
   const namedSchedule =
     !calendarReadProhibited &&
     !calendarDayList &&
@@ -2860,6 +2864,7 @@ function detectPersonalReadRequestInternal(
       daySchedule ||
       namedSchedule ||
       (CALENDAR_SURFACE.test(latest) &&
+        (!publicTransitSchedule || /\b(?:my|our)\s+(?:calendar|schedule|agenda)\b/i.test(latest)) &&
         (READ_OR_QUESTION.test(latest) || verification || whyLookup)) ||
       (verification && CALENDAR_SURFACE.test(recentContext)));
   const email =

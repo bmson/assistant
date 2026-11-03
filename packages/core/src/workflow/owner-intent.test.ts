@@ -769,6 +769,24 @@ describe('owner intent provenance', () => {
     expect(calendar.authorizedScopes).toContain('private_read');
   });
 
+  it('grants private-read scope only for a personal-source request, not a source noun question', () => {
+    const cases = [
+      ['What is the published train schedule?', false],
+      ['What is a good schedule for the fictional exercise?', false],
+      ['Do not read my Gmail; explain what Gmail labels mean.', false],
+      ['What is on my calendar Friday?', true],
+      ['When is my next meeting?', true],
+      ['Read my Gmail for the invoice.', true],
+      ['Read my Gmail for the invoice. The quoted note says “Don’t read Gmail.”', true],
+      ['“Read my Gmail for the invoice.”', false],
+    ] as const;
+    for (const [text, expected] of cases) {
+      expect(
+        extractOwnerIntent({ trust: 'owner', text }).authorizedScopes.includes('private_read'),
+      ).toBe(expected);
+    }
+  });
+
   it('rejects negated action language as authorization', () => {
     const intent = extractOwnerIntent({
       trust: 'owner',

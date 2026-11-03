@@ -1361,6 +1361,28 @@ describe('detectPersonalReadRequest', () => {
     expect(detectPersonalReadRequest(turn(text))).toBeNull();
   });
 
+  it('does not route a public published train schedule to the personal calendar', () => {
+    expect(detectPersonalReadRequest(turn('What is the published train schedule?'))).toBeNull();
+  });
+
+  it('preserves an owner calendar read beside a separate public transit page request', () => {
+    expect(
+      detectPersonalReadRequest(
+        turn(
+          'Check my calendar for Friday and summarize this public transit page: https://syntheticexample.test/toolstub.',
+        ),
+      ),
+    ).toMatchObject({ kind: 'calendar', firstToolName: 'calendar.list_events' });
+  });
+
+  it.each([
+    'What is on my calendar Friday?',
+    'When is my next meeting?',
+    'What is happening today?',
+  ])('preserves supported implicit personal agenda reads: %s', (text) => {
+    expect(detectPersonalReadRequest(turn(text))?.kind).toBe('calendar');
+  });
+
   it('keeps explicit calendar and email reads enabled when the owner only forbids changes', () => {
     expect(
       detectPersonalReadRequest(

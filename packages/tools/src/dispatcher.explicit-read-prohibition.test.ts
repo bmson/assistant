@@ -432,6 +432,19 @@ afterEach(() => {
 });
 
 describe('P03 owner intent at ToolDispatcher boundary (synthetic repositories only)', () => {
+  it('does not dispatch a public train schedule to the personal calendar', async () => {
+    const { dispatch, calendarRead } = fixture();
+    expect(
+      await dispatch('What is the published train schedule?', 'calendar.list_events', {}, true),
+    ).toMatchObject({ kind: 'rejected' });
+    expect(calendarRead).not.toHaveBeenCalled();
+
+    expect(
+      await dispatch('What is on my calendar Friday?', 'calendar.list_events', {}, true),
+    ).toMatchObject({ kind: 'executed' });
+    expect(calendarRead).toHaveBeenCalledOnce();
+  });
+
   it('executes the direct authorized Gmail read positive control', async () => {
     const { dispatch, read, task, repositories } = fixture();
     const disabledPolicy: Records['approvalPolicies'] = {
