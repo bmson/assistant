@@ -4388,7 +4388,7 @@ final class AppModel {
                     self.setActivityThought(.thinking, proposedDetail: "Turn status unknown. Check this same operation.")
                     return
                 }
-                self.messages.removeAll { $0.id == streamID && $0.text.isEmpty }
+                self.removeEmptyStreamPlaceholder(streamID)
                 self.clearSendDisplayState(turnToken: turnToken)
                 // The composer cleared the draft when it sent; a failed turn
                 // gives the words back rather than losing them to the failure.
@@ -4943,9 +4943,7 @@ final class AppModel {
         }
         pollTask?.cancel()
         pollTask = nil
-        if messages.contains(where: { $0.id == turn.streamID && $0.text.isEmpty }) {
-            messages.removeAll { $0.id == turn.streamID && $0.text.isEmpty }
-        }
+        removeEmptyStreamPlaceholder(turn.streamID)
         if sendDisplayState?.streamID == turn.streamID { sendDisplayState = nil }
         spokenTurn = nil
         ordinaryTurn = nil

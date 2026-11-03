@@ -6287,6 +6287,51 @@ extension APIClientRetryTests {
         StubURLProtocol.appendStream(Data("data: [DONE]\n\n".utf8), operationId: try XCTUnwrap(secondSend["clientOperationId"] as? String))
     }
 
+    @MainActor
+    func testTerminalStopRetainsStructuredOnlyStreamCue() async throws {
+        let model = try await notificationModel()
+        let taskId = "33333333-3333-4333-8333-333333333333"
+        let cardPart = RichMessageFixture.generated()
+        let encodedCard = try JSONEncoder().encode(cardPart)
+        let cardObject = try XCTUnwrap(JSONSerialization.jsonObject(with: encodedCard) as? [String: Any])
+        let payload = try JSONSerialization.data(withJSONObject: [
+            "type": "data-card", "data": try XCTUnwrap(cardObject["data"]),
+        ])
+        let cardFrame = Data("data: \(String(decoding: payload, as: UTF8.self))\n\n".utf8)
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/chat": [.stream(body: cardFrame)],
+            "/api/mobile/v1/chat/cancel": [
+                .terminalOperationCancellation(status: 200, outcome: "cancelled",
+                    taskId: taskId, taskStatus: "cancelled", transitioned: true),
+            ],
+        ])
+
+        model.send("Stop after the structured result arrives")
+        let streamID = try XCTUnwrap(model.messages.last?.id)
+        let postDeadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while !StubURLProtocol.urls.contains(where: { $0.path == "/api/mobile/v1/chat" }),
+              ContinuousClock.now < postDeadline { await Task.yield() }
+        let cueDeadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while !((model.messages.first(where: { $0.id == streamID })?.parts.contains(where: { $0.type == "data-card" })) ?? false),
+              ContinuousClock.now < cueDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(model.sendDisplayState?.phase, .working)
+
+        model.cancelSend()
+        XCTAssertEqual(model.sendDisplayState?.phase, .stopping)
+        let settlementDeadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while model.hasUnresolvedTurn && ContinuousClock.now < settlementDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        XCTAssertFalse(model.hasUnresolvedTurn)
+        let retainedStream = try XCTUnwrap(model.messages.first(where: { $0.id == streamID }))
+        XCTAssertTrue(retainedStream.parts.contains(where: { $0.type == "data-card" }),
+            "Terminal cancellation must not treat a structured-only cue as an empty text row")
+        XCTAssertNil(model.sendDisplayState)
+    }
+
     func testChatOperationKeepsTheExactFrozenRequestBytes() async throws {
         let testToken = "frozen-chat-request-test"
         let client = makeClient(clientID: "33333333-3333-4333-8333-333333333333", token: testToken)
