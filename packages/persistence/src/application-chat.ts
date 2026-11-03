@@ -227,6 +227,19 @@ export type ApplicationChatArchiveResult = 'archived' | 'active' | 'primary';
  */
 export interface ApplicationChatPersistence {
   readonly kind: 'application-chat-persistence';
+  /**
+   * Optional request-scoped wake hints, never message content. Implementations
+   * validate owner/task/conversation scope, release on abort, and return an
+   * idempotent close. Callers re-read canonical messages after every hint.
+   */
+  watchChatChanges?(input: {
+    agentId: string;
+    conversationId: string;
+    taskId: string;
+    signal: AbortSignal;
+    onChange: () => void;
+    onError: (error: unknown) => void;
+  }): Promise<{ close(): void } | null>;
   resolveAgent(): Promise<ApplicationChatAgent>;
   /** Read before chat context retrieval; completion rejects if erasure changed afterward. */
   privacyObservationGeneration(agentId: string): Promise<string | null>;
