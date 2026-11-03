@@ -78,8 +78,8 @@ try {
   for (const [path, heading] of [
     ['/profile', 'What I remember'],
     ['/people', 'People'],
-    ['/profile/knowledge?view=library', 'Knowledge'],
-    ['/profile/knowledge?view=map', 'Knowledge'],
+    ['/profile/knowledge?view=library', 'Saved notes'],
+    ['/profile/knowledge?view=map', 'Map'],
   ] as const) {
     const result = await page.goto(`${baseUrl}${path}`, { waitUntil: 'domcontentloaded' });
     if (result?.status() !== 200 || new URL(page.url()).pathname !== path.split('?')[0])
@@ -96,7 +96,14 @@ try {
       if ((await page.locator('form:has(input[name="q"])').getAttribute('method')) !== 'get')
         throw new Error('People search must remain a GET form');
     } else {
-      await page.getByRole('navigation', { name: 'Knowledge views' }).waitFor();
+      const memoryNav = page.getByRole('navigation', { name: 'Memory', exact: true });
+      await memoryNav.waitFor();
+      if ((await memoryNav.count()) !== 1)
+        throw new Error('Memory browse pages must expose one primary Memory navigation');
+      const mapLink = page.getByRole('link', { name: 'Map', exact: true });
+      await mapLink.waitFor();
+      if ((await memoryNav.getByRole('link', { name: 'Map', exact: true }).count()) !== 0)
+        throw new Error('Map must remain a visible secondary link outside the primary Memory nav');
       const filters = page.locator('form[action="/profile/knowledge"]');
       await filters
         .getByLabel(path.endsWith('view=map') ? 'Search items by name' : 'Search saved notes', {
@@ -104,7 +111,7 @@ try {
         })
         .waitFor();
       if ((await filters.getAttribute('method')) !== 'get')
-        throw new Error('Knowledge filters must remain a GET form');
+        throw new Error('Memory browse filters must remain a GET form');
     }
   }
   const missingPerson = '00000000-0000-4000-8000-000000000099';

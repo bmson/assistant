@@ -53,6 +53,10 @@ describe('saved note page and actual editor controls', () => {
     expect(html).not.toContain('Open source');
     expect(html).toContain('Edit saved note');
     expect(html).toContain('href="/profile/knowledge?view=library&amp;query=family"');
+    expect(html).toContain('aria-label="Memory"');
+    expect([...html.matchAll(/aria-label="Memory"/g)]).toHaveLength(1);
+    const memoryNavigation = /<nav\b[^>]*aria-label="Memory"[\s\S]*?<\/nav>/.exec(html)?.[0] ?? '';
+    expect(memoryNavigation).toMatch(/<a\b[^>]*aria-current="page"[^>]*>Saved notes<\/a>/);
     expect(html).not.toContain(grant.issuedOperationHandle);
     expect(html).not.toContain(grant.operationId);
     expect(html).not.toContain('AUTH_SECRET');
