@@ -76,6 +76,84 @@ describe('weeklyCalendarPlan', () => {
     expect(text).not.toContain('no overlapping attended events');
   });
 
+  it('keeps offsetless timed rows out of interval math and marks proposed times tentative', () => {
+    const result = weeklyCalendarPlanResult({
+      timeMin,
+      timeMax,
+      timeZone: 'America/Los_Angeles',
+      evidence: evidence({
+        pages: [
+          {
+            toolName: 'calendar.list_events',
+            status: 'succeeded',
+            args: { timeMin, timeMax, maxResults: 50 },
+            result: {
+              events: [
+                {
+                  eventId: 'floating-meeting',
+                  calendarId: 'work',
+                  summary: 'Floating meeting',
+                  start: '2026-10-12T09:00:00',
+                  end: '2026-10-12T10:00:00',
+                  calendarTimeZone: 'America/Los_Angeles',
+                  blocksTime: true,
+                },
+              ],
+              complete: true,
+              calendarRosterComplete: true,
+              unavailable: [],
+            },
+          },
+        ],
+      }) as never,
+    });
+
+    expect(result.coverageComplete).toBe(false);
+    expect(result.text).toContain('Floating meeting (2026-10-12T09:00:00 – 2026-10-12T10:00:00)');
+    expect(result.text).toContain('excluded from overlap calculations');
+    expect(result.text).toContain('proposed times are tentative, not confirmed free');
+    expect(result.text).not.toContain('Conflicts: none found in checked calendar data.');
+  });
+
+  it('keeps an unresolved all-day blocking row as a conservative full-window hold', () => {
+    const result = weeklyCalendarPlanResult({
+      timeMin,
+      timeMax,
+      timeZone: 'America/Los_Angeles',
+      evidence: evidence({
+        pages: [
+          {
+            toolName: 'calendar.list_events',
+            status: 'succeeded',
+            args: { timeMin, timeMax, maxResults: 50 },
+            result: {
+              events: [
+                {
+                  eventId: 'unknown-zone-all-day',
+                  calendarId: 'travel',
+                  summary: 'Unzoned travel hold',
+                  start: '2026-10-12',
+                  end: '2026-10-13',
+                  allDay: true,
+                  blocksTime: true,
+                },
+              ],
+              complete: true,
+              calendarRosterComplete: true,
+              unavailable: [],
+            },
+          },
+        ],
+      }) as never,
+    });
+
+    expect(result.coverageComplete).toBe(false);
+    expect(result.slotCount).toBe(0);
+    expect(result.text).toContain('Unzoned travel hold');
+    expect(result.text).toContain('I couldn’t identify suitable 90-minute blocks');
+    expect(result.text).toContain('request was conservatively held for planning');
+  });
+
   it('groups availability caveats, assumptions, and conflict actions without dropping event references', () => {
     const allDay = {
       eventId: 'hold',

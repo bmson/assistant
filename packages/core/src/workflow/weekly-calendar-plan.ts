@@ -384,9 +384,18 @@ function attendance(event: PlainRecord): 'attending' | 'potential' | 'not-attend
 }
 
 function parseEventInterval(event: PlainRecord): { start: number; end: number } | undefined {
-  const start = dateMs(event.start);
-  const end = dateMs(event.end);
-  return start !== undefined && end !== undefined && end > start ? { start, end } : undefined;
+  // Date-only all-day rows keep their existing roster path so the caller can
+  // conservatively block the full request if their source zone is unresolved.
+  if (
+    event.allDay === true &&
+    /^\d{4}-\d{2}-\d{2}$/.test(String(event.start)) &&
+    /^\d{4}-\d{2}-\d{2}$/.test(String(event.end))
+  ) {
+    const start = dateMs(event.start);
+    const end = dateMs(event.end);
+    return start !== undefined && end !== undefined && end > start ? { start, end } : undefined;
+  }
+  return calendarSourceInterval(event);
 }
 
 function isExtendedContext(interval: { start: number; end: number }): boolean {
@@ -788,6 +797,8 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
   const events: PlainRecord[] = [];
   let eventRowsValid = allPages.length > 0;
   let unresolvedAllDayBlockingEvent = false;
+  const unresolvedAllDayEvents: PlainRecord[] = [];
+  const unresolvedTimedEvents: PlainRecord[] = [];
   for (const row of allPages) {
     const result = resultOf(row);
     if (!Array.isArray(result?.events)) {
@@ -796,8 +807,19 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
     }
     for (const value of result.events) {
       const event = record(value);
-      if (!event || !parseEventInterval(event)) {
+      if (!event) {
         eventRowsValid = false;
+        continue;
+      }
+      const interval = parseEventInterval(event);
+      if (!interval) {
+        eventRowsValid = false;
+        if (event.allDay === true && attendance(event) !== 'not-attending') {
+          unresolvedAllDayBlockingEvent = true;
+          unresolvedAllDayEvents.push(event);
+        } else if (event.allDay !== true) {
+          unresolvedTimedEvents.push(event);
+        }
         continue;
       }
       if (
@@ -807,6 +829,7 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
       ) {
         eventRowsValid = false;
         unresolvedAllDayBlockingEvent = true;
+        unresolvedAllDayEvents.push(event);
       }
       events.push(event);
     }
@@ -1336,6 +1359,28 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
           : 'Event listing is incomplete or reached its bounded page limit';
     coverageNotes.push(
       `${missing}; proposed times are tentative, not confirmed free. Confirm the missing calendars before relying on this review`,
+    );
+  }
+  if (unresolvedTimedEvents.length > 0) {
+    const examples = unresolvedTimedEvents.slice(0, 3).map((event) => {
+      const title = safeText(event.summary, 100) || 'Untitled event';
+      const rawStart = safeText(event.start, 80) || 'start unavailable';
+      const rawEnd = safeText(event.end, 80) || 'end unavailable';
+      return `${title} (${rawStart} – ${rawEnd})`;
+    });
+    coverageNotes.push(
+      `Timed event intervals could not be resolved from explicit source instants, so they were retained for review and excluded from overlap calculations: ${examples.join('; ')}${unresolvedTimedEvents.length > examples.length ? `; ${unresolvedTimedEvents.length - examples.length} more` : ''}`,
+    );
+  }
+  if (unresolvedAllDayEvents.length > 0) {
+    const titles = unresolvedAllDayEvents.slice(0, 3).map((event) => {
+      const title = safeText(event.summary, 100) || 'Untitled all-day event';
+      const rawStart = safeText(event.start, 80) || 'start unavailable';
+      const rawEnd = safeText(event.end, 80) || 'end unavailable';
+      return `${title} (${rawStart} – ${rawEnd})`;
+    });
+    coverageNotes.push(
+      `Blocking all-day source dates could not be mapped to instants; the request was conservatively held for planning and the rows were not compared as dated overlaps: ${titles.join('; ')}${unresolvedAllDayEvents.length > titles.length ? `; ${unresolvedAllDayEvents.length - titles.length} more` : ''}`,
     );
   }
   if (availabilityNotes.length > 0) {

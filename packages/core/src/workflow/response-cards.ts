@@ -357,6 +357,7 @@ export function calendarResponseCards(
         ).size > 1;
       const titleDiffers = canonicalValuesDiffer('summary');
       const timeDiffers = canonicalValuesDiffer('start') || canonicalValuesDiffer('end');
+      const windowMembership = calendarWindowMembership(event, request);
       const locationDiffers = canonicalValuesDiffer('location');
       const sourceIntegrity =
         titleDiffers ||
@@ -392,11 +393,11 @@ export function calendarResponseCards(
               ? request?.timeWindow
                 ? `All day · ${calendarSourceDateLabel(event)}`
                 : 'All day'
-              : calendarTimeRange(start, end, request?.timeZone),
+              : windowMembership === 'source-date-only'
+                ? `Local time unresolved · ${start || 'start unavailable'} – ${end || 'end unavailable'}`
+                : calendarTimeRange(start, end, request?.timeZone),
         allDay,
-        ...(options?.includeUnresolvedDates
-          ? { windowMembership: calendarWindowMembership(event, request) }
-          : {}),
+        ...(options?.includeUnresolvedDates ? { windowMembership } : {}),
         ...(!canonicalValuesDiffer('calendarTimeZone') && string(event.calendarTimeZone)
           ? { calendarTimeZone: string(event.calendarTimeZone) }
           : {}),

@@ -1800,6 +1800,7 @@ function calendarOverlapSummary(
   events: Record<string, unknown>[],
   request: PersonalReadRequest,
   complete: boolean,
+  unresolvedEvents: Record<string, unknown>[] = [],
 ): string[] {
   if (!request.includeCalendarOverlapSummary) return [];
   const zone = request.timeZone ?? 'UTC';
@@ -1871,6 +1872,31 @@ function calendarOverlapSummary(
       ? { start: requestedStart, end: requestedEnd }
       : undefined;
   const notes: string[] = [];
+  const unresolvedNotes: string[] = [];
+  const unresolvedTimed = unresolvedEvents.filter(
+    (event) =>
+      event.allDay !== true &&
+      stringField(event, 'status') !== 'cancelled' &&
+      verifiedOwnerParticipation(event) !== 'declined' &&
+      event.blocksTime !== false,
+  );
+  if (unresolvedTimed.length > 0) {
+    unresolvedNotes.push(
+      ...unresolvedTimed.slice(0, 3).map((event) => {
+        const title = compactEventTitleLink(
+          stringField(event, 'summary') || '(untitled event)',
+          '',
+        );
+        const start = compactEventTitleLink(stringField(event, 'start') || 'start unavailable', '');
+        const end = compactEventTitleLink(stringField(event, 'end') || 'end unavailable', '');
+        return `- Could not compare **${title}** (${start} – ${end}); its local interval is unresolved. Its overlap status is unknown.`;
+      }),
+    );
+    if (unresolvedTimed.length > 3)
+      unresolvedNotes.push(
+        `- ${unresolvedTimed.length - 3} additional unresolved timed event intervals were not compared.`,
+      );
+  }
   const travelContextNotes: string[] = [];
   const arrivalNotes: string[] = [];
   const MAX_FORMATTED_OVERLAP_DETAILS = 100;
@@ -1998,16 +2024,22 @@ function calendarOverlapSummary(
       }
     }
   }
-  if (overlapPairCount === 0 && travelContextCount === 0 && arrivalCount === 0)
+  if (
+    overlapPairCount === 0 &&
+    travelContextCount === 0 &&
+    arrivalCount === 0 &&
+    unresolvedTimed.length === 0
+  )
     return [
+      ...unresolvedNotes,
       complete
         ? 'No unresolved overlaps between timed calendar entries were found in the checked results.'
         : events.length > 0
           ? 'No overlaps appeared in the checked event subset; calendar coverage is incomplete.'
           : 'An overlap check was requested, but no calendar events were available to compare.',
     ];
-  const shown = notes.slice(0, 3);
-  if (overlapPairCount > shown.length)
+  const shown = [...unresolvedNotes, ...notes.slice(0, 3)];
+  if (overlapPairCount > Math.min(notes.length, 3))
     shown.push(
       `- ${overlapPairCount.toLocaleString('en-US')} calendar-entry pairs overlap in time; further pair details are not expanded.`,
     );
@@ -3408,11 +3440,11 @@ export function groundReadDraft(
   const reasons: string[] = [];
   if (
     events.some((event) => calendarWindowMembership(event, request) === 'source-date-only') &&
-    !/source dates?[^\n]*(?:only|unavailable|unconfirmed)|not confirmed for (?:the )?requested local day/i.test(
+    !/(?:source dates?[^\n]*(?:only|unavailable|unconfirmed)|not confirmed for (?:the )?requested local day|(?:time|interval)[^\n]*(?:unresolved|unconfirmed|unknown|could not be placed))/i.test(
       draft,
     )
   )
-    reasons.push('floating source dates are not qualified against the requested local day');
+    reasons.push('unresolved calendar intervals are not qualified against the requested window');
 
   if (request.answerFocus === 'flight') {
     const uncertainty =
@@ -3940,6 +3972,7 @@ export function verifiedReadResponse(
       const sourceDateEvents = activeEvents.filter(
         (event) => calendarWindowMembership(event, request) === 'source-date-only',
       );
+      const intervalCoverageComplete = complete && sourceDateEvents.length === 0;
       const agendaEvents = activeEvents.filter(
         (event) => calendarWindowMembership(event, request) === 'confirmed',
       );
@@ -4137,8 +4170,8 @@ export function verifiedReadResponse(
       if (sourceDateEvents.length > 0) {
         lines.push(
           request.compactCalendarBriefing
-            ? 'Source-date-only entries (not confirmed for this local day):'
-            : 'Source dates only — these entries are not confirmed for the requested local day:',
+            ? 'Unresolved calendar entries (not confirmed for this local day or time):'
+            : 'Unresolved calendar entries — these dates or times are not confirmed for the requested window:',
         );
         for (const event of sourceDateEvents) {
           const links = Array.isArray(event.links) ? event.links.map(record).filter(Boolean) : [];
@@ -4154,10 +4187,19 @@ export function verifiedReadResponse(
           const compactLink = compactEventTitleLink(summary, url);
           const safeSummary = compactEventTitleLink(summary, '');
           const calendar = compactEventTitleLink(stringField(event, 'calendar'), '');
+          const sourceDate = calendarSourceDateLabel(event);
+          const rawStart = compactEventTitleLink(
+            stringField(event, 'start') || 'start unavailable',
+            '',
+          );
+          const rawEnd = compactEventTitleLink(stringField(event, 'end') || 'end unavailable', '');
+          const unresolvedLabel = sourceDate
+            ? sourceDate
+            : `local interval unresolved (raw source time: ${rawStart} – ${rawEnd})`;
           lines.push(
             request.compactCalendarBriefing
-              ? `- ${compactLink}${calendar ? ` (${calendar})` : ''} — ${calendarSourceDateLabel(event) || 'date/time unresolved'}`
-              : `- ${safeSummary} — ${calendarSourceDateLabel(event) || 'date/time unresolved'}${calendar ? ` (${calendar})` : ''}${url ? ` — ${compactEventTitleLink('Source event', url)}` : ''}`,
+              ? `- ${compactLink}${calendar ? ` (${calendar})` : ''} — ${unresolvedLabel}`
+              : `- ${safeSummary} — ${unresolvedLabel}${calendar ? ` (${calendar})` : ''}${url ? ` — ${compactEventTitleLink('Source event', url)}` : ''}`,
           );
         }
       }
@@ -4169,9 +4211,9 @@ export function verifiedReadResponse(
           );
       }
       if (request.includeCalendarOverlapSummary) {
-        lines.push(...calendarOverlapSummary(agendaEvents, request, complete));
+        lines.push(...calendarOverlapSummary(agendaEvents, request, complete, sourceDateEvents));
         if (sourceDateEvents.length > 0)
-          lines.push('Source-date-only entries could not be compared for local-time overlaps.');
+          lines.push('Unresolved calendar entries could not be compared for local-time overlaps.');
       }
       if (request.includeCalendarBriefing && !request.compactCalendarBriefing) {
         const firstAppointment = agendaEvents.find(
@@ -4184,14 +4226,14 @@ export function verifiedReadResponse(
         );
         const next = firstAppointment
           ? `Check whether you need to attend **${stringField(firstAppointment, 'summary')}**, then review its source details for preparation${stringField(firstAppointment, 'location') ? ' and travel' : ''}.`
-          : sourceDateEvents.length > 0 || !complete
-            ? 'Confirm the unresolved calendar dates or coverage before relying on this briefing.'
+          : sourceDateEvents.length > 0 || !intervalCoverageComplete
+            ? 'Confirm unresolved calendar dates, times, or coverage before relying on this briefing.'
             : agendaEvents.length > 0
               ? 'Review the source details of the all-day records and confirm whether they require your attention.'
               : 'Review your priorities for the day before choosing your next task.';
         lines.push(`Next step: ${next}`);
       }
-      if (!complete || unavailable.length > 0) {
+      if (!intervalCoverageComplete || unavailable.length > 0) {
         lines.push(
           `Heads up: calendar coverage was incomplete${unavailable.length > 0 ? `; unavailable: ${[...new Set(unavailable)].join(', ')}` : ''}.`,
         );

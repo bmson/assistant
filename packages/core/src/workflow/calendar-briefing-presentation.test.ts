@@ -322,7 +322,7 @@ describe('calendar day and practical briefing fidelity', () => {
     const response = verifiedReadResponse(request, rows);
     expect(response).toContain('Thu 15 Oct (America/Los_Angeles)');
     expect(response).toContain('**09:00–10:00** — Project review');
-    expect(response).toContain('not confirmed for the requested local day');
+    expect(response).toContain('not confirmed for the requested window');
     expect(response).toContain('Payday — source date 2026-10-16; calendar time zone unavailable');
     expect(response).toContain('event?eid=pay');
     expect(response).not.toContain('**All day** — Payday');
@@ -332,6 +332,39 @@ describe('calendar day and practical briefing fidelity', () => {
     expect(
       groundReadDraft('Tomorrow: Project review at 09:00, plus all-day Payday.', request, rows)
         .grounded,
+    ).toBe(false);
+  });
+
+  it('retains offsetless timed rows as unresolved across the agenda, cards, and overlap check', () => {
+    const offsetless = {
+      ...timed,
+      eventId: 'floating-meeting',
+      summary: 'Floating meeting',
+      start: '2026-10-15T09:00:00',
+      end: '2026-10-15T10:00:00',
+      calendarTimeZone: 'America/Los_Angeles',
+    };
+    const rows = evidence([offsetless]);
+
+    expect(calendarSourceInterval(offsetless)).toBeUndefined();
+    expect(calendarWindowMembership(offsetless, request)).toBe('source-date-only');
+    const response = verifiedReadResponse(request, rows);
+    expect(response).toContain('Floating meeting');
+    expect(response).toContain(
+      'raw source time: 2026\\-10\\-15T09:00:00 – 2026\\-10\\-15T10:00:00',
+    );
+    expect(response).toContain('Could not compare **Floating meeting**');
+    expect(response).toContain('Its overlap status is unknown.');
+    expect(response).not.toContain('Nothing on the calendar');
+    expect(response).not.toContain('No unresolved overlaps between timed calendar entries');
+    expect(calendarResponseCards(rows, request)).toEqual([]);
+    expect(calendarResponseCards(rows, request, { includeUnresolvedDates: true })[0]?.time).toBe(
+      'Local time unresolved · 2026-10-15T09:00:00 – 2026-10-15T10:00:00',
+    );
+    const groundingRequest = { ...request, includeCalendarBriefing: false };
+    const groundingRows = evidence([offsetless], true, groundingRequest);
+    expect(
+      groundReadDraft('Floating meeting is at 9:00 AM.', groundingRequest, groundingRows).grounded,
     ).toBe(false);
   });
 
@@ -680,9 +713,18 @@ describe('calendar day and practical briefing fidelity', () => {
       end: '2026-10-17T08:15:00-07:00',
       links: link('flight'),
     };
+    const unresolved = {
+      ...timed,
+      eventId: 'unresolved',
+      summary: 'Unresolved appointment',
+      start: '2026-10-17T11:00:00',
+      end: '2026-10-17T12:00:00',
+      calendarTimeZone: 'America/Los_Angeles',
+      links: link('unresolved'),
+    };
     const response = verifiedReadResponse(
       compactRequest,
-      evidence([stay, flight], true, compactRequest),
+      evidence([stay, flight, unresolved], true, compactRequest),
     );
 
     expect(response).toContain('Ongoing context (full interval):');
@@ -696,6 +738,10 @@ describe('calendar day and practical briefing fidelity', () => {
       /^\s*-\s*(?:Possible overlap|Scheduling conflict|Conflict)(?::|\s)/m,
     );
     expect(response).not.toContain('Check whether you need to attend both.');
+    expect(response).toContain('Travel context overlap **Sat 17 Oct 12:00 AM–2:00 AM**');
+    expect(response).toContain('Unresolved appointment');
+    expect(response).toContain('Its overlap status is unknown.');
+    expect(response).not.toContain('No unresolved overlaps between timed calendar entries');
     expect(response).toContain('event?eid=stay');
     expect(response).toContain('event?eid=flight');
   });
@@ -715,7 +761,9 @@ describe('calendar day and practical briefing fidelity', () => {
       evidence([sourceDateOnly], false, compactRequest),
     );
 
-    expect(response).toContain('Source-date-only entries (not confirmed for this local day)');
+    expect(response).toContain(
+      'Unresolved calendar entries (not confirmed for this local day or time)',
+    );
     expect(response).toContain('Berlin day hold (Travel)');
     expect(response).not.toContain('[Berlin day hold](');
     expect(response).toContain('source date 2026-10-16; calendar time zone unavailable');
