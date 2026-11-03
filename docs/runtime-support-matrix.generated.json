@@ -295,7 +295,7 @@
     },
     "apps/web/app/api/mobile/v1/memory/library/route.ts": {
       "methods": ["GET"],
-      "sha256": "1a1c4011cb8d0e4d7b09277d223271a2e9acd23a2592c0907093a8de2df65d6b"
+      "sha256": "3ffcf4f37f36a49284b8659b4c7bf8766fea1beabd4ac39561e230cd13cb7ee5"
     },
     "apps/web/app/api/mobile/v1/memory/occasions/[id]/route.ts": {
       "methods": ["DELETE", "PATCH", "POST"],
