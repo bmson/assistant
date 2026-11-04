@@ -28,10 +28,7 @@ type SqlClient = ((
   end(options?: { timeout?: number }): Promise<void>;
 };
 const requireFromDb = createRequire(new URL('../packages/db/package.json', import.meta.url));
-type PostgresFactory = (
-  url: string,
-  options: { max: number; onnotice: () => void },
-) => SqlClient;
+type PostgresFactory = (url: string, options: { max: number; onnotice: () => void }) => SqlClient;
 const postgresModule: unknown = requireFromDb('postgres');
 const postgresFactory: unknown =
   typeof postgresModule === 'function'

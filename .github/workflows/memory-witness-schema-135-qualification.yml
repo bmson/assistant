@@ -6,7 +6,7 @@ name: Memory witness schema 135 qualification
 # wrapper); image inspection/probes <=12m (eight probes at <=75s each, six
 # image inspections at <=5s each, plus <=90s wrapper/kill grace); exact lease
 # drain <=4m; manifest <=1m; image archive <=8m; checkout/setup/builder init
-# <=10m; builder teardown/artifact upload <=5m; job margin <=10m. Sum: 200m.
+# <=11m; builder teardown/artifact upload <=5m; job margin <=9m. Sum: 200m.
 concurrency:
   group: memory-witness-135-${{ github.event.pull_request.number }}
   cancel-in-progress: false
@@ -59,9 +59,16 @@ jobs:
     env:
       SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
       BUILDER: memory-witness-135-${{ github.run_id }}-${{ github.run_attempt }}
-      DOCKER_CONFIG: ${{ runner.temp }}/memory-witness-docker
-      PROOF: ${{ runner.temp }}/memory-witness-135-proof
     steps:
+      - name: Initialize runner-derived private paths
+        timeout-minutes: 1
+        env:
+          DOCKER_CONFIG: ${{ runner.temp }}/memory-witness-docker
+          PROOF: ${{ runner.temp }}/memory-witness-135-proof
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          printf 'DOCKER_CONFIG=%s\nPROOF=%s\n' "$DOCKER_CONFIG" "$PROOF" >> "$GITHUB_ENV"
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         timeout-minutes: 2
         with:
@@ -390,7 +397,7 @@ jobs:
   populated-upgrade:
     needs: build
     runs-on: ubuntu-24.04
-# Bounded steps sum to <=65m; 10m remains for runner scheduling/diagnostics.
+    # Bounded steps sum to <=66m; 9m remains for runner scheduling/diagnostics.
     timeout-minutes: 75
     permissions:
       contents: read
@@ -399,9 +406,16 @@ jobs:
       TEST_DATABASE_URL: postgres://assistant:assistant@localhost:5432/assistant_test
       SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
       ASSISTANT_MEMORY_WITNESS_EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
-      DOCKER_CONFIG: ${{ runner.temp }}/memory-witness-db-docker
-      PROOF: ${{ runner.temp }}/memory-witness-135-db-proof
     steps:
+      - name: Initialize runner-derived private paths
+        timeout-minutes: 1
+        env:
+          DOCKER_CONFIG: ${{ runner.temp }}/memory-witness-db-docker
+          PROOF: ${{ runner.temp }}/memory-witness-135-db-proof
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          printf 'DOCKER_CONFIG=%s\nPROOF=%s\n' "$DOCKER_CONFIG" "$PROOF" >> "$GITHUB_ENV"
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         timeout-minutes: 2
         with:
