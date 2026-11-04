@@ -102,6 +102,15 @@ export function buildOwnerEditorView(input: {
               aliases: identity.aliases,
               revision: displayedContact?.identityRevision ?? '',
             },
+            personNoteCreate: {
+              grant: grant('create_owner_memory', identity.contactId),
+              snapshot: {
+                contactId: identity.contactId,
+                name: identity.name,
+                trust: identity.trust,
+                revision: identity.revision,
+              },
+            },
             personRemovalUnavailableReason:
               'Deleting people is not available in this release. You can still edit saved details and relationships.',
             family: {

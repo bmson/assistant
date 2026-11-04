@@ -34,13 +34,14 @@ test('the additive command constraint keeps existing minimums and supports schem
   assert.throws(() => validateManifest(future), /incompatible|schema/i);
 });
 
-test('schema compatibility does not enable the sixth command', () => {
+test('schema compatibility declares person-scoped note creation as the sixth command', () => {
   assert.deepEqual(contract.components.web.ownerEditorV1, [
     'create_person',
     'update_person_identity',
     'add_family_relationship',
     'correct_owner_family_relationship',
     'correct_owner_memory',
+    'create_owner_memory',
   ]);
 });
 
