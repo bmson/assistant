@@ -149,6 +149,9 @@ typealias RetryAction = @MainActor @Sendable () async -> Void
 typealias LocalNotificationScheduler = @MainActor (
     String, String, AssistantRoute?, String?, String?, String?
 ) async -> Bool
+/// AppModel's default factory stays on the Keychain/encrypted-draft production path.
+/// Explicit factories allow deterministic storage fixtures to exercise AppModel's full form flow.
+typealias CardFormMobileSessionFactory = @MainActor (String, String) throws -> CardFormMobileSession
 
 /// View-scoped loads are routinely cancelled when a navigation destination is
 /// replaced. Cancellation is control flow, not a failed request, so it must
@@ -337,18 +340,26 @@ final class AppModel {
     private(set) var isLoading = false
     private(set) var isSending = false {
         didSet {
-            if !isSending, pendingNotificationDestination != nil {
+            if !isSending, !isSettlingOrdinaryTurn, pendingNotificationDestination != nil {
                 Task { [weak self] in await self?.resolvePendingNotificationDestination() }
             }
         }
     }
+    /// A terminal reply can be visible while its final scoped refreshes and
+    /// notification work still hold the ordinary-send admission boundary.
+    private(set) var isSettlingOrdinaryTurn = false
+    @ObservationIgnored private var activeSendSettlementID: UUID?
     private(set) var isCancellingSend = false
     private(set) var sendDisplayState: ChatSendDisplayState?
     private(set) var isCardFormAdmissionPending = false
     var hasUnresolvedTurn: Bool { ordinaryTurn != nil || resumableTurn != nil }
+    var canAdmitOrdinarySend: Bool {
+        !isSending && !isSettlingOrdinaryTurn && ordinaryTurn == nil && resumableTurn == nil
+    }
     var canCancelCurrentSend: Bool {
-        (isSending && !isCardFormAdmissionPending && (ordinaryTurn != nil || resumableTurn?.taskId != nil))
-            || (ordinaryTurn != nil && !isCardFormAdmissionPending)
+        !isSettlingOrdinaryTurn
+            && ((isSending && !isCardFormAdmissionPending && (ordinaryTurn != nil || resumableTurn?.taskId != nil))
+                || (ordinaryTurn != nil && !isCardFormAdmissionPending))
     }
     var hasRequestedCancellationForCurrentSend: Bool {
         ordinaryTurn?.cancellationRequested == true
@@ -405,6 +416,7 @@ final class AppModel {
 
     private(set) var serverURL: String
     @ObservationIgnored private var client: APIClient?
+    private let cardFormMobileSessionFactory: CardFormMobileSessionFactory
     private(set) var cardFormSession: CardFormMobileSession?
     private var cardFormSessionInitializationFailure: Error?
     private(set) var cardFormComposerBinding: CardFormComposerBinding?
@@ -533,11 +545,15 @@ final class AppModel {
         phoneCalendarSharing: PhoneCalendarSharingCoordinator? = nil,
         captureCurrentPlace: @escaping @MainActor () async -> (location: CLLocation, label: String)? = {
             await LocationManager.shared.captureCurrentPlace()
+        },
+        cardFormMobileSessionFactory: @escaping CardFormMobileSessionFactory = { serverIdentity, ownerId in
+            try CardFormMobileSession(serverIdentity: serverIdentity, ownerId: ownerId)
         }
     ) {
         self.defaults = defaults
         self.systemSurfaces = systemSurfaces ?? ProductionAppSystemSurfaces()
         self.phoneCalendarSharing = phoneCalendarSharing ?? PhoneCalendarSharingCoordinator()
+        self.cardFormMobileSessionFactory = cardFormMobileSessionFactory
         self.storeConnectionToken = storeConnectionToken
         self.enqueueAutomaticSpeech = enqueueAutomaticSpeech
         self.scheduleLocalNotification = scheduleLocalNotification ?? { title, body, route, approvalId, agentID, conversationID in
@@ -1246,7 +1262,7 @@ final class AppModel {
         }
 
         do {
-            let candidateSession = try CardFormMobileSession(serverIdentity: serverIdentity, ownerId: ownerId)
+            let candidateSession = try cardFormMobileSessionFactory(serverIdentity, ownerId)
             let unsettled = try await candidateSession.restoreUnsettled()
             guard attemptIsCurrent() else { return }
             cardFormSession = candidateSession
@@ -1825,6 +1841,8 @@ final class AppModel {
         ordinaryTurn = nil
         isCardFormAdmissionPending = false
         isCancellingSend = false
+        activeSendSettlementID = nil
+        isSettlingOrdinaryTurn = false
         sendDisplayState = nil
         cancelRequestedWithoutTaskID = false
         pendingNotificationDestination = nil
@@ -4178,7 +4196,7 @@ final class AppModel {
               onComposerDraftStage: (@MainActor (ComposerDraftSubmissionProvenance) -> Void)? = nil,
               onComposerDraftClear: (@MainActor (ComposerDraftSnapshot, ComposerDraftSnapshot) -> Void)? = nil) {
         let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !isSending,
+        guard !text.isEmpty, canAdmitOrdinarySend,
               let client,
               let conversationId, let draftScope = composerDraftScope else { return }
         guard cardFormRecoveryReady, cardFormUnknownOperationIds.isEmpty,
@@ -4397,7 +4415,16 @@ final class AppModel {
                 self.composerRecoveryRevision += 1
                 self.reportError(error)
                 let settlement = self.notificationTurnSettlements.begin()
-                defer { self.notificationTurnSettlements.finish(settlement) }
+                let sendSettlementID = UUID()
+                self.activeSendSettlementID = sendSettlementID
+                self.isSettlingOrdinaryTurn = true
+                defer {
+                    self.notificationTurnSettlements.finish(settlement)
+                    if self.activeSendSettlementID == sendSettlementID {
+                        self.activeSendSettlementID = nil
+                        self.isSettlingOrdinaryTurn = false
+                    }
+                }
                 self.isSending = false
                 self.isCancellingSend = false
                 self.clearSendDisplayState(turnToken: turnToken)
@@ -4837,7 +4864,7 @@ final class AppModel {
     /// Requests cancellation of the server task when its identity is known.
     /// Until the matching task status arrives, the outcome remains unresolved.
     func cancelSend() {
-        guard (isSending || ordinaryTurn != nil),
+        guard !isSettlingOrdinaryTurn, (isSending || ordinaryTurn != nil),
               !isCancellingSend, !isCardFormAdmissionPending else { return }
         isCancellingSend = true
         if let turn = ordinaryTurn {
@@ -4920,7 +4947,8 @@ final class AppModel {
         taskStatus: String,
         outcome: ChatOperationCancellationOutcome
     ) {
-        guard let turn = ordinaryTurn, turn.token == turnToken,
+        guard !isSettlingOrdinaryTurn,
+              let turn = ordinaryTurn, turn.token == turnToken,
               turn.taskId == nil || turn.taskId == taskId else { return }
         let notice: String
         let detail: String
@@ -5329,7 +5357,16 @@ final class AppModel {
             observeCardFormTask(finalStatus, taskId: taskId)
         }
         let settlement = notificationTurnSettlements.begin()
-        defer { notificationTurnSettlements.finish(settlement) }
+        let sendSettlementID = UUID()
+        activeSendSettlementID = sendSettlementID
+        isSettlingOrdinaryTurn = true
+        defer {
+            notificationTurnSettlements.finish(settlement)
+            if activeSendSettlementID == sendSettlementID {
+                activeSendSettlementID = nil
+                isSettlingOrdinaryTurn = false
+            }
+        }
         isSending = false
         isCancellingSend = false
         resumableTurn = nil
@@ -5435,7 +5472,8 @@ final class AppModel {
                   ordinaryTurnToken == nil || ordinaryTurn?.token == ordinaryTurnToken else { return }
         notificationTurnSettlements.finish(settlement)
         await resolvePendingNotificationDestination()
-        if let ordinaryTurnToken, ordinaryTurn?.token == ordinaryTurnToken {
+        if let ordinaryTurnToken {
+            guard ordinaryTurn?.token == ordinaryTurnToken else { return }
             clearSendDisplayState(turnToken: ordinaryTurnToken)
             ordinaryTurn = nil
         }
