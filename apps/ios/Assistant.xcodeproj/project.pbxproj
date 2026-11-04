@@ -94,6 +94,8 @@
 		B13A99000000000000000003 /* MemoryCorrectionPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C13A99000000000000000003 /* MemoryCorrectionPresentationTests.swift */; };
 		B13A99000000000000000004 /* Models/NativeMemoryCorrectionRecovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = C13A99000000000000000004 /* Models/NativeMemoryCorrectionRecovery.swift */; };
 		B13A99000000000000000005 /* NativeMemoryCorrectionRecoveryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C13A99000000000000000005 /* NativeMemoryCorrectionRecoveryTests.swift */; };
+		B13A99000000000000000006 /* Models/NativeMemoryCorrectionConsumer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C13A99000000000000000006 /* Models/NativeMemoryCorrectionConsumer.swift */; };
+		B13A99000000000000000007 /* NativeMemoryCorrectionConsumerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C13A99000000000000000007 /* NativeMemoryCorrectionConsumerTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -219,6 +221,8 @@
 		C13A99000000000000000003 /* MemoryCorrectionPresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryCorrectionPresentationTests.swift; sourceTree = "<group>"; };
 		C13A99000000000000000004 /* Models/NativeMemoryCorrectionRecovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models/NativeMemoryCorrectionRecovery.swift; sourceTree = "<group>"; };
 		C13A99000000000000000005 /* NativeMemoryCorrectionRecoveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeMemoryCorrectionRecoveryTests.swift; sourceTree = "<group>"; };
+		C13A99000000000000000006 /* Models/NativeMemoryCorrectionConsumer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models/NativeMemoryCorrectionConsumer.swift; sourceTree = "<group>"; };
+		C13A99000000000000000007 /* NativeMemoryCorrectionConsumerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeMemoryCorrectionConsumerTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -312,6 +316,7 @@
 				C13A99000000000000000002 /* Views/MemoryCorrectionReview.swift */,
 				C13A99000000000000000001 /* Models/MemoryCorrectionPresentation.swift */,
 				C13A99000000000000000004 /* Models/NativeMemoryCorrectionRecovery.swift */,
+				C13A99000000000000000006 /* Models/NativeMemoryCorrectionConsumer.swift */,
 				C00000000000000000000076 /* Views/MemoryDataView.swift */,
 				C00000000000000000000078 /* Views/CommitmentsView.swift */,
 				C00000000000000000000077 /* Views/MemoryLibraryView.swift */,
@@ -349,6 +354,7 @@
 				C00000000000000000000020 /* APIModelsTests.swift */,
 				C13A99000000000000000003 /* MemoryCorrectionPresentationTests.swift */,
 				C13A99000000000000000005 /* NativeMemoryCorrectionRecoveryTests.swift */,
+				C13A99000000000000000007 /* NativeMemoryCorrectionConsumerTests.swift */,
 				C000000000000000000000BD /* OptimisticEditsTests.swift */,
 				C000000000000000000000B5 /* PhoneCalendarStoreTests.swift */,
 				C000000000000000000000A2 /* ConversationDraftsTests.swift */,
@@ -549,6 +555,7 @@
 				B13A99000000000000000002 /* Views/MemoryCorrectionReview.swift in Sources */,
 				B13A99000000000000000001 /* Models/MemoryCorrectionPresentation.swift in Sources */,
 				B13A99000000000000000004 /* Models/NativeMemoryCorrectionRecovery.swift in Sources */,
+				B13A99000000000000000006 /* Models/NativeMemoryCorrectionConsumer.swift in Sources */,
 				B00000000000000000000076 /* Views/MemoryDataView.swift in Sources */,
 				B00000000000000000000078 /* Views/CommitmentsView.swift in Sources */,
 				B00000000000000000000077 /* Views/MemoryLibraryView.swift in Sources */,
@@ -581,6 +588,7 @@
 				B00000000000000000000012 /* APIModelsTests.swift in Sources */,
 				B13A99000000000000000003 /* MemoryCorrectionPresentationTests.swift in Sources */,
 				B13A99000000000000000005 /* NativeMemoryCorrectionRecoveryTests.swift in Sources */,
+				B13A99000000000000000007 /* NativeMemoryCorrectionConsumerTests.swift in Sources */,
 				B000000000000000000000BD /* OptimisticEditsTests.swift in Sources */,
 				B000000000000000000000B5 /* PhoneCalendarStoreTests.swift in Sources */,
 				B000000000000000000000A2 /* ConversationDraftsTests.swift in Sources */,

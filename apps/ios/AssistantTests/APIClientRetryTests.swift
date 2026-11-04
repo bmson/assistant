@@ -5381,28 +5381,166 @@ extension APIClientRetryTests {
     private func notificationModel(
         enqueueAutomaticSpeech: ((ChatMessage) -> Void)? = nil,
         scheduleLocalNotification: LocalNotificationScheduler? = nil,
-        systemSurfaces suppliedSystemSurfaces: RecordingAppSystemSurfaces? = nil
+        systemSurfaces suppliedSystemSurfaces: RecordingAppSystemSurfaces? = nil,
+        apiClient suppliedClient: APIClient? = nil,
+        memoryCorrections: NativeMemoryCorrectionConsumer? = nil,
+        editRecoveryRoot: URL? = nil
     ) async throws -> AppModel {
         let systemSurfaces = suppliedSystemSurfaces ?? RecordingAppSystemSurfaces()
         let notificationScheduler: LocalNotificationScheduler = scheduleLocalNotification
             ?? { _, _, _, _, _, _ in false }
+        let client = suppliedClient ?? makeClient()
         let model: AppModel
         if let enqueueAutomaticSpeech {
             model = AppModel(
-                apiClient: makeClient(),
+                apiClient: client,
                 enqueueAutomaticSpeech: enqueueAutomaticSpeech,
                 scheduleLocalNotification: notificationScheduler,
-                systemSurfaces: systemSurfaces
+                systemSurfaces: systemSurfaces,
+                memoryCorrections: memoryCorrections
             )
         } else {
-            model = AppModel(apiClient: makeClient(), scheduleLocalNotification: notificationScheduler,
-                             systemSurfaces: systemSurfaces)
+            model = AppModel(apiClient: client, scheduleLocalNotification: notificationScheduler,
+                             systemSurfaces: systemSurfaces, memoryCorrections: memoryCorrections)
+        }
+        if let editRecoveryRoot {
+            let vault = MemoryDraftKeyVaultFixture()
+            model.edits.recoveryJournalFactory = { scope in
+                MobileEditRecoveryJournal(scope: scope, keyVault: vault, applicationSupportRoot: editRecoveryRoot)
+            }
         }
         model.scenePhaseDidChange(.background)
         StubURLProtocol.primeBootstrap(try notificationBootstrap())
         await model.refreshAll(reportFailure: false)
         XCTAssertNotNil(model.bootstrap)
         return model
+    }
+
+    @MainActor
+    func testNativePendingCorrectionInterlocksSameTargetLegacyWritesAndOutboxRetryOnly() async throws {
+        let memoryA = "123e4567-e89b-42d3-a456-426614174101"
+        let memoryB = "123e4567-e89b-42d3-a456-426614174102"
+        let recoveryRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: recoveryRoot) }
+        let storage = NativeCorrectionStorageFixture(records: [nativeCorrectionRecoveryRecord(memoryID: memoryA)])
+        let model = try await notificationModel(memoryCorrections: NativeMemoryCorrectionConsumer(storage: storage),
+                                                editRecoveryRoot: recoveryRoot)
+
+        model.edits.submit(title: "Interrupted correction A", draft: "A pending draft",
+                           resources: [.memory, .memoryTarget(memoryA)], patch: { _ in }) {
+            throw APIError.transport(URLError(.networkConnectionLost))
+        }
+        model.edits.submit(title: "Interrupted correction B", draft: "B pending draft",
+                           resources: [.memory, .memoryTarget(memoryB)], patch: { _ in }) {
+            throw APIError.transport(URLError(.networkConnectionLost))
+        }
+        await model.edits.settle()
+        let failureA = try XCTUnwrap(model.edits.failures.first(where: { $0.title == "Interrupted correction A" }))
+        let failureB = try XCTUnwrap(model.edits.failures.first(where: { $0.title == "Interrupted correction B" }))
+        XCTAssertTrue(model.edits.canRetry(failureA.id))
+        XCTAssertTrue(model.edits.canRetry(failureB.id))
+
+        await model.openNativeMemoryCorrection(memoryID: memoryA)
+        XCTAssertEqual(model.memoryCorrections.presentation?.phase, .unknown)
+        let sameTargetCorrection = await model.correctMemory(id: memoryA, content: "Another A correction")
+        let sameTargetAction = await model.updateMemory(id: memoryA, action: "forget")
+        XCTAssertFalse(sameTargetCorrection)
+        XCTAssertFalse(sameTargetAction)
+        XCTAssertFalse(model.edits.canRetry(failureA.id), "The encrypted pending correction fences the same-target outbox retry.")
+        XCTAssertTrue(model.edits.canRetry(failureB.id), "A different target remains retryable.")
+
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/memory/\(memoryB)": [.success(status: 422, body: Data(#"{"error":"fixture"}"#.utf8))],
+        ])
+        let unrelatedCorrection = await model.correctMemory(id: memoryB, content: "Unrelated B correction")
+        XCTAssertTrue(unrelatedCorrection)
+        await model.edits.settle()
+        let sent = Array(zip(StubURLProtocol.attempts, StubURLProtocol.urls.map(\.path)))
+        XCTAssertFalse(sent.contains { $0.0 == "PATCH" && $0.1 == "/api/mobile/v1/memory/\(memoryA)" })
+        XCTAssertTrue(sent.contains { $0.0 == "PATCH" && $0.1 == "/api/mobile/v1/memory/\(memoryB)" })
+        let queried = await storage.queriedMemoryIDs
+        XCTAssertTrue(queried.contains(memoryB), "The native pending lookup is scoped to the requested note.")
+    }
+
+    @MainActor
+    func testGenericSameTargetWriteBlocksNativeAuthorizationBeforeGrantRequest() async throws {
+        let memoryA = "123e4567-e89b-42d3-a456-426614174103"
+        let memoryB = "123e4567-e89b-42d3-a456-426614174104"
+        let client = makeClient()
+        let recoveryRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: recoveryRoot) }
+        let storage = NativeCorrectionStorageFixture()
+        let model = try await notificationModel(apiClient: client,
+            memoryCorrections: NativeMemoryCorrectionConsumer(storage: storage), editRecoveryRoot: recoveryRoot)
+        let hash = String(repeating: "a", count: 64)
+        let revision = String(repeating: "b", count: 64)
+        let patchA = "/api/mobile/v1/memory/\(memoryA)"
+        let snapshotA = "/api/mobile/v1/memory/\(memoryA)/snapshot"
+        defer { StubURLProtocol.releaseHeldResponse(path: patchA) }
+        StubURLProtocol.prime([], paths: [
+            patchA: [.held(status: 503, body: Data(#"{"error":"unknown"}"#.utf8))],
+            snapshotA: [.success(status: 200, body: nativeCorrectionSnapshot(memoryID: memoryA, hash: hash, revision: revision))],
+            "/api/mobile/v1/memory/\(memoryB)": [.success(status: 422, body: Data(#"{"error":"fixture"}"#.utf8))],
+        ])
+
+        model.edits.submit(title: "Existing generic write", draft: "Legacy wording",
+                           resources: [.memory, .memoryTarget(memoryA)], patch: { _ in }) {
+            try await client.updateMemory(id: memoryA, content: "Legacy wording")
+        }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while !StubURLProtocol.isHoldingResponse(path: patchA), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(StubURLProtocol.isHoldingResponse(path: patchA))
+        await model.openNativeMemoryCorrection(memoryID: memoryA)
+        XCTAssertEqual(StubURLProtocol.urls.filter { $0.path == snapshotA }.count, 1)
+        XCTAssertEqual(StubURLProtocol.urls.filter { $0.path == "/api/mobile/v1/memory/\(memoryA)/correction/authorize" }.count, 0)
+
+        var presentation = try XCTUnwrap(model.memoryCorrections.presentation)
+        guard let intent = presentation.requestSave() else {
+            return XCTFail("The verified snapshot should permit the user to request a correction")
+        }
+        model.memoryCorrections.updatePresentation(presentation)
+        await model.memoryCorrections.handle(intent)
+        XCTAssertEqual(model.memoryCorrections.presentation?.phase, .unavailable)
+        XCTAssertEqual(StubURLProtocol.urls.filter { $0.path == "/api/mobile/v1/memory/\(memoryA)/correction/authorize" }.count, 0,
+                       "A known unresolved same-target generic write blocks before requesting server authority.")
+
+        let unrelatedCorrection = await model.correctMemory(id: memoryB, content: "Unrelated B correction")
+        XCTAssertTrue(unrelatedCorrection)
+        let queried = await storage.queriedMemoryIDs
+        XCTAssertTrue(queried.contains(memoryB), "The unrelated target is checked independently for a pending native operation.")
+
+        StubURLProtocol.releaseHeldResponse(path: patchA)
+        await model.edits.settle()
+        let sent = Array(zip(StubURLProtocol.attempts, StubURLProtocol.urls.map(\.path)))
+        XCTAssertFalse(sent.contains { $0.0 == "POST" && $0.1 == "/api/mobile/v1/memory/\(memoryA)/correction/authorize" })
+        XCTAssertTrue(sent.contains { $0.0 == "PATCH" && $0.1 == "/api/mobile/v1/memory/\(memoryB)" })
+    }
+
+    private func nativeCorrectionRecoveryRecord(memoryID: String, draft: String = "Reviewed corrected wording") -> NativeMemoryCorrectionRecoveryRecord {
+        let operationID = "123e4567-e89b-42d3-a456-426614174105"
+        let hash = String(repeating: "a", count: 64)
+        let revision = String(repeating: "b", count: 64)
+        return NativeMemoryCorrectionRecoveryRecord(
+            serverIdentity: "https://assistant.test",
+            target: .init(ownerID: notificationOwner, serverID: "https://assistant.test", memoryID: memoryID, sourceIdentity: nil),
+            operation: .init(operationID: operationID, expectedRevision: revision, expectedStoredContentHash: hash),
+            snapshot: .init(revision: revision, storedContentHash: hash, content: "Original saved note",
+                            sourceLabel: "Saved note", ownerCorrected: true, readOnlyReason: nil),
+            draft: draft,
+            authorizationHandle: ownerMemoryCorrectionHandle(memoryID: memoryID, operationID: operationID,
+                                                              hash: hash, revision: revision, content: draft),
+            authorizationExpiresAt: "2026-11-03T00:00:00.000Z"
+        )
+    }
+
+    private func nativeCorrectionSnapshot(memoryID: String, hash: String, revision: String) -> Data {
+        try! JSONSerialization.data(withJSONObject: [
+            "memoryId": memoryID, "content": "Original saved note", "contentHash": hash,
+            "revision": revision, "sourceLabel": "Saved note", "eligible": true,
+            "readOnlyReason": NSNull(), "ownerCorrected": true,
+        ])
     }
 
     func testNotificationDestinationRejectsMalformedOwnerAndNeverTreatsPathsAsConversationIDs() throws {
@@ -9986,6 +10124,62 @@ extension APIClientRetryTests {
                 if phase == "final-success" { XCTAssertEqual(successfulReceipt?.approvalId, original.id, "A retired view must not undo or misclassify the durable response: " + label) }
                 XCTAssertEqual(StubURLProtocol.attempts, ["POST"], label)
             }
+        }
+    }
+}
+
+private final class MemoryDraftKeyVaultFixture: CardFormDraftKeyVault, @unchecked Sendable {
+    private let lock = NSLock()
+    private var keys: [String: SymmetricKey] = [:]
+    private var closed = Set<String>()
+
+    func assertOpen(partition: String) throws {
+        try lock.withLock {
+            if closed.contains(partition) { throw EncryptedCardFormDraftStorageError.partitionClosed }
+        }
+    }
+
+    func key(for partition: String, createIfMissing: Bool) throws -> SymmetricKey {
+        try lock.withLock {
+            if closed.contains(partition) { throw EncryptedCardFormDraftStorageError.partitionClosed }
+            if let key = keys[partition] { return key }
+            guard createIfMissing else { throw EncryptedCardFormDraftStorageError.keyUnavailable }
+            let key = SymmetricKey(size: .bits256)
+            keys[partition] = key
+            return key
+        }
+    }
+
+    func close(partition: String) throws {
+        lock.withLock {
+            keys.removeValue(forKey: partition)
+            closed.insert(partition)
+        }
+    }
+}
+
+private actor NativeCorrectionStorageFixture: NativeMemoryCorrectionStorage {
+    private var records: [NativeMemoryCorrectionRecoveryRecord]
+    private(set) var queriedMemoryIDs: [String] = []
+
+    init(records: [NativeMemoryCorrectionRecoveryRecord] = []) {
+        self.records = records
+    }
+
+    func saveBeforeDispatch(_ record: NativeMemoryCorrectionRecoveryRecord) async throws {
+        records.removeAll { $0.serverIdentity == record.serverIdentity && $0.target == record.target }
+        records.append(record)
+    }
+
+    func loadPending(serverIdentity: String, target: NativeMemoryCorrectionRecoveryRecord.Target) async throws -> NativeMemoryCorrectionRecoveryRecord? {
+        queriedMemoryIDs.append(target.memoryID)
+        return records.first { $0.serverIdentity == serverIdentity && $0.target == target }
+    }
+
+    func remove(serverIdentity: String, target: NativeMemoryCorrectionRecoveryRecord.Target, operationID: String,
+                disposition: NativeMemoryCorrectionRecoveryTerminalDisposition) async throws {
+        records.removeAll {
+            $0.serverIdentity == serverIdentity && $0.target == target && $0.operation.operationID == operationID
         }
     }
 }
