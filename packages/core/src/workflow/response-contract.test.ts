@@ -1931,6 +1931,119 @@ describe('response execution contract', () => {
       expect(result.text).not.toContain('Monday at 9:30 AM');
     });
 
+    it('keeps Gmail search, unopened thread, and partial metadata distinctions under a routing limit', () => {
+      const readRequest = {
+        kind: 'calendar_email' as const,
+        queryTerms: ['clay'],
+        firstToolName: 'calendar.search_events' as const,
+        requiresThreadRead: true,
+      };
+      const evidence: ActionEvidence[] = [
+        {
+          toolName: 'calendar.search_events',
+          status: 'succeeded',
+          args: { query: 'clay' },
+          result: { complete: true, calendarsSearched: ['Assistant'], events: [] },
+        },
+        {
+          toolName: 'gmail.search',
+          status: 'succeeded',
+          args: { query: 'clay' },
+          result: {
+            complete: false,
+            hasMore: true,
+            matchingMessagesEstimate: 3,
+            mailboxSearched: 'assistant@example.com',
+            results: [
+              { threadId: 'thread-1', subject: 'Clay intro' },
+              { threadId: 'thread-2', subject: 'Clay interview details' },
+            ],
+          },
+        },
+        {
+          toolName: 'gmail.read_thread',
+          status: 'succeeded',
+          args: { threadId: 'thread-1' },
+          result: { complete: true, messages: [{ subject: 'Clay intro', text: 'Intro call.' }] },
+        },
+      ];
+
+      const result = enforcePersonalReadResponse(readRequest, evidence, {
+        source: 'mail',
+        reason: 'unavailable',
+      });
+
+      expect(result.blocked).toBe(true);
+      expect(result.text).toContain('Clay intro');
+      expect(result.text).toContain('1 of 2 matching threads opened (1 remain unopened)');
+      expect(result.text).toContain('more metadata pages remain');
+      expect(result.text).toContain("I couldn't finish checking your email in this session.");
+      expect(result.text).not.toMatch(/thread-1|thread-2|gmail\.search/i);
+    });
+
+    it('keeps both sources explicitly unverified when no evidence exists', () => {
+      const readRequest = {
+        kind: 'calendar_email' as const,
+        queryTerms: ['clay'],
+        firstToolName: 'calendar.search_events' as const,
+        requiresThreadRead: true,
+      };
+
+      const result = enforcePersonalReadResponse(readRequest, [], {
+        source: 'mail',
+        reason: 'unavailable',
+      });
+
+      expect(result.blocked).toBe(true);
+      expect(result.unsupported).toEqual(expect.arrayContaining(['calendar_read', 'inbox_read']));
+      expect(result.text).toContain("I couldn't verify either requested source yet:");
+      expect(result.text).toContain('- Calendar: no successful event read.');
+      expect(result.text).toContain("The email lookup isn't available in this session.");
+      expect(result.text).not.toMatch(
+        /Here's what .* has|Nothing on the calendar|Nothing in the mail/i,
+      );
+    });
+
+    it('leaves the default renderer output unchanged without a routing limitation', () => {
+      const readRequest = {
+        kind: 'calendar_email' as const,
+        queryTerms: ['clay'],
+        firstToolName: 'calendar.search_events' as const,
+        requiresThreadRead: true,
+      };
+      const evidence: ActionEvidence[] = [
+        {
+          toolName: 'calendar.search_events',
+          status: 'succeeded',
+          args: { query: 'clay' },
+          result: { complete: true, calendarsSearched: ['Assistant'], events: [] },
+        },
+      ];
+
+      const result = enforcePersonalReadResponse(readRequest, evidence);
+
+      expect(result.text).toContain('- Gmail: no successful search.');
+      expect(result.text).toContain("What I couldn't get to: a successful Gmail search");
+    });
+
+    it('keeps flight-specific unverified-time guidance when a routing limitation is supplied', () => {
+      const readRequest = {
+        kind: 'calendar_email' as const,
+        answerFocus: 'flight' as const,
+        queryTerms: ['flight'],
+        firstToolName: 'calendar.search_events' as const,
+        requiresThreadRead: true,
+      };
+
+      const result = enforcePersonalReadResponse(readRequest, [], {
+        source: 'mail',
+        reason: 'unavailable',
+      });
+
+      expect(result.text).toContain('departure time is still unverified');
+      expect(result.text).not.toContain("The email lookup isn't available in this session.");
+    });
+
     it('does not use an unread fourth hit as trip evidence and reports the unread scope', () => {
       const readRequest = {
         kind: 'email' as const,

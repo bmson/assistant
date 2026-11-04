@@ -2361,9 +2361,7 @@ describe('golden tasks', () => {
     createdTaskIds.push(result.taskId);
 
     expect(result.status, result.finalText).toBe('needs_attention');
-    expect(result.finalText).toMatch(
-      /couldn't check your calendar.*lookup isn't available in this session/i,
-    );
+    expect(result.finalText).toMatch(/The calendar lookup isn't available in this session/i);
     expect(result.finalText).not.toContain('found the hotel reservation');
     expect(result.finalText).not.toContain('reminder was created');
     expect(result.finalText).not.toMatch(/nothing real to tell|ask me again|re-run/i);

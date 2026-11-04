@@ -851,6 +851,20 @@ describe('unsupported temporal requests through the actual executor step loop', 
     expect(answer).toMatch(/\*\*10:00–10:30\*\*/i);
     expect(answer).toMatch(/email|Gmail/i);
     expect(answer).toMatch(/unavailable|not checked|could not check|isn't available/i);
+    expect(answer).not.toMatch(/That's everything I could actually see|What I couldn't get to/i);
+    expect(answer).not.toMatch(/Gmail: no successful search|Mail coverage:/i);
+    expect(answer.match(/email lookup isn't available/gi)).toHaveLength(1);
+    expect(answer).toBe(
+      [
+        "Here's what the calendar has for tomorrow:",
+        'Sat 10 Oct (America/Los_Angeles).',
+        '- **10:00–10:30** — Zendesk meeting',
+        '',
+        "The email lookup isn't available in this session.",
+        '',
+        "I haven't completed the other requested work: Draft a reply to the invitation.",
+      ].join('\n'),
+    );
     expect(answer).toMatch(
       /haven't completed the other requested work: Draft a reply to the invitation/i,
     );

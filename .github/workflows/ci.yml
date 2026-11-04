@@ -305,9 +305,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          setsid pnpm --filter @assistant/web exec next dev --webpack --hostname 127.0.0.1 --port 3001 > "$RUNNER_TEMP/assistant-web17-preview.log" 2>&1 &
-          assistant_web17_pgid=$!
+          assistant_web17_pgid=""
+          emit_web17_preview_diagnostics() {
+            if ! pnpm exec tsx scripts/web17-preview-diagnostics.ts "$RUNNER_TEMP/assistant-web17-preview.log"; then
+              echo '[WEB-17] {"kind":"WEB17_PREVIEW_DIAGNOSTICS","logAvailable":false}'
+            fi
+          }
           cleanup_web17_preview() {
+            assistant_web17_exit=$?
+            trap - EXIT
+            if [ "$assistant_web17_exit" -ne 0 ]; then
+              emit_web17_preview_diagnostics
+            fi
+            if [ -z "$assistant_web17_pgid" ]; then
+              exit "$assistant_web17_exit"
+            fi
             kill -TERM -- "-$assistant_web17_pgid" 2>/dev/null || true
             for assistant_attempt in {1..10}; do
               if ! kill -0 -- "-$assistant_web17_pgid" 2>/dev/null; then
@@ -317,8 +329,11 @@ jobs:
             done
             kill -KILL -- "-$assistant_web17_pgid" 2>/dev/null || true
             wait "$assistant_web17_pgid" 2>/dev/null || true
+            exit "$assistant_web17_exit"
           }
           trap cleanup_web17_preview EXIT
+          setsid pnpm --filter @assistant/web exec next dev --webpack --hostname 127.0.0.1 --port 3001 > "$RUNNER_TEMP/assistant-web17-preview.log" 2>&1 &
+          assistant_web17_pgid=$!
           assistant_web17_ready=false
           for assistant_attempt in {1..60}; do
             if curl --fail --silent --output /dev/null http://127.0.0.1:3001/api/health; then
@@ -326,13 +341,11 @@ jobs:
               break
             fi
             if ! kill -0 "$assistant_web17_pgid" 2>/dev/null; then
-              cat "$RUNNER_TEMP/assistant-web17-preview.log"
               exit 1
             fi
             sleep 1
           done
           if [ "$assistant_web17_ready" != true ]; then
-            cat "$RUNNER_TEMP/assistant-web17-preview.log"
             exit 1
           fi
           pnpm exec tsx scripts/web17-delayed-old-poll.browser.ts

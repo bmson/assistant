@@ -508,11 +508,37 @@ function readRoutingLimitationResponse(
   limitation: 'unavailable' | 'unresolved-input',
   otherUnfinishedWork: string[],
 ) {
+  const routingSource = toolName.startsWith('calendar.')
+    ? 'calendar'
+    : toolName.startsWith('gmail.')
+      ? 'mail'
+      : undefined;
+  const conciseRoutingLimitation =
+    request.kind === 'calendar_email' &&
+    routingSource !== undefined &&
+    request.answerFocus !== 'flight' &&
+    !request.sourceReads &&
+    !request.personCalendar &&
+    !request.familyBirthday &&
+    !request.billingAudit &&
+    !request.billingAuditIssue &&
+    !request.weeklyCalendarPlan &&
+    !request.calendarEventAnalysis &&
+    !request.upcomingFlightDiscovery &&
+    !request.compoundTripDiscovery &&
+    !request.temporalIssue &&
+    !request.scopeIssue;
+  const source = readSourceLabel(toolName);
   const checked = enforcePersonalReadResponse(
     request,
     evidence.map((row) => ({ ...row, result: row.result })),
+    conciseRoutingLimitation && routingSource !== undefined
+      ? {
+          source: routingSource,
+          reason: limitation,
+        }
+      : undefined,
   );
-  const source = readSourceLabel(toolName);
   const note =
     limitation === 'unavailable'
       ? `I couldn't check ${source} because that lookup isn't available in this session.`
@@ -522,7 +548,9 @@ function readRoutingLimitationResponse(
     : '';
   return {
     ...checked,
-    text: [checked.text.trim(), note, otherWork].filter(Boolean).join('\n\n'),
+    text: [checked.text.trim(), conciseRoutingLimitation ? '' : note, otherWork]
+      .filter(Boolean)
+      .join('\n\n'),
     blocked: true,
   };
 }
