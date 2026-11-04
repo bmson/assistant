@@ -92,6 +92,8 @@
 		B13A99000000000000000001 /* Models/MemoryCorrectionPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = C13A99000000000000000001 /* Models/MemoryCorrectionPresentation.swift */; };
 		B13A99000000000000000002 /* Views/MemoryCorrectionReview.swift in Sources */ = {isa = PBXBuildFile; fileRef = C13A99000000000000000002 /* Views/MemoryCorrectionReview.swift */; };
 		B13A99000000000000000003 /* MemoryCorrectionPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C13A99000000000000000003 /* MemoryCorrectionPresentationTests.swift */; };
+		B13A99000000000000000004 /* Models/NativeMemoryCorrectionRecovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = C13A99000000000000000004 /* Models/NativeMemoryCorrectionRecovery.swift */; };
+		B13A99000000000000000005 /* NativeMemoryCorrectionRecoveryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C13A99000000000000000005 /* NativeMemoryCorrectionRecoveryTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -215,6 +217,8 @@
 		C13A99000000000000000001 /* Models/MemoryCorrectionPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models/MemoryCorrectionPresentation.swift; sourceTree = "<group>"; };
 		C13A99000000000000000002 /* Views/MemoryCorrectionReview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/MemoryCorrectionReview.swift; sourceTree = "<group>"; };
 		C13A99000000000000000003 /* MemoryCorrectionPresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryCorrectionPresentationTests.swift; sourceTree = "<group>"; };
+		C13A99000000000000000004 /* Models/NativeMemoryCorrectionRecovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models/NativeMemoryCorrectionRecovery.swift; sourceTree = "<group>"; };
+		C13A99000000000000000005 /* NativeMemoryCorrectionRecoveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeMemoryCorrectionRecoveryTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -307,6 +311,7 @@
 				C00000000000000000000025 /* Views/MemoryView.swift */,
 				C13A99000000000000000002 /* Views/MemoryCorrectionReview.swift */,
 				C13A99000000000000000001 /* Models/MemoryCorrectionPresentation.swift */,
+				C13A99000000000000000004 /* Models/NativeMemoryCorrectionRecovery.swift */,
 				C00000000000000000000076 /* Views/MemoryDataView.swift */,
 				C00000000000000000000078 /* Views/CommitmentsView.swift */,
 				C00000000000000000000077 /* Views/MemoryLibraryView.swift */,
@@ -343,6 +348,7 @@
 			children = (
 				C00000000000000000000020 /* APIModelsTests.swift */,
 				C13A99000000000000000003 /* MemoryCorrectionPresentationTests.swift */,
+				C13A99000000000000000005 /* NativeMemoryCorrectionRecoveryTests.swift */,
 				C000000000000000000000BD /* OptimisticEditsTests.swift */,
 				C000000000000000000000B5 /* PhoneCalendarStoreTests.swift */,
 				C000000000000000000000A2 /* ConversationDraftsTests.swift */,
@@ -542,6 +548,7 @@
 				B0000000000000000000001C /* Views/MemoryView.swift in Sources */,
 				B13A99000000000000000002 /* Views/MemoryCorrectionReview.swift in Sources */,
 				B13A99000000000000000001 /* Models/MemoryCorrectionPresentation.swift in Sources */,
+				B13A99000000000000000004 /* Models/NativeMemoryCorrectionRecovery.swift in Sources */,
 				B00000000000000000000076 /* Views/MemoryDataView.swift in Sources */,
 				B00000000000000000000078 /* Views/CommitmentsView.swift in Sources */,
 				B00000000000000000000077 /* Views/MemoryLibraryView.swift in Sources */,
@@ -573,6 +580,7 @@
 			files = (
 				B00000000000000000000012 /* APIModelsTests.swift in Sources */,
 				B13A99000000000000000003 /* MemoryCorrectionPresentationTests.swift in Sources */,
+				B13A99000000000000000005 /* NativeMemoryCorrectionRecoveryTests.swift in Sources */,
 				B000000000000000000000BD /* OptimisticEditsTests.swift in Sources */,
 				B000000000000000000000B5 /* PhoneCalendarStoreTests.swift in Sources */,
 				B000000000000000000000A2 /* ConversationDraftsTests.swift in Sources */,
