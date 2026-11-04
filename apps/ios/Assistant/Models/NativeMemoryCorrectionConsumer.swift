@@ -189,7 +189,7 @@ final class NativeMemoryCorrectionConsumer {
                 do {
                     try await storage.remove(serverIdentity: scope.serverIdentity, target: target.recoveryTarget,
                         operationID: authorization.operationId, disposition: .rejectedNoWrite)
-                    unblock(target.memoryID, scope: scope)
+                    if valid(token, target) { unblock(target.memoryID, scope: scope) }
                 } catch {
                     // A failed cleanup cannot authorize another same-target write.
                     if self.scope == scope { block(target.memoryID) }
