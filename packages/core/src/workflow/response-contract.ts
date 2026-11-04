@@ -120,6 +120,11 @@ export interface ResponseContractResult {
   weeklyPlanAssessment?: { coverageComplete: boolean; slotCount: number };
 }
 
+export interface ReadRoutingLimitation {
+  source: 'calendar' | 'mail';
+  reason: 'unavailable' | 'unresolved-input';
+}
+
 export type PublicActivityEvidenceStatus =
   | 'source_leads_found'
   | 'no_relevant_evidence'
@@ -3691,6 +3696,10 @@ export function verifiedReadResponse(
   request: PersonalReadRequest,
   evidence: ActionEvidence[],
   compoundTripExtraction?: CompoundTripExtraction,
+  routingPresentation?: {
+    routingLimitation: ReadRoutingLimitation;
+    visibleSource: 'calendar' | 'mail' | 'both' | undefined;
+  },
 ): string {
   if (request.temporalIssue || request.scopeIssue)
     return request.temporalIssue ?? request.scopeIssue ?? '';
@@ -3819,18 +3828,24 @@ export function verifiedReadResponse(
     ].join('\n');
   }
   const where =
-    request.kind === 'email'
-      ? 'the mail'
-      : request.kind === 'calendar'
-        ? 'the calendar'
-        : 'the calendar and mail';
+    routingPresentation?.visibleSource === 'calendar'
+      ? 'the calendar'
+      : routingPresentation?.visibleSource === 'mail'
+        ? 'the mail'
+        : request.kind === 'email'
+          ? 'the mail'
+          : request.kind === 'calendar'
+            ? 'the calendar'
+            : 'the calendar and mail';
   const forWindow = request.timeWindow ? ` for ${request.timeWindow.label}` : '';
   const lines = [
     request.includeCalendarBriefing
       ? `Calendar briefing${forWindow} (local time):`
       : request.verification
         ? 'I rechecked it — this is everything the sources actually return:'
-        : `Here's what ${where} has${forWindow}:`,
+        : routingPresentation && routingPresentation.visibleSource === undefined
+          ? "I couldn't verify either requested source yet:"
+          : `Here's what ${where} has${forWindow}:`,
   ];
 
   if (request.kind !== 'email') {
@@ -3988,13 +4003,20 @@ export function verifiedReadResponse(
           `${shortDate(request.timeWindow.timeMin, request.timeZone)} (${request.timeZone}).`,
         );
       if (agendaEvents.length === 0 && sourceDateEvents.length === 0) {
-        lines.push(
-          calendarRows.length > 0 && complete
-            ? `Nothing on the calendar — no matching events${calendars.size > 0 ? ` across ${[...calendars].join(', ')}` : ''}.`
-            : calendarRows.length > 0
-              ? 'No matching calendar events were returned in the checked subset; coverage does not establish an empty calendar.'
-              : '- Calendar: no successful event read.',
-        );
+        if (
+          !(
+            routingPresentation?.routingLimitation.source === 'calendar' &&
+            calendarRows.length === 0
+          )
+        ) {
+          lines.push(
+            calendarRows.length > 0 && complete
+              ? `Nothing on the calendar — no matching events${calendars.size > 0 ? ` across ${[...calendars].join(', ')}` : ''}.`
+              : calendarRows.length > 0
+                ? 'No matching calendar events were returned in the checked subset; coverage does not establish an empty calendar.'
+                : '- Calendar: no successful event read.',
+          );
+        }
       } else {
         const multiDay = spansDays(request.timeWindow, request.timeZone);
         const manyCalendars =
@@ -4311,13 +4333,15 @@ export function verifiedReadResponse(
     );
     const openedThreads = matchedThreadIds.filter((id) => openedThreadIds.has(id)).length;
     if (results.length === 0) {
-      lines.push(
-        metadataComplete
-          ? 'Nothing in the mail — no matching messages were returned.'
-          : searches.length > 0
-            ? 'No matching mail was returned in the checked subset; coverage does not establish that no matching message exists.'
-            : '- Gmail: no successful search.',
-      );
+      if (!(routingPresentation?.routingLimitation.source === 'mail' && searches.length === 0)) {
+        lines.push(
+          metadataComplete
+            ? 'Nothing in the mail — no matching messages were returned.'
+            : searches.length > 0
+              ? 'No matching mail was returned in the checked subset; coverage does not establish that no matching message exists.'
+              : '- Gmail: no successful search.',
+        );
+      }
     } else {
       // Sender first, in the rundown shape: who it is from is what decides
       // whether the owner opens it.
@@ -4451,6 +4475,7 @@ function explicitSourceGaps(
 export function enforcePersonalReadResponse(
   request: PersonalReadRequest,
   evidence: ActionEvidence[],
+  routingLimitation?: ReadRoutingLimitation,
 ): ResponseContractResult {
   if (request.billingAuditIssue)
     return {
@@ -4519,6 +4544,63 @@ export function enforcePersonalReadResponse(
   }
   const gaps = requiredReadGaps(request, evidence);
   if (gaps.labels.length > 0) {
+    if (
+      routingLimitation &&
+      request.kind === 'calendar_email' &&
+      request.answerFocus !== 'flight' &&
+      !request.sourceReads &&
+      !request.personCalendar &&
+      !request.familyBirthday &&
+      !request.billingAudit &&
+      !request.billingAuditIssue &&
+      !request.weeklyCalendarPlan &&
+      !request.calendarEventAnalysis &&
+      !request.upcomingFlightDiscovery &&
+      !request.compoundTripDiscovery &&
+      !request.temporalIssue &&
+      !request.scopeIssue
+    ) {
+      const current = currentSuccessfulEvidence(evidence);
+      const hasCalendarEvidence = matchingCalendarRows(request, current).length > 0;
+      const hasMailEvidence = matchingGmailSearchRows(request, current).length > 0;
+      const visibleSource =
+        routingLimitation.source === 'calendar' && !hasCalendarEvidence
+          ? hasMailEvidence
+            ? 'mail'
+            : undefined
+          : routingLimitation.source === 'mail' && !hasMailEvidence
+            ? hasCalendarEvidence
+              ? 'calendar'
+              : undefined
+            : 'both';
+      const routingSourceHasEvidence =
+        routingLimitation.source === 'calendar' ? hasCalendarEvidence : hasMailEvidence;
+      const verified = verifiedReadResponse(request, evidence, undefined, {
+        routingLimitation,
+        visibleSource,
+      });
+      const limitation =
+        routingLimitation.reason === 'unavailable'
+          ? routingSourceHasEvidence
+            ? routingLimitation.source === 'calendar'
+              ? "I couldn't finish checking your calendar in this session."
+              : "I couldn't finish checking your email in this session."
+            : routingLimitation.source === 'calendar'
+              ? "The calendar lookup isn't available in this session."
+              : "The email lookup isn't available in this session."
+          : routingSourceHasEvidence
+            ? routingLimitation.source === 'calendar'
+              ? "I couldn't continue the calendar search because the needed search details weren't available."
+              : "I couldn't continue the email search because the needed search details weren't available."
+            : routingLimitation.source === 'calendar'
+              ? "I couldn't start the calendar search because the needed search details weren't available."
+              : "I couldn't start the email search because the needed search details weren't available.";
+      return {
+        text: [verified.trim(), limitation].filter(Boolean).join('\n\n'),
+        blocked: true,
+        unsupported: gaps.unsupported,
+      };
+    }
     const response = coverageGapResponse(request, evidence, gaps);
     return weeklyAssessment
       ? {
