@@ -226,7 +226,11 @@ final class NativeMemoryCorrectionConsumer {
 
     private func check(_ issued: MemoryCorrectionOperation) async {
         guard let state = presentation, state.operation == issued, state.isChecking,
-              [.unknown, .pending].contains(state.phase), let operation, let transport, currentBinding() else { return }
+              [.unknown, .pending].contains(state.phase), let operation, let transport else { return }
+        guard currentBinding() else {
+            presentation?.checkFailed(presentationID: state.presentationID, operation: issued)
+            return
+        }
         let token = generation
         do {
             let reply = try await transport.ownerMemoryCorrectionStatus(operation)
@@ -239,27 +243,56 @@ final class NativeMemoryCorrectionConsumer {
     }
 
     private func receive(_ reply: OwnerMemoryCorrectionReply, issued: MemoryCorrectionOperation, token: UUID) async {
-        guard let operation, valid(token, issued.target), reply.command == "correct_owner_memory",
-              reply.operationId == operation.authorization.operationId,
-              reply.requestHash == nil || reply.requestHash == operation.requestHash,
+        guard let operation, valid(token, issued.target), issued == presentation?.operation,
               let id = presentation?.presentationID else { return }
+        guard reply.command == "correct_owner_memory",
+              reply.operationId == operation.authorization.operationId,
+              reply.requestHash == nil || reply.requestHash == operation.requestHash else {
+            leaveUnresolved(presentationID: id, operation: issued)
+            return
+        }
         if reply.authority == "unresolved", reply.isUnresolved {
             _ = presentation?.receiveOutcome(presentationID: id, operation: issued, version: 0,
                                             disposition: reply.reason == "preparing" ? .pending : .uncertain)
             return
         }
-        guard reply.isTerminal else {
-            _ = presentation?.receiveOutcome(presentationID: id, operation: issued, version: 0, disposition: .uncertain); return
+        // Scope retirement is not terminal proof for the original operation and cannot clear its hold.
+        if reply.authority == "scope_retirement" {
+            leaveUnresolved(presentationID: id, operation: issued)
+            return
         }
-        let version = reply.statusVersion ?? 1
-        if ["saved", "unchanged"].contains(reply.outcome) {
+        if reply.outcome == "unchanged" {
+            guard let statusVersion = reply.statusVersion, statusVersion > 0,
+                  exactUnchangedNoWriteReceipt(reply, operation: operation, issued: issued) else {
+                leaveUnresolved(presentationID: id, operation: issued)
+                return
+            }
+            terminalReply = nil // No current snapshot is attributed to this operation.
+            guard presentation?.receiveOutcome(presentationID: id, operation: issued,
+                version: statusVersion, disposition: .unchangedNoWrite) == true else {
+                leaveUnresolved(presentationID: id, operation: issued)
+                return
+            }
+            await removeRecovery(.unchangedNoWrite, token: token)
+            return
+        }
+        guard reply.isTerminal else {
+            leaveUnresolved(presentationID: id, operation: issued)
+            return
+        }
+        guard let version = reply.statusVersion, version > 0 else {
+            leaveUnresolved(presentationID: id, operation: issued)
+            return
+        }
+        if reply.outcome == "saved" {
             guard reply.authority == "operation_receipt", reply.requestHash == operation.requestHash,
                   reply.ids?["memoryId"] == operation.memoryId, Self.hash(reply.revision) else {
-                _ = presentation?.receiveOutcome(presentationID: id, operation: issued, version: 0, disposition: .uncertain); return
+                leaveUnresolved(presentationID: id, operation: issued)
+                return
             }
             terminalReply = reply
-            let disposition: MemoryCorrectionDisposition = reply.outcome == "saved" ? .saved(readback: nil) : .unchanged(readback: nil)
-            _ = presentation?.receiveOutcome(presentationID: id, operation: issued, version: version, disposition: disposition)
+            _ = presentation?.receiveOutcome(presentationID: id, operation: issued, version: version,
+                disposition: .saved(readback: nil))
             if let request = presentation?.requestRefresh(), case .refreshSavedNote(let read) = request { await refresh(read) }
         } else {
             // A typed terminal no-effect result may release recovery; a request rejection may not.
@@ -274,6 +307,56 @@ final class NativeMemoryCorrectionConsumer {
         }
     }
 
+    private func exactUnchangedNoWriteReceipt(
+        _ reply: OwnerMemoryCorrectionReply,
+        operation: OwnerMemoryCorrectionOperation,
+        issued: MemoryCorrectionOperation
+    ) -> Bool {
+        guard let scope, let record = recovery,
+              currentBinding(),
+              operation.isBoundToServerAuthorization,
+              operation.memoryId == issued.target.memoryID,
+              issued.operationID == operation.authorization.operationId,
+              issued.expectedRevision == operation.authorization.expectedMemoryRevision,
+              issued.expectedStoredContentHash == operation.authorization.expectedContentHash,
+              issued.target == scope.target(operation.memoryId),
+              record.serverIdentity == scope.serverIdentity,
+              record.target == issued.target.recoveryTarget,
+              record.operation.operationID == operation.authorization.operationId,
+              record.operation.expectedRevision == operation.authorization.expectedMemoryRevision,
+              record.operation.expectedStoredContentHash == operation.authorization.expectedContentHash,
+              record.snapshot.revision == record.operation.expectedRevision,
+              record.snapshot.storedContentHash == record.operation.expectedStoredContentHash,
+              OwnerMemoryCorrectionApplyRequest.trimmedServerContent(record.draft) == operation.request.content,
+              record.authorizationHandle == operation.authorization.authorization,
+              reply.version == 1,
+              reply.authority == "operation_receipt",
+              reply.command == "correct_owner_memory",
+              reply.operationId == operation.authorization.operationId,
+              reply.outcome == "unchanged",
+              reply.reason == nil,
+              reply.fieldErrors == nil,
+              reply.originalOperationTerminal == nil,
+              reply.requestHash == operation.requestHash,
+              reply.ids == ["memoryId": operation.memoryId],
+              Self.hash(reply.revision),
+              let statusVersion = reply.statusVersion, statusVersion > 0,
+              reply.isTerminal else { return false }
+        return true
+    }
+
+    private func leaveUnresolved(presentationID: UUID, operation: MemoryCorrectionOperation) {
+        guard var state = presentation else { return }
+        if state.isChecking {
+            state.checkFailed(presentationID: presentationID, operation: operation)
+            presentation = state
+        } else {
+            _ = state.receiveOutcome(presentationID: presentationID, operation: operation,
+                                     version: 0, disposition: .uncertain)
+            presentation = state
+        }
+    }
+
     private func refresh(_ request: MemoryCorrectionReadRequest) async {
         guard let transport, currentBinding(), presentation?.readRequest == request else { return }
         let token = generation
@@ -282,11 +365,12 @@ final class NativeMemoryCorrectionConsumer {
             guard valid(token, request.target), presentation?.readRequest == request else { return }
             snapshotOwnerCorrected[wire.revision] = wire.ownerCorrected
             let current = try Self.snapshot(wire, target: request.target)
-            if let terminalReply, let operation, request.operation == presentation?.operation,
+            if let terminalReply, terminalReply.outcome == "saved", let operation,
+               request.operation == presentation?.operation,
                wire.revision == terminalReply.revision, Self.hash(wire.contentHash), wire.content == operation.request.content,
                terminalReply.ids?["memoryId"] == wire.memoryId {
                 if presentation?.receiveConfirmedReadback(for: request, snapshot: current) == true {
-                    await removeRecovery(terminalReply.outcome == "saved" ? .savedWithOperationBoundReadback : .unchangedWithOperationBoundReadback, token: token)
+                    await removeRecovery(.savedWithOperationBoundReadback, token: token)
                 }
             } else { _ = presentation?.receiveCurrentSnapshot(for: request, snapshot: current) }
         } catch { /* A failed read is neither operation proof nor permission to replay. */ }
@@ -303,7 +387,9 @@ final class NativeMemoryCorrectionConsumer {
             guard valid(token, record.presentationTarget) else { return }
             // Cleanup may have removed the record before failing on its locator.
             retainedOnDevice = false
-            cleanupMessage = "The save result was checked, but local recovery cleanup is still pending. Reopen this note to finish cleanup."
+            cleanupMessage = disposition == .unchangedNoWrite
+                ? "The no-change result was checked, but local recovery cleanup is still pending. Reopen this note to finish cleanup."
+                : "The save result was checked, but local recovery cleanup is still pending. Reopen this note to finish cleanup."
         }
     }
 

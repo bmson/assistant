@@ -638,6 +638,7 @@ actor NativeMemoryCorrectionRecoveryStore {
         switch disposition {
         case .savedWithOperationBoundReadback: "saved_with_operation_bound_readback"
         case .unchangedWithOperationBoundReadback: "unchanged_with_operation_bound_readback"
+        case .unchangedNoWrite: "unchanged_no_write"
         case .rejectedNoWrite: "rejected_no_write"
         case .staleNoWrite: "stale_no_write"
         }
@@ -645,7 +646,7 @@ actor NativeMemoryCorrectionRecoveryStore {
 
     private static func validCleanupCode(_ code: String) -> Bool {
         ["saved_with_operation_bound_readback", "unchanged_with_operation_bound_readback",
-         "rejected_no_write", "stale_no_write"].contains(code)
+         "unchanged_no_write", "rejected_no_write", "stale_no_write"].contains(code)
     }
 
     private static func validServerIdentity(_ value: String) -> Bool {
@@ -723,9 +724,10 @@ actor NativeMemoryCorrectionRecoveryStore {
 
 /// Marker values can only be supplied explicitly after the adapter has qualified disposition
 /// against the original operation. Pending readback is intentionally not a removal case.
-enum NativeMemoryCorrectionRecoveryTerminalDisposition: Sendable {
+enum NativeMemoryCorrectionRecoveryTerminalDisposition: Equatable, Sendable {
     case savedWithOperationBoundReadback
     case unchangedWithOperationBoundReadback
+    case unchangedNoWrite
     case rejectedNoWrite
     case staleNoWrite
 }

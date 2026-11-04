@@ -154,16 +154,16 @@ final class NativeMemoryCorrectionConsumerTests: XCTestCase {
         XCTAssertEqual(checkedIDs, [issued.operationID, issued.operationID])
     }
 
-    func testUnchangedReceiptCanRetryFailedReadExplicitlyWithoutReapplying() async throws {
+    func testUnchangedNoWriteReceiptReleasesRecoveryIndependentlyOfCurrentRead() async throws {
         let storage = MockCorrectionStorage()
         let transport = MockCorrectionTransport()
         let consumer = makeConsumer(storage: storage, transport: transport)
         await transport.setStatuses([.unchangedReceipt])
         await transport.setSnapshots([
             snapshot(memoryID: memoryA, revision: revisionA, content: original),
-            snapshot(memoryID: memoryA, revision: String(repeating: "e", count: 64), content: draft),
+            snapshot(memoryID: memoryA, revision: revisionB, content: "A later current note, separate from this no-write result."),
         ])
-        await transport.setSnapshotFailures([2]) // Opening read succeeds; receipt-triggered read fails.
+        await transport.setSnapshotFailures([2]) // A later explicit current read fails.
 
         await consumer.open(memoryID: memoryA)
         consumer.editDraft(draft)
@@ -174,31 +174,230 @@ final class NativeMemoryCorrectionConsumerTests: XCTestCase {
         consumer.updatePresentation(checking)
         await consumer.handle(checkIntent)
 
-        XCTAssertEqual(consumer.presentation?.phase, .unchanged)
+        XCTAssertEqual(consumer.presentation?.phase, .unchangedNoWrite)
         XCTAssertNil(consumer.presentation?.resultReadback)
         XCTAssertTrue(consumer.presentation?.canRefreshSavedNote == true)
-        XCTAssertTrue(consumer.retainedOnDevice)
-        XCTAssertTrue(consumer.blockedMemoryIDs.contains(memoryA))
+        XCTAssertFalse(consumer.retainedOnDevice)
+        XCTAssertFalse(consumer.blockedMemoryIDs.contains(memoryA))
+        XCTAssertEqual(consumer.presentation?.openedSnapshot.content, original)
+        XCTAssertEqual(consumer.presentation?.reviewedSnapshot.content, original)
+        XCTAssertEqual(consumer.presentation?.draft, draft)
+        XCTAssertNil(consumer.presentation?.currentSnapshot)
+        XCTAssertEqual(consumer.presentation?.statusText,
+                       "No correction was applied. The operation confirmed the note was already unchanged.")
+        let removedDispositions = await storage.removedDispositions
+        XCTAssertEqual(removedDispositions, [.unchangedNoWrite])
 
         var retrying = try XCTUnwrap(consumer.presentation)
         let refreshIntent = try XCTUnwrap(retrying.requestRefresh())
         consumer.updatePresentation(retrying)
         await consumer.handle(refreshIntent)
+        XCTAssertEqual(consumer.presentation?.phase, .unchangedNoWrite)
+        XCTAssertNil(consumer.presentation?.currentSnapshot)
+        XCTAssertNil(consumer.presentation?.resultReadback)
+        XCTAssertTrue(consumer.presentation?.canRefreshSavedNote == true)
+
+        var secondRefresh = try XCTUnwrap(consumer.presentation)
+        let secondRefreshIntent = try XCTUnwrap(secondRefresh.requestRefresh())
+        consumer.updatePresentation(secondRefresh)
+        await consumer.handle(secondRefreshIntent)
 
         let authorizations = await transport.authorizationCount
         let applies = await transport.applyCount
         let statusReads = await transport.statusCount
         let checkedIDs = await transport.statusOperationIDs
-        XCTAssertEqual(consumer.presentation?.phase, .unchanged)
+        let snapshotReads = await transport.snapshotCount
+        XCTAssertEqual(consumer.presentation?.phase, .unchangedNoWrite)
         XCTAssertEqual(consumer.presentation?.operation, issued)
-        XCTAssertEqual(consumer.presentation?.resultReadback?.content, draft)
-        XCTAssertFalse(consumer.presentation?.canRefreshSavedNote == true)
+        XCTAssertEqual(consumer.presentation?.currentSnapshot?.content,
+                       "A later current note, separate from this no-write result.")
+        XCTAssertNil(consumer.presentation?.resultReadback)
+        XCTAssertTrue(consumer.presentation?.canRefreshSavedNote == true)
+        XCTAssertTrue(consumer.presentation?.canReviewCurrent == true)
+        XCTAssertEqual(consumer.presentation?.statusText,
+                       "No correction was applied. The operation confirmed the note was already unchanged.")
         XCTAssertFalse(consumer.retainedOnDevice)
         XCTAssertFalse(consumer.blockedMemoryIDs.contains(memoryA))
         XCTAssertEqual(authorizations, 1)
         XCTAssertEqual(applies, 1)
         XCTAssertEqual(statusReads, 1)
         XCTAssertEqual(checkedIDs, [issued.operationID])
+        XCTAssertEqual(snapshotReads, 3, "The receipt must not trigger an automatic current read.")
+
+        var reviewed = try XCTUnwrap(consumer.presentation)
+        reviewed.reviewCurrentKeepingDraft()
+        consumer.updatePresentation(reviewed)
+        XCTAssertEqual(consumer.presentation?.reviewedSnapshot.content,
+                       "A later current note, separate from this no-write result.")
+        XCTAssertEqual(consumer.presentation?.draft, draft)
+        XCTAssertEqual(consumer.presentation?.phase, .editing)
+        XCTAssertNil(consumer.presentation?.operation)
+    }
+
+    func testUnchangedNoWritePreservesWhitespacePaddedDraftWhileAuthorizingCanonicalContent() async throws {
+        let storage = MockCorrectionStorage()
+        let transport = MockCorrectionTransport()
+        let consumer = makeConsumer(storage: storage, transport: transport)
+        let paddedDraft = "  \(draft)  "
+        await transport.setStatus(.unchangedReceipt)
+
+        await consumer.open(memoryID: memoryA)
+        consumer.editDraft(paddedDraft)
+        await save(consumer)
+
+        let target = NativeMemoryCorrectionRecoveryRecord.Target(ownerID: owner, serverID: server,
+            memoryID: memoryA, sourceIdentity: nil)
+        let persisted = try await storage.loadPending(serverIdentity: server, target: target)
+        let authorizedContents = await transport.authorizedContents
+        XCTAssertEqual(persisted?.draft, paddedDraft)
+        XCTAssertEqual(consumer.presentation?.draft, paddedDraft)
+        XCTAssertEqual(authorizedContents, [draft])
+
+        var checking = try XCTUnwrap(consumer.presentation)
+        let checkIntent = try XCTUnwrap(checking.checkResult())
+        consumer.updatePresentation(checking)
+        await consumer.handle(checkIntent)
+
+        let authorizationCount = await transport.authorizationCount
+        let applyCount = await transport.applyCount
+        let removedDispositions = await storage.removedDispositions
+        XCTAssertEqual(consumer.presentation?.phase, .unchangedNoWrite)
+        XCTAssertEqual(consumer.presentation?.draft, paddedDraft)
+        XCTAssertNil(consumer.presentation?.resultReadback)
+        XCTAssertFalse(consumer.retainedOnDevice)
+        XCTAssertEqual(authorizationCount, 1)
+        XCTAssertEqual(applyCount, 1)
+        XCTAssertEqual(removedDispositions, [.unchangedNoWrite])
+    }
+
+    func testOnlyExactCurrentOperationUnchangedReceiptCanUseNoWriteCleanup() async throws {
+        let rejectedStatuses: [StatusReply] = [
+            .unchangedWrongCommand,
+            .unchangedWrongOperationID,
+            .unchangedWrongRequestHash,
+            .unchangedWrongTarget,
+            .unchangedMissingRevision,
+            .unchangedMalformedRevision,
+            .unchangedMissingStatusVersion,
+            .unchangedWithReason,
+            .scopeRetirement,
+            .requestRejection,
+        ]
+        for rejectedStatus in rejectedStatuses {
+            let storage = MockCorrectionStorage()
+            let transport = MockCorrectionTransport()
+            await transport.setStatus(rejectedStatus)
+            let consumer = makeConsumer(storage: storage, transport: transport)
+
+            await consumer.open(memoryID: memoryA)
+            consumer.editDraft(draft)
+            await save(consumer)
+            let issued = try XCTUnwrap(consumer.presentation?.operation)
+            var checking = try XCTUnwrap(consumer.presentation)
+            let intent = try XCTUnwrap(checking.checkResult())
+            consumer.updatePresentation(checking)
+            await consumer.handle(intent)
+
+            XCTAssertEqual(consumer.presentation?.phase, .unknown, "Rejected: \(rejectedStatus)")
+            XCTAssertFalse(consumer.presentation?.isChecking == true, "Rejected: \(rejectedStatus)")
+            XCTAssertNil(consumer.presentation?.resultReadback, "Rejected: \(rejectedStatus)")
+            XCTAssertTrue(consumer.retainedOnDevice, "Rejected: \(rejectedStatus)")
+            XCTAssertTrue(consumer.blockedMemoryIDs.contains(memoryA), "Rejected: \(rejectedStatus)")
+            let removedDispositions = await storage.removedDispositions
+            let authorizations = await transport.authorizationCount
+            let applies = await transport.applyCount
+            let statusReads = await transport.statusCount
+            XCTAssertTrue(removedDispositions.isEmpty, "Rejected: \(rejectedStatus)")
+            XCTAssertEqual(authorizations, 1, "Rejected: \(rejectedStatus)")
+            XCTAssertEqual(applies, 1, "Rejected: \(rejectedStatus)")
+            XCTAssertEqual(statusReads, 1, "Rejected: \(rejectedStatus)")
+            XCTAssertEqual(consumer.presentation?.operation, issued)
+        }
+    }
+
+    func testNoWriteReceiptRequiresCurrentOwnerServerSessionBinding() async throws {
+        var isCurrent = true
+        let storage = MockCorrectionStorage()
+        let transport = MockCorrectionTransport()
+        await transport.setStatus(.unchangedReceipt)
+        let consumer = makeConsumer(storage: storage, transport: transport, isCurrent: { isCurrent })
+
+        await consumer.open(memoryID: memoryA)
+        consumer.editDraft(draft)
+        await save(consumer)
+        var checking = try XCTUnwrap(consumer.presentation)
+        let intent = try XCTUnwrap(checking.checkResult())
+        consumer.updatePresentation(checking)
+
+        isCurrent = false // The authenticated owner/server/session binding retired before the read.
+        await consumer.handle(intent)
+
+        XCTAssertEqual(consumer.presentation?.phase, .unknown)
+        XCTAssertFalse(consumer.presentation?.isChecking == true)
+        XCTAssertTrue(consumer.retainedOnDevice)
+        XCTAssertTrue(consumer.blockedMemoryIDs.contains(memoryA))
+        let removedDispositions = await storage.removedDispositions
+        let statusReads = await transport.statusCount
+        let authorizations = await transport.authorizationCount
+        let applies = await transport.applyCount
+        XCTAssertTrue(removedDispositions.isEmpty)
+        XCTAssertEqual(statusReads, 0)
+        XCTAssertEqual(authorizations, 1)
+        XCTAssertEqual(applies, 1)
+    }
+
+    func testOlderUnchangedReceiptCannotClearNewerPendingStatusVersion() async throws {
+        let storage = MockCorrectionStorage()
+        let transport = MockCorrectionTransport()
+        await transport.setStatus(.unchangedReceipt)
+        let consumer = makeConsumer(storage: storage, transport: transport)
+
+        await consumer.open(memoryID: memoryA)
+        consumer.editDraft(draft)
+        await save(consumer)
+        let issued = try XCTUnwrap(consumer.presentation?.operation)
+        var pending = try XCTUnwrap(consumer.presentation)
+        XCTAssertTrue(pending.receiveOutcome(presentationID: pending.presentationID, operation: issued,
+                                             version: 2, disposition: .pending))
+        consumer.updatePresentation(pending)
+
+        var checking = try XCTUnwrap(consumer.presentation)
+        let intent = try XCTUnwrap(checking.checkResult())
+        consumer.updatePresentation(checking)
+        await consumer.handle(intent)
+
+        XCTAssertEqual(consumer.presentation?.phase, .pending)
+        XCTAssertFalse(consumer.presentation?.isChecking == true)
+        XCTAssertEqual(consumer.presentation?.outcomeVersion, 2)
+        XCTAssertTrue(consumer.retainedOnDevice)
+        XCTAssertTrue(consumer.blockedMemoryIDs.contains(memoryA))
+        let removedDispositions = await storage.removedDispositions
+        XCTAssertTrue(removedDispositions.isEmpty)
+    }
+
+    func testUnchangedNoWriteCleanupFailureKeepsTargetBlockedWithoutReplay() async throws {
+        let storage = MockCorrectionStorage(failRemove: true)
+        let transport = MockCorrectionTransport()
+        await transport.setStatus(.unchangedReceipt)
+        let consumer = makeConsumer(storage: storage, transport: transport)
+
+        await consumer.open(memoryID: memoryA)
+        consumer.editDraft(draft)
+        await save(consumer)
+        var checking = try XCTUnwrap(consumer.presentation)
+        let intent = try XCTUnwrap(checking.checkResult())
+        consumer.updatePresentation(checking)
+        await consumer.handle(intent)
+
+        let authorizations = await transport.authorizationCount
+        let applies = await transport.applyCount
+        XCTAssertEqual(consumer.presentation?.phase, .unchangedNoWrite)
+        XCTAssertNil(consumer.presentation?.resultReadback)
+        XCTAssertFalse(consumer.retainedOnDevice)
+        XCTAssertTrue(consumer.blockedMemoryIDs.contains(memoryA))
+        XCTAssertTrue(consumer.cleanupMessage?.contains("no-change result") == true)
+        XCTAssertEqual(authorizations, 1)
+        XCTAssertEqual(applies, 1)
     }
 
     func testRestartRestoresUnknownOperationAndOriginalDraftWithoutNetworkMutation() async throws {
@@ -534,10 +733,11 @@ final class NativeMemoryCorrectionConsumerTests: XCTestCase {
     }
 
     private func makeConsumer(storage: MockCorrectionStorage, transport: MockCorrectionTransport,
+                              isCurrent: @escaping @MainActor () -> Bool = { true },
                               hasGenericWrite: @escaping @MainActor (String) -> Bool = { _ in false }) -> NativeMemoryCorrectionConsumer {
         let consumer = NativeMemoryCorrectionConsumer(storage: storage)
         consumer.bind(scope: .init(ownerID: owner, serverIdentity: server), transport: transport,
-                      isCurrent: { true }, hasGenericWrite: hasGenericWrite)
+                      isCurrent: isCurrent, hasGenericWrite: hasGenericWrite)
         return consumer
     }
 
@@ -610,6 +810,7 @@ private actor MockCorrectionStorage: NativeMemoryCorrectionStorage {
     private var removeContinuation: CheckedContinuation<Void, Never>?
     private var removeWaiter: CheckedContinuation<Void, Never>?
     private(set) var removedOperationIDs: [String] = []
+    private(set) var removedDispositions: [NativeMemoryCorrectionRecoveryTerminalDisposition] = []
 
     init(events: EventLog? = nil, failSave: Bool = false, holdSave: Bool = false,
          failRemove: Bool = false, failLoadPendingCount: Int = 0, holdFirstLoad: Bool = false,
@@ -656,6 +857,7 @@ private actor MockCorrectionStorage: NativeMemoryCorrectionStorage {
               pending?.operation.operationID == operationID else { return }
         pending = nil
         removedOperationIDs.append(operationID)
+        removedDispositions.append(disposition)
         if holdFirstRemove && !removeHeld {
             removeHeld = true
             removeWaiter?.resume(); removeWaiter = nil
@@ -704,6 +906,7 @@ private actor MockCorrectionTransport: NativeMemoryCorrectionTransport {
     private(set) var statusCount = 0
     private(set) var statusOperationIDs: [String] = []
     private(set) var appliedOperationIDs: [String] = []
+    private(set) var authorizedContents: [String] = []
 
     init(events: EventLog? = nil, heldMemoryID: String? = nil, operationIDs: [String]? = nil) {
         self.events = events
@@ -736,10 +939,12 @@ private actor MockCorrectionTransport: NativeMemoryCorrectionTransport {
     func authorizeOwnerMemoryCorrection(memoryID: String, expectedContentHash: String,
         expectedMemoryRevision: String, content: String) async throws -> OwnerMemoryCorrectionAuthorization {
         authorizationCount += 1
+        let canonicalContent = OwnerMemoryCorrectionApplyRequest.trimmedServerContent(content)
+        authorizedContents.append(canonicalContent)
         let operationID = operationIDs.flatMap { $0.indices.contains(authorizationCount - 1) ? $0[authorizationCount - 1] : nil }
             ?? defaultOperationID
         return makeAuthorization(memoryID: memoryID, operationID: operationID, hash: expectedContentHash,
-                                 revision: expectedMemoryRevision, content: content)
+                                 revision: expectedMemoryRevision, content: canonicalContent)
     }
 
     nonisolated func makeOwnerMemoryCorrectionOperation(memoryID: String,
@@ -784,7 +989,51 @@ private actor MockCorrectionTransport: NativeMemoryCorrectionTransport {
                 outcome: "unchanged", reason: nil, fieldErrors: nil, ids: ["memoryId": operation.memoryId],
                 originalOperationTerminal: nil, revision: String(repeating: "e", count: 64),
                 statusVersion: 1, requestHash: operation.requestHash)
+        case .unchangedWrongCommand:
+            return unchangedReply(operation, command: "other_command")
+        case .unchangedWrongOperationID:
+            return unchangedReply(operation, operationID: "123e4567-e89b-12d3-a456-426614174099")
+        case .unchangedWrongRequestHash:
+            return unchangedReply(operation, requestHash: String(repeating: "f", count: 64))
+        case .unchangedWrongTarget:
+            return unchangedReply(operation, ids: ["memoryId": "123e4567-e89b-12d3-a456-426614174002"])
+        case .unchangedMissingRevision:
+            return unchangedReply(operation, revision: nil)
+        case .unchangedMalformedRevision:
+            return unchangedReply(operation, revision: "not-a-revision")
+        case .unchangedMissingStatusVersion:
+            return unchangedReply(operation, statusVersion: nil)
+        case .unchangedWithReason:
+            return unchangedReply(operation, reason: "unexpected")
+        case .scopeRetirement:
+            return OwnerMemoryCorrectionReply(version: 1, authority: "scope_retirement",
+                command: "correct_owner_memory", operationId: operation.authorization.operationId,
+                outcome: "voided", reason: "replay_window_retired", fieldErrors: nil, ids: nil,
+                originalOperationTerminal: nil, revision: nil, statusVersion: nil, requestHash: nil)
+        case .requestRejection:
+            return OwnerMemoryCorrectionReply(version: 1, authority: "request_rejection",
+                command: "correct_owner_memory", operationId: operation.authorization.operationId,
+                outcome: "conflict", reason: "request_binding_mismatch", fieldErrors: nil, ids: nil,
+                originalOperationTerminal: false, revision: nil, statusVersion: nil, requestHash: nil)
         }
+    }
+
+    private func unchangedReply(
+        _ operation: OwnerMemoryCorrectionOperation,
+        command: String = "correct_owner_memory",
+        operationID: String? = nil,
+        requestHash: String? = nil,
+        ids: [String: String]? = nil,
+        reason: String? = nil,
+        revision: String? = String(repeating: "e", count: 64),
+        statusVersion: Int? = 1
+    ) -> OwnerMemoryCorrectionReply {
+        OwnerMemoryCorrectionReply(version: 1, authority: "operation_receipt",
+            command: command, operationId: operationID ?? operation.authorization.operationId,
+            outcome: "unchanged", reason: reason, fieldErrors: nil,
+            ids: ids ?? ["memoryId": operation.memoryId], originalOperationTerminal: nil,
+            revision: revision, statusVersion: statusVersion,
+            requestHash: requestHash ?? operation.requestHash)
     }
 
     func setStatus(_ status: StatusReply) {
@@ -831,5 +1080,11 @@ private actor MockCorrectionTransport: NativeMemoryCorrectionTransport {
     private var memoryID: String { "123e4567-e89b-12d3-a456-426614174001" }
 }
 
-private enum StatusReply { case pending, savedReceipt, unchangedReceipt }
+private enum StatusReply {
+    case pending, savedReceipt, unchangedReceipt
+    case unchangedWrongCommand, unchangedWrongOperationID, unchangedWrongRequestHash
+    case unchangedWrongTarget, unchangedMissingRevision, unchangedMalformedRevision
+    case unchangedMissingStatusVersion, unchangedWithReason
+    case scopeRetirement, requestRejection
+}
 private enum MockFailure: Error { case storage, missingSnapshot, noStatus }

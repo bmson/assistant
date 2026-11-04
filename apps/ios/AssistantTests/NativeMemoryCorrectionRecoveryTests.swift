@@ -222,6 +222,43 @@ final class NativeMemoryCorrectionRecoveryTests: XCTestCase {
         }
     }
 
+    func testUnchangedNoWriteCleanupMarkerResumesOnlyItsOwnDispositionAfterReopen() async throws {
+        let files = RecoveryMemoryFiles()
+        let vault = RecoveryMemoryVault()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let record = fixture(operationID: "unchanged-no-write-reopen")
+        let store = try makeStore(files: files, vault: vault, root: root)
+        try await store.saveBeforeDispatch(record)
+        files.failRemovePath = try XCTUnwrap(files.paths.first(where: { $0.hasSuffix(".nmcr") }))
+
+        do {
+            try await store.remove(serverIdentity: record.serverIdentity, target: record.target,
+                                   operationID: record.operation.operationID,
+                                   disposition: .unchangedNoWrite)
+            XCTFail("The failed deletion must leave its authenticated no-write marker discoverable.")
+        } catch { }
+        let markerPath = try XCTUnwrap(files.paths.first(where: { $0.hasSuffix("terminal-cleanup.nmct") }))
+        XCTAssertTrue(files.paths.contains(where: { $0.hasSuffix(".nmcr") }))
+        XCTAssertTrue(files.paths.contains(where: { $0.hasSuffix("pending.nmcp") }))
+
+        do {
+            try await store.remove(serverIdentity: record.serverIdentity, target: record.target,
+                                   operationID: record.operation.operationID,
+                                   disposition: .unchangedWithOperationBoundReadback)
+            XCTFail("The legacy readback disposition must not silently reuse the no-write marker.")
+        } catch let error as NativeMemoryCorrectionRecoveryError {
+            XCTAssertEqual(error, .operationConflict)
+        }
+        XCTAssertTrue(files.paths.contains(markerPath))
+
+        files.failRemovePath = nil
+        let reopened = try makeStore(files: files, vault: vault, root: root)
+        let pending = try await reopened.loadPending(serverIdentity: record.serverIdentity, target: record.target)
+        XCTAssertNil(pending)
+        XCTAssertTrue(files.values.isEmpty, "A fresh store resumes only the exact authenticated no-write cleanup.")
+    }
+
     func testTamperedOrForeignScopeCleanupMarkerFailsClosed() async throws {
         let files = RecoveryMemoryFiles()
         let vault = RecoveryMemoryVault()

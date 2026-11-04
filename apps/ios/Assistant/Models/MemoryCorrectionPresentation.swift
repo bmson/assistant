@@ -64,6 +64,8 @@ enum MemoryCorrectionAuthorizationResult: Equatable, Sendable {
 enum MemoryCorrectionDisposition: Equatable, Sendable {
     case saved(readback: MemoryCorrectionSnapshot?)
     case unchanged(readback: MemoryCorrectionSnapshot?)
+    /// The exact terminal receipt says this operation made no write. It is not saved attribution.
+    case unchangedNoWrite
     case uncertain
     case pending
     case staleNoWrite(MemoryCorrectionSnapshot)
@@ -73,7 +75,7 @@ enum MemoryCorrectionDisposition: Equatable, Sendable {
 /// Unmounted in-memory state. It performs no networking, grant validation, or persistence.
 struct MemoryCorrectionPresentation: Equatable, Sendable {
     enum Phase: Equatable, Sendable {
-        case editing, authorizing, submitting, pending, unknown, stale, saved, unchanged, unavailable, cancelled
+        case editing, authorizing, submitting, pending, unknown, stale, saved, unchanged, unchangedNoWrite, unavailable, cancelled
     }
 
     /// Local view lifetime, deliberately unrelated to mobile authentication/session semantics.
@@ -105,8 +107,13 @@ struct MemoryCorrectionPresentation: Equatable, Sendable {
             && draft.trimmingCharacters(in: .whitespacesAndNewlines).count >= 3
     }
     var canCheckResult: Bool { [.unknown, .pending].contains(phase) && operation != nil && !isChecking }
-    var canRefreshSavedNote: Bool { phase == .stale || ([.saved, .unchanged].contains(phase) && resultReadback == nil) }
-    var canReviewCurrent: Bool { phase == .stale && currentSnapshot != nil }
+    var canRefreshSavedNote: Bool {
+        phase == .stale || ([.saved, .unchanged, .unchangedNoWrite].contains(phase) && resultReadback == nil)
+    }
+    var canReviewCurrent: Bool {
+        currentSnapshot != nil &&
+            (phase == .stale || (phase == .unchangedNoWrite && currentSnapshot != reviewedSnapshot))
+    }
     var hasDispatchedSave: Bool { operation != nil }
 
     var statusText: String? {
@@ -121,6 +128,7 @@ struct MemoryCorrectionPresentation: Equatable, Sendable {
         case .stale: "Review the current saved note before saving your draft."
         case .saved: resultReadback == nil ? "Saved. The latest view has not been refreshed." : "Saved."
         case .unchanged: resultReadback == nil ? "No change was needed. The latest view has not been refreshed." : "No change was needed."
+        case .unchangedNoWrite: "No correction was applied. The operation confirmed the note was already unchanged."
         case .unavailable: message ?? "Editing is unavailable. Your draft is still here."
         }
     }
@@ -203,6 +211,9 @@ struct MemoryCorrectionPresentation: Equatable, Sendable {
             resultReadback = readback
             if let readback { currentSnapshot = readback }
             if case .saved = disposition { phase = .saved } else { phase = .unchanged }
+        case .unchangedNoWrite:
+            resultReadback = nil
+            phase = .unchangedNoWrite
         case .uncertain:
             phase = .unknown
         case .pending:

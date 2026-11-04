@@ -197,6 +197,41 @@ final class MemoryCorrectionPresentationTests: XCTestCase {
         XCTAssertEqual(state.statusText, "Saved.")
     }
 
+    func testUnchangedNoWriteKeepsOriginalDraftAndNeverAcceptsReadbackAttribution() throws {
+        var state = MemoryCorrectionPresentation(snapshot: snapshot())
+        state.editDraft("My unchanged draft stays visible")
+        let operation = try authorize(&state)
+        XCTAssertTrue(state.receiveOutcome(presentationID: state.presentationID, operation: operation,
+                                           version: 1, disposition: .unchangedNoWrite))
+
+        XCTAssertEqual(state.phase, .unchangedNoWrite)
+        XCTAssertEqual(state.openedSnapshot, snapshot())
+        XCTAssertEqual(state.reviewedSnapshot, snapshot())
+        XCTAssertEqual(state.draft, "My unchanged draft stays visible")
+        XCTAssertNil(state.currentSnapshot)
+        XCTAssertNil(state.resultReadback)
+        XCTAssertFalse(state.canRequestAuthorization)
+        XCTAssertTrue(state.canRefreshSavedNote)
+        XCTAssertTrue(state.statusText?.contains("No correction was applied") == true)
+
+        let changed = snapshot(revision: "r2", content: "Changed after the no-write receipt")
+        let readRequest = try refreshRequest(&state)
+        XCTAssertTrue(state.receiveCurrentSnapshot(for: readRequest, snapshot: changed))
+        XCTAssertEqual(state.phase, .unchangedNoWrite)
+        XCTAssertEqual(state.currentSnapshot, changed)
+        XCTAssertNil(state.resultReadback)
+        XCTAssertTrue(state.canReviewCurrent)
+        let noWriteReadback = try refreshRequest(&state)
+        XCTAssertFalse(state.receiveConfirmedReadback(for: noWriteReadback, snapshot: changed))
+        XCTAssertEqual(state.phase, .unchangedNoWrite)
+
+        state.reviewCurrentKeepingDraft()
+        XCTAssertEqual(state.phase, .editing)
+        XCTAssertEqual(state.reviewedSnapshot, changed)
+        XCTAssertEqual(state.draft, "My unchanged draft stays visible")
+        XCTAssertNil(state.operation)
+    }
+
     func testLateReadFromAAfterNewOperationBCannotReplaceCurrentText() throws {
         var state = MemoryCorrectionPresentation(snapshot: snapshot())
         let a = try authorize(&state)
