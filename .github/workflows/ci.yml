@@ -120,6 +120,11 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm test
+      - name: Qualify PostgreSQL native owner-editor recovery adapter
+        timeout-minutes: 8
+        env:
+          OWNER_EDITOR_RECOVERY_PG_QUALIFICATION: '1'
+        run: pnpm test packages/db/src/owner-editor-recovery.native.test.ts
       - name: Verify isolated snapshot restore stays read-only and inert
         timeout-minutes: 8
         run: |
@@ -165,10 +170,25 @@ jobs:
       # No cloud authentication, project creation, or billable API calls.
       - name: Verify Firestore transactions and vector retrieval
         shell: bash
+        env:
+          OWNER_EDITOR_RECOVERY_FS_QUALIFICATION_PROJECT: demo-owner-editor-recovery-qualification
+          ASSISTANT_TEST_NO_EXTERNAL_CREDENTIALS: '1'
+          TMPDIR: ${{ runner.temp }}/owner-editor-recovery-qualification
         run: |
+          if [ -e "$TMPDIR" ]; then
+            echo "Refusing pre-existing Firestore recovery qualification temp directory."
+            exit 1
+          fi
+          mkdir -m 700 "$TMPDIR"
           gcloud emulators firestore start --host-port="$FIRESTORE_EMULATOR_HOST" --quiet > "$RUNNER_TEMP/firestore.log" 2>&1 &
           assistant_emulator_pid=$!
-          trap 'kill "$assistant_emulator_pid" 2>/dev/null || true' EXIT
+          assistant_cleanup() {
+            kill "$assistant_emulator_pid" 2>/dev/null || true
+            if [ "$TMPDIR" = "$RUNNER_TEMP/owner-editor-recovery-qualification" ]; then
+              rm -rf -- "$TMPDIR"
+            fi
+          }
+          trap assistant_cleanup EXIT
           assistant_emulator_ready=false
           for assistant_attempt in {1..60}; do
             if curl --fail --silent --output /dev/null "http://$FIRESTORE_EMULATOR_HOST"; then
@@ -185,7 +205,44 @@ jobs:
             cat "$RUNNER_TEMP/firestore.log"
             exit 1
           fi
+          set +e
           pnpm test:firestore
+          assistant_test_status=$?
+          set -e
+          assistant_cleanup_receipt="$TMPDIR/recovery-fs-cleanup.json"
+          if [ -f "$assistant_cleanup_receipt" ]; then
+            cat "$assistant_cleanup_receipt"
+            node --input-type=module - "$assistant_cleanup_receipt" <<'NODE' || assistant_test_status=1
+          import { readFileSync } from 'node:fs';
+          const receipt = JSON.parse(readFileSync(process.argv[2], 'utf8'));
+          const clean =
+            receipt.formatVersion === 1 &&
+            receipt.expectedTests === 9 &&
+            receipt.completedCleanups === 9 &&
+            receipt.remainingRefs === 0 &&
+            receipt.terminatedClients === 9 &&
+            Array.isArray(receipt.cleanupErrors) &&
+            receipt.cleanupErrors.length === 0 &&
+            Array.isArray(receipt.cases) &&
+            receipt.cases.length === 9 &&
+            receipt.cases.every((item) => item.remainingRefs === 0 && item.terminated);
+          if (!clean) {
+            console.error('Firestore owner-editor recovery cleanup receipt is incomplete.');
+            process.exitCode = 1;
+          }
+          NODE
+          else
+            echo "Firestore owner-editor recovery cleanup receipt was not produced."
+            assistant_test_status=1
+          fi
+          assistant_conflict_receipt="$TMPDIR/recovery-fs-conflict.json"
+          if [ -f "$assistant_conflict_receipt" ]; then
+            cat "$assistant_conflict_receipt"
+          else
+            echo "Firestore owner-editor recovery conflict receipt was not produced."
+            assistant_test_status=1
+          fi
+          exit "$assistant_test_status"
       - name: Remove owned PostgreSQL service
         if: always()
         run: bash infra/ci/postgres-service.sh cleanup

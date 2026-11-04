@@ -51,6 +51,14 @@ export function assertReplayDatabaseUrl(raw: string): string {
   return url.toString();
 }
 
+export function assertReplayDatabaseTarget(host: string[], database: string | null): void {
+  if (
+    !host.every((value) => ['localhost', '127.0.0.1', '::1'].includes(value)) ||
+    !database?.endsWith('_test')
+  )
+    throw new Error('Refusing replay outside a loopback _test database');
+}
+
 export interface QuestionResult {
   id: string;
   records: number[];
@@ -726,11 +734,7 @@ export async function runQuestion(
     );
   const host = db.$client.options.host;
   const database = db.$client.options.database;
-  if (
-    !host.every((value) => ['localhost', '127.0.0.1', '::1'].includes(value)) ||
-    !database.endsWith('_test')
-  )
-    throw new Error('Refusing replay outside a loopback _test database');
+  assertReplayDatabaseTarget(host, database);
   try {
     await db.transaction(async (transaction) => {
       const replayDb = transaction as unknown as Db;

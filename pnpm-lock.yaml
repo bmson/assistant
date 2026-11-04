@@ -69,7 +69,7 @@ importers:
         version: 7.0.159(zod@4.6.7)
       drizzle-orm:
         specifier: ^0.45.4
-        version: 0.45.4(@opentelemetry/api@1.10.0)(postgres@3.4.9)
+        version: 0.45.4(@opentelemetry/api@1.10.0)(postgres@4.0.0)
       google-auth-library:
         specifier: 10.9.1
         version: 10.9.1
@@ -150,7 +150,7 @@ importers:
         version: 7.0.159(zod@4.6.7)
       drizzle-orm:
         specifier: ^0.45.4
-        version: 0.45.4(@opentelemetry/api@1.10.0)(postgres@3.4.9)
+        version: 0.45.4(@opentelemetry/api@1.10.0)(postgres@4.0.0)
       hono:
         specifier: ^4.13.14
         version: 4.13.16
@@ -180,8 +180,8 @@ importers:
         specifier: 9.4.0
         version: 9.4.0
       unpdf:
-        specifier: 1.9.1
-        version: 1.9.1
+        specifier: 2.1.0
+        version: 2.1.0
 
   apps/web:
     dependencies:
@@ -296,7 +296,7 @@ importers:
         version: 7.0.159(zod@4.6.7)
       drizzle-orm:
         specifier: ^0.45.4
-        version: 0.45.4(@opentelemetry/api@1.10.0)(postgres@3.4.9)
+        version: 0.45.4(@opentelemetry/api@1.10.0)(postgres@4.0.0)
       google-auth-library:
         specifier: 10.9.1
         version: 10.9.1
@@ -346,17 +346,17 @@ importers:
         specifier: ^7.0.156
         version: 7.0.159(zod@4.6.7)
       croner:
-        specifier: ^10.0.1
-        version: 10.0.1
+        specifier: ^11.0.0
+        version: 11.0.0
       drizzle-orm:
         specifier: ^0.45.4
-        version: 0.45.4(@opentelemetry/api@1.10.0)(postgres@3.4.9)
+        version: 0.45.4(@opentelemetry/api@1.10.0)(postgres@4.0.0)
       postal-mime:
         specifier: 4.2.0
         version: 4.2.0
       unpdf:
-        specifier: ^1.9.1
-        version: 1.9.1
+        specifier: ^2.1.0
+        version: 2.1.0
       ws:
         specifier: 8.22.0
         version: 8.22.0
@@ -378,10 +378,10 @@ importers:
         version: link:../persistence
       drizzle-orm:
         specifier: ^0.45.4
-        version: 0.45.4(@opentelemetry/api@1.10.0)(postgres@3.4.9)
+        version: 0.45.4(@opentelemetry/api@1.10.0)(postgres@4.0.0)
       postgres:
-        specifier: ^3.4.9
-        version: 3.4.9
+        specifier: ^4.0.0
+        version: 4.0.0
     devDependencies:
       drizzle-kit:
         specifier: ^0.31.11
@@ -431,7 +431,7 @@ importers:
         version: link:../tools
       drizzle-orm:
         specifier: ^0.45.4
-        version: 0.45.4(@opentelemetry/api@1.10.0)(postgres@3.4.9)
+        version: 0.45.4(@opentelemetry/api@1.10.0)(postgres@4.0.0)
       zod:
         specifier: ^4.6.7
         version: 4.6.7
@@ -464,7 +464,7 @@ importers:
         version: link:../persistence
       drizzle-orm:
         specifier: ^0.45.4
-        version: 0.45.4(@opentelemetry/api@1.10.0)(postgres@3.4.9)
+        version: 0.45.4(@opentelemetry/api@1.10.0)(postgres@4.0.0)
       zod:
         specifier: ^4.6.7
         version: 4.6.7
@@ -2212,8 +2212,8 @@ packages:
     resolution: {integrity: sha512-piICUB6ei4IlTv1+653yq5+KoqfBYmj9bw6LqXoOneTMDXk5nM1qt12mFW1caG3LlJXEKW1Bp0WggEmIfQB34g==}
     engines: {node: '>= 14'}
 
-  croner@10.0.1:
-    resolution: {integrity: sha512-ixNtAJndqh173VQ4KodSdJEI6nuioBWI0V1ITNKhZZsO0pEMoDxz539T4FTTbSZ/xIOSuDnzxLVRqBVSvPNE2g==}
+  croner@11.0.0:
+    resolution: {integrity: sha512-T17ADjdttrVToyzLpLq9Xb9xzcMwpQ/M3Qs9szhh0MVNTbv6NWQ9OFYa2qlzPYXFMn+uoDlnW1IpIv6cAvFtyA==}
     engines: {node: '>=18.0'}
 
   cross-spawn@7.0.6:
@@ -3366,9 +3366,9 @@ packages:
     resolution: {integrity: sha512-g50586zr4bZmwFiTlflMu8E0bDTb5I5gertgwAKmsdUlTQIhZtunzUlD1WSzwcVWPoAVpsrA6vlfCD7oXvRwgg==}
     engines: {node: ^10 || ^12 || >=14}
 
-  postgres@3.4.9:
-    resolution: {integrity: sha512-GD3qdB0x1z9xgFI6cdRD6xu2Sp2WCOEoe3mtnyB5Ee0XrrL5Pe+e4CCnJrRMnL1zYtRDZmQQVbvOttLnKDLnaw==}
-    engines: {node: '>=12'}
+  postgres@4.0.0:
+    resolution: {integrity: sha512-kBh8qXtcvvIAc00DftQyOxz7M/3Zxww1tRMXZPLzipNXXl5PIzHml+9zB3Mrge2U8ldc0WF1ZdLp1iYQi7Kh3A==}
+    engines: {node: '>=20'}
 
   preact-render-to-string@6.5.11:
     resolution: {integrity: sha512-ubnauqoGczeGISiOh6RjX0/cdaF8v/oDXIjO85XALCQjwQP+SB4RDXXtvZ6yTYSjG+PC1QRP2AhPgCEsM2EvUw==}
@@ -3725,9 +3725,9 @@ packages:
     resolution: {integrity: sha512-gptHNQghINnc/vTGIk0SOFGFNXw7JVrlRUtConJRlvaw6DuX0wO5Jeko9sWrMBhh+PsYAZ7oXAiOnf/UKogyiw==}
     engines: {node: '>= 10.0.0'}
 
-  unpdf@1.9.1:
-    resolution: {integrity: sha512-nO1npM2kNyd4hj1fKzUVU6bvnWjDSxI97eycM/DgzI83dYyW+pNRI9NeMQVEfef8fI3Q06i9lkMeE1HxrQqKoA==}
-    engines: {node: '>=22'}
+  unpdf@2.1.0:
+    resolution: {integrity: sha512-G/Hsrm++g0EoubUhV8TDFItq6oQ+FUu9EMvIRtHUwseKXB0iJoCvaLvBGOpYUBqyvggv/XfxhYYtohL2QpE3xQ==}
+    engines: {node: '>=24'}
     peerDependencies:
       '@napi-rs/canvas': ^0.1.69 || ^1.0.0
     peerDependenciesMeta:
@@ -5307,7 +5307,7 @@ snapshots:
       crc-32: 1.2.2
       readable-stream: 4.8.0
 
-  croner@10.0.1: {}
+  croner@11.0.0: {}
 
   cross-spawn@7.0.6:
     dependencies:
@@ -5542,10 +5542,10 @@ snapshots:
       esbuild: 0.25.12
       tsx: 4.23.15
 
-  drizzle-orm@0.45.4(@opentelemetry/api@1.10.0)(postgres@3.4.9):
+  drizzle-orm@0.45.4(@opentelemetry/api@1.10.0)(postgres@4.0.0):
     optionalDependencies:
       '@opentelemetry/api': 1.10.0
-      postgres: 3.4.9
+      postgres: 4.0.0
 
   duck@0.1.12:
     dependencies:
@@ -6699,7 +6699,7 @@ snapshots:
       picocolors: 1.1.1
       source-map-js: 1.2.2
 
-  postgres@3.4.9: {}
+  postgres@4.0.0: {}
 
   preact-render-to-string@6.5.11(preact@10.24.3):
     dependencies:
@@ -7186,7 +7186,7 @@ snapshots:
 
   universalify@2.0.1: {}
 
-  unpdf@1.9.1: {}
+  unpdf@2.1.0: {}
 
   unzipper@0.12.5:
     dependencies:

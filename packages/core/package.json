@@ -97,10 +97,10 @@
     "@openrouter/ai-sdk-provider": "^3.1.0",
     "@opentelemetry/api": "^1.10.0",
     "ai": "^7.0.156",
-    "croner": "^10.0.1",
+    "croner": "^11.0.0",
     "drizzle-orm": "^0.45.4",
     "postal-mime": "4.2.0",
-    "unpdf": "^1.9.1",
+    "unpdf": "^2.1.0",
     "ws": "8.22.0",
     "zod": "^4.6.7"
   },
