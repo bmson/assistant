@@ -481,8 +481,10 @@ describe('dormant person-note request and receipt contract', () => {
     expect(html).toContain('Check result');
     expect(html).not.toContain('disabled=""');
     expect(html).not.toContain('Add saved note');
-    expect(html).toContain('Reloading loses the note text.');
-    expect(html).toContain('Save result unknown. Check result before adding another note.');
+    expect(html).toContain(
+      'The result of an earlier save is still unknown. Check result before adding another note.',
+    );
+    expect(html).not.toContain('Reloading loses the note text.');
     expect(html).not.toContain('Your draft is kept');
     expect(html).not.toContain(content);
   });
@@ -495,5 +497,59 @@ describe('dormant person-note request and receipt contract', () => {
       <PersonNoteRecovery state={state} checkResult={() => {}} draftPresent />,
     );
     expect(html).toContain('Your draft is kept on this page.');
+    expect(html).toContain('Reloading loses the note text.');
+  });
+  it('uses pending copy only for a typed preparing result', () => {
+    const state = operationState({
+      phase: 'pending',
+      marker: { id: grant.issuedOperationHandle, command: grant.command, targetId: subjectId },
+      reply: {
+        version: 1,
+        authority: 'unresolved',
+        command: grant.command,
+        operationId,
+        outcome: 'outcome_unknown',
+        reason: 'preparing',
+      },
+    });
+    const html = renderToStaticMarkup(
+      <PersonNoteRecovery state={state} checkResult={() => {}} draftPresent />,
+    );
+    expect(html).toContain('Save pending. Its result is not confirmed yet.');
+    expect(html).not.toContain('Save result unknown');
+    expect(html).toContain('Your draft is kept on this page.');
+  });
+  it('labels an in-flight status check neutrally and distinguishes an in-flight create', () => {
+    const marker = { id: grant.issuedOperationHandle, command: grant.command, targetId: subjectId };
+    const checkingHtml = renderToStaticMarkup(
+      <PersonNoteRecovery
+        state={operationState({
+          phase: 'pending',
+          marker,
+          busy: true,
+          message: 'Save could not be confirmed. Check its result before saving again.',
+          reply: null,
+        })}
+        checkResult={() => {}}
+        draftPresent={false}
+      />,
+    );
+    expect(checkingHtml).toContain('Checking save result…');
+    expect(checkingHtml).not.toContain('Saving…');
+    const savingHtml = renderToStaticMarkup(
+      <PersonNoteRecovery
+        state={operationState({
+          phase: 'pending',
+          marker,
+          busy: true,
+          message: 'Saving…',
+          reply: null,
+        })}
+        checkResult={() => {}}
+        draftPresent
+      />,
+    );
+    expect(savingHtml).toContain('Saving…');
+    expect(savingHtml).not.toContain('Checking save result…');
   });
 });

@@ -22,7 +22,7 @@ import {
   loadFirestoreMemoryLibrary,
 } from '@/lib/firestore-knowledge';
 import { entityKindLabel } from '@/lib/knowledge';
-import { memoryNoteHref } from '@/lib/memory-note-context';
+import { memoryNoteHref, memoryNoteReturnTo } from '@/lib/memory-note-context';
 import { savedNoteCreatedLabel, savedNoteValidityLabel } from '@/lib/saved-note-date-display';
 import { withPostgresMemoryBrowseRead } from '@/lib/server';
 import {
@@ -239,6 +239,10 @@ export default async function KnowledgePage({
   }
   const { library, filters, map, missingEntity } = data;
   const now = new Date();
+  const addPersonNoteReturnTo = memoryNoteReturnTo(href({ ...retained, view: 'library', page }));
+  const addPersonNoteHref = addPersonNoteReturnTo
+    ? `/people?addNote=1&returnTo=${encodeURIComponent(addPersonNoteReturnTo)}`
+    : '/people?addNote=1';
   return (
     <PageShell size="wide">
       <PageHeader
@@ -263,7 +267,7 @@ export default async function KnowledgePage({
           <p className="min-w-0 flex-1 text-sm text-muted">
             You can add a plain-text note about an existing person.
           </p>
-          <Link href="/people?addNote=1" className={btn.outline}>
+          <Link href={addPersonNoteHref} className={btn.outline}>
             Add a note about someone
           </Link>
         </div>

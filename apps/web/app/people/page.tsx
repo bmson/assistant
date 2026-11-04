@@ -23,6 +23,7 @@ import { PersonAvatar } from '@/app/people/person-avatar';
 import { MemoryNavigation } from '@/app/profile/memory-navigation';
 import { requireOwner } from '@/auth';
 import { listFirestorePeopleDirectory } from '@/lib/firestore-people';
+import { memoryNoteReturnTo } from '@/lib/memory-note-context';
 import { ownerEditorAvailability } from '@/lib/owner-editor-availability';
 import { buildOwnerEditorView } from '@/lib/owner-editor-view';
 import {
@@ -124,13 +125,15 @@ export default async function PeoplePage({
   searchParams: Promise<Record<string, string | undefined>>;
 }) {
   const session = await requireOwner();
-  const { q, addNote } = await searchParams;
+  const { q, addNote, returnTo: rawNoteReturnTo } = await searchParams;
   const addingPersonNote = addNote === '1';
+  const noteReturnTo = addingPersonNote ? memoryNoteReturnTo(rawNoteReturnTo) : null;
   const query = (typeof q === 'string' ? q : '').trim().slice(0, 120);
   const personHref = (id: string) => {
     const params = [
       query ? `q=${encodeURIComponent(query)}` : '',
       addingPersonNote ? 'addNote=1' : '',
+      noteReturnTo ? `returnTo=${encodeURIComponent(noteReturnTo)}` : '',
     ]
       .filter(Boolean)
       .join('&');
@@ -222,6 +225,7 @@ export default async function PeoplePage({
             with themselves, and the page stays a server component. */}
         <form method="get" className="mt-4 flex min-w-0 flex-wrap items-center gap-2">
           {addingPersonNote ? <input type="hidden" name="addNote" value="1" /> : null}
+          {noteReturnTo ? <input type="hidden" name="returnTo" value={noteReturnTo} /> : null}
           <label htmlFor="people-search" className="sr-only">
             Search people
           </label>
@@ -243,7 +247,14 @@ export default async function PeoplePage({
             Search
           </button>
           {query ? (
-            <Link href={addingPersonNote ? '/people?addNote=1' : '/people'} className={btn.outline}>
+            <Link
+              href={
+                addingPersonNote
+                  ? `/people?addNote=1${noteReturnTo ? `&returnTo=${encodeURIComponent(noteReturnTo)}` : ''}`
+                  : '/people'
+              }
+              className={btn.outline}
+            >
               Clear
             </Link>
           ) : null}

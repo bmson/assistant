@@ -37,6 +37,7 @@ vi.mock('@assistant/config', async (original) => ({
     GCP_PROJECT: 'offline-fixture',
     ASSISTANT_WORKSPACE_ID: 'offline-fixture',
     FIRESTORE_DATABASE_ID: 'offline-fixture',
+    DATABASE_URL: 'postgres://offline:offline@db.example.test:5432/assistant',
     AUTH_SECRET: 'offline-page-signing-secret',
     ASSISTANT_RELEASE_WRITES_PAUSED: !ports.enabled,
     RESTORE_REHEARSAL: false,
@@ -113,11 +114,24 @@ const dossier = () =>
     params: Promise.resolve({ id: contact.id }),
     searchParams: Promise.resolve({ q: 'retained search' }),
   });
-const noteIntentDirectory = () => People({ searchParams: Promise.resolve({ addNote: '1' }) });
+const noteReturnContext =
+  '/profile/knowledge?view=library&q=family&state=review&filter=verified&page=3&source=email';
+const noteIntentDirectory = () =>
+  People({
+    searchParams: Promise.resolve({
+      q: 'Sam Rivera',
+      addNote: '1',
+      returnTo: noteReturnContext,
+    }),
+  });
 const noteIntentDossier = () =>
   Person({
     params: Promise.resolve({ id: contact.id }),
-    searchParams: Promise.resolve({ q: 'retained search', addNote: '1' }),
+    searchParams: Promise.resolve({
+      q: 'retained search',
+      addNote: '1',
+      returnTo: noteReturnContext,
+    }),
   });
 beforeEach(() => {
   vi.resetAllMocks();
@@ -149,6 +163,7 @@ beforeEach(() => {
     expect(db).toBe(leased);
     ports.trace.push('editor');
     return {
+      ownerId,
       context,
       snapshot: input.contactId
         ? snapshot
@@ -322,7 +337,9 @@ describe('actual page + real issuance builder composition, named reader/fence po
     expect(directoryHtml).toContain(
       'Choose an existing person. The note will be saved about that person.',
     );
-    expect(directoryHtml).toContain(`href="/people/${contact.id}?addNote=1"`);
+    expect(directoryHtml).toContain(
+      `href="/people/${contact.id}?q=Sam%20Rivera&amp;addNote=1&amp;returnTo=${encodeURIComponent(noteReturnContext)}"`,
+    );
     ports.owner.mockResolvedValueOnce({
       user: { email: 'offline-owner@example.test' },
       formSessionScope: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
@@ -330,7 +347,49 @@ describe('actual page + real issuance builder composition, named reader/fence po
     const personHtml = renderToStaticMarkup(await noteIntentDossier());
     expect(personHtml).toContain(`Add a saved note about ${contact.name}`);
     expect(personHtml).not.toContain('Adding a note is unavailable');
-    expect(personHtml).toContain(`href="/people?q=retained%20search&amp;addNote=1"`);
+    expect(personHtml).toContain(
+      `href="/people?q=retained%20search&amp;addNote=1&amp;returnTo=${encodeURIComponent(noteReturnContext)}"`,
+    );
+  });
+  it('shows an explicit choose-another-person outcome when the owner is not note-eligible', async () => {
+    ports.person.mockResolvedValueOnce({
+      ...data.dossier,
+      profile: {
+        ...data.dossier.profile,
+        contact: { ...contact, trust: 'owner' },
+      },
+    });
+    ports.pgEditor.mockResolvedValueOnce({
+      ownerId,
+      context,
+      snapshot: { ...snapshot, identity: { ...snapshot.identity, trust: 'owner' } },
+    });
+    ports.owner.mockResolvedValueOnce({
+      user: { email: 'offline-owner@example.test' },
+      formSessionScope: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    });
+    const html = renderToStaticMarkup(await noteIntentDossier());
+    expect(html).toContain('Adding a note is unavailable for this person view.');
+    expect(html).toContain('Choose another existing person');
+    expect(html).toContain(
+      `href="/people?q=retained%20search&amp;addNote=1&amp;returnTo=${encodeURIComponent(noteReturnContext)}"`,
+    );
+  });
+  it('keeps the person-note host visible with a choose-another outcome when issuance is missing', async () => {
+    ports.pgEditor.mockResolvedValueOnce({
+      ownerId,
+      context: null,
+      snapshot: { ownerId, identity: null, people: [], corrections: [] },
+    });
+    ports.owner.mockResolvedValueOnce({
+      user: { email: 'offline-owner@example.test' },
+      formSessionScope: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    });
+    const html = renderToStaticMarkup(await noteIntentDossier());
+    expect(html).toContain(`Add a saved note about ${contact.name}`);
+    expect(html).toContain('Adding a note is unavailable for this person view.');
+    expect(html).toContain('Choose another existing person');
+    expect(html).not.toContain('Your sign-in changed');
   });
   it('PG dossier binds same displayed/native identity/options and preserves q back/map context', async () => {
     const node = data.map.nodes.find((node) => node.contactId === contact.id);
