@@ -75,11 +75,18 @@ it('keeps portable record types compatible with all PostgreSQL tables', () => {
   >();
   // Historical portable rows may omit the additive marker; native SQL rows
   // always expose its nullable column after schema 131.
-  expectTypeOf<Omit<Records['memories'], 'ownerCorrection'>>().toEqualTypeOf<
-    Omit<typeof schema.memories.$inferSelect, 'ownerCorrection'>
+  expectTypeOf<Omit<Records['memories'], 'ownerCorrection' | 'memoryWriteWitness'>>().toEqualTypeOf<
+    Omit<typeof schema.memories.$inferSelect, 'ownerCorrection' | 'memoryWriteWitness'>
   >();
   expectTypeOf<NonNullable<Records['memories']['ownerCorrection']> | null>().toEqualTypeOf<
     typeof schema.memories.$inferSelect.ownerCorrection
+  >();
+  // Portable legacy rows may omit the additive witness; SQL materializes null.
+  expectTypeOf<Records['memories']['memoryWriteWitness']>().toEqualTypeOf<
+    typeof schema.memories.$inferSelect.memoryWriteWitness | undefined
+  >();
+  expectTypeOf<NonNullable<Records['memories']['memoryWriteWitness']> | null>().toEqualTypeOf<
+    typeof schema.memories.$inferSelect.memoryWriteWitness
   >();
   expectTypeOf<Records['memoryEmbeddingRefreshes']>().toEqualTypeOf<
     typeof schema.memoryEmbeddingRefreshes.$inferSelect

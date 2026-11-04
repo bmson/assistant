@@ -656,6 +656,22 @@ export function validateMigrationBundle(
     ![1, 2, 3].includes(bundle.manifest.formatVersion)
   )
     throw new Error('Unsupported migration bundle format');
+  if (Array.isArray(bundle.records)) {
+    for (const record of bundle.records) {
+      if (
+        record?.table === 'memories' &&
+        record.data &&
+        typeof record.data === 'object' &&
+        !Array.isArray(record.data) &&
+        (Object.hasOwn(record.data, 'memoryWriteWitness') ||
+          Object.hasOwn(record.data, 'memory_write_witness'))
+      ) {
+        throw new Error(
+          'Installation-local memory write witness cannot appear in a portable migration bundle',
+        );
+      }
+    }
+  }
   const manifest = bundle.manifest;
   const versionChecksum = (value: unknown) =>
     checksumForMigrationVersion(value, manifest.formatVersion);

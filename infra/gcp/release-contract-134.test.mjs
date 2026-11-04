@@ -1,13 +1,30 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { createManifest, validateManifest } from './release-manifest.mjs';
 import { deriveSchemaVersion } from './release-schema-version.mjs';
 
-const contract = JSON.parse(await readFile(new URL('./release-contracts.json', import.meta.url)));
-const journal = JSON.parse(
-  await readFile(new URL('../../packages/db/drizzle/meta/_journal.json', import.meta.url)),
+// Freeze the pre-0135 compatibility declaration so this historical test does
+// not silently become evidence for the current candidate contract.
+// The ad81925 journal fixture normalizes one trailing newline; hashes below
+// pin fixture bytes rather than claiming raw Git-blob byte identity.
+const historicalContractBytes = await readFile(
+  new URL('./fixtures/release-contracts.schema134.json', import.meta.url),
 );
+const historicalJournalBytes = await readFile(
+  new URL('./fixtures/postgres-journal.schema134.json', import.meta.url),
+);
+assert.equal(
+  createHash('sha256').update(historicalContractBytes).digest('hex'),
+  '7e9166bef85bb64fb010d04301af4338fbd1aa861d44b1644b9512b28fae18f8',
+);
+assert.equal(
+  createHash('sha256').update(historicalJournalBytes).digest('hex'),
+  '2ca7b996bc569db04c2e68139cefa276a98146a92c55ba860bde05dc7d4cf67f',
+);
+const contract = JSON.parse(historicalContractBytes.toString('utf8'));
+const journal = JSON.parse(historicalJournalBytes.toString('utf8'));
 const names = ['agent', 'web', 'browser', 'code', 'processor'];
 function manifest(selected = names) {
   return createManifest({
@@ -34,14 +51,13 @@ test('the additive command constraint keeps existing minimums and supports schem
   assert.throws(() => validateManifest(future), /incompatible|schema/i);
 });
 
-test('schema compatibility declares person-scoped note creation as the sixth command', () => {
+test('frozen pre-creation schema-134 contract preserves its exact five commands', () => {
   assert.deepEqual(contract.components.web.ownerEditorV1, [
     'create_person',
     'update_person_identity',
     'add_family_relationship',
     'correct_owner_family_relationship',
     'correct_owner_memory',
-    'create_owner_memory',
   ]);
 });
 

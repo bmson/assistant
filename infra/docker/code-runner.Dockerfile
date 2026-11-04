@@ -20,6 +20,7 @@ RUN pnpm install --frozen-lockfile --filter @assistant/code-runner... \
 
 FROM mirror.gcr.io/library/node:26-slim
 WORKDIR /app
+COPY infra/gcp/release-contracts.json /app/infra/gcp/release-contracts.json
 RUN apt-get update \
   && apt-get upgrade -y --no-install-recommends \
   && apt-get install -y --no-install-recommends python3 python3-pip \

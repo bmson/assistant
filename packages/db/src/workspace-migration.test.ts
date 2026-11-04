@@ -15,6 +15,7 @@ import { allocateTestTarget, assertAllocatedTestTarget } from './test-target.js'
 import {
   exportWorkspaceSnapshot,
   filterPortableMaintenanceCursorRows,
+  omitInstallationLocalMemoryWitnessColumns,
 } from './workspace-migration.js';
 
 describe('portable owner editor cursor filtering', () => {
@@ -25,6 +26,22 @@ describe('portable owner editor cursor filtering', () => {
       { name: 'approval-recovery', cursor: 'task-1' },
     ];
     expect(filterPortableMaintenanceCursorRows(rows)).toEqual(rows.slice(1));
+  });
+});
+
+describe('portable memory witness filtering', () => {
+  it('omits installation-local witness fields from memory exports only', () => {
+    const memoryRow = {
+      id: 'memory-1',
+      content_hash: 'a'.repeat(64),
+      memory_write_witness: { version: 1, attribution: null },
+      memoryWriteWitness: { spoofed: true },
+    };
+    expect(omitInstallationLocalMemoryWitnessColumns('memories', memoryRow)).toEqual({
+      id: 'memory-1',
+      content_hash: 'a'.repeat(64),
+    });
+    expect(omitInstallationLocalMemoryWitnessColumns('tasks', memoryRow)).toBe(memoryRow);
   });
 });
 

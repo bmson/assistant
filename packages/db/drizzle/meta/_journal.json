@@ -946,6 +946,13 @@
       "when": 1793555900804,
       "tag": "0134_owner_memory_creation",
       "breakpoints": true
+    },
+    {
+      "idx": 135,
+      "version": "7",
+      "when": 1793798375365,
+      "tag": "0135_memory_write_witness",
+      "breakpoints": true
     }
   ]
 }
