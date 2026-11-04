@@ -85,8 +85,9 @@ final class NativeMemoryCorrectionConsumer {
         let target = scope.target(memoryID)
         var noPendingVerified = false
         do {
-            if let record = try await storage.loadPending(serverIdentity: scope.serverIdentity, target: target.recoveryTarget) {
-                guard valid(token, target) else { return }
+            let pending = try await storage.loadPending(serverIdentity: scope.serverIdentity, target: target.recoveryTarget)
+            guard valid(token, target) else { return }
+            if let record = pending {
                 let restored = try Self.restore(record, transport: transport)
                 var state = MemoryCorrectionPresentation(snapshot: Self.snapshot(record))
                 state.editDraft(record.draft)

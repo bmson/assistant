@@ -251,6 +251,43 @@ final class NativeMemoryCorrectionConsumerTests: XCTestCase {
         XCTAssertEqual(applies, 0)
     }
 
+    func testStaleNilPendingLookupCannotClearNewSameTargetOperationBlock() async throws {
+        let storage = MockCorrectionStorage(holdFirstLoad: true)
+        let transport = MockCorrectionTransport()
+        let consumer = makeConsumer(storage: storage, transport: transport)
+
+        let olderOpen = Task { await consumer.open(memoryID: memoryA) }
+        await storage.waitForHeldFirstLoad()
+        await consumer.open(memoryID: memoryA)
+        let snapshotsAfterCurrentOpen = await transport.snapshotCount
+        XCTAssertEqual(consumer.presentation?.reviewedSnapshot.target.memoryID, memoryA)
+        XCTAssertFalse(consumer.blockedMemoryIDs.contains(memoryA))
+
+        consumer.editDraft(draft)
+        await save(consumer)
+        let issued = try XCTUnwrap(consumer.presentation?.operation)
+        XCTAssertEqual(consumer.presentation?.phase, .unknown)
+        XCTAssertTrue(consumer.retainedOnDevice)
+        XCTAssertTrue(consumer.blockedMemoryIDs.contains(memoryA))
+
+        await storage.releaseFirstLoadWithNil()
+        await olderOpen.value
+
+        let snapshotsAfterOldReply = await transport.snapshotCount
+        let authorizations = await transport.authorizationCount
+        let applies = await transport.applyCount
+        let legacyWriteAllowed = await consumer.permitsLegacyWrite(memoryID: memoryA)
+        XCTAssertEqual(snapshotsAfterOldReply, snapshotsAfterCurrentOpen,
+                       "The stale nil lookup must not start another snapshot read")
+        XCTAssertEqual(consumer.presentation?.operation?.operationID, issued.operationID)
+        XCTAssertEqual(consumer.presentation?.phase, .unknown)
+        XCTAssertTrue(consumer.retainedOnDevice)
+        XCTAssertTrue(consumer.blockedMemoryIDs.contains(memoryA))
+        XCTAssertFalse(legacyWriteAllowed)
+        XCTAssertEqual(authorizations, 1)
+        XCTAssertEqual(applies, 1)
+    }
+
     func testScopeChangeRejectsLateSnapshotFromPreviousOwnerAndServer() async throws {
         let storage = MockCorrectionStorage()
         let transport = MockCorrectionTransport(heldMemoryID: memoryA)
@@ -513,17 +550,22 @@ private actor MockCorrectionStorage: NativeMemoryCorrectionStorage {
     private let failRemove: Bool
     private let holdSave: Bool
     private var failLoadPendingCount: Int
+    private let holdFirstLoad: Bool
+    private var firstLoadHeld = false
+    private var firstLoadContinuation: CheckedContinuation<NativeMemoryCorrectionRecoveryRecord?, Error>?
+    private var firstLoadWaiter: CheckedContinuation<Void, Never>?
     private var saveHeld = false
     private var saveContinuation: CheckedContinuation<Void, Never>?
     private var saveWaiter: CheckedContinuation<Void, Never>?
 
     init(events: EventLog? = nil, failSave: Bool = false, holdSave: Bool = false,
-         failRemove: Bool = false, failLoadPendingCount: Int = 0) {
+         failRemove: Bool = false, failLoadPendingCount: Int = 0, holdFirstLoad: Bool = false) {
         self.events = events
         self.failSave = failSave
         self.holdSave = holdSave
         self.failRemove = failRemove
         self.failLoadPendingCount = failLoadPendingCount
+        self.holdFirstLoad = holdFirstLoad
     }
 
     func saveBeforeDispatch(_ record: NativeMemoryCorrectionRecoveryRecord) async throws {
@@ -538,6 +580,11 @@ private actor MockCorrectionStorage: NativeMemoryCorrectionStorage {
     }
 
     func loadPending(serverIdentity: String, target: NativeMemoryCorrectionRecoveryRecord.Target) async throws -> NativeMemoryCorrectionRecoveryRecord? {
+        if holdFirstLoad && !firstLoadHeld {
+            firstLoadHeld = true
+            firstLoadWaiter?.resume(); firstLoadWaiter = nil
+            return try await withCheckedThrowingContinuation { firstLoadContinuation = $0 }
+        }
         if failLoadPendingCount > 0 {
             failLoadPendingCount -= 1
             throw MockFailure.storage
@@ -559,6 +606,13 @@ private actor MockCorrectionStorage: NativeMemoryCorrectionStorage {
         await withCheckedContinuation { saveWaiter = $0 }
     }
     func releaseSave() { saveContinuation?.resume(); saveContinuation = nil }
+    func waitForHeldFirstLoad() async {
+        if firstLoadHeld { return }
+        await withCheckedContinuation { firstLoadWaiter = $0 }
+    }
+    func releaseFirstLoadWithNil() {
+        firstLoadContinuation?.resume(returning: nil); firstLoadContinuation = nil
+    }
 }
 
 private actor MockCorrectionTransport: NativeMemoryCorrectionTransport {
