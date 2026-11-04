@@ -27,6 +27,53 @@ const eventSources = (event: ResponseCard): Record<string, unknown>[] => {
     .filter((source) => Object.keys(source).length);
   return sources.length ? sources : [event];
 };
+function ownerRSVPNote(event: ResponseCard): string {
+  const verified = eventSources(event)
+    .map((source) => parseCalendarOwnerParticipation(source.ownerParticipation))
+    .filter(
+      (participation) =>
+        participation?.identityVerified === true && participation.basis === 'attendee-email',
+    );
+  if (verified.length === 0) {
+    const participation = parseCalendarOwnerParticipation(event.ownerParticipation);
+    if (participation?.identityVerified === true && participation.basis === 'attendee-email')
+      verified.push(participation);
+  }
+  const statuses = new Set(verified.map((participation) => participation?.status));
+  if (statuses.size > 1) return 'Your RSVP differs by calendar source.';
+  const status = verified[0]?.status;
+  if (status === 'accepted') return 'Your RSVP: accepted.';
+  if (status === 'declined') return 'Your RSVP: declined.';
+  if (status === 'tentative') return 'Your RSVP: tentative.';
+  if (status === 'needsAction') return 'Your RSVP: needs a response.';
+  if (status === 'unknown') return 'Your RSVP: unknown.';
+  return 'Your RSVP: not verified.';
+}
+
+function organizerDetails(events: ResponseCard[]): Array<{ title: string; detail: string }> {
+  const seen = new Set<string>();
+  return events.flatMap((event) =>
+    eventSources(event).flatMap((source) => {
+      const organizer = text(source.organizer)
+        .replace(/[\r\n\t]+/g, ' ')
+        .replace(/\s+/g, ' ');
+      if (!organizer) return [];
+      const calendar = text(source.calendar) || text(source.calendarId);
+      const eventID = text(source.eventId) || text(event.id);
+      const eventTitle = text(source.summary) || text(event.title) || 'Untitled event';
+      const key = `${eventID}\0${calendar}\0${organizer}`;
+      if (seen.has(key)) return [];
+      seen.add(key);
+      return [
+        {
+          title: `${eventTitle}: Organizer: ${organizer}`,
+          detail: calendar ? `Calendar source: ${calendar}` : 'Calendar source not reported.',
+        },
+      ];
+    }),
+  );
+}
+
 const sourceNames = (sources: Record<string, unknown>[]): string[] => [
   ...new Set(
     sources.map((source) => text(source.calendar) || text(source.calendarId) || 'Calendar'),
@@ -317,6 +364,10 @@ function sourceDifferences(
       value: (source) => text(source.location) || 'location not listed',
     },
     {
+      label: 'organizer',
+      value: (source) => text(source.organizer) || 'organizer not reported',
+    },
+    {
       label: 'status',
       value: (source) => text(source.status) || 'status not reported',
     },
@@ -425,6 +476,134 @@ function coverageComplete(rows: ActionEvidence[]): boolean {
       return result.complete === true;
     })
   );
+}
+
+function coverageDetails(rows: ActionEvidence[]): Array<{ title: string; detail?: string }> {
+  const items: Array<{ title: string; detail?: string }> = [];
+  const seen = new Set<string>();
+  const add = (title: string, detail?: string) => {
+    const normalizedDetail = detail
+      ?.replace(/[\r\n\t]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!title || !normalizedDetail) return;
+    const key = `${title}\0${normalizedDetail}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    items.push({ title, detail: normalizedDetail });
+  };
+  const timestamp = (value: unknown): string | undefined => {
+    const raw = text(value);
+    const instant = Date.parse(raw);
+    return raw && Number.isFinite(instant) && instant !== 0 ? raw : undefined;
+  };
+
+  for (const row of rows) {
+    const result = record(row.result);
+    const args = record(row.args);
+    const timeMin = text(args.timeMin);
+    const timeMax = text(args.timeMax);
+    if (timeMin || timeMax)
+      add(
+        'Requested window',
+        `${timeMin || 'Start not reported'} to ${timeMax || 'end not reported'}`,
+      );
+
+    const resolved = list(result.calendarsResolved).map(record).filter(Boolean);
+    const resolvedName = (id: string) => {
+      const entry = resolved.find((candidate) => candidate && text(candidate.id) === id);
+      return entry ? text(entry.name) : '';
+    };
+    const resolvedTimeZone = (id: string) => {
+      const entry = resolved.find((candidate) => candidate && text(candidate.id) === id);
+      return entry ? text(entry.timeZone) : '';
+    };
+    const searchedIDs = list(result.calendarsSearchedIds).map(text).filter(Boolean);
+    const searchedNames = list(result.calendarsSearched).map(text).filter(Boolean);
+    const resolvedSearched = searchedIDs.map((id) => ({ id, name: resolvedName(id) }));
+    const nameCounts = new Map<string, number>();
+    for (const item of resolvedSearched)
+      if (item.name) nameCounts.set(item.name, (nameCounts.get(item.name) ?? 0) + 1);
+    const searched = searchedIDs.length
+      ? resolvedSearched.map(({ id, name }) => {
+          if (!name) return 'Unresolved calendar source';
+          const label = nameCounts.get(name) === 1 ? name : `${name} (${id})`;
+          const zone = resolvedTimeZone(id);
+          return zone ? `${label} (${zone})` : label;
+        })
+      : searchedNames;
+    if (searched.length) add('Calendars checked in this read', [...new Set(searched)].join(', '));
+    if (
+      searchedIDs.some((id) => !id.startsWith('iphone:')) ||
+      (!searchedIDs.length && searchedNames.length)
+    )
+      add(
+        'Source freshness unavailable',
+        'This read does not report when these calendar sources were fetched.',
+      );
+    if (result.calendarRosterComplete === false)
+      add('Calendar roster', 'Incomplete; the readable calendar list may omit sources.');
+
+    const phone = record(result.phoneCalendarCoverage);
+    if (Object.keys(phone).length) {
+      const phoneWindowMin = text(phone.timeMin);
+      const phoneWindowMax = text(phone.timeMax);
+      const coverageState =
+        phone.complete === true
+          ? 'Complete for the recorded coverage window'
+          : phone.complete === false
+            ? 'Incomplete for the recorded coverage window'
+            : 'Coverage status not reported';
+      const capturedAt = timestamp(phone.capturedAt);
+      const receivedAt = timestamp(phone.receivedAt);
+      const freshness = [
+        capturedAt ? `Captured at ${capturedAt}` : 'Capture time not reported',
+        receivedAt
+          ? `received by Assistant at ${receivedAt}`
+          : text(phone.receivedAt) && Date.parse(text(phone.receivedAt)) === 0
+            ? 'receive time unavailable (phone has not uploaded a snapshot)'
+            : 'receive time not reported',
+      ].join('; ');
+      add(
+        'iPhone shared-calendar coverage',
+        `${coverageState}${phoneWindowMin || phoneWindowMax ? `; source window ${phoneWindowMin || 'start not reported'} to ${phoneWindowMax || 'end not reported'}` : ''}; ${freshness}.`,
+      );
+      const phoneSources = list(phone.sources).map(record).filter(Boolean);
+      for (const source of phoneSources) {
+        if (!source) continue;
+        const calendarId = text(source.calendarId);
+        const scopedID = calendarId ? `iphone:${calendarId}` : '';
+        const name = scopedID ? resolvedName(scopedID) : '';
+        const zone = scopedID ? resolvedTimeZone(scopedID) : '';
+        const sourceLabel = name
+          ? `Phone source: ${name}${zone ? ` (${zone})` : ''}`
+          : 'Phone calendar source';
+        const status = ['available', 'missing', 'permission-denied'].includes(text(source.status))
+          ? text(source.status)
+          : 'status not reported';
+        add(
+          sourceLabel,
+          `${status}; ${source.complete === true ? 'source complete' : source.complete === false ? 'source incomplete' : 'source completeness not reported'}${text(source.reason) ? `; ${text(source.reason)}` : ''}.`,
+        );
+      }
+      const phoneNote = text(phone.note);
+      if (phoneNote) add('Phone coverage note', phoneNote);
+    } else if (searchedIDs.some((id) => id.startsWith('iphone:'))) {
+      add(
+        'iPhone shared-calendar coverage',
+        'Coverage metadata not reported for a searched phone source.',
+      );
+    }
+
+    const note = text(result.note);
+    if (note) add('Calendar read note', note);
+    if (!successful(row)) {
+      const status = text(row.status) || 'not completed';
+      const reason = text(result.error) || text(result.message);
+      add(`Calendar read ${status}`, reason || 'No successful result was recorded for this read.');
+    }
+  }
+  return items;
 }
 
 type CalendarPairAttention = {
@@ -704,11 +883,7 @@ export function calendarAgendaCards(input: {
         const differences = sourceDifferences(event, zone);
         const status = text(event.status).toLowerCase();
         const note = [
-          verifiedOwnerParticipation(event) === 'needsAction'
-            ? 'Needs response'
-            : verifiedOwnerParticipation(event) === 'tentative'
-              ? 'Tentative'
-              : '',
+          ownerRSVPNote(event),
           status === 'cancelled' ? 'Cancelled' : '',
           differences ? `Calendar copies differ in ${differences.fields.join(', ')}.` : '',
           event.windowMembership === 'source-date-only'
@@ -745,6 +920,9 @@ export function calendarAgendaCards(input: {
       const sections: Record<string, unknown>[] = items.length
         ? [{ type: 'agenda', title: dateLabel(day, zone), complete: groupComplete, items }]
         : [];
+      const eventDetails = organizerDetails(events);
+      if (eventDetails.length)
+        sections.push({ type: 'attention', title: 'Event details', items: eventDetails });
       const sourceDifferencesForDay = events.flatMap((event) => {
         const differences = sourceDifferences(event, zone);
         return differences
@@ -778,6 +956,9 @@ export function calendarAgendaCards(input: {
       ];
       if (unavailable.length)
         sections.push({ type: 'attention', title: 'Calendars not checked', items: unavailable });
+      const readCoverage = coverageDetails(rows);
+      if (readCoverage.length)
+        sections.push({ type: 'attention', title: 'Calendar read coverage', items: readCoverage });
       if (day === 'unverified' && items.length)
         sections.push({
           type: 'attention',
@@ -912,7 +1093,82 @@ export function calendarAgendaSummary(
     (card) => card.kind === 'briefing' && card.presentation === 'calendar-agenda',
   );
   if (!agenda.length || agenda.length !== cards.length) return undefined;
-  return agenda.length === 1
-    ? text(agenda[0]?.lead)
-    : 'The checked calendar agenda is shown by day below.';
+  const maxAgendaRows = 50;
+  const maxAttentionRows = 50;
+  return agenda
+    .map((card) => {
+      const displayZone = validZone(card.timeZone);
+      const blocks = [
+        text(card.date),
+        displayZone ? `Display time zone: ${displayZone}` : 'Display time zone unavailable.',
+        text(card.lead),
+      ].filter(Boolean);
+      const sections = list(card.sections).map(record).filter(Boolean);
+      for (const section of sections) {
+        const title = text(section.title);
+        if (section.type === 'agenda') {
+          const rows = list(section.items).map(record).filter(Boolean);
+          const displayed = rows.slice(0, maxAgendaRows).map((item) => {
+            const sourceNames = list(item.calendars).map(text).filter(Boolean);
+            return [
+              `- **${text(item.time) || 'Time unavailable'}** — ${text(item.title) || 'Untitled event'}`,
+              text(item.location) ? ` — ${text(item.location)}` : '',
+              sourceNames.length ? ` · Calendars: ${[...new Set(sourceNames)].join(', ')}` : '',
+              text(item.note) ? ` · ${text(item.note)}` : '',
+            ].join('');
+          });
+          if (title && displayed.length) blocks.push(`**${title}**\n${displayed.join('\n')}`);
+          const omitted = rows.length - displayed.length;
+          if (omitted > 0)
+            blocks.push(
+              `${omitted} additional retrieved calendar entries are omitted from this text fallback; the structured agenda retains them.`,
+            );
+          if (typeof section.omittedCount === 'number' && section.omittedCount > 0)
+            blocks.push(
+              `${section.omittedCount} additional retrieved events are omitted from this agenda preview.`,
+            );
+          if (section.complete === false)
+            blocks.push(
+              'Calendar coverage is incomplete; some events or calendars may be missing.',
+            );
+          continue;
+        }
+        if (section.type !== 'attention') continue;
+        const details = list(section.items).map(record).filter(Boolean);
+        const overlaps = list(section.overlaps).map(record).filter(Boolean);
+        const detailLines = details
+          .slice(0, maxAttentionRows)
+          .map(
+            (item) =>
+              `- ${text(item.title) || title}${text(item.detail) ? ` — ${text(item.detail)}` : ''}`,
+          );
+        const overlapLines = overlaps
+          .slice(0, maxAttentionRows)
+          .map(
+            (item) =>
+              `- ${text(item.title) || 'Calendar overlap'}${text(item.detail) ? ` — ${text(item.detail)}` : ''}`,
+          );
+        if (title && (detailLines.length || overlapLines.length))
+          blocks.push(`**${title}**\n${[...detailLines, ...overlapLines].join('\n')}`);
+        const omitted =
+          Math.max(0, details.length - maxAttentionRows) +
+          Math.max(0, overlaps.length - maxAttentionRows);
+        if (omitted > 0)
+          blocks.push(
+            `${omitted} additional calendar attention details are omitted from this text fallback.`,
+          );
+        if (section.overlapsTruncated === true && typeof section.overlapCount === 'number')
+          blocks.push(
+            `${section.overlapCount} overlapping event pairs were counted; only the structured card's available detail previews are shown.`,
+          );
+      }
+      if (
+        card.complete === false &&
+        !sections.some((section) => section.type === 'agenda' && section.complete === false)
+      )
+        blocks.push('Calendar coverage is incomplete; some events or calendars may be missing.');
+      return blocks.join('\n\n');
+    })
+    .filter(Boolean)
+    .join('\n\n');
 }

@@ -581,9 +581,8 @@ describe('calendarAgendaCards', () => {
     expect(sourceDiffs).toContain('same meeting time in different calendar time zones');
     expect(sections).toMatchObject([
       { type: 'agenda' },
-      {
-        title: 'Calendar source differences',
-      },
+      { title: 'Calendar source differences' },
+      { title: 'Calendar read coverage' },
     ]);
     expect(JSON.stringify(sections)).not.toContain('differ in time zone, time');
   });

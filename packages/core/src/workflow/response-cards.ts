@@ -95,6 +95,7 @@ function calendarOccurrenceSource(event: RecordValue): CalendarOccurrenceSource 
     ...(string(event.calendarId) ? { calendarId: string(event.calendarId) } : {}),
     ...(string(event.calendar) ? { calendar: string(event.calendar) } : {}),
     ...(string(event.calendarTimeZone) ? { calendarTimeZone: string(event.calendarTimeZone) } : {}),
+    ...(string(event.organizer) ? { organizer: string(event.organizer) } : {}),
     ...(string(event.eventId) ? { eventId: string(event.eventId) } : {}),
     ...(string(event.iCalUID) ? { iCalUID: string(event.iCalUID) } : {}),
     ...(string(event.recurringEventId) ? { recurringEventId: string(event.recurringEventId) } : {}),
