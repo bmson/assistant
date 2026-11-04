@@ -929,14 +929,18 @@ struct ChatComposerActionPolicy: Equatable {
         canCancel: Bool,
         isCancelling: Bool,
         formAdmissionPending: Bool,
-        hasUnresolvedTurn: Bool
+        hasUnresolvedTurn: Bool,
+        isSettling: Bool = false
     ) -> String? {
         guard hasDraft,
-              isSending || canCancel || isCancelling || formAdmissionPending || hasUnresolvedTurn
+              isSending || canCancel || isCancelling || formAdmissionPending || hasUnresolvedTurn || isSettling
         else { return nil }
 
         if formAdmissionPending {
             return "Your draft stays here. The form request is still being sent."
+        }
+        if isSettling {
+            return "Your draft stays here. Finishing this turn before another message can be sent."
         }
         if isCancelling {
             return "Your draft stays here. Wait for the stop result before sending."
@@ -1439,7 +1443,7 @@ struct ChatView: View {
                         } else {
                             ChatTranscriptRows(
                                 messages: model.messages,
-                                isSending: model.isSending,
+                                isSending: model.isSending || model.isSettlingOrdinaryTurn,
                                 sendDisplayState: model.sendDisplayState,
                                 openApprovals: { model.present(.approvals) },
                                 send: { sendWithComposerContext($0, force: $1) },
@@ -1613,7 +1617,7 @@ struct ChatView: View {
                     // quick replies were never reachable without dismissing it by
                     // hand. Yield focus when one actually arrives, unless the
                     // reader has already started typing a follow-up.
-                    guard !replies.isEmpty, !model.isSending, draft.isEmpty else { return }
+                    guard !replies.isEmpty, model.canAdmitOrdinarySend, draft.isEmpty else { return }
                     composerFocused = false
                 }
                 .onChange(of: composerHeight) { previousHeight, _ in
@@ -2583,7 +2587,7 @@ struct ChatView: View {
             overview: model.overview,
             pendingApprovalCount: model.pendingApprovalCount,
             needsAttentionCount: model.needsAttentionCount,
-            isSending: model.isSending,
+            isSending: model.isSending || model.isSettlingOrdinaryTurn,
             onRoute: openRoute,
             onPrompt: sendPreset
         )
@@ -2606,7 +2610,7 @@ struct ChatView: View {
                 .padding(.horizontal, 6)
                 .accessibilityIdentifier("assistant.chat.form-attached")
             }
-            if !model.latestQuickReplies.isEmpty && !composerFocused && !model.isSending {
+            if !model.latestQuickReplies.isEmpty && !composerFocused && model.canAdmitOrdinarySend {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
                         ForEach(model.latestQuickReplies, id: \.self) { reply in
@@ -3092,6 +3096,7 @@ struct ChatView: View {
     private var composerAccessibilityPrompt: String {
         if !micStopping && listener.isListening { return "Listening…" }
         if !micStopping && listener.state == .preparing { return "Getting speech ready…" }
+        if model.isSettlingOrdinaryTurn { return "Finishing turn — keep typing" }
         return model.isSending ? "Working — keep typing" : "Ask anything…"
     }
 
@@ -3099,6 +3104,7 @@ struct ChatView: View {
         guard dynamicTypeSize.isAccessibilitySize else { return composerAccessibilityPrompt }
         if !micStopping && listener.isListening { return "Listening" }
         if !micStopping && listener.state == .preparing { return "Preparing" }
+        if model.isSettlingOrdinaryTurn { return "Finishing turn" }
         return model.isSending ? "Working" : "Message"
     }
 
@@ -3260,9 +3266,9 @@ struct ChatView: View {
     }
 
     private func sendPreset(_ rawText: String) {
-        model.detachCardFormFromComposer()
         let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !model.isSending else { return }
+        guard !text.isEmpty, model.canAdmitOrdinarySend else { return }
+        model.detachCardFormFromComposer()
         sendPreparedMessage(text, keepsComposerFocused: false)
     }
 
@@ -3278,6 +3284,7 @@ struct ChatView: View {
     }
 
     private func sendWithComposerContext(_ text: String, force: Bool = false) {
+        guard model.canAdmitOrdinarySend else { return }
         let context = draftSnapshot.map { ComposerDraftSubmissionContext(origin: $0, localDraft: draft) }
         model.send(text, force: force, composerDraftContext: context, onComposerDraftStage: { submission in
             guard let draftScope, let previous = draftSnapshot,
@@ -3588,13 +3595,13 @@ struct ChatView: View {
         !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    private var canSend: Bool { composerHasDraft && !model.isSending && !model.isPreparingCalendarContext }
+    private var canSend: Bool { composerHasDraft && model.canAdmitOrdinarySend && !model.isPreparingCalendarContext }
 
     private var composerActionPolicy: ChatComposerActionPolicy {
         ChatComposerActionPolicy.resolve(
             hasDraft: composerHasDraft,
             canSend: canSend,
-            isSending: model.isSending,
+            isSending: model.isSending || model.isSettlingOrdinaryTurn,
             canCancel: model.canCancelCurrentSend,
             isCancelling: model.isCancellingSend,
             formAdmissionPending: model.isCardFormAdmissionPending,
@@ -3609,7 +3616,8 @@ struct ChatView: View {
             canCancel: model.canCancelCurrentSend,
             isCancelling: model.isCancellingSend,
             formAdmissionPending: model.isCardFormAdmissionPending,
-            hasUnresolvedTurn: model.hasUnresolvedTurn
+            hasUnresolvedTurn: model.hasUnresolvedTurn,
+            isSettling: model.isSettlingOrdinaryTurn
         )
     }
 
@@ -3634,7 +3642,8 @@ struct ChatView: View {
         case .stop: stopButtonLabel
         case .waiting:
             model.isCardFormAdmissionPending ? "Sending form"
-                : model.isCancellingSend ? "Checking stop status" : "Waiting for current turn"
+                : model.isCancellingSend ? "Checking stop status"
+                : model.isSettlingOrdinaryTurn ? "Finishing current turn" : "Waiting for current turn"
         }
     }
 
@@ -3645,7 +3654,9 @@ struct ChatView: View {
         case .send:
             model.isCardFormAdmissionPending
                 ? "The saved form request is being sent. Your draft stays in the composer."
-                : "Wait for the current turn to finish before sending. Your draft stays in the composer."
+                : model.isSettlingOrdinaryTurn
+                    ? "Finishing this turn before another message can be sent. Your draft stays in the composer."
+                    : "Wait for the current turn to finish before sending. Your draft stays in the composer."
         case .stop:
             model.hasRequestedCancellationForCurrentSend
                 ? "Retries cancellation for this same pending turn."
@@ -3653,7 +3664,9 @@ struct ChatView: View {
         case .waiting:
             model.isCancellingSend
                 ? "The stop request is pending. The server status is being checked."
-                : "The current request is still being resolved."
+                : model.isSettlingOrdinaryTurn
+                    ? "Finishing this turn before another message can be sent."
+                    : "The current request is still being resolved."
         }
     }
 
