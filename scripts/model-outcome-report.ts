@@ -136,6 +136,8 @@ export interface ModelOutcomeReport {
   source: ModelOutcomeFixture['source'];
   outcome: EvaluationStatus;
   occurrenceDurationMs: number | null;
+  occurrenceTerminal: boolean;
+  attemptsTerminal: boolean;
   coverage: ModelOutcomeFixture['coverage'];
   attempts: Array<{
     callId: string;
@@ -149,10 +151,12 @@ export interface ModelOutcomeReport {
     amount: string | null;
     currency: string | null;
   }>;
-  uniqueCallCount: number;
+  uniqueAttemptCount: number;
   duplicateReceiptCount: number;
   retryCount: number;
   failedAttemptCount: number;
+  interruptedAttemptCount: number;
+  notRunAttemptCount: number;
   unknownCostCount: number;
   amountsByCurrency: Array<{
     currency: string;
@@ -167,6 +171,8 @@ export interface ModelOutcomeReport {
         reason:
           | 'outcome_not_passed'
           | 'coverage_partial'
+          | 'occurrence_not_terminal'
+          | 'attempts_not_terminal'
           | 'unknown_cost'
           | 'mixed_currencies'
           | 'no_cost';
@@ -219,11 +225,19 @@ export function buildModelOutcomeReport(input: unknown): ModelOutcomeReport {
   const attempts = [...unique.values()];
   const byCallId = new Map(attempts.map((attempt) => [attempt.callId, attempt]));
   for (const attempt of attempts) {
-    if (!attempt.retryOfCallId) continue;
-    const parent = byCallId.get(attempt.retryOfCallId);
-    if (!parent) throw new Error(`Retry parent is absent for call ${attempt.callId}`);
-    if (!parent.finishedAt || Date.parse(parent.finishedAt) > Date.parse(attempt.startedAt)) {
-      throw new Error(`Retry parent is not terminal before call ${attempt.callId}`);
+    const lineage = new Set([attempt.callId]);
+    let current = attempt;
+    while (current.retryOfCallId) {
+      const parent = byCallId.get(current.retryOfCallId);
+      if (!parent) throw new Error(`Retry parent is absent for call ${current.callId}`);
+      if (lineage.has(parent.callId)) {
+        throw new Error(`Retry lineage contains a cycle at call ${parent.callId}`);
+      }
+      lineage.add(parent.callId);
+      if (!parent.finishedAt || Date.parse(parent.finishedAt) > Date.parse(current.startedAt)) {
+        throw new Error(`Retry parent is not terminal before call ${current.callId}`);
+      }
+      current = parent;
     }
   }
 
@@ -261,6 +275,20 @@ export function buildModelOutcomeReport(input: unknown): ModelOutcomeReport {
     modelCostPerSuccessfulOutcome = {
       eligible: false,
       reason: 'coverage_partial',
+      amount: null,
+      currency: null,
+    };
+  } else if (!fixture.finishedAt) {
+    modelCostPerSuccessfulOutcome = {
+      eligible: false,
+      reason: 'occurrence_not_terminal',
+      amount: null,
+      currency: null,
+    };
+  } else if (attempts.some((attempt) => attempt.status !== 'not_run' && !attempt.finishedAt)) {
+    modelCostPerSuccessfulOutcome = {
+      eligible: false,
+      reason: 'attempts_not_terminal',
       amount: null,
       currency: null,
     };
@@ -304,6 +332,10 @@ export function buildModelOutcomeReport(input: unknown): ModelOutcomeReport {
     source: fixture.source,
     outcome: fixture.outcome,
     occurrenceDurationMs: finishedAt === null ? null : finishedAt - startedAt,
+    occurrenceTerminal: finishedAt !== null,
+    attemptsTerminal: attempts.every(
+      (attempt) => attempt.status === 'not_run' || attempt.finishedAt !== null,
+    ),
     coverage: fixture.coverage,
     attempts: attempts.map((attempt) => ({
       callId: attempt.callId,
@@ -319,10 +351,15 @@ export function buildModelOutcomeReport(input: unknown): ModelOutcomeReport {
       amount: attempt.cost.known ? attempt.cost.amount : null,
       currency: attempt.cost.known ? attempt.cost.currency : null,
     })),
-    uniqueCallCount: attempts.length,
+    uniqueAttemptCount: attempts.length,
     duplicateReceiptCount,
     retryCount: attempts.filter((attempt) => attempt.retryOfCallId !== undefined).length,
-    failedAttemptCount: attempts.filter((attempt) => attempt.status !== 'passed').length,
+    failedAttemptCount: attempts.filter((attempt) =>
+      ['behavior_failure', 'compatibility_failure', 'request_failure'].includes(attempt.status),
+    ).length,
+    interruptedAttemptCount: attempts.filter((attempt) => attempt.status === 'budget_interrupted')
+      .length,
+    notRunAttemptCount: attempts.filter((attempt) => attempt.status === 'not_run').length,
     unknownCostCount,
     amountsByCurrency: [...currencies.entries()]
       .sort(([a], [b]) => a.localeCompare(b))

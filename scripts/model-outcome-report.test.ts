@@ -17,7 +17,7 @@ describe('synthetic model outcome report', () => {
     expect(report.outcomeSource).toBe('fixture_declared');
     expect(report.occurrenceDurationMs).toBe(2400);
     expect(report.attempts.map((attempt) => attempt.durationMs)).toEqual([800, 1500]);
-    expect(report.uniqueCallCount).toBe(2);
+    expect(report.uniqueAttemptCount).toBe(2);
     expect(report.duplicateReceiptCount).toBe(1);
     expect(report.retryCount).toBe(1);
     expect(report.failedAttemptCount).toBe(1);
@@ -197,6 +197,101 @@ describe('synthetic model outcome report', () => {
         coverage: { state: 'complete', missingFacts: ['terminal receipt'] },
       }).success,
     ).toBe(false);
+  });
+
+  it('rejects cyclic retry lineage even when zero-duration attempts share a timestamp', () => {
+    const sameTime = '2026-11-03T10:00:00.000Z';
+    const cycle = fixture({
+      outcome: 'request_failure',
+      attempts: [
+        {
+          callId: 'call:a',
+          retryOfCallId: 'call:b',
+          model: 'fixture-model',
+          provider: 'fixture-provider',
+          role: 'plan',
+          status: 'request_failure',
+          startedAt: sameTime,
+          finishedAt: sameTime,
+          cost: { known: true, basis: 'token_rate', amount: '0.01', currency: 'USD' },
+        },
+        {
+          callId: 'call:b',
+          retryOfCallId: 'call:a',
+          model: 'fixture-model',
+          provider: 'fixture-provider',
+          role: 'plan',
+          status: 'request_failure',
+          startedAt: sameTime,
+          finishedAt: sameTime,
+          cost: { known: true, basis: 'token_rate', amount: '0.01', currency: 'USD' },
+        },
+      ],
+    });
+    expect(() => buildModelOutcomeReport(cycle)).toThrow('Retry lineage contains a cycle');
+  });
+
+  it('separates failed, interrupted, and not-run attempts', () => {
+    const at = '2026-11-03T10:00:00.000Z';
+    const report = buildModelOutcomeReport(
+      fixture({
+        outcome: 'request_failure',
+        attempts: (['request_failure', 'budget_interrupted', 'not_run'] as const).map(
+          (status, index) => ({
+            callId: `call:status-${index}`,
+            model: 'fixture-model',
+            provider: 'fixture-provider',
+            role: 'plan',
+            status,
+            startedAt: at,
+            finishedAt: status === 'not_run' ? null : at,
+            cost:
+              status === 'not_run'
+                ? { known: false, basis: 'unknown', amount: null, currency: null }
+                : { known: true, basis: 'provider_reported', amount: '0.01', currency: 'USD' },
+          }),
+        ),
+      }),
+    );
+    expect(report.failedAttemptCount).toBe(1);
+    expect(report.interruptedAttemptCount).toBe(1);
+    expect(report.notRunAttemptCount).toBe(1);
+  });
+
+  it('withholds success cost when the occurrence has no terminal timestamp', () => {
+    const report = buildModelOutcomeReport(fixture({ finishedAt: null }));
+    expect(report.occurrenceTerminal).toBe(false);
+    expect(report.modelCostPerSuccessfulOutcome).toEqual({
+      eligible: false,
+      reason: 'occurrence_not_terminal',
+      amount: null,
+      currency: null,
+    });
+  });
+
+  it('withholds success cost while an executed attempt has no terminal timestamp', () => {
+    const source = fixture({
+      attempts: [
+        {
+          callId: 'call:open',
+          model: 'fixture-model',
+          provider: 'fixture-provider',
+          role: 'plan',
+          status: 'passed',
+          startedAt: '2026-11-03T10:00:00.000Z',
+          finishedAt: null,
+          cost: { known: true, basis: 'provider_reported', amount: '0.01', currency: 'USD' },
+        },
+      ],
+    });
+    const report = buildModelOutcomeReport(source);
+    expect(report.attemptsTerminal).toBe(false);
+    expect(report.modelCostPerSuccessfulOutcome).toEqual({
+      eligible: false,
+      reason: 'attempts_not_terminal',
+      amount: null,
+      currency: null,
+    });
   });
 
   it('produces a stable digest for an unchanged synthetic report', () => {
