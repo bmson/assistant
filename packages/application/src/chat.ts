@@ -745,21 +745,25 @@ function notifyChatHistoryStage(
   }
 }
 
-async function observeChatHistoryOperation<T>(
+function observeChatHistoryOperation<T>(
   observer: ChatHistoryStageObserver | undefined,
   name: keyof typeof chatHistoryOperationStages,
   operation: () => Promise<T>,
 ): Promise<T> {
+  if (!observer) return operation();
+
   const stages = chatHistoryOperationStages[name];
   notifyChatHistoryStage(observer, stages.started);
-  try {
-    const value = await operation();
-    notifyChatHistoryStage(observer, stages.completed);
-    return value;
-  } catch (error) {
-    notifyChatHistoryStage(observer, stages.failed);
-    throw error;
-  }
+  return (async () => {
+    try {
+      const value = await operation();
+      notifyChatHistoryStage(observer, stages.completed);
+      return value;
+    } catch (error) {
+      notifyChatHistoryStage(observer, stages.failed);
+      throw error;
+    }
+  })();
 }
 
 export async function listChatHistory(

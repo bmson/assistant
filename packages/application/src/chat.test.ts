@@ -435,6 +435,35 @@ describe('listChatHistory optional stage observation', () => {
     ).rejects.toBe(failure);
     expect(phases).toContain('conversations_failed');
   });
+
+  it('preserves synchronous agent failures without an observer', async () => {
+    const failure = new Error('synthetic synchronous agent failure');
+    const store = persistence({
+      resolveAgent: vi.fn(() => {
+        throw failure;
+      }),
+    });
+
+    await expect(listChatHistory(store, false)).rejects.toBe(failure);
+    expect(store.resolveAgent).toHaveBeenCalledOnce();
+    expect(store.listConversations).not.toHaveBeenCalled();
+    expect(store.countConversations).not.toHaveBeenCalled();
+    expect(store.listActiveConversationIds).not.toHaveBeenCalled();
+  });
+
+  it('does not start sibling reads after a synchronous no-observer query failure', async () => {
+    const failure = new Error('synthetic synchronous list failure');
+    const store = persistence({
+      listConversations: vi.fn(() => {
+        throw failure;
+      }),
+    });
+
+    await expect(listChatHistory(store, false)).rejects.toBe(failure);
+    expect(store.listConversations).toHaveBeenCalledOnce();
+    expect(store.countConversations).not.toHaveBeenCalled();
+    expect(store.listActiveConversationIds).not.toHaveBeenCalled();
+  });
 });
 
 describe('collapseRuntimeMessageDuplicates', () => {

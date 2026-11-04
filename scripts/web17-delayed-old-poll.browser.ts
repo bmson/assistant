@@ -898,12 +898,12 @@ async function verifyUnmountedPollDoesNotPublishAfterRemount(): Promise<void> {
       try {
         const allHeaders = await request.allHeaders();
         const nonce = randomBytes(16).toString('base64url');
-        navigationDiagnostics.recordRscAttemptStarted(
+        const recorded = navigationDiagnostics.recordRscAttemptStarted(
           nonce,
           typeof requestHeaders['next-router-prefetch'] === 'string' &&
             requestHeaders['next-router-prefetch'].length > 0,
         );
-        continuedHeaders = { ...allHeaders, [WEB17_RSC_ATTEMPT_NONCE_HEADER]: nonce };
+        if (recorded) continuedHeaders = { ...allHeaders, [WEB17_RSC_ATTEMPT_NONCE_HEADER]: nonce };
       } catch {
         // If diagnostic correlation is unavailable, preserve the original request.
       }

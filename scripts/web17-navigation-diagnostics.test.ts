@@ -182,9 +182,9 @@ describe('bounded WEB-17 navigation diagnostics', () => {
     diagnostics.setObserverAvailable(true);
     const prefetchNonce = 'Abcdef0123456789_-pref0';
     const clickNonce = 'Abcdef0123456789_-click';
-    diagnostics.recordRscAttemptStarted(prefetchNonce, true);
+    expect(diagnostics.recordRscAttemptStarted(prefetchNonce, true)).toBe(true);
     diagnostics.markClickAttempted();
-    diagnostics.recordRscAttemptStarted(clickNonce, false);
+    expect(diagnostics.recordRscAttemptStarted(clickNonce, false)).toBe(true);
     diagnostics.recordRscAttemptResponse(clickNonce, 200);
 
     const snapshot = diagnostics.snapshot();
@@ -215,10 +215,12 @@ describe('bounded WEB-17 navigation diagnostics', () => {
   it('bounds correlated RSC attempts and rejects malformed nonces', () => {
     const diagnostics = createWeb17NavigationDiagnostics(origin);
     diagnostics.setObserverAvailable(true);
-    diagnostics.recordRscAttemptStarted('private-owner-id', false);
+    expect(diagnostics.recordRscAttemptStarted('private-owner-id', false)).toBe(false);
     for (let index = 0; index <= WEB17_NAVIGATION_DIAGNOSTIC_CAP; index++) {
       const nonce = `Abcdef0123456789_-${String(index).padStart(4, '0')}`;
-      diagnostics.recordRscAttemptStarted(nonce, index === 0);
+      expect(diagnostics.recordRscAttemptStarted(nonce, index === 0)).toBe(
+        index < WEB17_NAVIGATION_DIAGNOSTIC_CAP,
+      );
     }
     const snapshot = diagnostics.snapshot();
     expect(snapshot.correlatedRscAttempts).toHaveLength(WEB17_NAVIGATION_DIAGNOSTIC_CAP);

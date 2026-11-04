@@ -271,18 +271,18 @@ export function createWeb17NavigationDiagnostics(expectedOrigin: string) {
     recordRscAttemptStarted(nonce: unknown, prefetch: unknown) {
       if (typeof nonce !== 'string' || !correlationNonce.safeParse(nonce).success) {
         overflow = true;
-        return;
+        return false;
       }
       if (
         typeof prefetch !== 'boolean' ||
         correlatedRscAttempts.some((item) => item.nonce === nonce)
       ) {
         overflow = true;
-        return;
+        return false;
       }
       if (correlatedRscAttempts.length >= WEB17_NAVIGATION_DIAGNOSTIC_CAP) {
         overflow = true;
-        return;
+        return false;
       }
       correlatedRscAttempts.push({
         nonce,
@@ -292,6 +292,7 @@ export function createWeb17NavigationDiagnostics(expectedOrigin: string) {
         failed: false,
         responseStatus: null,
       });
+      return true;
     },
     recordRscAttemptFinished(nonce: unknown) {
       if (typeof nonce !== 'string') return;
