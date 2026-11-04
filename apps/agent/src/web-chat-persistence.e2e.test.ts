@@ -22,6 +22,7 @@ import type { UIMessage } from 'ai';
 import { eq, inArray } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { z } from 'zod';
+import { calendarAgendaSummary } from '../../../packages/core/src/workflow/calendar-agenda.js';
 import {
   createChatLogOrder,
   orderChatLog,
@@ -117,6 +118,54 @@ function responseTextParts(row: { parts: unknown }): string[] {
     const value = part as { type?: unknown; text?: unknown };
     return value.type === 'text' && typeof value.text === 'string' ? [value.text] : [];
   });
+}
+
+function expectCalendarAgendaNarrative(
+  row: { parts: unknown },
+  card: Record<string, unknown>,
+  eventTitle: string,
+): void {
+  const textParts = responseTextParts(row);
+  const expected = calendarAgendaSummary([card]);
+  expect(expected).toBeDefined();
+  expect(textParts).toEqual([expected]);
+
+  const sections = Array.isArray(card.sections)
+    ? (card.sections as Array<Record<string, unknown>>)
+    : [];
+  const agenda = sections.find((section) => section.type === 'agenda');
+  const items = Array.isArray(agenda?.items)
+    ? (agenda.items as Array<Record<string, unknown>>)
+    : [];
+  expect(items).toHaveLength(1);
+  const item = items[0];
+  expect(item).toMatchObject({ title: eventTitle, note: 'Your RSVP: not verified.' });
+  expect(typeof item?.time).toBe('string');
+  expect(item?.time).not.toBe('');
+
+  const coverage = sections.find(
+    (section) => section.type === 'attention' && section.title === 'Calendar read coverage',
+  );
+  expect(coverage).toBeDefined();
+  const coverageItems = Array.isArray(coverage?.items)
+    ? (coverage.items as Array<Record<string, unknown>>)
+    : [];
+  expect(coverageItems.map((entry) => entry.title)).toContain('Requested window');
+  expect(coverageItems.map((entry) => entry.title)).toContain('Calendars checked in this read');
+  expect(coverageItems).toContainEqual({
+    title: 'Calendars checked in this read',
+    detail: 'primary',
+  });
+
+  expect(typeof card.date).toBe('string');
+  const text = textParts[0] ?? '';
+  expect(text).toContain(String(card.date));
+  expect(text).toContain(
+    typeof card.timeZone === 'string'
+      ? `Display time zone: ${card.timeZone}`
+      : 'Display time zone unavailable.',
+  );
+  expect(text).toContain('Calendar read coverage');
 }
 
 function optimisticUser(operationId: string, durableMessageId?: string): UIMessage {
@@ -513,8 +562,8 @@ describe('WEB-12 persisted chat identity across interrupted card completion', ()
     expect(String(itemB[0]?.id)).toContain('event-b');
     expect(String(itemA[0]?.id)).not.toBe(String(itemB[0]?.id));
     expect(new Set([cardA.id, cardB.id]).size).toBe(2);
-    expect(responseTextParts(assistantA ?? { parts: [] })).toEqual([cardA.lead]);
-    expect(responseTextParts(assistantB ?? { parts: [] })).toEqual([cardB.lead]);
+    expectCalendarAgendaNarrative(assistantA ?? { parts: [] }, cardA, 'Planning review');
+    expectCalendarAgendaNarrative(assistantB ?? { parts: [] }, cardB, 'Planning review');
     expect(responseTextParts(assistantA ?? { parts: [] })).not.toContain(REPLY_TEXT);
     expect(responseTextParts(assistantB ?? { parts: [] })).not.toContain(REPLY_TEXT);
     expect(assistantRows[0]?.taskId).not.toBe(assistantRows[1]?.taskId);
@@ -727,7 +776,12 @@ describe('WEB-12 persisted chat identity across interrupted card completion', ()
       expect(delayedBCards).toHaveLength(1);
       expect(delayedBCards[0]).toMatchObject({ kind: 'briefing', presentation: 'calendar-agenda' });
       const delayedBLead = delayedBCards[0]?.lead;
-      expect(responseTextParts(delayedB ?? { parts: [] })).toEqual([delayedBLead]);
+      expectCalendarAgendaNarrative(
+        delayedB ?? { parts: [] },
+        delayedBCards[0] as Record<string, unknown>,
+        'B planning review',
+      );
+      expect(responseTextParts(delayedB ?? { parts: [] })[0]).toContain(String(delayedBLead));
       expect(responseTextParts(delayedB ?? { parts: [] })).not.toContain(replyB);
       const delayedBItems = agendaItems(delayedBCards[0] as Record<string, unknown>);
       expect(delayedBItems).toHaveLength(1);
@@ -762,7 +816,7 @@ describe('WEB-12 persisted chat identity across interrupted card completion', ()
         mergedWhileAIsDelayed
           .filter((row) => row.role === 'assistant')
           .flatMap((row) => row.parts.flatMap((part) => (part.type === 'text' ? [part.text] : []))),
-      ).toEqual([replyA, delayedBLead]);
+      ).toEqual([replyA, calendarAgendaSummary(delayedBCards)]);
     } finally {
       releaseA();
       if (workerA) {
@@ -808,8 +862,16 @@ describe('WEB-12 persisted chat identity across interrupted card completion', ()
     expect(finalBCards).toHaveLength(1);
     expect(finalACards[0]).toMatchObject({ kind: 'briefing', presentation: 'calendar-agenda' });
     expect(finalBCards[0]).toMatchObject({ kind: 'briefing', presentation: 'calendar-agenda' });
-    expect(responseTextParts(finalA)).toEqual([finalACards[0]?.lead]);
-    expect(responseTextParts(finalB)).toEqual([finalBCards[0]?.lead]);
+    expectCalendarAgendaNarrative(
+      finalA,
+      finalACards[0] as Record<string, unknown>,
+      'A planning review',
+    );
+    expectCalendarAgendaNarrative(
+      finalB,
+      finalBCards[0] as Record<string, unknown>,
+      'B planning review',
+    );
     expect(responseTextParts(finalA)).not.toContain(replyA);
     expect(responseTextParts(finalB)).not.toContain(replyB);
     expect(agendaItems(finalACards[0] as Record<string, unknown>)).toMatchObject([

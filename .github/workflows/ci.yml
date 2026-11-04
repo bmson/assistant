@@ -352,11 +352,13 @@ jobs:
       # loopback development preview. Keep that preview separate from the
       # shipping standalone/mobile smoke above; no provider key is supplied.
       - name: Verify WEB-17 in the loopback development preview
+        id: web17_preview
         env:
           AUTH_DEV_BYPASS: "false"
           AUTH_LOCALHOST_BYPASS: "true"
           AUTH_URL: http://127.0.0.1:3001
           WEB17_DIAGNOSTICS: "1"
+          WEB17_TRANSPORT_ARTIFACT_PATH: ${{ runner.temp }}/assistant-web17-evidence/transport.json
           PERSISTENCE_DRIVER: postgres
           QUEUE_DRIVER: local
           WEB_APP_PREVIEW_ENABLED: "true"
@@ -367,17 +369,23 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          umask 077
+          mkdir -m 700 "$RUNNER_TEMP/assistant-web17-evidence"
           assistant_web17_pgid=""
           emit_web17_preview_diagnostics() {
-            if ! pnpm exec tsx scripts/web17-preview-diagnostics.ts "$RUNNER_TEMP/assistant-web17-preview.log"; then
+            if ! (set -o noclobber; pnpm exec tsx scripts/web17-preview-diagnostics.ts "$RUNNER_TEMP/assistant-web17-preview.log" > "$RUNNER_TEMP/assistant-web17-evidence/preview-diagnostics.log"); then
               echo '[WEB-17] {"kind":"WEB17_PREVIEW_DIAGNOSTICS","logAvailable":false}'
             fi
+            cat "$RUNNER_TEMP/assistant-web17-evidence/preview-diagnostics.log" || true
           }
           cleanup_web17_preview() {
             assistant_web17_exit=$?
             trap - EXIT
-            if [ "$assistant_web17_exit" -ne 0 ]; then
-              emit_web17_preview_diagnostics
+            emit_web17_preview_diagnostics
+            if [ -f "$WEB17_TRANSPORT_ARTIFACT_PATH" ]; then
+              echo '[WEB-17-TRANSPORT] {"artifactWritten":true}'
+            else
+              echo '[WEB-17-TRANSPORT] {"artifactWritten":false,"reason":"unavailable_or_io"}'
             fi
             if [ -z "$assistant_web17_pgid" ]; then
               exit "$assistant_web17_exit"
@@ -411,6 +419,16 @@ jobs:
             exit 1
           fi
           pnpm exec tsx scripts/web17-delayed-old-poll.browser.ts
+      - name: Preserve sanitized WEB-17 evidence
+        if: ${{ always() && steps.web17_preview.outcome != 'skipped' }}
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
+        with:
+          name: web17-diagnostics-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/assistant-web17-evidence/transport.json
+            ${{ runner.temp }}/assistant-web17-evidence/preview-diagnostics.log
+          retention-days: 14
+          if-no-files-found: warn
       - name: Remove owned PostgreSQL service
         if: always()
         run: bash infra/ci/postgres-service.sh cleanup
