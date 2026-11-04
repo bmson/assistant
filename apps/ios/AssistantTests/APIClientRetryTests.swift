@@ -683,6 +683,250 @@ final class APIClientRetryTests: XCTestCase {
         super.tearDown()
     }
 
+    func testOwnerMemoryCorrectionTransportPreservesServerIssuedOperationAndExactBodies() async throws {
+        let memoryID = "123e4567-e89b-12d3-a456-426614174001"
+        let operationID = "123e4567-e89b-12d3-a456-426614174002"
+        let hash = String(repeating: "a", count: 64)
+        let revision = String(repeating: "b", count: 64)
+        let handle = ownerMemoryCorrectionHandle(memoryID: memoryID, operationID: operationID, hash: hash, revision: revision, content: "corrected note")
+        StubURLProtocol.prime([
+            .success(status: 200, body: Data(#"{"version":1,"intent":"authorized","command":"correct_owner_memory","memoryId":"\#(memoryID)","operationId":"\#(operationID)","authorization":"\#(handle)","expiresAt":"2026-11-03T00:00:00.000Z"}"#.utf8)),
+            .success(status: 200, body: Data(#"{"version":1,"authority":"operation_receipt","command":"correct_owner_memory","operationId":"\#(operationID)","outcome":"saved","ids":{},"revision":"r2","statusVersion":2,"requestHash":"\#(ownerMemoryCorrectionRequestHash(memoryID: memoryID, operationID: operationID, hash: hash, revision: revision, content: "corrected note"))"}"#.utf8)),
+            .success(status: 202, body: Data(#"{"version":1,"authority":"unresolved","command":"correct_owner_memory","operationId":"\#(operationID)","outcome":"outcome_unknown","reason":"preparing"}"#.utf8)),
+            .success(status: 200, body: Data(#"{"version":1,"authority":"operation_receipt","command":"correct_owner_memory","operationId":"\#(operationID)","outcome":"saved","ids":{},"revision":"r2","statusVersion":2,"requestHash":"\#(ownerMemoryCorrectionRequestHash(memoryID: memoryID, operationID: operationID, hash: hash, revision: revision, content: "corrected note"))"}"#.utf8)),
+        ])
+        let client = makeClient(token: "bearer-token")
+        let authorized = try await client.authorizeOwnerMemoryCorrection(
+            memoryID: memoryID, expectedContentHash: hash,
+            expectedMemoryRevision: revision, content: "  corrected note  "
+        )
+        XCTAssertEqual(authorized.operationId, operationID)
+        let operation = try client.makeOwnerMemoryCorrectionOperation(
+            memoryID: memoryID, authorization: authorized
+        )
+        guard case let .replied(applied) = await client.applyOwnerMemoryCorrection(operation) else {
+            return XCTFail("Apply should return the server's typed receipt")
+        }
+        XCTAssertEqual(applied.outcome, "saved")
+        XCTAssertTrue(applied.isTerminal)
+        let status = try await client.ownerMemoryCorrectionStatus(operation)
+        XCTAssertTrue(status.isUnresolved)
+        let terminalStatus = try await client.ownerMemoryCorrectionStatus(operation)
+        XCTAssertTrue(terminalStatus.isTerminal)
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST", "POST", "GET", "GET"])
+        let requests = StubURLProtocol.requests
+        XCTAssertEqual(requests.map { $0.1.path }, [
+            "/api/mobile/v1/memory/\(memoryID)/correction/authorize",
+            "/api/mobile/v1/memory/\(memoryID)/correction/\(operationID)/apply",
+            "/api/mobile/v1/memory/\(memoryID)/correction/\(operationID)/status",
+            "/api/mobile/v1/memory/\(memoryID)/correction/\(operationID)/status",
+        ])
+        let authorizeHeaders = Dictionary(uniqueKeysWithValues: requests[0].2.map { ($0.key.lowercased(), $0.value) })
+        let applyHeaders = Dictionary(uniqueKeysWithValues: requests[1].2.map { ($0.key.lowercased(), $0.value) })
+        XCTAssertEqual(authorizeHeaders["authorization"], "Bearer bearer-token")
+        XCTAssertEqual(applyHeaders["x-owner-memory-correction-authorization"], handle)
+        let authorizeBody = try XCTUnwrap(JSONSerialization.jsonObject(with: requests[0].3) as? [String: Any])
+        XCTAssertEqual(authorizeBody["version"] as? Int, 1)
+        XCTAssertEqual(authorizeBody["intent"] as? String, "authorize")
+        XCTAssertEqual(authorizeBody["expectedContentHash"] as? String, hash)
+        XCTAssertEqual(authorizeBody["expectedMemoryRevision"] as? String, revision)
+        XCTAssertEqual(authorizeBody["content"] as? String, "corrected note")
+        let applyBody = try XCTUnwrap(JSONSerialization.jsonObject(with: requests[1].3) as? [String: Any])
+        XCTAssertEqual(applyBody["operationId"] as? String, operationID)
+        XCTAssertEqual(applyBody["memoryId"] as? String, memoryID)
+        XCTAssertEqual(applyBody["expectedContentHash"] as? String, hash)
+        XCTAssertEqual(applyBody["expectedMemoryRevision"] as? String, revision)
+        XCTAssertEqual(applyBody["content"] as? String, "corrected note")
+    }
+
+    func testOwnerMemoryCorrectionApplyTransportLossIsUncertainAndNeverRetried() async throws {
+        let memoryID = "123e4567-e89b-12d3-a456-426614174003"
+        let operationID = "123e4567-e89b-12d3-a456-426614174004"
+        let authorization = makeOwnerMemoryCorrectionAuthorization(memoryID: memoryID, operationID: operationID,
+            hash: String(repeating: "c", count: 64), revision: String(repeating: "d", count: 64), content: "new note")
+        let operation = try makeClient().makeOwnerMemoryCorrectionOperation(
+            memoryID: memoryID, authorization: authorization
+        )
+        StubURLProtocol.prime([.failure(URLError(.networkConnectionLost))])
+        let client = makeClient()
+        guard case let .uncertain(retained) = await client.applyOwnerMemoryCorrection(operation) else {
+            return XCTFail("Transport loss must preserve an uncertain operation")
+        }
+        XCTAssertEqual(retained, operation)
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST"])
+        XCTAssertEqual(StubURLProtocol.urls.first?.path, "/api/mobile/v1/memory/\(memoryID)/correction/\(operationID)/apply")
+    }
+
+    func testOwnerMemoryCorrectionCallerCancellationReturnsTheSameOperation() async throws {
+        let memoryID = "123e4567-e89b-12d3-a456-426614174005"
+        let operationID = "123e4567-e89b-12d3-a456-426614174006"
+        let path = "/api/mobile/v1/memory/\(memoryID)/correction/\(operationID)/apply"
+        let authorization = makeOwnerMemoryCorrectionAuthorization(memoryID: memoryID, operationID: operationID,
+            hash: String(repeating: "e", count: 64), revision: String(repeating: "f", count: 64), content: "new note")
+        let client = makeClient()
+        let operation = try client.makeOwnerMemoryCorrectionOperation(
+            memoryID: memoryID, authorization: authorization
+        )
+        StubURLProtocol.prime([.held(status: 200, body: Data(#"{"version":1,"authority":"operation_receipt","command":"correct_owner_memory","operationId":"123e4567-e89b-12d3-a456-426614174006","outcome":"saved"}"#.utf8))])
+        let stopped = expectation(description: "Cancelled apply stops its transport")
+        StubURLProtocol.observeStopLoading(path: path, testCaseID: testCaseID) { stopped.fulfill() }
+        let task = Task { await client.applyOwnerMemoryCorrection(operation) }
+        let deadline = ContinuousClock.now + .seconds(2)
+        while !StubURLProtocol.isHoldingResponse(path: path), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(StubURLProtocol.isHoldingResponse(path: path))
+        task.cancel()
+        guard case let .cancelled(retained) = await task.value else {
+            return XCTFail("Cancellation must return the original operation for an explicit status read")
+        }
+        XCTAssertEqual(retained, operation)
+        await fulfillment(of: [stopped], timeout: 2)
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST"])
+    }
+
+    func testOwnerMemoryCorrectionReplyMustMatchCommandAndOriginalOperationIdentity() async throws {
+        let memoryID = "123e4567-e89b-12d3-a456-426614174007"
+        let operationIDs = [
+            "123e4567-e89b-12d3-a456-426614174008",
+            "123e4567-e89b-12d3-a456-426614174009",
+            "123e4567-e89b-12d3-a456-426614174010",
+            "123e4567-e89b-12d3-a456-426614174011",
+        ]
+        let replies = [
+            #"{"version":1,"authority":"operation_receipt","operationId":"123e4567-e89b-12d3-a456-426614174008","outcome":"saved"}"#,
+            #"{"version":1,"authority":"operation_receipt","command":"other_command","operationId":"123e4567-e89b-12d3-a456-426614174009","outcome":"saved"}"#,
+            #"{"version":1,"authority":"operation_receipt","command":"correct_owner_memory","outcome":"saved"}"#,
+            #"{"version":1,"authority":"operation_receipt","command":"correct_owner_memory","operationId":"123e4567-e89b-12d3-a456-426614174099","outcome":"saved"}"#,
+        ]
+        StubURLProtocol.prime(replies.map { .success(status: 200, body: Data($0.utf8)) })
+        let client = makeClient()
+        for operationID in operationIDs {
+            let auth = makeOwnerMemoryCorrectionAuthorization(memoryID: memoryID, operationID: operationID,
+                hash: String(repeating: "a", count: 64), revision: String(repeating: "b", count: 64), content: "note")
+            let operation = try client.makeOwnerMemoryCorrectionOperation(
+                memoryID: memoryID, authorization: auth
+            )
+            guard case let .uncertain(retained) = await client.applyOwnerMemoryCorrection(operation) else {
+                return XCTFail("Unbound apply replies must stay uncertain")
+            }
+            XCTAssertEqual(retained, operation)
+        }
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST", "POST", "POST", "POST"])
+
+        let statusReplies = [
+            #"{"version":1,"authority":"operation_receipt","operationId":"123e4567-e89b-12d3-a456-426614174008","outcome":"saved"}"#,
+            #"{"version":1,"authority":"operation_receipt","command":"other_command","operationId":"123e4567-e89b-12d3-a456-426614174009","outcome":"saved"}"#,
+            #"{"version":1,"authority":"operation_receipt","command":"correct_owner_memory","outcome":"saved"}"#,
+            #"{"version":1,"authority":"operation_receipt","command":"correct_owner_memory","operationId":"123e4567-e89b-12d3-a456-426614174099","outcome":"saved"}"#,
+        ]
+        StubURLProtocol.prime(statusReplies.map { .success(status: 200, body: Data($0.utf8)) })
+        for operationID in operationIDs {
+            let auth = makeOwnerMemoryCorrectionAuthorization(memoryID: memoryID, operationID: operationID,
+                hash: String(repeating: "a", count: 64), revision: String(repeating: "b", count: 64), content: "note")
+            let operation = try client.makeOwnerMemoryCorrectionOperation(
+                memoryID: memoryID, authorization: auth
+            )
+            do {
+                _ = try await client.ownerMemoryCorrectionStatus(operation)
+                XCTFail("Status must reject any reply not bound to the original operation")
+            } catch let error as APIError {
+                XCTAssertEqual(error.localizedDescription, APIError.invalidResponse.localizedDescription)
+            }
+        }
+        XCTAssertEqual(StubURLProtocol.attempts, ["GET", "GET", "GET", "GET"])
+    }
+
+    func testOwnerMemoryCorrectionStatusRejectsUnboundRepliesAndMalformedOperationTuplesWithoutSending() async throws {
+        let memoryID = "123e4567-e89b-12d3-a456-426614174012"
+        let operationID = "123e4567-e89b-12d3-a456-426614174013"
+        let authorization = makeOwnerMemoryCorrectionAuthorization(memoryID: memoryID, operationID: operationID,
+            hash: String(repeating: "c", count: 64), revision: String(repeating: "d", count: 64), content: "note")
+        let client = makeClient()
+        XCTAssertThrowsError(try client.makeOwnerMemoryCorrectionOperation(
+            memoryID: "123e4567-e89b-12d3-a456-426614174014",
+            authorization: authorization
+        ))
+        let valid = try client.makeOwnerMemoryCorrectionOperation(
+            memoryID: memoryID, authorization: authorization
+        )
+        let mismatchedRequest = OwnerMemoryCorrectionApplyRequest(
+            memoryId: "123e4567-e89b-12d3-a456-426614174014",
+            operationId: authorization.operationId,
+            expectedContentHash: authorization.expectedContentHash,
+            expectedMemoryRevision: authorization.expectedMemoryRevision,
+            content: authorization.content
+        )
+        let malformed = OwnerMemoryCorrectionOperation(
+            memoryId: memoryID, authorization: authorization, request: mismatchedRequest,
+            requestHash: valid.requestHash
+        )
+        StubURLProtocol.prime([])
+        guard case .uncertain = await client.applyOwnerMemoryCorrection(malformed) else {
+            return XCTFail("A local operation mismatch must remain uncertain without sending")
+        }
+        do {
+            _ = try await client.ownerMemoryCorrectionStatus(malformed)
+            XCTFail("A local operation mismatch must reject status without sending")
+        } catch let error as APIError {
+            XCTAssertEqual(error.localizedDescription, APIError.invalidResponse.localizedDescription)
+        }
+        XCTAssertTrue(StubURLProtocol.attempts.isEmpty)
+    }
+
+    func testOwnerMemoryCorrectionApplyRejectsServerAuthorityStatusAndHashContradictions() async throws {
+        let memoryID = "123e4567-e89b-12d3-a456-426614174015"
+        let operationIDs = [
+            "123e4567-e89b-12d3-a456-426614174016",
+            "123e4567-e89b-12d3-a456-426614174017",
+            "123e4567-e89b-12d3-a456-426614174018",
+            "123e4567-e89b-12d3-a456-426614174019",
+        ]
+        let hash = String(repeating: "a", count: 64)
+        let revision = String(repeating: "b", count: 64)
+        let statuses = [200, 409, 500, 200]
+        let bodies: [[String: Any]] = [
+            ["version": 1, "authority": "operation_receipt", "command": "correct_owner_memory", "operationId": operationIDs[0], "outcome": "outcome_unknown", "requestHash": ownerMemoryCorrectionRequestHash(memoryID: memoryID, operationID: operationIDs[0], hash: hash, revision: revision, content: "note")],
+            ["version": 1, "authority": "request_rejection", "command": "correct_owner_memory", "operationId": operationIDs[1], "outcome": "conflict", "originalOperationTerminal": true, "reason": "bad-shape"],
+            ["version": 1, "authority": "operation_receipt", "command": "correct_owner_memory", "operationId": operationIDs[2], "outcome": "saved", "ids": [:], "revision": "r2", "statusVersion": 1, "requestHash": ownerMemoryCorrectionRequestHash(memoryID: memoryID, operationID: operationIDs[2], hash: hash, revision: revision, content: "note")],
+            ["version": 1, "authority": "operation_receipt", "command": "correct_owner_memory", "operationId": operationIDs[3], "outcome": "saved", "requestHash": String(repeating: "0", count: 64)],
+        ]
+        StubURLProtocol.prime(zip(statuses, bodies).map { status, body in
+            .success(status: status, body: try! JSONSerialization.data(withJSONObject: body))
+        })
+        let client = makeClient()
+        for operationID in operationIDs {
+            let authorization = makeOwnerMemoryCorrectionAuthorization(
+                memoryID: memoryID, operationID: operationID,
+                hash: hash, revision: revision, content: "note"
+            )
+            let operation = try client.makeOwnerMemoryCorrectionOperation(memoryID: memoryID, authorization: authorization)
+            guard case let .uncertain(retained) = await client.applyOwnerMemoryCorrection(operation) else {
+                return XCTFail("Contradictory authority/status/hash replies must stay uncertain")
+            }
+            XCTAssertEqual(retained, operation)
+        }
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST", "POST", "POST", "POST"])
+
+        StubURLProtocol.prime(zip(statuses, bodies).map { status, body in
+            .success(status: status, body: try! JSONSerialization.data(withJSONObject: body))
+        })
+        for operationID in operationIDs {
+            let authorization = makeOwnerMemoryCorrectionAuthorization(
+                memoryID: memoryID, operationID: operationID,
+                hash: hash, revision: revision, content: "note"
+            )
+            let operation = try client.makeOwnerMemoryCorrectionOperation(memoryID: memoryID, authorization: authorization)
+            do {
+                _ = try await client.ownerMemoryCorrectionStatus(operation)
+                XCTFail("Contradictory status replies must not be exposed as terminal")
+            } catch is APIError {
+                // Invalid status bodies and HTTP failures leave the original operation unresolved.
+            }
+        }
+        XCTAssertEqual(StubURLProtocol.attempts, ["GET", "GET", "GET", "GET"])
+    }
+
     func testOwnerReplyDeliveryUsesTheSameStableClientIdentityAsTheChatRequest() async throws {
         let clientID = "33333333-3333-4333-8333-333333333333"
         StubURLProtocol.prime([
@@ -2775,21 +3019,59 @@ final class APIClientRetryTests: XCTestCase {
 
     @MainActor
     func testStandingApprovalDoesNotWaitOnTheWorkspaceRead() async throws {
+        let workspacePath = "/api/mobile/v1/workspace"
         StubURLProtocol.prime([
-            .success(status: 200, body: Data(#"{"ok":true,"taskId":"t1","toolCallId":"tc1","approvalId":"a1"}"#.utf8)),
-            .delayed(after: 1.5, status: 401, body: Data()),
-            .delayed(after: 1.5, status: 401, body: Data())
-        ])
+            .success(status: 200, body: Data(#"{"ok":true,"taskId":"t1","toolCallId":"tc1","approvalId":"a1"}"#.utf8))
+        ], paths: [workspacePath: [.held(status: 401, body: Data())]])
         let model = AppModel(apiClient: makeClient())
-        let started = ContinuousClock.now
-        let accepted = await model.approveAndRemember(id: "a1")
-        let elapsed = ContinuousClock.now - started
+        let approval = Task { await model.approveAndRemember(id: "a1") }
+        defer { StubURLProtocol.releaseHeldResponse(path: workspacePath) }
 
-        XCTAssertTrue(accepted)
-        XCTAssertLessThan(elapsed, .milliseconds(750))
+        // This is a bounded test deadline, not a performance threshold. The
+        // workspace response stays held until the approval itself completes.
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !StubURLProtocol.isHoldingResponse(path: workspacePath), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        guard StubURLProtocol.isHoldingResponse(path: workspacePath) else {
+            approval.cancel()
+            XCTFail("The workspace read did not reach its held response before the test deadline")
+            return
+        }
+
+        enum ApprovalCompletion: Sendable {
+            case completed(Bool)
+            case deadline
+        }
+        let remaining = deadline - ContinuousClock.now
+        let completion = await withTaskGroup(of: ApprovalCompletion.self) { group in
+            group.addTask { .completed(await approval.value) }
+            group.addTask {
+                try? await Task.sleep(for: remaining)
+                return .deadline
+            }
+            let first = await group.next() ?? .deadline
+            if case .deadline = first {
+                // Release before the group joins its approval waiter so a
+                // regression cannot leave this test hanging.
+                StubURLProtocol.releaseHeldResponse(path: workspacePath)
+            }
+            group.cancelAll()
+            return first
+        }
+
+        switch completion {
+        case .completed(let accepted):
+            XCTAssertTrue(accepted)
+            XCTAssertTrue(StubURLProtocol.isHoldingResponse(path: workspacePath),
+                          "The standing approval must finish before the workspace response is released")
+        case .deadline:
+            XCTFail("The standing approval waited for the held workspace response")
+        }
+        StubURLProtocol.releaseHeldResponse(path: workspacePath)
         await model.settleApprovalReconciliation()
         XCTAssertEqual(StubURLProtocol.attempts.first, "POST")
-        XCTAssertTrue(StubURLProtocol.urls.contains { $0.path.hasSuffix("/workspace") })
+        XCTAssertTrue(StubURLProtocol.urls.contains { $0.path == workspacePath })
     }
 
     /// An overview request that left before the tap comes back still listing
@@ -3577,6 +3859,61 @@ final class APIClientRetryTests: XCTestCase {
 
     private func makeClient(clientID: String? = nil, token: String = "t") -> APIClient {
         makeClient(clientID: clientID, token: token, requestScopeID: testCaseID).client
+    }
+
+    private func ownerMemoryCorrectionHandle(memoryID: String, operationID: String, hash: String, revision: String, content: String) -> String {
+        let claims: [String: Any] = [
+            "version": 1,
+            "purpose": "mobile_owner_memory_correction",
+            "principal": ["kind": "configured_installation_bearer"],
+            "scope": [
+                "ownerId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "sessionDigest": String(repeating: "c", count: 64),
+                "epoch": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                "privacyGeneration": NSNull(),
+                "command": "correct_owner_memory",
+                "operationId": operationID,
+                "targetId": memoryID,
+                "nonce": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+                "issuedAt": 1_000,
+                "expiresAt": 601_000,
+            ],
+            "expectedContentHash": hash,
+            "expectedMemoryRevision": revision,
+            "requestHash": ownerMemoryCorrectionRequestHash(memoryID: memoryID, operationID: operationID, hash: hash, revision: revision, content: content),
+        ]
+        let payload = try! JSONSerialization.data(withJSONObject: claims, options: [.sortedKeys])
+            .base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        return "omc1.\(payload).\(String(repeating: "A", count: 43))"
+    }
+
+    private func ownerMemoryCorrectionRequestHash(memoryID: String, operationID: String, hash: String, revision: String, content: String) -> String {
+        OwnerMemoryCorrectionApplyRequest(
+            memoryId: memoryID, operationId: operationID,
+            expectedContentHash: hash, expectedMemoryRevision: revision, content: content
+        ).canonicalRequestHash
+    }
+
+    private func makeOwnerMemoryCorrectionAuthorization(
+        memoryID: String,
+        operationID: String,
+        hash: String,
+        revision: String,
+        content: String
+    ) -> OwnerMemoryCorrectionAuthorization {
+        let response = OwnerMemoryCorrectionAuthorizationResponse(
+            version: 1, intent: "authorized", command: "correct_owner_memory",
+            memoryId: memoryID, operationId: operationID,
+            authorization: ownerMemoryCorrectionHandle(memoryID: memoryID, operationID: operationID, hash: hash, revision: revision, content: content),
+            expiresAt: "expired-is-still-status-readable"
+        )
+        return OwnerMemoryCorrectionAuthorization(
+            response: response, expectedContentHash: hash,
+            expectedMemoryRevision: revision, content: content
+        )
     }
 
     private func makeClient(clientID: String? = nil, token: String = "t",

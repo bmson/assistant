@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 struct SituationSource: Codable, Hashable {
     var kind: String
@@ -1228,6 +1229,335 @@ struct ChecklistCorrectionBody: Encodable, Sendable, Equatable {
     let ownerMessageId: String
     let replacementKind = "lookup"
     let replacementLabel: String
+}
+
+/// Exact owner-memory correction wire values. Authorization and operation ID
+/// are issued by the server and must be retained unchanged across recovery.
+struct OwnerMemoryCorrectionSnapshot: Decodable, Sendable, Equatable {
+    let memoryId: String
+    let content: String
+    let contentHash: String?
+    let revision: String
+    let sourceLabel: String
+    let eligible: Bool
+    let readOnlyReason: String?
+    let ownerCorrected: Bool
+}
+
+struct OwnerMemoryCorrectionAuthorizationRequest: Encodable, Sendable, Equatable {
+    let version = 1
+    let intent = "authorize"
+    let expectedContentHash: String
+    let expectedMemoryRevision: String
+    let content: String
+}
+
+struct OwnerMemoryCorrectionAuthorizationResponse: Decodable, Sendable, Equatable {
+    let version: Int
+    let intent: String
+    let command: String
+    let memoryId: String
+    let operationId: String
+    let authorization: String
+    let expiresAt: String
+}
+
+struct OwnerMemoryCorrectionAuthorization: Sendable, Equatable {
+    let version: Int
+    let intent: String
+    let command: String
+    let memoryId: String
+    let operationId: String
+    let authorization: String
+    let expiresAt: String
+    let expectedContentHash: String
+    let expectedMemoryRevision: String
+    let content: String
+    let requestHash: String
+
+    init(response: OwnerMemoryCorrectionAuthorizationResponse, expectedContentHash: String,
+         expectedMemoryRevision: String, content: String) {
+        version = response.version
+        intent = response.intent
+        command = response.command
+        memoryId = response.memoryId
+        operationId = response.operationId
+        authorization = response.authorization
+        expiresAt = response.expiresAt
+        self.expectedContentHash = expectedContentHash
+        self.expectedMemoryRevision = expectedMemoryRevision
+        self.content = content
+        requestHash = Self.readHandleClaims(response.authorization)?.requestHash ?? ""
+    }
+
+    private static func readHandleClaims(_ authorization: String) -> OwnerMemoryCorrectionHandleClaims? {
+        let parts = authorization.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 3, parts[0] == "omc1",
+              String(parts[1]).range(of: "^[A-Za-z0-9_-]+$", options: .regularExpression) != nil,
+              String(parts[2]).range(of: "^[A-Za-z0-9_-]+$", options: .regularExpression) != nil,
+              let payload = Data(base64URL: String(parts[1])),
+              let claims = try? JSONDecoder().decode(OwnerMemoryCorrectionHandleClaims.self, from: payload) else {
+            return nil
+        }
+        return claims
+    }
+
+    func handleBinds(memoryId: String, operationId: String, contentHash: String,
+                     memoryRevision: String, requestHash: String) -> Bool {
+        guard let claims = Self.readHandleClaims(authorization) else { return false }
+        return claims.version == 1
+            && claims.purpose == "mobile_owner_memory_correction"
+            && claims.scope.command == "correct_owner_memory"
+            && claims.scope.targetId == memoryId
+            && claims.scope.operationId == operationId
+            && claims.expectedContentHash == contentHash
+            && claims.expectedMemoryRevision == memoryRevision
+            && claims.requestHash.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil
+            && claims.requestHash == requestHash
+            && self.requestHash == claims.requestHash
+    }
+}
+
+private struct OwnerMemoryCorrectionHandleClaims: Decodable {
+    struct Scope: Decodable {
+        let command: String
+        let operationId: String
+        let targetId: String
+    }
+    let version: Int
+    let purpose: String
+    let scope: Scope
+    let expectedContentHash: String
+    let expectedMemoryRevision: String
+    let requestHash: String
+}
+
+private extension Data {
+    init?(base64URL value: String) {
+        var base64 = value.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        let remainder = base64.count % 4
+        if remainder != 0 { base64 += String(repeating: "=", count: 4 - remainder) }
+        self.init(base64Encoded: base64)
+    }
+}
+
+struct OwnerMemoryCorrectionApplyRequest: Encodable, Sendable, Equatable {
+    let version: Int
+    let intent: String
+    let operationId: String
+    let command: String
+    let memoryId: String
+    let expectedContentHash: String
+    let expectedMemoryRevision: String
+    let content: String
+
+    static func trimmedServerContent(_ value: String) -> String {
+        func isTrimCharacter(_ scalar: Unicode.Scalar) -> Bool {
+            switch scalar.value {
+            case 0x0009...0x000d, 0x0020, 0x00a0, 0x1680, 0x2000...0x200a,
+                 0x2028, 0x2029, 0x202f, 0x205f, 0x3000, 0xfeff:
+                true
+            default: false
+            }
+        }
+        let scalars = value.unicodeScalars
+        var start = scalars.startIndex
+        var end = scalars.endIndex
+        while start < end, isTrimCharacter(scalars[start]) { scalars.formIndex(after: &start) }
+        while start < end {
+            let prior = scalars.index(before: end)
+            guard isTrimCharacter(scalars[prior]) else { break }
+            end = prior
+        }
+        return String(scalars[start..<end])
+    }
+
+    init(memoryId: String, operationId: String, expectedContentHash: String,
+         expectedMemoryRevision: String, content: String) {
+        version = 1
+        intent = "apply"
+        self.operationId = operationId
+        command = "correct_owner_memory"
+        self.memoryId = memoryId
+        self.expectedContentHash = expectedContentHash
+        self.expectedMemoryRevision = expectedMemoryRevision
+        self.content = content
+    }
+
+    var canonicalRequestHash: String {
+        let fields: [(String, String)] = [
+            ("command", Self.quote(command)),
+            ("content", Self.quote(content)),
+            ("expectedContentHash", Self.quote(expectedContentHash)),
+            ("expectedMemoryRevision", Self.quote(expectedMemoryRevision)),
+            ("intent", Self.quote(intent)),
+            ("memoryId", Self.quote(memoryId)),
+            ("operationId", Self.quote(operationId)),
+            ("version", "1"),
+        ]
+        let json = "{" + fields.map { "\(Self.quote($0.0)):\($0.1)" }.joined(separator: ",") + "}"
+        let data = Data(("owner-editor-apply-v1\n" + json).utf8)
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func quote(_ value: String) -> String {
+        var output = "\""
+        for scalar in value.unicodeScalars {
+            switch scalar.value {
+            case 0x22: output += "\\\""
+            case 0x5c: output += "\\\\"
+            case 0x08: output += "\\b"
+            case 0x0c: output += "\\f"
+            case 0x0a: output += "\\n"
+            case 0x0d: output += "\\r"
+            case 0x09: output += "\\t"
+            case 0x00...0x1f: output += String(format: "\\u%04x", scalar.value)
+            default: output.unicodeScalars.append(scalar)
+            }
+        }
+        output += "\""
+        return output
+    }
+}
+
+struct OwnerMemoryCorrectionOperation: Sendable, Equatable {
+    let memoryId: String
+    let authorization: OwnerMemoryCorrectionAuthorization
+    let request: OwnerMemoryCorrectionApplyRequest
+    let requestHash: String
+
+    var isBoundToServerAuthorization: Bool {
+        let hashPattern = "^[a-f0-9]{64}$"
+        return memoryId == authorization.memoryId
+            && memoryId == request.memoryId
+            && authorization.version == 1
+            && authorization.intent == "authorized"
+            && authorization.command == "correct_owner_memory"
+            && authorization.operationId.range(of: "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", options: .regularExpression) != nil
+            && authorization.handleBinds(
+                memoryId: memoryId, operationId: authorization.operationId,
+                contentHash: authorization.expectedContentHash,
+                memoryRevision: authorization.expectedMemoryRevision,
+                requestHash: request.canonicalRequestHash
+            )
+            && request.version == 1
+            && request.intent == "apply"
+            && request.command == "correct_owner_memory"
+            && request.operationId == authorization.operationId
+            && request.expectedContentHash.range(of: hashPattern, options: .regularExpression) != nil
+            && request.expectedMemoryRevision.range(of: hashPattern, options: .regularExpression) != nil
+            && request.expectedContentHash == authorization.expectedContentHash
+            && request.expectedMemoryRevision == authorization.expectedMemoryRevision
+            && request.content == authorization.content
+            && request.content == OwnerMemoryCorrectionApplyRequest.trimmedServerContent(request.content)
+            && (3...4_000).contains(request.content.utf16.count)
+            && request.canonicalRequestHash == authorization.requestHash
+            && requestHash == authorization.requestHash
+    }
+}
+
+struct OwnerMemoryCorrectionReply: Decodable, Sendable, Equatable {
+    let version: Int
+    let authority: String
+    let command: String?
+    let operationId: String?
+    let outcome: String
+    let reason: String?
+    let fieldErrors: [String: String]?
+    let ids: [String: String]?
+    let originalOperationTerminal: Bool?
+    let revision: String?
+    let statusVersion: Int?
+    let requestHash: String?
+
+    var isTerminal: Bool {
+        guard version == 1, command == "correct_owner_memory", operationId != nil else { return false }
+        guard authority == "operation_receipt",
+              requestHash?.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil,
+              (statusVersion ?? 0) > 0 else {
+            return authority == "scope_retirement"
+                && outcome == "voided"
+                && (reason == "scope_retired" || reason == "replay_window_retired")
+        }
+        switch outcome {
+        case "saved", "unchanged": return ids != nil && revision != nil
+        case "conflict", "unavailable": return reason != nil
+        case "invalid": return fieldErrors != nil
+        case "not_applied": return reason == "claim_abandoned" || reason == "preparation_failed"
+        default: return false
+        }
+    }
+    var isUnresolved: Bool {
+        version == 1 && authority == "unresolved" && command == "correct_owner_memory"
+            && operationId != nil && outcome == "outcome_unknown"
+    }
+    var isRejection: Bool {
+        version == 1 && authority == "request_rejection" && command == "correct_owner_memory"
+            && operationId != nil && originalOperationTerminal == false
+            && ["conflict", "invalid", "unavailable"].contains(outcome)
+    }
+
+    func validatedKind(httpStatus: Int, operation: OwnerMemoryCorrectionOperation) -> Kind? {
+        guard version == 1, command == "correct_owner_memory",
+              operationId == operation.authorization.operationId,
+              requestHash == nil || requestHash == operation.requestHash else { return nil }
+        switch authority {
+        case "operation_receipt":
+            guard requestHash == operation.requestHash, (statusVersion ?? 0) > 0 else { return nil }
+            let expectedStatus: Int
+            switch outcome {
+            case "saved", "unchanged":
+                guard ids != nil, revision != nil else { return nil }
+                expectedStatus = 200
+            case "not_applied":
+                guard reason == "claim_abandoned" || reason == "preparation_failed" else { return nil }
+                expectedStatus = 200
+            case "conflict":
+                guard reason != nil else { return nil }
+                expectedStatus = 409
+            case "invalid":
+                guard fieldErrors != nil else { return nil }
+                expectedStatus = 422
+            case "unavailable":
+                guard reason != nil else { return nil }
+                expectedStatus = 503
+            default: return nil
+            }
+            guard httpStatus == expectedStatus else { return nil }
+            return .terminal
+        case "scope_retirement":
+            guard outcome == "voided", reason == "scope_retired" || reason == "replay_window_retired",
+                  httpStatus == 409 else { return nil }
+            return .terminal
+        case "request_rejection":
+            guard originalOperationTerminal == false, reason != nil else { return nil }
+            let expectedStatus: Int
+            switch outcome {
+            case "conflict": expectedStatus = 409
+            case "invalid": expectedStatus = 422
+            case "unavailable": expectedStatus = 503
+            default: return nil
+            }
+            guard httpStatus == expectedStatus else { return nil }
+            return .nonterminalRejection
+        case "unresolved":
+            guard outcome == "outcome_unknown",
+                  ["preparing", "receipt_unavailable", "proof_changed", "receipt_missing"].contains(reason ?? ""),
+                  httpStatus == 202 else { return nil }
+            return .unknown
+        default: return nil
+        }
+    }
+
+    enum Kind { case terminal, nonterminalRejection, unknown }
+}
+
+enum OwnerMemoryCorrectionApplyResult: Sendable, Equatable {
+    case replied(OwnerMemoryCorrectionReply)
+    /// Retain this operation for an explicit status read; never replay apply.
+    case uncertain(OwnerMemoryCorrectionOperation)
+    /// Cancellation leaves the exact operation available to its caller.
+    case cancelled(OwnerMemoryCorrectionOperation)
 }
 
 struct ChecklistCancellationBody: Encodable, Sendable, Equatable {

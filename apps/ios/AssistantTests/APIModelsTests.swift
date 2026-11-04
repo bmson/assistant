@@ -4,6 +4,42 @@ import CoreLocation
 @testable import Assistant
 
 extension APIModelsTests {
+    func testOwnerMemoryCorrectionDTOsPreserveStoredSnapshotClaimsAndTypedReplyAuthority() throws {
+        let decoder = JSONDecoder()
+        let ineligible = try decoder.decode(OwnerMemoryCorrectionSnapshot.self, from: Data(
+            #"{"memoryId":"123e4567-e89b-12d3-a456-426614174001","content":"note","contentHash":null,"revision":"rev-a","sourceLabel":"Imported note","eligible":false,"readOnlyReason":"unverified_source","ownerCorrected":false}"#.utf8
+        ))
+        XCTAssertNil(ineligible.contentHash, "A null stored claim must remain absent; clients must not repair it from content.")
+        XCTAssertFalse(ineligible.eligible)
+        XCTAssertEqual(ineligible.readOnlyReason, "unverified_source")
+
+        let replies = [
+            #"{"version":1,"authority":"operation_receipt","command":"correct_owner_memory","operationId":"op","outcome":"saved","ids":{},"revision":"r2","statusVersion":2,"requestHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
+            #"{"version":1,"authority":"request_rejection","command":"correct_owner_memory","operationId":"op","outcome":"conflict","originalOperationTerminal":false,"reason":"request_binding_mismatch"}"#,
+            #"{"version":1,"authority":"unresolved","command":"correct_owner_memory","operationId":"op","outcome":"outcome_unknown","reason":"preparing"}"#,
+            #"{"version":1,"authority":"operation_receipt","command":"correct_owner_memory","operationId":"op","outcome":"outcome_unknown","requestHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
+        ]
+        let decoded = try replies.map { try decoder.decode(OwnerMemoryCorrectionReply.self, from: Data($0.utf8)) }
+        XCTAssertTrue(decoded[0].isTerminal)
+        XCTAssertFalse(decoded[0].isRejection)
+        XCTAssertTrue(decoded[1].isRejection)
+        XCTAssertFalse(decoded[1].isTerminal)
+        XCTAssertTrue(decoded[2].isUnresolved)
+        XCTAssertFalse(decoded[2].isTerminal)
+        XCTAssertFalse(decoded[3].isTerminal)
+    }
+
+    func testOwnerMemoryCorrectionApplyHashMatchesServerCanonicalApplyBytes() {
+        let request = OwnerMemoryCorrectionApplyRequest(
+            memoryId: "123e4567-e89b-12d3-a456-426614174015",
+            operationId: "123e4567-e89b-12d3-a456-426614174016",
+            expectedContentHash: String(repeating: "a", count: 64),
+            expectedMemoryRevision: String(repeating: "b", count: 64),
+            content: "note"
+        )
+        XCTAssertEqual(request.canonicalRequestHash, "15e4ad7b8259a606ecac2d4e7aaad8199d59d3346721952e34f20835607caae7")
+    }
+
     func testPersonProfileContactTreatsMissingIdentityRevisionAsUnsupportedLegacyRead() throws {
         let legacy = try JSONDecoder().decode(
             PersonProfileContact.self,
