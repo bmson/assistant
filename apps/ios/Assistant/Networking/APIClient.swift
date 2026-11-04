@@ -340,6 +340,146 @@ struct APIClient: Sendable {
         try await get("api/mobile/v1/activity/\(id)")
     }
 
+    func ownerMemoryCorrectionSnapshot(memoryID: String) async throws -> OwnerMemoryCorrectionSnapshot {
+        guard Self.isCorrectionIdentifier(memoryID) else { throw APIError.invalidResponse }
+        var request = makeRequest(url: configuration.baseURL.appending(path: "api/mobile/v1/memory/\(memoryID)/snapshot"))
+        request.httpMethod = "GET"
+        let data = try await ownerMemoryCorrectionData(for: request)
+        do {
+            let snapshot = try JSONDecoder().decode(OwnerMemoryCorrectionSnapshot.self, from: data)
+            guard snapshot.memoryId == memoryID else { throw APIError.invalidResponse }
+            return snapshot
+        } catch let error as APIError { throw error }
+        catch { throw APIError.decodeFailure(error, as: OwnerMemoryCorrectionSnapshot.self) }
+    }
+
+    func authorizeOwnerMemoryCorrection(
+        memoryID: String,
+        expectedContentHash: String,
+        expectedMemoryRevision: String,
+        content: String
+    ) async throws -> OwnerMemoryCorrectionAuthorization {
+        guard Self.isCorrectionIdentifier(memoryID),
+              expectedContentHash.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil,
+              expectedMemoryRevision.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil,
+              (3...4_000).contains(OwnerMemoryCorrectionApplyRequest.trimmedServerContent(content).utf16.count) else {
+            throw APIError.invalidResponse
+        }
+        var request = makeRequest(url: configuration.baseURL.appending(path: "api/mobile/v1/memory/\(memoryID)/correction/authorize"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        let exactAuthorizedContent = OwnerMemoryCorrectionApplyRequest.trimmedServerContent(content)
+        request.httpBody = try JSONEncoder().encode(OwnerMemoryCorrectionAuthorizationRequest(
+            expectedContentHash: expectedContentHash,
+            expectedMemoryRevision: expectedMemoryRevision,
+            content: exactAuthorizedContent
+        ))
+        let data = try await ownerMemoryCorrectionData(for: request)
+        do {
+            let response = try JSONDecoder().decode(OwnerMemoryCorrectionAuthorizationResponse.self, from: data)
+            guard Self.isCorrectionIdentifier(response.operationId) else { throw APIError.invalidResponse }
+            let applyRequest = OwnerMemoryCorrectionApplyRequest(
+                memoryId: memoryID, operationId: response.operationId,
+                expectedContentHash: expectedContentHash,
+                expectedMemoryRevision: expectedMemoryRevision,
+                content: exactAuthorizedContent
+            )
+            let authorization = OwnerMemoryCorrectionAuthorization(
+                response: response, expectedContentHash: expectedContentHash,
+                expectedMemoryRevision: expectedMemoryRevision, content: exactAuthorizedContent
+            )
+            guard authorization.version == 1, authorization.intent == "authorized",
+                  authorization.command == "correct_owner_memory", authorization.memoryId == memoryID,
+                  Self.isCorrectionIdentifier(authorization.operationId),
+                  authorization.handleBinds(
+                    memoryId: memoryID, operationId: authorization.operationId,
+                    contentHash: expectedContentHash, memoryRevision: expectedMemoryRevision,
+                    requestHash: applyRequest.canonicalRequestHash
+                  ) else {
+                throw APIError.invalidResponse
+            }
+            return authorization
+        } catch let error as APIError { throw error }
+        catch { throw APIError.decodeFailure(error, as: OwnerMemoryCorrectionAuthorization.self) }
+    }
+
+    func makeOwnerMemoryCorrectionOperation(
+        memoryID: String,
+        authorization: OwnerMemoryCorrectionAuthorization
+    ) throws -> OwnerMemoryCorrectionOperation {
+        let operation = OwnerMemoryCorrectionOperation(
+            memoryId: memoryID,
+            authorization: authorization,
+            request: OwnerMemoryCorrectionApplyRequest(
+                memoryId: memoryID, operationId: authorization.operationId,
+                expectedContentHash: authorization.expectedContentHash,
+                expectedMemoryRevision: authorization.expectedMemoryRevision,
+                content: authorization.content
+            ),
+            requestHash: authorization.requestHash
+        )
+        guard operation.isBoundToServerAuthorization else { throw APIError.invalidResponse }
+        return operation
+    }
+
+    func applyOwnerMemoryCorrection(_ operation: OwnerMemoryCorrectionOperation) async -> OwnerMemoryCorrectionApplyResult {
+        guard operation.isBoundToServerAuthorization else { return .uncertain(operation) }
+        var request = makeRequest(url: configuration.baseURL.appending(path: "api/mobile/v1/memory/\(operation.memoryId)/correction/\(operation.authorization.operationId)/apply"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.setValue(operation.authorization.authorization, forHTTPHeaderField: "x-owner-memory-correction-authorization")
+        do {
+            request.httpBody = try JSONEncoder().encode(operation.request)
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else { return .uncertain(operation) }
+            let reply = try JSONDecoder().decode(OwnerMemoryCorrectionReply.self, from: data)
+            guard reply.validatedKind(httpStatus: http.statusCode, operation: operation) != nil else {
+                return .uncertain(operation)
+            }
+            return .replied(reply)
+        } catch is CancellationError { return .cancelled(operation) }
+        catch let error as URLError where error.code == .cancelled { return .cancelled(operation) }
+        catch let APIError.transport(error) where error.code == .cancelled { return .cancelled(operation) }
+        catch { return .uncertain(operation) }
+    }
+
+    /// Explicit read of the original operation. This never submits or replays it.
+    func ownerMemoryCorrectionStatus(_ operation: OwnerMemoryCorrectionOperation) async throws -> OwnerMemoryCorrectionReply {
+        guard operation.isBoundToServerAuthorization else { throw APIError.invalidResponse }
+        var request = makeRequest(url: configuration.baseURL.appending(path: "api/mobile/v1/memory/\(operation.memoryId)/correction/\(operation.authorization.operationId)/status"))
+        request.httpMethod = "GET"
+        request.setValue(operation.authorization.authorization, forHTTPHeaderField: "x-owner-memory-correction-authorization")
+        let (data, http) = try await ownerMemoryCorrectionResponse(for: request)
+        if !(200..<300).contains(http.statusCode) && ![409, 422, 503].contains(http.statusCode) {
+            try await validate(http, data: data)
+        }
+        do {
+            let reply = try JSONDecoder().decode(OwnerMemoryCorrectionReply.self, from: data)
+            guard reply.validatedKind(httpStatus: http.statusCode, operation: operation) != nil else {
+                throw APIError.invalidResponse
+            }
+            return reply
+        } catch let error as APIError { throw error }
+        catch { throw APIError.decodeFailure(error, as: OwnerMemoryCorrectionReply.self) }
+    }
+
+    /// Single-attempt transport for this protocol: in particular, an apply
+    /// transport loss must remain uncertain and must never trigger a replay.
+    private func ownerMemoryCorrectionData(for request: URLRequest) async throws -> Data {
+        let (data, http) = try await ownerMemoryCorrectionResponse(for: request)
+        try await validate(http, data: data)
+        return data
+    }
+
+    private func ownerMemoryCorrectionResponse(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
+            return (data, http)
+        } catch let error as APIError { throw error }
+        catch let error as URLError { throw APIError.transport(error) }
+    }
+
     func checklistCorrectionProjection(taskID: String) async throws -> ChecklistCorrectionProjection {
         guard Self.isCorrectionIdentifier(taskID) else { throw APIError.invalidResponse }
         var components = URLComponents(
