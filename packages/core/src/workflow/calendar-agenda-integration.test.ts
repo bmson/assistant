@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { calendarAgendaSummary } from './calendar-agenda.js';
 import { detectPersonalReadRequest } from './read-intent.js';
 import { responseCardsForFinal } from './response-cards.js';
 
@@ -48,7 +49,7 @@ describe('deterministic calendar agenda integration', () => {
     });
     const sections = cards[0]?.sections as { type: string; items: unknown[] }[];
     expect(sections.find((s) => s.type === 'agenda')?.items).toHaveLength(13);
-    expect(JSON.stringify(cards)).toContain('Needs response');
+    expect(JSON.stringify(cards)).toContain('Your RSVP: needs a response.');
     const visibleAgenda = JSON.stringify(
       sections
         .find((section) => section.type === 'agenda')
@@ -58,7 +59,7 @@ describe('deterministic calendar agenda integration', () => {
         }),
     );
     expect(visibleAgenda).not.toContain('needsAction');
-    expect(visibleAgenda).not.toContain('accepted');
+    expect(visibleAgenda).toContain('Your RSVP: accepted.');
   });
   it('does not turn prior-task events or failed results into a current agenda', () => {
     const cards = responseCardsForFinal({
@@ -103,8 +104,12 @@ describe('deterministic calendar agenda integration', () => {
       readRequest,
       requestText: ownerText,
     });
-    const sections = cards.flatMap((card) => card.sections ?? []) as Array<{ type?: string }>;
-    expect(sections.some((section) => section.type === 'attention')).toBe(false);
+    const sections = cards.flatMap((card) => card.sections ?? []) as Array<Record<string, unknown>>;
+    expect(
+      sections.some(
+        (section) => section.type === 'attention' && /overlap/i.test(String(section.title)),
+      ),
+    ).toBe(false);
   });
   it('keeps a specific event time answer in the existing prose-and-source format', () => {
     const cards = responseCardsForFinal({
@@ -151,5 +156,360 @@ describe('deterministic calendar agenda integration', () => {
     expect(payload).toContain('Work');
     expect(payload).toContain('Permission denied');
     expect(payload).not.toContain('No events on');
+  });
+
+  it('labels verified owner RSVP only and keeps household organizer metadata in details', () => {
+    const ownerAccepted = {
+      status: 'accepted',
+      identityVerified: true,
+      basis: 'attendee-email',
+    };
+    const cards = responseCardsForFinal({
+      evidence: [
+        evidence([
+          {
+            ...event(1),
+            eventId: 'family-school-event',
+            calendarId: 'family',
+            calendar: 'Family',
+            summary: 'School pickup for Maya',
+            organizer: 'Katharine <katharine@example.test>',
+            ownerResponse: 'accepted',
+            ownerParticipation: { status: 'unknown', identityVerified: false, basis: 'unverified' },
+          },
+          {
+            ...event(2),
+            eventId: 'owner-meeting',
+            calendarId: 'work',
+            calendar: 'Work',
+            ownerParticipation: ownerAccepted,
+          },
+          {
+            ...event(6),
+            eventId: 'family-brunch-event',
+            calendarId: 'family',
+            calendar: 'Family',
+            summary: 'Family brunch',
+            organizer: 'Katharine <katharine@example.test>',
+            ownerParticipation: { status: 'unknown', identityVerified: false, basis: 'unverified' },
+          },
+        ]),
+      ],
+      readRequest: request,
+      requestText: ownerText,
+    });
+    const sections = (cards[0]?.sections ?? []) as Array<Record<string, unknown>>;
+    const agenda = sections.find((section) => section.type === 'agenda');
+    const rows = agenda?.items as Array<Record<string, unknown>>;
+    const familyRow = rows.find((row) => row.title === 'School pickup for Maya');
+    expect(familyRow?.note).toContain('Your RSVP: not verified.');
+    expect(familyRow?.note).not.toContain('accepted');
+    const eventDetails = sections.find((section) => section.title === 'Event details');
+    expect(eventDetails?.items).toContainEqual({
+      title: 'School pickup for Maya: Organizer: Katharine <katharine@example.test>',
+      detail: 'Calendar source: Family',
+    });
+    expect(eventDetails?.items).toContainEqual({
+      title: 'Family brunch: Organizer: Katharine <katharine@example.test>',
+      detail: 'Calendar source: Family',
+    });
+    const overlaps = sections.find((section) => section.overlaps);
+    expect(JSON.stringify(overlaps)).toContain('isn’t confirmed');
+    expect(JSON.stringify(overlaps)).not.toContain('accepted commitment conflict');
+    expect(JSON.stringify(cards)).not.toMatch(/assigned driver|you will drive|you are attending/i);
+    const textFallback = calendarAgendaSummary(cards);
+    expect(textFallback).toContain('Your RSVP: not verified.');
+    expect(textFallback).toContain('School pickup for Maya: Organizer: Katharine');
+    expect(textFallback).toContain('Calendars: Family');
+    expect(textFallback).toContain('isn’t confirmed');
+    expect(textFallback).not.toMatch(/assigned driver|you will drive|you are attending/i);
+  });
+
+  it.each([
+    ['accepted', 'Your RSVP: accepted.'],
+    ['declined', 'Your RSVP: declined.'],
+    ['tentative', 'Your RSVP: tentative.'],
+    ['needsAction', 'Your RSVP: needs a response.'],
+    ['unknown', 'Your RSVP: unknown.'],
+  ])('shows only the verified owner RSVP status %s', (status, expected) => {
+    const cards = responseCardsForFinal({
+      evidence: [
+        evidence([
+          {
+            ...event(1),
+            ownerParticipation: { status, identityVerified: true, basis: 'attendee-email' },
+          },
+        ]),
+      ],
+      readRequest: request,
+      requestText: ownerText,
+    });
+    const sections = (cards[0]?.sections ?? []) as Array<Record<string, unknown>>;
+    const agenda = sections.find((section) => section.type === 'agenda');
+    const rows = agenda?.items as Array<Record<string, unknown>>;
+    expect(rows[0]?.note).toContain(expected);
+  });
+
+  it('retains trusted recurring mirrors but keeps similar titles and adjacent recurrences distinct', () => {
+    const currentOriginal = '2026-10-23T16:00:00Z';
+    const cards = responseCardsForFinal({
+      evidence: [
+        evidence([
+          {
+            ...event(1),
+            eventId: 'google-moved',
+            calendarId: 'google-family',
+            calendar: 'Family Google',
+            summary: 'Pediatric appointment',
+            iCalUID: 'trusted-series-uid',
+            recurringEventId: 'series',
+            originalStartTime: currentOriginal,
+            start: '2026-10-23T17:00:00Z',
+            end: '2026-10-23T18:00:00Z',
+            organizer: 'Clinic <clinic@example.test>',
+            ownerParticipation: {
+              status: 'declined',
+              identityVerified: true,
+              basis: 'attendee-email',
+            },
+          },
+          {
+            ...event(2),
+            eventId: 'iphone-moved',
+            calendarId: 'iphone:family',
+            calendar: 'Family iPhone',
+            summary: 'Pediatric appointment',
+            iCalUID: 'trusted-series-uid',
+            recurringEventId: 'series',
+            originalStartTime: currentOriginal,
+            start: '2026-10-23T17:00:00Z',
+            end: '2026-10-23T18:00:00Z',
+            organizer: 'Clinic <clinic@example.test>',
+          },
+          {
+            ...event(3),
+            eventId: 'adjacent-occurrence',
+            calendarId: 'google-family',
+            calendar: 'Family Google',
+            summary: 'Pediatric appointment',
+            iCalUID: 'trusted-series-uid',
+            recurringEventId: 'series',
+            originalStartTime: '2026-10-23T18:00:00Z',
+            start: '2026-10-23T18:00:00Z',
+            end: '2026-10-23T19:00:00Z',
+          },
+          {
+            ...event(4),
+            eventId: 'similar-distinct-event',
+            calendarId: 'school',
+            calendar: 'School',
+            summary: 'Pediatric appointment',
+            iCalUID: 'another-series-uid',
+            start: '2026-10-23T17:00:00Z',
+            end: '2026-10-23T18:00:00Z',
+          },
+        ]),
+      ],
+      readRequest: request,
+      requestText: ownerText,
+    });
+    const sections = (cards[0]?.sections ?? []) as Array<Record<string, unknown>>;
+    const agenda = sections.find((section) => section.type === 'agenda');
+    const rows = agenda?.items as Array<Record<string, unknown>>;
+    expect(rows).toHaveLength(3);
+    const mirrored = rows.find(
+      (row) => Array.isArray(row.calendars) && row.calendars.includes('Family Google'),
+    );
+    expect(mirrored?.calendars).toEqual(['Family Google', 'Family iPhone']);
+    expect(mirrored?.time).toContain('10:00 AM');
+    expect(mirrored?.note).toContain('Your RSVP differs by calendar source.');
+    expect(
+      rows.some((row) => Array.isArray(row.calendars) && row.calendars.includes('School')),
+    ).toBe(true);
+    expect(rows.some((row) => String(row.id).includes('adjacent-occurrence'))).toBe(true);
+    const details = sections.find((section) => section.title === 'Event details');
+    expect(JSON.stringify(details)).toContain(
+      'Pediatric appointment: Organizer: Clinic <clinic@example.test>',
+    );
+    expect(JSON.stringify(details)).toContain('Calendar source: Family iPhone');
+  });
+
+  it('shows exact phone snapshot freshness, source window, searched scope and permission gaps', () => {
+    const cards = responseCardsForFinal({
+      evidence: [
+        {
+          ...evidence([
+            {
+              ...event(1),
+              eventId: 'phone-family-event',
+              calendarId: 'iphone:family',
+              calendar: 'Family iPhone',
+            },
+          ]),
+          args: {
+            timeMin: '2026-10-23T07:00:00.000Z',
+            timeMax: '2026-10-24T07:00:00.000Z',
+          },
+          result: {
+            complete: false,
+            events: [
+              {
+                ...event(1),
+                eventId: 'phone-family-event',
+                calendarId: 'iphone:family',
+                calendar: 'Family iPhone',
+              },
+            ],
+            calendarsResolved: [
+              { id: 'google-work', name: 'Work', timeZone: 'America/Los_Angeles' },
+              { id: 'iphone:family', name: 'Family iPhone', timeZone: 'America/Los_Angeles' },
+              { id: 'iphone:school', name: 'School iPhone', timeZone: 'America/Los_Angeles' },
+            ],
+            calendarsSearched: ['Work', 'Family iPhone'],
+            calendarsSearchedIds: ['google-work', 'iphone:family'],
+            calendarRosterComplete: true,
+            unavailable: [
+              { calendar: 'School iPhone', reason: 'Calendar permission was revoked.' },
+            ],
+            phoneCalendarCoverage: {
+              complete: false,
+              capturedAt: '2026-10-23T05:00:00.000Z',
+              receivedAt: '2026-10-23T05:05:00.000Z',
+              timeMin: '2026-10-23T00:00:00.000Z',
+              timeMax: '2026-10-24T00:00:00.000Z',
+              sources: [
+                { calendarId: 'family', status: 'available', complete: true },
+                {
+                  calendarId: 'school',
+                  status: 'permission-denied',
+                  complete: false,
+                  reason: 'Calendar permission was revoked.',
+                },
+                { calendarId: 'old-family', status: 'missing', complete: false },
+              ],
+              note: 'iPhone calendar coverage is incomplete; last shared snapshot may be stale.',
+            },
+            note: 'Searched the listed Google and iPhone calendars only.',
+          },
+        },
+      ],
+      readRequest: request,
+      requestText: ownerText,
+    });
+    expect(cards[0]?.complete).toBe(false);
+    const sections = (cards[0]?.sections ?? []) as Array<Record<string, unknown>>;
+    const coverage = sections.find((section) => section.title === 'Calendar read coverage');
+    const coverageText = JSON.stringify(coverage);
+    expect(coverageText).toContain('Requested window');
+    expect(coverageText).toContain('2026-10-23T07:00:00.000Z to 2026-10-24T07:00:00.000Z');
+    expect(coverageText).toContain('Captured at 2026-10-23T05:00:00.000Z');
+    expect(coverageText).toContain('received by Assistant at 2026-10-23T05:05:00.000Z');
+    expect(coverageText).toContain('2026-10-23T00:00:00.000Z to 2026-10-24T00:00:00.000Z');
+    expect(coverageText).toContain('permission-denied');
+    expect(coverageText).toContain('missing');
+    expect(coverageText).toContain('Family iPhone');
+    expect(coverageText).toContain('School iPhone');
+    expect(coverageText).toContain('last shared snapshot may be stale');
+    expect(coverageText).not.toContain('Fetched at');
+    expect(coverageText).not.toContain('iphone:family');
+    const unavailable = sections.find((section) => section.title === 'Calendars not checked');
+    expect(JSON.stringify(unavailable)).toContain('Calendar permission was revoked.');
+    const textFallback = calendarAgendaSummary(cards);
+    expect(textFallback).toContain('Captured at 2026-10-23T05:00:00.000Z');
+    expect(textFallback).toContain('permission-denied');
+    expect(textFallback).toContain('Calendar permission was revoked.');
+    expect(textFallback).not.toContain('iphone:family');
+  });
+
+  it('keeps the owner display zone in text across the DST fold when the source zone differs', () => {
+    const dstRequest = detectPersonalReadRequest([{ role: 'user', content: ownerText }], {
+      now: new Date('2026-10-31T18:00:00Z'),
+      timeZone: 'America/Los_Angeles',
+    });
+    if (!dstRequest?.timeWindow) throw new Error('Expected bounded DST request');
+    const cards = responseCardsForFinal({
+      evidence: [
+        {
+          ...evidence([]),
+          args: { timeMin: dstRequest.timeWindow.timeMin, timeMax: dstRequest.timeWindow.timeMax },
+          result: {
+            complete: true,
+            calendarsSearched: ['Work'],
+            calendarsSearchedIds: ['work'],
+            calendarsResolved: [{ id: 'work', name: 'Work', timeZone: 'America/New_York' }],
+            events: [
+              {
+                ...event(0),
+                summary: 'First fold occurrence',
+                start: '2026-11-01T08:30:00Z',
+                end: '2026-11-01T08:45:00Z',
+                calendarTimeZone: 'America/New_York',
+              },
+              {
+                ...event(1),
+                summary: 'Second fold occurrence',
+                start: '2026-11-01T09:30:00Z',
+                end: '2026-11-01T09:45:00Z',
+                calendarTimeZone: 'America/New_York',
+              },
+            ],
+          },
+        },
+      ],
+      readRequest: dstRequest,
+      requestText: ownerText,
+    });
+    const fallback = calendarAgendaSummary(cards);
+    expect(fallback).toContain('Display time zone: America/Los_Angeles');
+    expect(fallback).not.toContain('Display time zone: America/New_York');
+    expect(fallback).toContain('First fold occurrence');
+    expect(fallback).toContain('Second fold occurrence');
+    expect(fallback).toContain('Source freshness unavailable');
+    expect(fallback).not.toMatch(/Fetched at|Checked at/);
+    const absentZone = calendarAgendaSummary(
+      cards.map((card) => ({ ...card, timeZone: undefined })),
+    );
+    expect(absentZone).toContain('Display time zone unavailable.');
+    expect(absentZone).not.toContain('Display time zone: America/New_York');
+    const invalidZone = calendarAgendaSummary(
+      cards.map((card) => ({ ...card, timeZone: 'Not/AZone' })),
+    );
+    expect(invalidZone).toContain('Display time zone unavailable.');
+  });
+
+  it('does not substitute receive time for a missing phone capture or infer an omitted phone source', () => {
+    const cards = responseCardsForFinal({
+      evidence: [
+        {
+          ...evidence([]),
+          result: {
+            complete: false,
+            events: [],
+            calendarsResolved: [{ id: 'iphone:family', name: 'Family iPhone' }],
+            calendarsSearchedIds: ['iphone:family'],
+            phoneCalendarCoverage: {
+              complete: false,
+              receivedAt: '2026-10-23T05:05:00.000Z',
+              timeMin: '2026-10-23T00:00:00.000Z',
+              timeMax: '2026-10-24T00:00:00.000Z',
+              note: 'Phone capture time was not supplied.',
+            },
+          },
+        },
+      ],
+      readRequest: request,
+      requestText: ownerText,
+    });
+    expect(cards[0]?.complete).toBe(false);
+    const sections = (cards[0]?.sections ?? []) as Array<Record<string, unknown>>;
+    const coverage = sections.find((section) => section.title === 'Calendar read coverage');
+    const coverageText = JSON.stringify(coverage);
+    expect(coverageText).toContain('Capture time not reported');
+    expect(coverageText).toContain('received by Assistant at 2026-10-23T05:05:00.000Z');
+    expect(coverageText).not.toContain('Captured at 2026-10-23T05:05:00.000Z');
+    const textFallback = calendarAgendaSummary(cards);
+    expect(textFallback).toContain('Capture time not reported');
+    expect(textFallback).toContain('received by Assistant at 2026-10-23T05:05:00.000Z');
+    expect(textFallback).not.toContain('iphone:family');
   });
 });

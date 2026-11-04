@@ -29,6 +29,8 @@ export type CalendarPurpose = 'unspecified' | 'commitments' | 'reference';
 export interface CalendarOccurrenceSource extends CalendarOccurrenceIdentity {
   calendar?: string;
   calendarTimeZone?: string;
+  /** Literal provider organizer, preserved per source and never an attendance signal. */
+  organizer?: string;
   summary?: string;
   description?: string;
   location?: string;
