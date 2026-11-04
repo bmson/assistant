@@ -14,14 +14,14 @@ The installed app must support server URL/device-key pairing. Do not reuse an ex
 
 ## Prerequisites
 
-| Item | Notes |
-| --- | --- |
-| A new Google account | Use a personal account that has never owned a Cloud project, so the pilot proves the first-run path. |
-| A payment method | Google requires a billing account. Creating one is a Google-controlled step, and its time is measured separately. |
+| Item                                                                                                   | Notes                                                                                                                                                                                                                                   |
+| ------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A new Google account                                                                                   | Use a personal account that has never owned a Cloud project, so the pilot proves the first-run path.                                                                                                                                    |
+| A payment method                                                                                       | Google requires a billing account. Creating one is a Google-controlled step, and its time is measured separately.                                                                                                                       |
 | A shell with `gcloud`, Node.js 22+, pnpm 10+, Terraform ≥ 1.6 (CI uses 1.14.5), and Docker with Buildx | Cloud Shell has all of these except possibly a recent pnpm (`corepack enable`). A local machine also works. The "Open in Cloud Shell" button has **not** been proven (plan P0), so start Cloud Shell yourself and clone the repository. |
-| An iPhone with the published native app | Record the distribution URL, exact version/build and supported OS; availability is a prerequisite. |
-| A device that supports passkeys | Any current iPhone, Mac, Android phone, or Windows Hello machine. A second device or a hardware key is needed to test the second passkey. |
-| About 60–90 minutes | Most of it is waiting on image builds and Firestore index builds. |
+| An iPhone with the published native app                                                                | Record the distribution URL, exact version/build and supported OS; availability is a prerequisite.                                                                                                                                      |
+| A device that supports passkeys                                                                        | Any current iPhone, Mac, Android phone, or Windows Hello machine. A second device or a hardware key is needed to test the second passkey.                                                                                               |
+| About 60–90 minutes                                                                                    | Most of it is waiting on image builds and Firestore index builds.                                                                                                                                                                       |
 
 Keep one terminal open for the whole run. Closing it at any point is allowed: rerun the same command and it resumes from the persisted stage. Testing that deliberately is step 11.
 
@@ -86,7 +86,12 @@ pnpm consumer:seed-runtime --input $DIR/seed-plan.json
 ```json
 {
   "firestoreAgentId": "<agent.id from seed-plan.json>",
-  "firestoreEmbeddingSpace": { "provider": "vertex", "model": "gemini-embedding-001", "dimensions": 1536, "revision": "customer-seed-v1" },
+  "firestoreEmbeddingSpace": {
+    "provider": "vertex",
+    "model": "gemini-embedding-001",
+    "dimensions": 1536,
+    "revision": "customer-seed-v1"
+  },
   "vertexLocation": "global",
   "ownerEmail": "owner@example.com",
   "ownerAuth": "passkey"
@@ -167,18 +172,18 @@ The result then shows `runtimeReady: true` and stage `ready`. A failing check le
 
 Mark each as pass or fail in the evidence table.
 
-| Check | How |
-| --- | --- |
-| Second passkey | **/security → Add a passkey** on another device or a hardware key. Sign out, then sign in with it. |
-| Sign out everywhere | **/security → Sign out everywhere**. Other browsers are signed out within about 10 seconds. |
-| Offline recovery | In a private window, open **/signin → Lost your passkey?**, enter the recovery code, and create a passkey. A new recovery code is shown, and the old one no longer works. |
-| Cloud-owner recovery | `pnpm consumer:owner-claim --project $PROJECT --installation $INSTALL --database assistant-$INSTALL --url <authOrigin> --recover --apply`. Open the link and register a passkey. Every other session is signed out. |
-| Last passkey guard | Remove passkeys until one is left. The last one cannot be removed. |
-| Native pairing and revocation | Pair as in step 6, load the new owner conversation, revoke that device key in **/security**, and verify the app rejects further owner requests. Record the observed time; then create a fresh key and pair again. |
-| Native feature handoff | Open Calls, Costs, approvals and task controls in the app. Record unavailable controls as failures rather than following blocked browser links. |
-| Memory | Tell the assistant a fact, then ask about it in a new chat. |
-| Idle cost | Leave the installation idle for 24 hours, then read **Billing → Reports**, filtered to the project. |
-| No publisher dependency | In the Cloud Run revision environment, check there is no `DATABASE_URL` and no `OPENROUTER_API_KEY`, and that no secret references a publisher project. |
+| Check                         | How                                                                                                                                                                                                                 |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Second passkey                | **/security → Add a passkey** on another device or a hardware key. Sign out, then sign in with it.                                                                                                                  |
+| Sign out everywhere           | **/security → Sign out everywhere**. Other browsers are signed out within about 10 seconds.                                                                                                                         |
+| Offline recovery              | In a private window, open **/signin → Lost your passkey?**, enter the recovery code, and create a passkey. A new recovery code is shown, and the old one no longer works.                                           |
+| Cloud-owner recovery          | `pnpm consumer:owner-claim --project $PROJECT --installation $INSTALL --database assistant-$INSTALL --url <authOrigin> --recover --apply`. Open the link and register a passkey. Every other session is signed out. |
+| Last passkey guard            | Remove passkeys until one is left. The last one cannot be removed.                                                                                                                                                  |
+| Native pairing and revocation | Pair as in step 6, load the new owner conversation, revoke that device key in **/security**, and verify the app rejects further owner requests. Record the observed time; then create a fresh key and pair again.   |
+| Native feature handoff        | Open Calls, Costs, approvals and task controls in the app. Record unavailable controls as failures rather than following blocked browser links.                                                                     |
+| Memory                        | Tell the assistant a fact, then ask about it in a new chat.                                                                                                                                                         |
+| Idle cost                     | Leave the installation idle for 24 hours, then read **Billing → Reports**, filtered to the project.                                                                                                                 |
+| No publisher dependency       | In the Cloud Run revision environment, check there is no `DATABASE_URL` and no `OPENROUTER_API_KEY`, and that no secret references a publisher project.                                                             |
 
 ## 9. Backup, restore, and export
 
@@ -217,14 +222,14 @@ To roll back, check out the old commit and run `consumer:update` with the old ar
 
 ## 11. Interruption and failure drills
 
-| Drill | Expected |
-| --- | --- |
-| Press Ctrl-C during step 4's Terraform apply, then rerun | Resumes from remote state and reaches `provisioned`. |
-| Close the terminal while indexes are building, then rerun | Rechecks the indexes and continues. |
-| Rerun steps 4 to 7 after success | Each run is a no-op or re-verification. No duplicate secret versions or resources are created. |
-| Let a claim link expire, or issue a second one | The old link fails. `--issue-owner-claim --apply` issues a fresh one while nobody owns the install. |
-| Run step 4 against a project whose billing is not linked | Stops before any change, with a billing prerequisite error. |
-| Prepare a second installation ID in the same project | Its own database, buckets, and service accounts. No adoption of the first installation's resources. |
+| Drill                                                     | Expected                                                                                            |
+| --------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| Press Ctrl-C during step 4's Terraform apply, then rerun  | Resumes from remote state and reaches `provisioned`.                                                |
+| Close the terminal while indexes are building, then rerun | Rechecks the indexes and continues.                                                                 |
+| Rerun steps 4 to 7 after success                          | Each run is a no-op or re-verification. No duplicate secret versions or resources are created.      |
+| Let a claim link expire, or issue a second one            | The old link fails. `--issue-owner-claim --apply` issues a fresh one while nobody owns the install. |
+| Run step 4 against a project whose billing is not linked  | Stops before any change, with a billing prerequisite error.                                         |
+| Prepare a second installation ID in the same project      | Its own database, buckets, and service accounts. No adoption of the first installation's resources. |
 
 ## 12. Uninstall
 
@@ -243,22 +248,22 @@ The project itself is never deleted. Delete it yourself, or unlink billing, when
 
 ## Evidence to record
 
-| Field | Value |
-| --- | --- |
-| Release commit / archive digest and successful fresh clone | |
-| Published app distribution link / installed version/build / iOS version | |
-| Claim / saved recovery / authenticated native pairing / first conversation-task identity | |
-| Account, project ID, region | |
-| `t_billing` (account creation to billing linked) | |
-| Provisioning wall time (step 4), including index wait | |
-| Image build and deploy wall time (step 5) | |
-| Hands-on time from step 3 to first native reply (target: under 10 minutes once billing and app availability are ready) | |
-| App distribution/install, claim and pairing hands-on times separately | |
-| Verification result (paste the `checks`) | |
-| Acceptance checks, pass/fail each | |
-| Drills, pass/fail each | |
-| 24-hour idle cost, and a light-use day's cost | |
-| Issues or unclear instructions | |
+| Field                                                                                                                  | Value |
+| ---------------------------------------------------------------------------------------------------------------------- | ----- |
+| Release commit / archive digest and successful fresh clone                                                             |       |
+| Published app distribution link / installed version/build / iOS version                                                |       |
+| Claim / saved recovery / authenticated native pairing / first conversation-task identity                               |       |
+| Account, project ID, region                                                                                            |       |
+| `t_billing` (account creation to billing linked)                                                                       |       |
+| Provisioning wall time (step 4), including index wait                                                                  |       |
+| Image build and deploy wall time (step 5)                                                                              |       |
+| Hands-on time from step 3 to first native reply (target: under 10 minutes once billing and app availability are ready) |       |
+| App distribution/install, claim and pairing hands-on times separately                                                  |       |
+| Verification result (paste the `checks`)                                                                               |       |
+| Acceptance checks, pass/fail each                                                                                      |       |
+| Drills, pass/fail each                                                                                                 |       |
+| 24-hour idle cost, and a light-use day's cost                                                                          |       |
+| Issues or unclear instructions                                                                                         |       |
 
 ## Known limits in this release
 

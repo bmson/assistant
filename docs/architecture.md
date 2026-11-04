@@ -84,7 +84,7 @@ channel, the sms module's channel, the watches module's matching).
 
 Hooks receive invocation-time `ModuleServices` rather than richer `create()` context because the
 tool dispatcher can only exist after every module has registered its tools. Modules never import
-each other: cross-module needs flow through platform ports — the sms module *provides* the
+each other: cross-module needs flow through platform ports — the sms module _provides_ the
 `OwnerNotifier`, google and watches consume it; watches observes google's inbound mail through the
 email-observer port and polls owner-defined web watches through a sweep step. The mounters in the
 agent apply transport-level route auth (Google OIDC,

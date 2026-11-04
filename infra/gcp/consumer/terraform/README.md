@@ -124,12 +124,12 @@ The digest examples are placeholders, not published images. Terraform constructs
 
 Before supplying digests, create and populate these exact secrets in the customer project, outside Terraform state:
 
-| Secret ID | Cloud Run web environment variable |
-| --- | --- |
-| `<installation_id>-auth-secret` | `AUTH_SECRET` |
-| `<installation_id>-google-client-id` | `AUTH_GOOGLE_ID` |
-| `<installation_id>-google-client-secret` | `AUTH_GOOGLE_SECRET` |
-| `<installation_id>-mobile-api-token` (optional) | `MOBILE_API_TOKEN` |
+| Secret ID                                       | Cloud Run web environment variable |
+| ----------------------------------------------- | ---------------------------------- |
+| `<installation_id>-auth-secret`                 | `AUTH_SECRET`                      |
+| `<installation_id>-google-client-id`            | `AUTH_GOOGLE_ID`                   |
+| `<installation_id>-google-client-secret`        | `AUTH_GOOGLE_SECRET`               |
+| `<installation_id>-mobile-api-token` (optional) | `MOBILE_API_TOKEN`                 |
 
 Supply positive, numbered versions. Terraform grants only the web service account `secretAccessor` on the three required secrets and the optional mobile secret, and injects those pinned versions; it never reads, outputs, or stores secret values. Omit `mobile_api_token_version` to preserve the previous no-mobile runtime. The consumer installer currently refuses changed runtime config after `initialized`, so adding or rotating a token on an existing install needs a separately reviewed update path. See [consumer installation](../../../../docs/consumer-install-preview.md) for customer-side secret creation and secure transfer to iOS. Configure the Google OAuth client for the owner account and the callback `${web_auth_url}/api/auth/callback/google` before exposing the service. `web_auth_url` must be a real HTTPS origin under customer control; Terraform neither provisions DNS/custom domains nor derives it from a service URI.
 
@@ -155,11 +155,11 @@ The agent registers exactly `/internal/tasks/execute` and `/internal/sweep` as s
 
 ### Runtime IAM summary
 
-| Identity | Grants |
-| --- | --- |
-| `<id>-runtime` (agent) | `datastore.user` conditioned on the installation database; `storage.objectAdmin` on the assets bucket only; `aiplatform.user`; queue enqueuer and invoker `actAs` with Cloud Tasks dispatch |
-| `<id>-web` | `datastore.user` conditioned on the installation database; `aiplatform.user`; `secretAccessor` on its pinned auth (and optional mobile) secrets only; `run.invoker` on the agent; queue enqueuer and invoker `actAs` with Cloud Tasks dispatch |
-| `<id>-invoker` (Cloud Tasks only) | `run.invoker` on the agent only |
+| Identity                          | Grants                                                                                                                                                                                                                                         |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `<id>-runtime` (agent)            | `datastore.user` conditioned on the installation database; `storage.objectAdmin` on the assets bucket only; `aiplatform.user`; queue enqueuer and invoker `actAs` with Cloud Tasks dispatch                                                    |
+| `<id>-web`                        | `datastore.user` conditioned on the installation database; `aiplatform.user`; `secretAccessor` on its pinned auth (and optional mobile) secrets only; `run.invoker` on the agent; queue enqueuer and invoker `actAs` with Cloud Tasks dispatch |
+| `<id>-invoker` (Cloud Tasks only) | `run.invoker` on the agent only                                                                                                                                                                                                                |
 
 Neither runtime identity can change IAM, deploy services, read the source/state buckets, or administer backups.
 

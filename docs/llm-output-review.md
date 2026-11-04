@@ -1,7 +1,7 @@
 # Reviewing what the models said
 
 The cost ledger (`model_calls`) proves a call happened and what it spent. It
-keeps neither the prompt nor the answer, so questions about answer *quality* —
+keeps neither the prompt nor the answer, so questions about answer _quality_ —
 "was last week worse than the week before", "did that routing change help",
 "how often does the briefing come out malformed" — had no source at all. They
 were only answerable by reading transcripts by hand, which is how the
@@ -106,21 +106,21 @@ credential or model calls; Firestore reads incur the ordinary database charges.
 
 Deterministic checks over the text alone (`packages/core/src/model-router/audit-graders.ts`):
 
-| Defect | What it catches |
-| --- | --- |
-| `unclosed-code-fence` | An odd fence count, which renders the rest of the reply as code |
-| `background-notice-echo` | The assistant repeating `[Background notice…]` from its own context |
-| `forbidden-theme-tag` | A `[theme: …]` tag, which the cue vocabulary forbids outright |
-| `excess-break-tags` | More than two `[break]` tags in one reply |
-| `excess-chip-rows` | More than one `[action_chips: …]` row |
-| `fabricated-interface-element` | `[Set alert] | [Check timing]` — a fake button row nothing renders |
-| `empty-output` | A call that produced no text |
-| `truncated-output` | The provider stopped at the token limit |
-| `schema-parse-failure` | Structured output returned provider text that could not be parsed against its schema |
-| `repetitive-output` | An obvious generation loop or repeated replacement-character corruption |
-| `malformed-output` | A corrupted C/F temperature unit such as `12°Chare` |
-| `emoji` | An emoji, which is a defect unless the owner asked for one |
-| `wall-of-text` | A plain paragraph over 400 characters or four sentences — a block on a phone. Review signal only: both clients also split such paragraphs at render time (`apps/web/lib/paragraph-reflow.ts`, `ParagraphReflow.swift`) |
+| Defect                         | What it catches                                                                                                                                                                                                        |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `unclosed-code-fence`          | An odd fence count, which renders the rest of the reply as code                                                                                                                                                        |
+| `background-notice-echo`       | The assistant repeating `[Background notice…]` from its own context                                                                                                                                                    |
+| `forbidden-theme-tag`          | A `[theme: …]` tag, which the cue vocabulary forbids outright                                                                                                                                                          |
+| `excess-break-tags`            | More than two `[break]` tags in one reply                                                                                                                                                                              |
+| `excess-chip-rows`             | More than one `[action_chips: …]` row                                                                                                                                                                                  |
+| `fabricated-interface-element` | `[Set alert]                                                                                                                                                                                                           | [Check timing]` — a fake button row nothing renders |
+| `empty-output`                 | A call that produced no text                                                                                                                                                                                           |
+| `truncated-output`             | The provider stopped at the token limit                                                                                                                                                                                |
+| `schema-parse-failure`         | Structured output returned provider text that could not be parsed against its schema                                                                                                                                   |
+| `repetitive-output`            | An obvious generation loop or repeated replacement-character corruption                                                                                                                                                |
+| `malformed-output`             | A corrupted C/F temperature unit such as `12°Chare`                                                                                                                                                                    |
+| `emoji`                        | An emoji, which is a defect unless the owner asked for one                                                                                                                                                             |
+| `wall-of-text`                 | A plain paragraph over 400 characters or four sentences — a block on a phone. Review signal only: both clients also split such paragraphs at render time (`apps/web/lib/paragraph-reflow.ts`, `ParagraphReflow.swift`) |
 
 Tool-calling `step` rows retain the selected tool names and arguments for
 diagnosis, but prose graders remove those serialized `→ tool(JSON)` lines
@@ -140,7 +140,7 @@ same functions — see recommendation 6 in the audit.
 
 ## What this does not tell you
 
-The graders judge the text, never whether the answer was *correct*. Deciding
+The graders judge the text, never whether the answer was _correct_. Deciding
 that needs the evidence the answer was drawn from, which is what
 `groundReadDraft` already does for calendar, email, drive and memory reads —
 and what live web and weather answers still lack.

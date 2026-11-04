@@ -30,9 +30,9 @@ on:
       native_web_qualification:
         description: Read-only native web qualification; no image, release, delivery hold or cleanup
         required: false
-        default: 'off'
+        default: "off"
         type: choice
-        options: ['off', read_only]
+        options: ["off", read_only]
       sha:
         description: Commit SHA to release (defaults to the tip of main)
         required: false
@@ -290,7 +290,7 @@ jobs:
       - name: Build the image
         env:
           # RUN --mount=type=cache in the Dockerfiles requires BuildKit.
-          DOCKER_BUILDKIT: '1'
+          DOCKER_BUILDKIT: "1"
         run: |
           IMAGE_ROOT="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT}/${ARTIFACT_REPOSITORY}"
           args=(--file "$DOCKERFILE" --tag "${IMAGE_ROOT}/${IMAGE_NAME}:${RELEASE_SHA}")
@@ -322,7 +322,7 @@ jobs:
           image-ref: ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT }}/${{ env.ARTIFACT_REPOSITORY }}/${{ matrix.entry.name }}:${{ needs.plan.outputs.sha }}
           severity: HIGH,CRITICAL
           ignore-unfixed: true
-          exit-code: '1'
+          exit-code: "1"
       - name: Install SBOM tooling
         uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
       - name: Generate the SBOM and push the image
@@ -521,10 +521,10 @@ jobs:
           ASSISTANT_MODULES: ${{ needs.plan.outputs.modules }}
           RELEASE_PERSISTENCE_DRIVER: ${{ needs.plan.outputs.persistence }}
           RELEASE_COMPONENTS: ${{ needs.plan.outputs.components }}
-          RELEASE_SCHEMA_UNCHANGED: 'false'
+          RELEASE_SCHEMA_UNCHANGED: "false"
           RELEASE_EMAIL_OBSERVER_WORKER_ENABLED: ${{ vars.RELEASE_EMAIL_OBSERVER_WORKER_ENABLED }}
           RELEASE_MANIFEST_PATH: ${{ runner.temp }}/assistant-release-${{ needs.plan.outputs.sha }}.json
-          SKIP_IMAGE_BUILD: 'true'
+          SKIP_IMAGE_BUILD: "true"
           GUARD_WORKER_BROWSER: ${{ needs.plan.outputs.browser }}
           GUARD_WORKER_CODE: ${{ needs.plan.outputs.code }}
           GUARD_WORKER_PROCESSOR: ${{ needs.plan.outputs.processor }}
@@ -549,7 +549,7 @@ jobs:
           RELEASE_SCHEMA_UNCHANGED: ${{ needs.plan.outputs.components == 'web' && 'true' || 'false' }}
           RELEASE_EMAIL_OBSERVER_WORKER_ENABLED: ${{ vars.RELEASE_EMAIL_OBSERVER_WORKER_ENABLED }}
           RELEASE_MANIFEST_PATH: ${{ runner.temp }}/assistant-release-${{ needs.plan.outputs.sha }}.json
-          SKIP_IMAGE_BUILD: 'true'
+          SKIP_IMAGE_BUILD: "true"
         run: bash infra/gcp/release.sh
       - name: Restore Firestore delivery guard
         if: always() && steps.release_path.outputs.firestore_pair == 'true'

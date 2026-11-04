@@ -4,12 +4,12 @@ The ongoing review prioritizes simplicity, shared typography, consistent alignme
 
 ## Confirmed findings and fixes
 
-| Finding | Change | Evidence |
-| --- | --- | --- |
-| At 320px, adding Chat pushed Audit trail onto a third header row. Navigation consumed 156px before content. | Compact navigation uses 8px horizontal link padding; desktop retains 12px. All labels remain visible and link height remains at least 44px. | The rendered header is now 109px. Console checks pass at 320, 390, 640 and 1280px in light/dark, with no horizontal overflow. QA independently inspected the before/after captures. |
-| Primary and individual chats inherited the browser title “Assistant settings.” Activity and person details also lacked route titles. | Both conversation routes now declare Chat; detail routes declare Activity detail and Person. Root fallback is Assistant; description includes Chat. | Source metadata uses the installed Next metadata API. Typecheck passes. Deployed title verification awaits integration. |
-| Hydrated chat screenshots could not build after chat cancellation moved to cancelChatTask. Their coverage check also expected unrelated product pages inside the separate chat series. | Mock the current cancellation entry point, keep other actions forbidden, and explicitly record the chat series coverage scope. Static selective runs continue requiring the complete product matrix. | Eight hydrated loaded/empty layouts and four recall/failed-Stop layouts pass the current-receipt requirement. |
-| Fixture inventory still labelled all chat routes blocked by the proxy. | Record three owner Chat routes, six console routes, 24 retained routes/aliases, and the root redirect separately. | Complete source inventory still accounts for all 34 page files. Proxy source admits authenticated owner Chat. Synthetic screenshots do not establish live route admission. |
+| Finding                                                                                                                                                                                | Change                                                                                                                                                                                               | Evidence                                                                                                                                                                            |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| At 320px, adding Chat pushed Audit trail onto a third header row. Navigation consumed 156px before content.                                                                            | Compact navigation uses 8px horizontal link padding; desktop retains 12px. All labels remain visible and link height remains at least 44px.                                                          | The rendered header is now 109px. Console checks pass at 320, 390, 640 and 1280px in light/dark, with no horizontal overflow. QA independently inspected the before/after captures. |
+| Primary and individual chats inherited the browser title “Assistant settings.” Activity and person details also lacked route titles.                                                   | Both conversation routes now declare Chat; detail routes declare Activity detail and Person. Root fallback is Assistant; description includes Chat.                                                  | Source metadata uses the installed Next metadata API. Typecheck passes. Deployed title verification awaits integration.                                                             |
+| Hydrated chat screenshots could not build after chat cancellation moved to cancelChatTask. Their coverage check also expected unrelated product pages inside the separate chat series. | Mock the current cancellation entry point, keep other actions forbidden, and explicitly record the chat series coverage scope. Static selective runs continue requiring the complete product matrix. | Eight hydrated loaded/empty layouts and four recall/failed-Stop layouts pass the current-receipt requirement.                                                                       |
+| Fixture inventory still labelled all chat routes blocked by the proxy.                                                                                                                 | Record three owner Chat routes, six console routes, 24 retained routes/aliases, and the root redirect separately.                                                                                    | Complete source inventory still accounts for all 34 page files. Proxy source admits authenticated owner Chat. Synthetic screenshots do not establish live route admission.          |
 
 [Before: 320px navigation](assets/ui-consistency-2026-10-19/navigation-before.png) · [After: 320px navigation](assets/ui-consistency-2026-10-19/navigation-after.png)
 
@@ -17,42 +17,42 @@ The ongoing review prioritizes simplicity, shared typography, consistent alignme
 
 “Captured” means real source components with synthetic data and current CSS, not a live owner-account test. Console coverage includes hydrated controls; most product layouts are static. Contact sheets supported the initial compact-layout hierarchy review. Long-page, enlarged-text and native acceptance remain separate work.
 
-| Route | Current access | Review evidence / next check |
-| --- | --- | --- |
-| `/` | Redirects to Settings | Source redirect and generic title fallback reviewed. |
-| `/settings` | Owner console | 96-layout console matrix includes both authentication modes, key creation/rotation, errors and recovery. Header fix inspected at 320px. |
-| `/security` | Passkey console | Passkeys, recovery, devices and browser sessions captured; synthetic receipt/retry checks passed. |
-| `/audit` | Owner console | Loaded/empty/error/filter layouts, keyboard and appearance checks. |
-| `/audit/[id]` | Owner console | Detail evidence remains within initial viewport; full evidence is separately scrollable. |
-| `/setup` | Passkey setup | Light/dark responsive captures and simulated setup states. |
-| `/signin` | Passkey sign in | Responsive captures, recovery/error states. |
-| `/chat` | Owner Chat | Loaded/empty real ChatClient, settled composer geometry, light/dark. Explicit page title added. |
-| `/chat/[id]` | Owner Chat | Side-chat loaded/empty, return link, archive action and settled composer geometry. Explicit title added. |
-| `/chat/all` | Owner Chat | Loaded/empty list captured. Primary and archived controls reviewed in compact contact sheet. |
-| `/tasks` | Retained | Loaded/empty Activity captured; status/filter hierarchy reviewed. |
-| `/tasks/[id]` | Retained | Detail captured; facts/actions and evidence disclosure reviewed. Explicit title added. |
-| `/goals` | Retained | Loaded/empty/editor presentations captured; continuation/action hierarchy reviewed. |
-| `/approvals` | Retained | Loaded/empty captured; primary decision and evidence disclosure hierarchy reviewed. |
-| `/cards` | Retained | Loaded/empty captured; paper card and dismissal alignment reviewed. |
-| `/packs` | Retained | Loaded/empty captured; plan, commitments and waiting sections reviewed. |
-| `/people` | Retained | Loaded/empty, upcoming dates and grouped rows captured. |
-| `/people/[id]` | Retained | Person details, occasions and relationship sections captured. Explicit title added. |
-| `/profile/people/[id]` | Legacy alias | Redirect asserted to People detail. No independent screen. |
-| `/profile` | Retained | Memory loaded/empty captured; open loops, follow-ups and health hierarchy reviewed. |
-| `/profile/about` | Retained | Loaded/empty facts and pinned-summary surfaces captured. |
-| `/profile/memories` | Retained | Firestore read-only loaded/empty branches captured separately. |
-| `/profile/knowledge` | Retained | Library/map/cleanup, loaded/empty captured. Filters and selected view remain distinct. |
-| `/profile/data` | Retained | Export/erase explanation and controls captured; no erasure performed. |
-| `/profile/voice` | Retained | Loaded/empty/editor captured; failed saves preserve draft in hydrated check. |
-| `/skills` | Retained | Loaded/empty/editor captured; hydrated failure/recovery and focus checks. |
-| `/documents` | Retained | Loaded/empty upload and document rows captured. No upload performed. |
-| `/import` | Retained | Loaded/empty file/import history captured. No import performed. |
-| `/calls` | Retained | Loaded/empty call history captured. |
-| `/calls/[id]` | Retained | Outcome, follow-through and transcript captured. No call performed. |
-| `/costs` | Retained | Loaded/empty provider billing and usage-ledger hierarchy captured. |
-| `/anomalies` | Retained | Loaded/empty evidence and decision controls captured. |
-| `/improvements` | Retained | Loaded/empty repair/proposal surfaces captured; failed issue-report submission preserves draft. |
-| `/capabilities` | Retained | Setup/status cards captured and compact hierarchy reviewed. |
+| Route                  | Current access        | Review evidence / next check                                                                                                            |
+| ---------------------- | --------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `/`                    | Redirects to Settings | Source redirect and generic title fallback reviewed.                                                                                    |
+| `/settings`            | Owner console         | 96-layout console matrix includes both authentication modes, key creation/rotation, errors and recovery. Header fix inspected at 320px. |
+| `/security`            | Passkey console       | Passkeys, recovery, devices and browser sessions captured; synthetic receipt/retry checks passed.                                       |
+| `/audit`               | Owner console         | Loaded/empty/error/filter layouts, keyboard and appearance checks.                                                                      |
+| `/audit/[id]`          | Owner console         | Detail evidence remains within initial viewport; full evidence is separately scrollable.                                                |
+| `/setup`               | Passkey setup         | Light/dark responsive captures and simulated setup states.                                                                              |
+| `/signin`              | Passkey sign in       | Responsive captures, recovery/error states.                                                                                             |
+| `/chat`                | Owner Chat            | Loaded/empty real ChatClient, settled composer geometry, light/dark. Explicit page title added.                                         |
+| `/chat/[id]`           | Owner Chat            | Side-chat loaded/empty, return link, archive action and settled composer geometry. Explicit title added.                                |
+| `/chat/all`            | Owner Chat            | Loaded/empty list captured. Primary and archived controls reviewed in compact contact sheet.                                            |
+| `/tasks`               | Retained              | Loaded/empty Activity captured; status/filter hierarchy reviewed.                                                                       |
+| `/tasks/[id]`          | Retained              | Detail captured; facts/actions and evidence disclosure reviewed. Explicit title added.                                                  |
+| `/goals`               | Retained              | Loaded/empty/editor presentations captured; continuation/action hierarchy reviewed.                                                     |
+| `/approvals`           | Retained              | Loaded/empty captured; primary decision and evidence disclosure hierarchy reviewed.                                                     |
+| `/cards`               | Retained              | Loaded/empty captured; paper card and dismissal alignment reviewed.                                                                     |
+| `/packs`               | Retained              | Loaded/empty captured; plan, commitments and waiting sections reviewed.                                                                 |
+| `/people`              | Retained              | Loaded/empty, upcoming dates and grouped rows captured.                                                                                 |
+| `/people/[id]`         | Retained              | Person details, occasions and relationship sections captured. Explicit title added.                                                     |
+| `/profile/people/[id]` | Legacy alias          | Redirect asserted to People detail. No independent screen.                                                                              |
+| `/profile`             | Retained              | Memory loaded/empty captured; open loops, follow-ups and health hierarchy reviewed.                                                     |
+| `/profile/about`       | Retained              | Loaded/empty facts and pinned-summary surfaces captured.                                                                                |
+| `/profile/memories`    | Retained              | Firestore read-only loaded/empty branches captured separately.                                                                          |
+| `/profile/knowledge`   | Retained              | Library/map/cleanup, loaded/empty captured. Filters and selected view remain distinct.                                                  |
+| `/profile/data`        | Retained              | Export/erase explanation and controls captured; no erasure performed.                                                                   |
+| `/profile/voice`       | Retained              | Loaded/empty/editor captured; failed saves preserve draft in hydrated check.                                                            |
+| `/skills`              | Retained              | Loaded/empty/editor captured; hydrated failure/recovery and focus checks.                                                               |
+| `/documents`           | Retained              | Loaded/empty upload and document rows captured. No upload performed.                                                                    |
+| `/import`              | Retained              | Loaded/empty file/import history captured. No import performed.                                                                         |
+| `/calls`               | Retained              | Loaded/empty call history captured.                                                                                                     |
+| `/calls/[id]`          | Retained              | Outcome, follow-through and transcript captured. No call performed.                                                                     |
+| `/costs`               | Retained              | Loaded/empty provider billing and usage-ledger hierarchy captured.                                                                      |
+| `/anomalies`           | Retained              | Loaded/empty evidence and decision controls captured.                                                                                   |
+| `/improvements`        | Retained              | Loaded/empty repair/proposal surfaces captured; failed issue-report submission preserves draft.                                         |
+| `/capabilities`        | Retained              | Setup/status cards captured and compact hierarchy reviewed.                                                                             |
 
 ## Verification and remaining review
 

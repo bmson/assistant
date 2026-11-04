@@ -10,6 +10,27 @@ const jobs = new Map(
     .filter((m) => ['plan', 'image', 'release', 'native_web_qualification'].includes(m[1] ?? ''))
     .map((m) => [m[1] as string, m[2] as string]),
 );
+function nativeWebQualificationDefault(source: string): string | undefined {
+  const lines = source.split(/\r?\n/);
+  const starts = lines.flatMap((line, index) =>
+    /^ {6}native_web_qualification:/.test(line) ? [index] : [],
+  );
+  if (starts.length !== 1) return undefined;
+  const start = starts[0] as number;
+  if (!/^ {6}native_web_qualification:[ \t]*(?:#.*)?$/.test(lines[start] as string))
+    return undefined;
+
+  const defaults: string[] = [];
+  for (const line of lines.slice(start + 1)) {
+    if (/^ {6}[A-Za-z_][A-Za-z0-9_-]*:/.test(line)) break;
+    if (/^ {0,5}\S/.test(line)) break;
+    const match = /^ {8}default:[ \t]*(.*?)[ \t]*$/.exec(line);
+    if (match) defaults.push(match[1] as string);
+  }
+  if (defaults.length !== 1) return undefined;
+  const value = defaults[0] as string;
+  return /^(?:off|'off'|"off")(?:[ \t]+#.*)?$/.test(value) ? 'off' : undefined;
+}
 function condition(job: string) {
   const text = jobs.get(job);
   if (!text) throw new Error('Missing job');
@@ -50,9 +71,27 @@ describe('default-off workflow isolation for the read-only qualification', () =>
         (m) => m[1],
       ),
     ).toEqual(['plan', 'image', 'release', 'native_web_qualification']);
-    expect(workflow).toContain("default: 'off'");
+    expect(nativeWebQualificationDefault(workflow)).toBe('off');
     expect(workflow).toContain('group: production-deploy\n  cancel-in-progress: false');
     expect(jobs.get('native_web_qualification')).toContain('environment: production');
+  });
+  it.each(["'off'", '"off"', 'off'])('reads valid YAML default formatting %s as off', (value) => {
+    const source = [
+      '      native_web_qualification: # selector block',
+      `        default: ${value} # YAML comment`,
+      '      sha:',
+      '        default: "on"',
+    ].join('\n');
+    expect(nativeWebQualificationDefault(source)).toBe('off');
+  });
+  it.each([
+    '      native_web_qualification:\n        default: on\n      sha:\n        default: off',
+    '      native_web_qualification:\n        description: no default\n      sha: # sibling option\n        default: off',
+    '      native_web_qualification:\n        default: off\n        default: "off"\n      sha:',
+    '      native_web_qualification:\n        description: one\n      native_web_qualification: # duplicate\n        default: off',
+    '      native_web_qualification: off\n        default: off',
+  ])('rejects changed, missing, or ambiguous selector defaults', (source) => {
+    expect(nativeWebQualificationDefault(source)).toBeUndefined();
   });
   it.each(['success', 'failure', 'cancelled', 'skipped'])(
     'skips every normal job and therefore every nested always/failure/hold/cleanup step when prior status is %s',

@@ -19,13 +19,13 @@ file was rehashed against the independently graded report before copying its
 text. The fixture retains its original answer-file hash and source SHA; it
 contains no real owner context or live account data.
 
-| Failure class | Observed problem | Local change |
-| --- | --- | --- |
-| Rates and causation | Starts/submissions called abandonment; traffic volume offered as an explanation of a normalized rate | Share explicit numerator/denominator and confound criteria between drafting and review |
-| Total budget | A venue alone above the entire budget supposedly fits after cutting other spending; invented food price | Share component/total arithmetic, unknown extras and availability checks |
-| Hard deadlines | Missing Thursday design milestone followed by a claim that no hard deadline was broken | Require checking each original deadline and explicit renegotiation |
-| Invented facts | Fictional surnames, venue availability and prior artifacts asserted without support | Share source/unknown/proposal distinctions; exclude assistant claims from the owner-fact corpus |
-| Owner corrections | Accessibility priority became indoor-only; retained constraints and artifacts were invented | Preserve more bounded owner context, latest-turn precedence, and compatible-fact reuse criteria |
+| Failure class       | Observed problem                                                                                        | Local change                                                                                    |
+| ------------------- | ------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| Rates and causation | Starts/submissions called abandonment; traffic volume offered as an explanation of a normalized rate    | Share explicit numerator/denominator and confound criteria between drafting and review          |
+| Total budget        | A venue alone above the entire budget supposedly fits after cutting other spending; invented food price | Share component/total arithmetic, unknown extras and availability checks                        |
+| Hard deadlines      | Missing Thursday design milestone followed by a claim that no hard deadline was broken                  | Require checking each original deadline and explicit renegotiation                              |
+| Invented facts      | Fictional surnames, venue availability and prior artifacts asserted without support                     | Share source/unknown/proposal distinctions; exclude assistant claims from the owner-fact corpus |
+| Owner corrections   | Accessibility priority became indoor-only; retained constraints and artifacts were invented             | Preserve more bounded owner context, latest-turn precedence, and compatible-fact reuse criteria |
 
 ## Implementation boundary
 

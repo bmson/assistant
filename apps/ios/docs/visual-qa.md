@@ -15,11 +15,11 @@ you spend time on them. The rest are readable straight from the code.
 **Status:** 21 of 27 fixed. Every heading below is marked `Fixed` or `Open`.
 
 | Severity | Total | Fixed | Open |
-| --- | --- | --- | --- |
-| Critical | 4 | 4 | — |
-| High | 7 | 6 | 1 |
-| Medium | 8 | 4 | 4 |
-| Polish | 8 | 7 | 1 |
+| -------- | ----- | ----- | ---- |
+| Critical | 4     | 4     | —    |
+| High     | 7     | 6     | 1    |
+| Medium   | 8     | 4     | 4    |
+| Polish   | 8     | 7     | 1    |
 
 The six left open are the five that need a device to settle, plus P8, which is a shipping
 decision rather than a bug. None of the fixes have been compiled — there is no Swift
@@ -46,7 +46,7 @@ iPhone 15 Pro and the top inset collapses to zero, so `foregroundLift` becomes 0
 lands at the very top edge while the real island has moved to the left. On iPad, or a notch
 iPhone, it floats over the status bar permanently.
 
-*Fix:* gate the fill on `thought != nil` the same way the shadow is, and decide explicitly
+_Fix:_ gate the fill on `thought != nil` the same way the shadow is, and decide explicitly
 whether iPad and landscape are supported.
 
 `Assistant/Components/ActivityCrown.swift:178-185`, `:217-224`, `Assistant/Info.plist:46-58`,
@@ -61,7 +61,7 @@ If an activity is already live — background work, or a second message during a
 the island collapses and replays its full attach animation on every message. The state it is
 showing is continuous; the animation says it is not.
 
-*Fix:* call `ensure(…)` then `update(…)`; reserve `start` for when `activeActivity()` is nil.
+_Fix:_ call `ensure(…)` then `update(…)`; reserve `start` for when `activeActivity()` is nil.
 
 `Assistant/AppModel.swift:196-202`, `Assistant/System/LiveActivityManager.swift:32-49`
 
@@ -76,7 +76,7 @@ The in-app crown clears the same state after 1.8 seconds. The two surfaces are m
 mirror each other and disagree by roughly 500×. In practice the island keeps a stale
 "Finished" card through the next several turns of a conversation the user is actively having.
 
-*Fix:* decide the policy on foreground state rather than on whether a notification went out.
+_Fix:_ decide the policy on foreground state rather than on whether a notification went out.
 A result the user already saw does not need a 15-minute receipt.
 
 `Assistant/AppModel.swift:384-396`, `Assistant/System/LiveActivityManager.swift:84-87`,
@@ -96,7 +96,7 @@ Three consequences chain off it:
   island's compact trailing shows `!` and the expanded region says "Decision waiting" no
   matter how many actually are.
 
-*Fix:* clamp tool-derived thoughts to `.working`; let only `pollForReply`'s terminal branch
+_Fix:_ clamp tool-derived thoughts to `.working`; let only `pollForReply`'s terminal branch
 emit `.done` / `.failed`, and thread the real `pendingCount` through `update`.
 
 `Assistant/Models/APIModels.swift:552-560`, `Assistant/AppModel.swift:333-337`,
@@ -113,7 +113,7 @@ change. Whether the fake crown lines up with the real island depends on when Swi
 to re-run the body — first launch, rotation, and a status-bar height change are all cases
 where it can be a frame late or simply wrong.
 
-*Fix:* read the inset from the `safeAreaInsets` environment or a `GeometryReader` so the
+_Fix:_ read the inset from the `safeAreaInsets` environment or a `GeometryReader` so the
 offset is part of the layout pass.
 
 `Assistant/Components/ActivityCrown.swift:214-224`, `Assistant/Views/RootView.swift:77-91`
@@ -130,10 +130,10 @@ roughly one top inset too high, in both of its states:
 - Idle — the common case, since the crown only appears while work is running — the inset was a
   flat `4`. On a 15 Pro the pill occupies y = 11–48, so the warning glyph and the first words
   of every error sat behind it.
-- Expanded, the offset resolved to about 35pt on the same device, which is *inside* the crown
+- Expanded, the offset resolved to about 35pt on the same device, which is _inside_ the crown
   (y = 10–86) rather than below it. M6's symptom therefore survived M6's fix.
 
-*Fix:* one `ActivityCrown.overlayTopInset` measured from the physical top edge, taking the
+_Fix:_ one `ActivityCrown.overlayTopInset` measured from the physical top edge, taking the
 collapsed pill as what has to be cleared when the crown paints nothing. The transcript's own
 content margin — which was already correct — now comes from the same call, so the two cannot
 drift apart again. The banner animates between the two seats on the crown's spring.
@@ -149,7 +149,7 @@ It drifts on hardware with different insets and means nothing at all on notch or
 devices. There is no device check anywhere in the file — the constant is doing the work a
 capability query should.
 
-*Fix:* detect island presence and skip the crown where there is not one, rather than tuning a
+_Fix:_ detect island presence and skip the crown where there is not one, rather than tuning a
 magic number.
 
 `Assistant/Components/ActivityCrown.swift:77-84`, `:222-223`
@@ -161,7 +161,7 @@ to 188. On a 393pt screen that spans roughly x = 25–367, so the black surface 
 both the clock and the battery indicator, and up to 188pt of transcript. There is no dismiss
 — tapping it opens a route.
 
-*Fix:* cap the width against the container, and let the crown push content down instead of
+_Fix:_ cap the width against the container, and let the crown push content down instead of
 overlaying it at accessibility sizes.
 
 `Assistant/Components/ActivityCrown.swift:153-169`
@@ -173,7 +173,7 @@ overlaying it at accessibility sizes.
 in the expanded island, squeezed between leading and trailing. Labels reaching it include
 "Working in the background" (25 characters) and tool names like "Saving a note to memory".
 
-*Fix:* move the label into the bottom region, which has the full width, or shorten the
+_Fix:_ move the label into the bottom region, which has the full width, or shorten the
 `AssistantThought` label set for the island specifically.
 
 `AssistantActivityExtension/AssistantActivityWidget.swift:25-30`,
@@ -184,7 +184,7 @@ in the expanded island, squeezed between leading and trailing. Labels reaching i
 Both `compactLeading` and `minimal` pass `compact: true`; the function body ignores the
 parameter, so all three presentations get the identically sized glyph.
 
-*Fix:* size the glyph down for the compact and minimal slots, or drop the parameter so the
+_Fix:_ size the glyph down for the compact and minimal slots, or drop the parameter so the
 call sites stop implying a distinction that is not there.
 
 `AssistantActivityExtension/AssistantActivityWidget.swift:135-148`
@@ -212,7 +212,7 @@ instantly at full size. The same omission silently disables two more:
 The autonomous notice, by contrast, has its `.animation(value: autonomous)` and works, which
 is what makes the other three read as oversights rather than intent.
 
-*Fix:* add `.animation(reduceMotion ? nil : …, value: model.messages)` on the `LazyVStack`,
+_Fix:_ add `.animation(reduceMotion ? nil : …, value: model.messages)` on the `LazyVStack`,
 and value-scoped animations for `errorMessage` and `isSending`.
 
 `Assistant/Views/ChatView.swift:356-382`, `:121-131`, `:900-953`,
@@ -227,7 +227,7 @@ content. On a shape it is a silent no-op — the streaming indicator inside the 
 bubble is a static dot. The same modifier is used correctly on `Image(systemName:)` in
 `StatusPill` and in the crown's thinking glyph, so this is a one-off.
 
-*Fix:* drive it with a `PhaseAnimator` or a `TimelineView` like `ComposerWorkingIndicator`
+_Fix:_ drive it with a `PhaseAnimator` or a `TimelineView` like `ComposerWorkingIndicator`
 does, or swap the shape for a symbol.
 
 `Assistant/Components/MessageBubble.swift:111-128`, `Assistant/Components/StatusPill.swift:11-17`
@@ -242,7 +242,7 @@ suggestions, the condition that hides them is still true. The user has to know t
 exists, dismiss the keyboard, and go looking. The feature is built, styled, and effectively
 invisible.
 
-*Fix:* drop focus when a reply with quick replies arrives, or show the strip above the
+_Fix:_ drop focus when a reply with quick replies arrives, or show the strip above the
 keyboard rather than gating it on focus.
 
 `Assistant/Views/ChatView.swift:902`, `:1183-1192`
@@ -257,7 +257,7 @@ comparable chat client turns that affordance into stop. The accessibility hint e
 "You can continue drafting while the assistant works" — which is true, and you still cannot
 send or cancel.
 
-*Fix:* swap the glyph to a stop square while sending, and cancel `pollTask` on tap.
+_Fix:_ swap the glyph to a stop square while sending, and cancel `pollTask` on tap.
 
 `Assistant/Views/ChatView.swift:1018-1074`, `Assistant/AppModel.swift:311-320`
 
@@ -266,7 +266,7 @@ send or cancel.
 The menu is bottom-aligned inside the safe area — its own background comment says so, which
 is why the background carries `.ignoresSafeArea(.container, edges: .bottom)` to fill the
 strip beneath it. The conversation surface, meanwhile, ignores the safe area entirely and is
-translated up by exactly `menuRevealHeight` from the *screen* bottom.
+translated up by exactly `menuRevealHeight` from the _screen_ bottom.
 
 Those are two different bottom edges, differing by the bottom safe-area inset — 34pt on any
 home-indicator iPhone, 0 on an SE. On the former, the top ~34pt of the menu sits behind the
@@ -277,7 +277,7 @@ inset hit area that clears the surface's edge.
 The `conversationRevealDistance` comment describes tuning this exact offset away because the
 extra inset "left a visible air gap" — that gap is the grip's own padding.
 
-*Fix:* anchor both to the same edge. Give the menu `.ignoresSafeArea(.container, edges: .bottom)`
+_Fix:_ anchor both to the same edge. Give the menu `.ignoresSafeArea(.container, edges: .bottom)`
 with `.safeAreaPadding(.bottom)` on its content, so `menuRevealHeight` means the same thing on
 both sides.
 
@@ -292,7 +292,7 @@ Drag straight to anywhere in 70.8–84.8 without first crossing 84.8 and the det
 "stays open"; release and it closes. The feedback and the outcome contradict each other inside
 a 14pt window.
 
-*Fix:* commit on release against the same edge the detent last reported, or compare against
+_Fix:_ commit on release against the same edge the detent last reported, or compare against
 `menuDetentReached` directly.
 
 `Assistant/Views/ChatView.swift:735-763`, `:18-28`
@@ -306,7 +306,7 @@ Tapping "Chat" animates closed; tapping "Goals" teleports. The sheet's slide-up 
 of it, but the first frames of the presentation show a menu that has already vanished, and it
 is visible again on dismissal.
 
-*Fix:* route it through `setPullMenu(open: false)` and present after.
+_Fix:_ route it through `setPullMenu(open: false)` and present after.
 
 `Assistant/Views/ChatView.swift:812-820`, `:775-795`
 
@@ -319,7 +319,7 @@ Expanded at default type the crown reaches roughly 76pt below its origin, which 
 23pt into the banner. At accessibility sizes it is 188pt tall and covers the banner outright,
 including its dismiss button.
 
-*Fix:* offset the banner by the crown's current height, or move both into one top-aligned
+_Fix:_ offset the banner by the crown's current height, or move both into one top-aligned
 stack so they cannot overlap.
 
 The banner moved into the root stack, but the offset it was given was measured from the wrong
@@ -345,7 +345,7 @@ whole grid to a different layout. Everything else in the app scales: the compose
 bubbles, the capsule all use `@ScaledMetric`. This is the one surface that does not, and 8pt
 is below the floor for a badge at any setting.
 
-*Fix:* `@ScaledMetric(relativeTo: .caption2)` for both, matching the composer's pattern.
+_Fix:_ `@ScaledMetric(relativeTo: .caption2)` for both, matching the composer's pattern.
 
 `Assistant/Views/ChatView.swift:643-663`
 
@@ -360,7 +360,7 @@ Two things eat it at `.xxxLarge`. The header's two strings carry no `lineLimit`,
 own label. Since the container is a hard `.frame(height:)`, the overflow clips rather than
 growing.
 
-*Fix:* measure the menu with `onGeometryChange` and drive `menuRevealHeight` from the result,
+_Fix:_ measure the menu with `onGeometryChange` and drive `menuRevealHeight` from the result,
 rather than three constants.
 
 `Assistant/Views/ChatView.swift:58-73`, `:460-486`, `:636-642`
@@ -373,7 +373,7 @@ close gesture — see H6, which shrinks its usable area further. The rest of the
 disciplined about this: the composer, send button, error dismiss and jump-to-latest all
 explicitly pad out to 44.
 
-*Fix:* raise the toggle to 44 and widen the grip's content shape vertically.
+_Fix:_ raise the toggle to 44 and widen the grip's content shape vertically.
 
 `Assistant/Views/ChatView.swift:448-458`, `:600-602`
 
@@ -384,7 +384,7 @@ explicitly pad out to 44.
 sheet. Goals is the only route with the pair, so it also breaks the header rhythm across the
 eight sheets.
 
-*Fix:* drop the Goals-local toolbar item; the card-level "Continue in chat" button already
+_Fix:_ drop the Goals-local toolbar item; the card-level "Continue in chat" button already
 covers the intent.
 
 `Assistant/Views/GoalsView.swift:31-40`, `Assistant/Views/RootView.swift:114-123`
@@ -396,7 +396,7 @@ with no transition. The card header grows by about 18pt the instant you confirm,
 back. It is the most consequential moment in the app — approving a real-world action — and it
 is the one that twitches.
 
-*Fix:* give the container a fixed height and cross-fade the two states.
+_Fix:_ give the container a fixed height and cross-fade the two states.
 
 `Assistant/Views/ApprovalsView.swift:139-156`
 
@@ -408,7 +408,7 @@ hues, and the activity card puts the icon and the pill within about 200pt of eac
 `ActivityView` uses raw system colors for done / failed / waiting throughout, where
 `StatusPill` uses theme tokens.
 
-*Fix:* route `ActivityView`'s status colors through the same helper the pill uses.
+_Fix:_ route `ActivityView`'s status colors through the same helper the pill uses.
 
 `Assistant/Views/ActivityView.swift:179-187`, `Assistant/Components/StatusPill.swift:42-49`
 
@@ -419,7 +419,7 @@ white at 0.96. A small inversion, but it runs the wrong way — the prompt outwe
 content. The comment notes the color was matched to the jump-to-latest label on request, so
 the pairing may be deliberate; the relative weighting probably is not.
 
-*Fix:* drop the placeholder to ~0.6 and take the typed text to 1.0.
+_Fix:_ drop the placeholder to ~0.6 and take the typed text to 1.0.
 
 `Assistant/Views/ChatView.swift:1095-1113`
 
@@ -431,7 +431,7 @@ notice sits on the always-dark stage rather than the canvas. But it bypasses
 `warningInk(for:)` / `warningSurface(for:)`, so a future change to the warning ramp will not
 reach it.
 
-*Fix:* add a stage-context warning pair to `AssistantTheme` and use it here.
+_Fix:_ add a stage-context warning pair to `AssistantTheme` and use it here.
 
 `Assistant/Views/ChatView.swift:956-987`, `Assistant/Design/AssistantTheme.swift:26-30`
 
@@ -442,7 +442,7 @@ orientations on iPad. The crown, the four-column menu grid, the centered empty s
 transcript's 40pt bubble gutters are all phone-portrait compositions. The only width-aware
 element in the app is `ConnectionView`'s 620pt cap. This is the setting behind C1.
 
-*Fix:* restrict to iPhone portrait until there is a reason not to — one line in each of two
+_Fix:_ restrict to iPhone portrait until there is a reason not to — one line in each of two
 files.
 
 `Assistant.xcodeproj/project.pbxproj` (`TARGETED_DEVICE_FAMILY`), `Assistant/Info.plist:46-58`
@@ -453,10 +453,10 @@ files.
 
 Dead code and judgement calls. Worth a look, not filed as findings.
 
-- **Dead branch in `expandedWidth`.** *(Fixed.)* The `usesAccessibilityLayout ? 8.2 : 6.4`
+- **Dead branch in `expandedWidth`.** _(Fixed.)_ The `usesAccessibilityLayout ? 8.2 : 6.4`
   character-width ternary sits after an early return for exactly that case, so it always
   evaluates 6.4. `ActivityCrown.swift:154-158`
-- **`AssistantTheme.stageMuted` is unreferenced** *(Fixed — removed.)* — the only token in the file with no reader.
+- **`AssistantTheme.stageMuted` is unreferenced** _(Fixed — removed.)_ — the only token in the file with no reader.
   `AssistantTheme.swift:20`
 - **Crown width is estimated from character count.** 6.4pt per character holds at default
   type; between `.large` and `.accessibility1` the caption font grows and the label falls back

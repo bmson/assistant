@@ -11,9 +11,9 @@ steps:
         -f,
         infra/docker/backup.Dockerfile,
         -t,
-        '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/backup:latest',
+        "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/backup:latest",
         -t,
-        '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/backup:${_TAG}',
+        "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/backup:${_TAG}",
         .,
       ]
   - name: gcr.io/cloud-builders/docker
@@ -24,9 +24,9 @@ steps:
         -f,
         infra/docker/migrate.Dockerfile,
         -t,
-        '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/migrate:latest',
+        "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/migrate:latest",
         -t,
-        '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/migrate:${_TAG}',
+        "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/migrate:${_TAG}",
         .,
       ]
   - name: gcr.io/cloud-builders/docker
@@ -37,9 +37,9 @@ steps:
         -f,
         infra/docker/agent.Dockerfile,
         -t,
-        '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/agent:latest',
+        "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/agent:latest",
         -t,
-        '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/agent:${_TAG}',
+        "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/agent:${_TAG}",
         .,
       ]
   - name: gcr.io/cloud-builders/docker
@@ -50,11 +50,11 @@ steps:
         -f,
         infra/docker/web.Dockerfile,
         --build-arg,
-        'GIT_SHA=${_TAG}',
+        "GIT_SHA=${_TAG}",
         -t,
-        '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/web:latest',
+        "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/web:latest",
         -t,
-        '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/web:${_TAG}',
+        "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/web:${_TAG}",
         .,
       ]
   - name: gcr.io/cloud-builders/docker
@@ -97,14 +97,14 @@ steps:
           docker push '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/processor:${_TAG}'
         fi
 images:
-  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/backup:latest'
-  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/backup:${_TAG}'
-  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/migrate:latest'
-  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/migrate:${_TAG}'
-  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/agent:latest'
-  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/agent:${_TAG}'
-  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/web:latest'
-  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/web:${_TAG}'
+  - "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/backup:latest"
+  - "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/backup:${_TAG}"
+  - "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/migrate:latest"
+  - "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/migrate:${_TAG}"
+  - "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/agent:latest"
+  - "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/agent:${_TAG}"
+  - "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/web:latest"
+  - "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/web:${_TAG}"
 substitutions:
   _REGION: us-west1
   _REPO: assistant

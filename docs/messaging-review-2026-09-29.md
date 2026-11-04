@@ -13,14 +13,14 @@ is on.
 
 ## What the 30 messages were
 
-| Class | Messages | Before | After |
-| --- | ---: | --- | --- |
-| Marketing, newsletters, digests, surveys | 16 | 1–2, quiet | 1–2, quiet |
-| Confirmations of one owner action (linking an app to a bank, a brokerage and a health portal) | 7 | 5 each — security/account alert, **7 pings in 21 minutes** | 3, quiet, in the briefing |
-| Card payment received, wire transfer submitted | 2 | 4–5 — "money moves" | 3, quiet, in the briefing |
-| Annual brokerage standing-instructions notice | 1 | 4 — financial, "Important" in subject | 3 |
-| Same-day reminder for an event already on the calendar (sent twice) | 2 | 4 — appointment, dated today, **2 pings** | 3, quiet |
-| Small subscription receipt, shipment notice | 2 | 2–3 | 2–3 |
+| Class                                                                                         | Messages | Before                                                     | After                     |
+| --------------------------------------------------------------------------------------------- | -------: | ---------------------------------------------------------- | ------------------------- |
+| Marketing, newsletters, digests, surveys                                                      |       16 | 1–2, quiet                                                 | 1–2, quiet                |
+| Confirmations of one owner action (linking an app to a bank, a brokerage and a health portal) |        7 | 5 each — security/account alert, **7 pings in 21 minutes** | 3, quiet, in the briefing |
+| Card payment received, wire transfer submitted                                                |        2 | 4–5 — "money moves"                                        | 3, quiet, in the briefing |
+| Annual brokerage standing-instructions notice                                                 |        1 | 4 — financial, "Important" in subject                      | 3                         |
+| Same-day reminder for an event already on the calendar (sent twice)                           |        2 | 4 — appointment, dated today, **2 pings**                  | 3, quiet                  |
+| Small subscription receipt, shipment notice                                                   |        2 | 2–3                                                        | 2–3                       |
 
 About 12 of the 30 cleared the interrupt threshold (4) under the old rubric. None of them needed the
 owner to do anything. In the old rubric, "security and account alerts, anything where money moves,
@@ -29,14 +29,14 @@ owner. Nothing in code held the model to its own `actionable` verdict.
 
 The day before held the real positives: a person following up to ask the owner for their
 availability, and a set of invitations for scheduled calls. Both should still reach the owner, and
-still do. The follow-up now arrives as *"Email from ‹name›: “‹subject›” / Next: Send updated
-availability"* instead of *"Important email from ‹address›"*. The three invitations came from one
+still do. The follow-up now arrives as _"Email from ‹name›: “‹subject›” / Next: Send updated
+availability"_ instead of _"Important email from ‹address›"_. The three invitations came from one
 sender within a minute, so they now produce one alert instead of three.
 
 ## Where each email could reach the owner, and what changed
 
 1. **Arrival alert** (`email-sync.ts`, importance ≥ `EMAIL_INGEST_NOTIFY_THRESHOLD`).
-   - The rubric now reserves 4–5 for mail that needs the owner to *do* something. Confirmations,
+   - The rubric now reserves 4–5 for mail that needs the owner to _do_ something. Confirmations,
      receipts, sign-in and linked-app notices, reminders, standing notices and new bookings are 3.
      Their dates are still extracted.
    - `calibrateImportance` enforces the rule in code. A message the model marks not actionable,
@@ -50,7 +50,7 @@ sender within a minute, so they now produce one alert instead of three.
 2. **Pulse "second look"** (`pulse.ts`). This used to re-announce the same email as "Email needs
    attention" about an hour after the arrival alert. It now waits until the mail is at least three
    hours old. The card reads "Still open". The offer depends on who wrote:
-   - For a person: "Draft a reply to ‹name›?", with a *Draft reply* button.
+   - For a person: "Draft a reply to ‹name›?", with a _Draft reply_ button.
    - For anything else: "Check what “‹subject›” needs from you?"
 
    Previously every email got "Review … and suggest next steps?", which asked the owner to
@@ -75,6 +75,6 @@ sender within a minute, so they now produce one alert instead of three.
 ## Verification
 
 Unit and Postgres-backed integration tests cover the calibration, the notice wording, the
-pulse age window, the category-specific suggestions and the *Draft reply* label, including a subject
+pulse age window, the category-specific suggestions and the _Draft reply_ label, including a subject
 that quotes the template's own tail. The Firestore pulse test gained a just-arrived message that must
 not be re-announced.

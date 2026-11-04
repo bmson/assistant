@@ -30,11 +30,11 @@ Normal 390px and both 1280px profiles preserve recorded geometry, text and compu
 
 Local lint, typecheck and 53 existing source-fixture tests pass. Independent final-source QA/review and exact-head CI remain separate gates.
 
-| Example | Before | After |
-| --- | --- | --- |
+| Example                               | Before                                                                                               | After                                                                                                  |
+| ------------------------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
 | Enlarged Settings warning and control | ![Settings extends beyond main gutter](assets/card-containment-2026-10-20/before-mobile-warning.png) | ![Settings warning and control contained](assets/card-containment-2026-10-20/after-mobile-warning.png) |
-| Enlarged rotation confirmation | ![Rotation control outside gutter](assets/card-containment-2026-10-20/before-mobile-armed.png) | ![Contained rotation confirmation](assets/card-containment-2026-10-20/after-mobile-armed.png) |
-| Enlarged privacy confirmation | ![Privacy border clipped](assets/card-containment-2026-10-20/before-privacy-armed.png) | ![Privacy confirmation inside footer](assets/card-containment-2026-10-20/after-privacy-armed.png) |
+| Enlarged rotation confirmation        | ![Rotation control outside gutter](assets/card-containment-2026-10-20/before-mobile-armed.png)       | ![Contained rotation confirmation](assets/card-containment-2026-10-20/after-mobile-armed.png)          |
+| Enlarged privacy confirmation         | ![Privacy border clipped](assets/card-containment-2026-10-20/before-privacy-armed.png)               | ![Privacy confirmation inside footer](assets/card-containment-2026-10-20/after-privacy-armed.png)      |
 
 [Resting key label before](assets/card-containment-2026-10-20/before-mobile-rest.png) · [Resting key label after](assets/card-containment-2026-10-20/after-mobile-rest.png) · [Unconfigured-key keyboard confirmation](assets/card-containment-2026-10-20/after-create-keyboard.png)
 

@@ -19,8 +19,12 @@ The accepted JSON shape is:
   "configProof": "sha256:<64 lowercase hex characters>",
   "procedureReference": "<reference to the accepted recovery procedure>",
   "images": {
-    "agent": ["us-west1-docker.pkg.dev/bmson-assistant/assistant/agent@sha256:<64 lowercase hex characters>"],
-    "web": ["us-west1-docker.pkg.dev/bmson-assistant/assistant/web@sha256:<64 lowercase hex characters>"]
+    "agent": [
+      "us-west1-docker.pkg.dev/bmson-assistant/assistant/agent@sha256:<64 lowercase hex characters>"
+    ],
+    "web": [
+      "us-west1-docker.pkg.dev/bmson-assistant/assistant/web@sha256:<64 lowercase hex characters>"
+    ]
   },
   "revisions": [
     "projects/bmson-assistant/locations/us-west1/services/assistant-agent/revisions/<exact agent revision>",

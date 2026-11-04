@@ -16,15 +16,15 @@ The shared strict persisted-record codec and browser receipt/pending-marker deco
 
 ## Reader and schema boundaries
 
-| Surface | Compatibility responsibility |
-|---|---|
-| Firestore and PostgreSQL recovery/reconcile | Both repositories parse stored operations through the shared strict codec. New-command codec fixtures are source evidence; no new native record is written by this slice. |
-| Firestore retention | Mixed old/new synthetic records pass the real retention validator; malformed new records reject the entire page before deletion. |
-| PostgreSQL retention/erasure | Owner-scoped projections/deletes do not dispatch by command. The physical command CHECK still excludes creation. A fake new record cannot prove real PostgreSQL persistence. |
-| Firestore migration verification | Runtime receipt inventory uses the shared strict codec and owner/physical-identity validation. New receipts remain runtime metadata, not portable content. |
-| Portable export/import/restore | All owner-editor operations and epoch runtime authority remain excluded from portable replay. Validation continues to reject runtime metadata records. |
-| Privacy erasure | Owner-scoped receipt deletion remains unchanged; old operation history never re-establishes current owner/privacy authority. |
-| Old serving and recovery images | Older strict codecs reject new-command rows. Upgrade and verify every retained reader before any new command writes, and pin compatible rollback/recovery images. |
+| Surface                                     | Compatibility responsibility                                                                                                                                                 |
+| ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Firestore and PostgreSQL recovery/reconcile | Both repositories parse stored operations through the shared strict codec. New-command codec fixtures are source evidence; no new native record is written by this slice.    |
+| Firestore retention                         | Mixed old/new synthetic records pass the real retention validator; malformed new records reject the entire page before deletion.                                             |
+| PostgreSQL retention/erasure                | Owner-scoped projections/deletes do not dispatch by command. The physical command CHECK still excludes creation. A fake new record cannot prove real PostgreSQL persistence. |
+| Firestore migration verification            | Runtime receipt inventory uses the shared strict codec and owner/physical-identity validation. New receipts remain runtime metadata, not portable content.                   |
+| Portable export/import/restore              | All owner-editor operations and epoch runtime authority remain excluded from portable replay. Validation continues to reject runtime metadata records.                       |
+| Privacy erasure                             | Owner-scoped receipt deletion remains unchanged; old operation history never re-establishes current owner/privacy authority.                                                 |
+| Old serving and recovery images             | Older strict codecs reject new-command rows. Upgrade and verify every retained reader before any new command writes, and pin compatible rollback/recovery images.            |
 
 Database-free codec/retention/rejection tests do not prove actual Firestore transactions, PostgreSQL constraint migration, emulator behavior, production traffic or browser durability. Physical new-command PostgreSQL records remain impossible under the current constraint. This is deliberate until the separate writer/migration stage.
 

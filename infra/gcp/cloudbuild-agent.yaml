@@ -8,14 +8,14 @@ steps:
         -f,
         infra/docker/agent.Dockerfile,
         -t,
-        '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/agent:latest',
+        "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/agent:latest",
         -t,
-        '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/agent:${_TAG}',
+        "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/agent:${_TAG}",
         .,
       ]
 images:
-  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/agent:latest'
-  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/agent:${_TAG}'
+  - "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/agent:latest"
+  - "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/agent:${_TAG}"
 substitutions:
   _REGION: us-west1
   _REPO: assistant

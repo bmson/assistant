@@ -26,12 +26,12 @@ off by default, next to one legacy surface that fires unconditionally.**
 Four defaults, each individually reasonable, compound into "quiet when it should
 speak, noisy when it shouldn't":
 
-| Default | Consequence |
-| --- | --- |
-| `EMAIL_INGEST_MODE=direct` (`packages/config/src/index.ts:215`) | The table every mail-driven proactive surface reads stays empty — pulse mail moments, importance alerts, briefing highlights, `email.extract` all inert |
+| Default                                                                                                            | Consequence                                                                                                                                                                                                                                                          |
+| ------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `EMAIL_INGEST_MODE=direct` (`packages/config/src/index.ts:215`)                                                    | The table every mail-driven proactive surface reads stays empty — pulse mail moments, importance alerts, briefing highlights, `email.extract` all inert                                                                                                              |
 | `CHAT_RECALL_ENABLED=false` in the schema (`config/src/index.ts:272`, via `booleanString` → `'false'` at `:24-27`) | Automatic recall never runs **on a local or Docker install**. Cloud Run deployments are unaffected: `deploy.sh:394-395` resolves an unset value to `true`, so a provisioned installation has recall on. Verified on the reference deployment — it was already `true` |
-| `GRAPH_RAG_ENABLED=false` (`config/src/index.ts:278`) | GraphRAG and the daily `graph.curiosity` question are permanent no-ops, and nothing reports it |
-| `morning-brief` seeded enabled (`packages/db/src/seed.ts:196-205`) | A second, older brief fires at 07:30 — 15 minutes before `daily-briefing` at 07:45 — through the full model/tool loop, with **no self-silence clause**, so it messages every morning regardless of whether anything happened |
+| `GRAPH_RAG_ENABLED=false` (`config/src/index.ts:278`)                                                              | GraphRAG and the daily `graph.curiosity` question are permanent no-ops, and nothing reports it                                                                                                                                                                       |
+| `morning-brief` seeded enabled (`packages/db/src/seed.ts:196-205`)                                                 | A second, older brief fires at 07:30 — 15 minutes before `daily-briefing` at 07:45 — through the full model/tool loop, with **no self-silence clause**, so it messages every morning regardless of whether anything happened                                         |
 
 So the three most-cited quality complaints have the same shape as each other and
 as the September audit's: the capability exists, is tested, is documented as
@@ -57,20 +57,20 @@ Every model call in the application goes through `ModelRouter`
 
 Thirty generative call sites exist. The ones on the owner-visible path:
 
-| Surface | file:line | Role |
-| --- | --- | --- |
-| Chat reply (primary) | `packages/application/src/chat-turn.ts:596` | draft |
-| Chat needs-action triage | `packages/application/src/chat-turn.ts:389` | classify |
-| Agent step loop (×4) | `packages/core/src/workflow/executor/step-loop.ts:757,813,853,882` | dynamic |
-| Planner — plan | `packages/core/src/workflow/planner.ts:231` | plan |
-| Planner — trivial triage | `packages/core/src/workflow/planner.ts:215` | classify |
-| Output verification | `packages/core/src/workflow/output-verification.ts:142` | rewrite |
-| Briefing compose | `packages/core/src/workflow/briefing.ts:671` | draft |
-| Watch suggest | `packages/core/src/workflow/watch-suggest.ts:72` | draft |
-| Email importance | `packages/modules/src/google/email-importance.ts:169` | classify |
-| Email automated triage | `packages/modules/src/google/email-sync.ts:331` | classify |
-| Email extraction | `packages/core/src/memory/email-extraction.ts:190` | extract |
-| Commitment extraction | `packages/core/src/memory/commitments.ts:125` | extract |
+| Surface                  | file:line                                                          | Role     |
+| ------------------------ | ------------------------------------------------------------------ | -------- |
+| Chat reply (primary)     | `packages/application/src/chat-turn.ts:596`                        | draft    |
+| Chat needs-action triage | `packages/application/src/chat-turn.ts:389`                        | classify |
+| Agent step loop (×4)     | `packages/core/src/workflow/executor/step-loop.ts:757,813,853,882` | dynamic  |
+| Planner — plan           | `packages/core/src/workflow/planner.ts:231`                        | plan     |
+| Planner — trivial triage | `packages/core/src/workflow/planner.ts:215`                        | classify |
+| Output verification      | `packages/core/src/workflow/output-verification.ts:142`            | rewrite  |
+| Briefing compose         | `packages/core/src/workflow/briefing.ts:671`                       | draft    |
+| Watch suggest            | `packages/core/src/workflow/watch-suggest.ts:72`                   | draft    |
+| Email importance         | `packages/modules/src/google/email-importance.ts:169`              | classify |
+| Email automated triage   | `packages/modules/src/google/email-sync.ts:331`                    | classify |
+| Email extraction         | `packages/core/src/memory/email-extraction.ts:190`                 | extract  |
+| Commitment extraction    | `packages/core/src/memory/commitments.ts:125`                      | extract  |
 
 The remaining eighteen are memory, card, browse, mission, dream, improve,
 self-maintenance, skill-reflect and voice surfaces.
@@ -83,9 +83,9 @@ codebase for this purpose: quality instrumentation needs one seam, not thirty.
 The two highest-frequency proactive producers are deterministic:
 
 - `packages/core/src/proactive/pulse.ts` — the `*/20 * * * *` job. Its own comment
-  at :121 reads *"What the owner is told. Deterministic: no model composes this."*
-- `packages/core/src/proactive/curiosity.ts` — gaps come *"from rows, never from a
-  model's imagination"* (:13).
+  at :121 reads _"What the owner is told. Deterministic: no model composes this."_
+- `packages/core/src/proactive/curiosity.ts` — gaps come _"from rows, never from a
+  model's imagination"_ (:13).
 
 `calendar-salience.ts`, `arrival.ts` and `nudge-policy.ts` are likewise pure code.
 
@@ -94,7 +94,7 @@ untrusted mail cannot act, and nothing can invent urgency. It is also the likely
 reason proactive messages read as templated. The improvement that preserves the
 property is narrow — let a model **phrase** what deterministic code **decided**,
 never let it decide. `briefing.ts` already works exactly this way (`briefing.ts:33`:
-the model *"is never asked what it"* — the notes are assembled first), so the
+the model _"is never asked what it"_ — the notes are assembled first), so the
 pattern exists in-repo and does not need inventing.
 
 ## 2. The default mail mode is the proactivity bug
@@ -108,13 +108,13 @@ that table is never written.
 
 Everything mail-driven and proactive reads that table:
 
-| Consumer | Reads | Effect in `direct` mode |
-| --- | --- | --- |
-| Pulse mail-action moment | `pulse.ts:376` | never fires |
-| Importance scoring | `email-importance.ts` | never runs |
-| Deterministic important-mail ping | `email-sync.ts:661-672` | never fires |
-| `email.extract` memory job | `email-extraction.ts:141-154` | walks an empty table |
-| Briefing mail highlights | `briefing.ts` | nothing to highlight |
+| Consumer                          | Reads                         | Effect in `direct` mode |
+| --------------------------------- | ----------------------------- | ----------------------- |
+| Pulse mail-action moment          | `pulse.ts:376`                | never fires             |
+| Importance scoring                | `email-importance.ts`         | never runs              |
+| Deterministic important-mail ping | `email-sync.ts:661-672`       | never fires             |
+| `email.extract` memory job        | `email-extraction.ts:141-154` | walks an empty table    |
+| Briefing mail highlights          | `briefing.ts`                 | nothing to highlight    |
 
 So in the shipped default, the assistant's only reaction to mail is to drop it or
 spend a sixteen-step triage task on it. The entire deterministic scoring, notify,
@@ -242,10 +242,10 @@ self-silencing. One is not.
 
 Two morning briefs are seeded enabled and fire 15 minutes apart:
 
-| Schedule | Cron | How it works | Silences itself? |
-| --- | --- | --- | --- |
-| `morning-brief` (`seed.ts:196-205`) | `30 7 * * *` | Full model + tool loop at `trust:'assistant'`, prompt ends "send ONE concise brief via `owner.notify` with `ping=true`" | **No** |
-| `daily-briefing` (`seed.ts:231-233`) | `45 7 * * *` | The `briefing.compose` code job — deterministic assembly, model phrases only | Yes |
+| Schedule                             | Cron         | How it works                                                                                                            | Silences itself? |
+| ------------------------------------ | ------------ | ----------------------------------------------------------------------------------------------------------------------- | ---------------- |
+| `morning-brief` (`seed.ts:196-205`)  | `30 7 * * *` | Full model + tool loop at `trust:'assistant'`, prompt ends "send ONE concise brief via `owner.notify` with `ping=true`" | **No**           |
+| `daily-briefing` (`seed.ts:231-233`) | `45 7 * * *` | The `briefing.compose` code job — deterministic assembly, model phrases only                                            | Yes              |
 
 So the owner is pinged every single morning by the older surface whether or not
 anything happened, and then potentially again by the newer one. The two do not
@@ -253,7 +253,7 @@ share dedup state.
 
 `morning-brief` cannot simply be disabled: `WAKE_BRIEF_SCHEDULE`
 (`packages/core/src/workflow/schedules.ts:725`) points at it by name, so the
-wake-on-first-app-open path fires *that* schedule. Retiring it means moving the
+wake-on-first-app-open path fires _that_ schedule. Retiring it means moving the
 wake path to `daily-briefing` first. This is a design decision, not a cleanup.
 
 Two further surfaces are silently inert: `graph.curiosity` never runs because
@@ -290,7 +290,7 @@ Two findings hold even with recall on:
   (`:184-192`), so the graph accumulates synonymous predicates that later
   traversals miss.
 - **Recall telemetry measures availability, not relevance.** `recall-metrics.ts`
-  and the health monitor detect recall being *down*, never recall being *wrong*,
+  and the health monitor detect recall being _down_, never recall being _wrong_,
   and the owner-facing thumbs-up/down in `recall-feedback.ts` is written and
   never read by anything.
 
@@ -406,5 +406,5 @@ Items 1-3 and 7 are **done and merged**; the rest are open.
   different and probably better starting point than more hand-written fixtures.
 - **Is `full` capture acceptable for this installation?** `redacted` keeps dates,
   amounts and scores but drops identifiers, which is enough for formatting and
-  timing review. Judging whether an answer was *grounded* generally needs the
+  timing review. Judging whether an answer was _grounded_ generally needs the
   evidence verbatim.

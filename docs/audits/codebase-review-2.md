@@ -23,21 +23,21 @@ and `pnpm build`.
 ## Phase A — HIGH severity
 
 **Email replies had no trust filter on the recipient (SEC-H2).**
-`deliverEmailFinal` resolved the reply target from the *earliest* `email_triage`
+`deliverEmailFinal` resolved the reply target from the _earliest_ `email_triage`
 task on the conversation, and `conversationForThread` binds a thread regardless
 of trust. An authenticated-but-untrusted stranger could seed the origin task on
 a thread, and later owner-trust output on that same thread — a scheduled or
-mission final, an approval notice — would then be addressed to *them*. Fixed by
+mission final, an approval notice — would then be addressed to _them_. Fixed by
 adding `eq(tasks.trust, 'owner')` to the origin-resolution query: the reply
 recipient now comes only from the earliest **owner-trust** email task, and
 delivery returns "no owner-trust origin" rather than guessing when none exists.
 
 **A dropped channel completed silently instead of failing (REG-H1).** The
-delivery loop iterated only the *installed* channels, so an owner-facing task
+delivery loop iterated only the _installed_ channels, so an owner-facing task
 whose owning channel module had been uninstalled completed as `done` with
 nothing delivered — the pre-refactor null-object used to throw. Fixed by making
 module ownership explicit: metas now declare `deliversTaskTypes`, `install.ts`
-builds a `channelUnavailable(taskType)` map over *all* definitions (installed or
+builds a `channelUnavailable(taskType)` map over _all_ definitions (installed or
 not), and `deliverFinal` throws for an owner-trust task whose owning channel is
 absent instead of reporting a false success.
 
@@ -67,7 +67,7 @@ fixtures are in `email-sync.test.ts`.
 a client-supplied `X-Forwarded-For` (`??=`), so with `AUTH_LOCALHOST_BYPASS` on
 and the port exposed, `Host: localhost` + `X-Forwarded-For: 127.0.0.1` is
 byte-for-byte indistinguishable from a genuine local request. Header-based
-loopback detection is *fundamentally* unsound behind a proxy — there is no
+loopback detection is _fundamentally_ unsound behind a proxy — there is no
 header a real client cannot also set. Rather than claim a fix the transport
 cannot deliver, this was treated honestly: the docstring now states the real
 limitation (a best-effort tripwire, not a boundary), the app logs a startup
@@ -119,7 +119,7 @@ The theme, again, was the assistant under-serving its own model:
   it exists to measure — step-cap, forced-no-tool, artifact failure, budget
   stalls — were never recorded. `recordQualitySignals` moved into the single
   finalize funnel (`finalizePendingResponse`, covering first-pass and resume) and
-  now records the *actual* terminal status.
+  now records the _actual_ terminal status.
 - **The skill-deprecation loop became reachable (AI-A3).** Skill-outcome
   recording was guarded on the fresh `response_checks` insert (`.returning()` +
   `inserted.length > 0`) so it runs exactly once per terminal task, letting

@@ -1,6 +1,6 @@
 # On-device speech: a talking interface on iPhone
 
-Feasibility study for making the iOS client *speak* its replies — and, later, *listen* — with no
+Feasibility study for making the iOS client _speak_ its replies — and, later, _listen_ — with no
 network round trip, no per-word billing, and no new server module.
 
 Status: **all three phases shipped.** `Components/SpeakableText.swift` projects a reply for the ear
@@ -17,11 +17,11 @@ quality, ducking, AirPods routing, echo cancellation and the silent switch still
 
 **Verdict: feasible, and cheaper than it looks.** The Apple side is small. `AVSpeechSynthesizer`
 is about a hundred lines and costs nothing. The real work is not synthesis — it is deciding what a
-card-heavy transcript *sounds* like, and not saying the same sentence twice across the handoff from
+card-heavy transcript _sounds_ like, and not saying the same sentence twice across the handoff from
 the stream to the durable row.
 
 A naming note first, because the collision is already in the tree: **voice** in this codebase means
-the owner's *writing* voice (`apps/web/app/profile/voice/page.tsx`, `voiceProfile`, `voice_samples`)
+the owner's _writing_ voice (`apps/web/app/profile/voice/page.tsx`, `voiceProfile`, `voice_samples`)
 — the tone the assistant imitates when it drafts on the owner's behalf. Anything audible should be
 called **speech**, **spoken replies**, or **talk mode**. Never "voice mode".
 
@@ -58,7 +58,7 @@ than letting the owner conclude the assistant sounds like a 2011 GPS. Personal V
 
 Enumerating by `.quality` alone is not enough, and the failure is silent. Siri's voices appear in
 `speechVoices()` and report `.premium`, but an utterance from a third-party app carrying one is
-spoken in the compact default — so an app that *did* go looking for a good voice sounds exactly like
+spoken in the compact default — so an app that _did_ go looking for a good voice sounds exactly like
 one that did not. `SpeechVoices.isUsable` drops them, along with Eloquence (a speech aid, tuned for
 speed over naturalness) and the legacy novelty voices; among voices of equal quality the tie goes to
 the one the phone is already set to, and then to identifier order, so the assistant does not change
@@ -92,7 +92,7 @@ Speaking with the screen locked additionally needs `audio` in `UIBackgroundModes
 ### Listening — two paths, and a free one
 
 1. **Keyboard dictation.** Zero code. The system mic on the keyboard already types into the
-   composer today. If "talking interface" mostly means *not typing*, this is already shipped and
+   composer today. If "talking interface" mostly means _not typing_, this is already shipped and
    costs nothing to say so.
 2. **`SpeechAnalyzer` + `SpeechTranscriber`** (the Speech framework's iOS 26 API). Fully on-device,
    streaming, with volatile results that firm up as context arrives, real punctuation, and no
@@ -113,7 +113,7 @@ This is the bulk of the work, and it is entirely ours — Apple has no opinion a
 
 The transcript is not prose. `packages/core`'s card compiler sends `generated-card` parts, and
 `MessageCard.replacesProse` (`apps/ios/Assistant/Components/MessageBubble.swift:1413`) says outright
-that a card grounded in a lookup *stands in for* the reply rather than heading it. Feeding
+that a card grounded in a lookup _stands in for_ the reply rather than heading it. Feeding
 `ChatMessage.text` (`apps/ios/Assistant/Models/APIModels.swift:221`) to a synthesizer therefore
 fails in two directions at once: for a card-answered turn there is nothing to say, and for an
 ordinary turn it reads Markdown punctuation aloud, recites table pipes, and spells out a fenced code
@@ -130,7 +130,7 @@ ear:
   …" — never its pipes.
 - Drop link URLs and keep their labels; keep list items as sentences with a pause between them.
 - For `replacesProse` cards, speak a projection of the card — its title and the two or three facts
-  it was grounded in — because the card *is* the answer.
+  it was grounded in — because the card _is_ the answer.
 - Normalise what looks wrong aloud: `AssistantTemperature.localized`
   (`MessageBubble.swift:1587`) already rewrites units; "18°C" should reach the synthesizer as
   "eighteen degrees".
@@ -152,7 +152,7 @@ the durable one the server persisted — removing the `stream-` twin when the re
 `AppModel.swift:613`), and a failed socket re-enters through the cursor poll without replaying the
 POST.
 
-Anything that speaks must therefore track *spoken progress per turn*, keyed on the stream id and
+Anything that speaks must therefore track _spoken progress per turn_, keyed on the stream id and
 carried across the swap to the durable id — an offset into the reply, not a set of message ids.
 Speak only the suffix past that offset. Get this wrong and the owner hears the last two sentences of
 every reply a second time, which is worse than not speaking at all.
@@ -167,7 +167,7 @@ accumulated delta buffer, holding back any trailing partial sentence until more 
 
 Half-duplex is easy and full-duplex is a project. Push-to-talk — hold to speak, release to send,
 tap anywhere to stop the reply — needs no echo cancellation and no wake word, and covers most of
-what "talk to it while cooking" actually means. Listening *while* speaking (barge-in) requires
+what "talk to it while cooking" actually means. Listening _while_ speaking (barge-in) requires
 `.playAndRecord` with voice-processing I/O enabled on the audio engine's input node, or the
 recognizer transcribes the synthesizer. Treat that as its own phase, and do not let it block the
 first one.
@@ -180,7 +180,7 @@ demands deliberate confirmation — device unlock for notification actions, an e
 is not consent, and a transcription error there is unrecoverable in a way a mistyped chat message is
 not. Talk mode should surface an approval by saying that one is waiting and stopping there.
 
-## What it does *not* need
+## What it does _not_ need
 
 Worth stating plainly, because it is the strongest part of the case:
 

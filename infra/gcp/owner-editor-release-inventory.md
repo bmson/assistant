@@ -9,7 +9,13 @@ Merging any successful main push still triggers the existing automatic deploymen
 The deploy job runs `--release-preflight` before invoking the Firestore delivery guard. The candidate's `infra/gcp/release-contracts.json` must declare `components.web.ownerEditorV1` as exactly these five strings:
 
 ```json
-["create_person", "update_person_identity", "add_family_relationship", "correct_owner_family_relationship", "correct_owner_memory"]
+[
+  "create_person",
+  "update_person_identity",
+  "add_family_relationship",
+  "correct_owner_family_relationship",
+  "correct_owner_memory"
+]
 ```
 
 The declaration is source, not an operator input. A present `apps/web/lib/owner-editor-runtime.ts` with an absent or different declaration fails closed. A declaration without that runtime also fails. Older source with neither is unaffected. This bounded feature release requires the observed agent Firestore path and the agent/web pair; an agent selecting PostgreSQL (or web-only selection) fails before release execution. PostgreSQL delivery of this runtime needs its own reviewed readiness path and is not silently allowed by a public web Firestore observation. Review must independently verify the actual server command allowlist matches the declaration.

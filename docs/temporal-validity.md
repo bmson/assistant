@@ -10,7 +10,7 @@ that answers it.
 
 ## The distinction this protects
 
-Between a fact the assistant *knows* and a fact that is *still true*. Those had been treated as the
+Between a fact the assistant _knows_ and a fact that is _still true_. Those had been treated as the
 same thing in two places:
 
 - **The owner card** filled its per-domain slots by importance alone. A former employer with
@@ -45,13 +45,13 @@ Validity now reads plainly on every shape. The card previously rendered a span o
 was set, so a fact recording only an END — exactly the rows this is about — appeared unmarked and
 read as current:
 
-| Stored | Reads as |
-| --- | --- |
-| from and to, lapsed | `(past: 2019-01-01–2023-06-01)` |
-| to only, lapsed | `(past: until 2023-06-01)` |
-| from only | `(since 2024-03-01)` |
+| Stored                     | Reads as                               |
+| -------------------------- | -------------------------------------- |
+| from and to, lapsed        | `(past: 2019-01-01–2023-06-01)`        |
+| to only, lapsed            | `(past: until 2023-06-01)`             |
+| from only                  | `(since 2024-03-01)`                   |
 | from and to, still running | `(since 2024-03-01, until 2027-01-01)` |
-| to only, still running | `(until 2027-01-01)` |
+| to only, still running     | `(until 2027-01-01)`                   |
 
 **Gap detector** (`graph-gaps.ts`). `SATISFIED_BY` is present tense only: `lives_in` is satisfied by
 `lives_in`, and `works_at` by `works_at` or `studies_at`. The past-tense forms are gone. A relation
@@ -66,7 +66,7 @@ birthplace as a residence was never pacing, it was a wrong answer.
 ## Nothing is erased
 
 A lapsed fact keeps its row, its provenance, and its place in explicit recall. This is about what
-gets offered as *current state*, not about deleting history — the same principle supersession
+gets offered as _current state_, not about deleting history — the same principle supersession
 follows, where a replaced fact expires but is never deleted
 ([memory supersession](memory-supersession.md)).
 

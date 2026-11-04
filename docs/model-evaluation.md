@@ -12,19 +12,19 @@ The source catalog now includes **GPT-6.1 Sol** and **GPT-6 Luna** as explicit c
 
 The following are the public catalog's **base advertised** USD token rates in the snapshot used for this review. The example is one request with **10,000 uncached input tokens and 1,000 total billed output tokens**, excluding tools, cache writes, provider fees, tier overrides and retries. Hidden reasoning contributes to billed output; 1,000 visible words does not imply 1,000 billed output tokens. Catalog rates can differ from eligible provider rates, time-of-day prices, long-context tiers, and the app's conservative reservation table. [Public model catalog](https://openrouter.ai/api/v1/models), [catalog API contract](https://openrouter.ai/docs/api/api-reference/models/list-all-models-and-their-properties).
 
-| Exact model identity | Input / million | Output / million | Example request | Catalog context |
-| --- | ---: | ---: | ---: | ---: |
-| `openai/gpt-6.1-sol` | $2 | $10 | $0.030000 | 1,050,000 |
-| `openai/gpt-6-luna` | $0.10 | $0.50 | $0.001500 | 1,050,000 |
-| `minimax/minimax-m2.7` | $0.21 | $0.84 | $0.002940 | 204,800 |
-| `minimax/minimax-m3` | $0.30 | $1.20 | $0.004200 | 1,048,576 |
-| `deepseek/deepseek-v4-flash-0731` | $0.0139 | $1.28 | $0.001419 | 1,048,576 |
-| `deepseek/deepseek-v4-flash` | $0.028 | $0.056 | $0.000336 | 1,048,576 |
-| `deepseek/deepseek-v4-pro` | $0.2088 | $0.4176 | $0.002506 | 1,048,576 |
-| `google/gemini-3.8-flash` | $0.75 | $3.75 | $0.011250 | 1,048,576 |
-| `qwen/qwen3.6-flash` | $0.1875 | $1.125 | $0.003000 | 1,000,000 |
-| `qwen/qwen3.6-plus` | $0.325 | $1.95 | $0.005200 | 1,000,000 |
-| `openai/gpt-oss-120b` | $0.037 | $0.17 | $0.000540 | 131,072 |
+| Exact model identity              | Input / million | Output / million | Example request | Catalog context |
+| --------------------------------- | --------------: | ---------------: | --------------: | --------------: |
+| `openai/gpt-6.1-sol`              |              $2 |              $10 |       $0.030000 |       1,050,000 |
+| `openai/gpt-6-luna`               |           $0.10 |            $0.50 |       $0.001500 |       1,050,000 |
+| `minimax/minimax-m2.7`            |           $0.21 |            $0.84 |       $0.002940 |         204,800 |
+| `minimax/minimax-m3`              |           $0.30 |            $1.20 |       $0.004200 |       1,048,576 |
+| `deepseek/deepseek-v4-flash-0731` |         $0.0139 |            $1.28 |       $0.001419 |       1,048,576 |
+| `deepseek/deepseek-v4-flash`      |          $0.028 |           $0.056 |       $0.000336 |       1,048,576 |
+| `deepseek/deepseek-v4-pro`        |         $0.2088 |          $0.4176 |       $0.002506 |       1,048,576 |
+| `google/gemini-3.8-flash`         |           $0.75 |            $3.75 |       $0.011250 |       1,048,576 |
+| `qwen/qwen3.6-flash`              |         $0.1875 |           $1.125 |       $0.003000 |       1,000,000 |
+| `qwen/qwen3.6-plus`               |          $0.325 |            $1.95 |       $0.005200 |       1,000,000 |
+| `openai/gpt-oss-120b`             |          $0.037 |            $0.17 |       $0.000540 |         131,072 |
 
 Do not silently replace a dated DeepSeek model with an undated alias because their names look similar: the snapshot shows different prices and contracts. The app currently uses `deepseek/deepseek-v4-flash-0731` and `deepseek/deepseek-v4-pro-0813`. Its estimates were checked on an earlier date and deliberately use conservative provider rates. This review does not overwrite existing price/routing choices with the cheapest advertised endpoint.
 
@@ -34,16 +34,16 @@ For Sol, official pricing adds a long-input tier above 272,000 input tokens; the
 
 ## Which ability to compare
 
-| Job | Candidate priority | What must be measured |
-| --- | --- | --- |
-| Triage and extraction | Luna, dated DeepSeek Flash, GPT-OSS, Qwen Flash | Correct/no-op rate, schema failures, timezone dates, hidden reasoning cost, latency |
-| Owner replies | Luna, existing Gemini Flash, MiniMax, selected Sol | Grounded claims, concise useful writing, first text, interruption recovery, token cost |
-| Tool execution | Existing MiniMax, M3, Luna, Sol | Correct tool and exact arguments, clarification, approval boundaries, tool-history replay |
-| Planning | Existing DeepSeek Pro, Sol, Luna, Qwen Plus | Complete checklist, dependencies, stopping conditions, bounded failure/replanning |
-| Background synthesis | Cheapest candidate that passes its job contract | Fact correction, provenance, forgetting exclusion, deduplication, total job cost |
-| Repair coding | Current configured repair backend plus tested alternatives | Reproduction, minimal patch, tests, exact-commit CI, no private-data transfer |
-| Embeddings | Existing installation embedding space | Retrieval quality and migration effort; incompatible spaces require re-embedding |
-| Speech/voice | Separate on-device Talk and outgoing-call voice paths | Real audio latency, turn-taking, interruption/echo, permissions, phone execution quality |
+| Job                   | Candidate priority                                         | What must be measured                                                                     |
+| --------------------- | ---------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| Triage and extraction | Luna, dated DeepSeek Flash, GPT-OSS, Qwen Flash            | Correct/no-op rate, schema failures, timezone dates, hidden reasoning cost, latency       |
+| Owner replies         | Luna, existing Gemini Flash, MiniMax, selected Sol         | Grounded claims, concise useful writing, first text, interruption recovery, token cost    |
+| Tool execution        | Existing MiniMax, M3, Luna, Sol                            | Correct tool and exact arguments, clarification, approval boundaries, tool-history replay |
+| Planning              | Existing DeepSeek Pro, Sol, Luna, Qwen Plus                | Complete checklist, dependencies, stopping conditions, bounded failure/replanning         |
+| Background synthesis  | Cheapest candidate that passes its job contract            | Fact correction, provenance, forgetting exclusion, deduplication, total job cost          |
+| Repair coding         | Current configured repair backend plus tested alternatives | Reproduction, minimal patch, tests, exact-commit CI, no private-data transfer             |
+| Embeddings            | Existing installation embedding space                      | Retrieval quality and migration effort; incompatible spaces require re-embedding          |
+| Speech/voice          | Separate on-device Talk and outgoing-call voice paths      | Real audio latency, turn-taking, interruption/echo, permissions, phone execution quality  |
 
 MiniMax M3 and Qwen Flash deserve inclusion as alternative candidates based on current catalog availability and tool/structured-output metadata. That metadata does not prove their reliability on Assistant tasks. A large context window also does not establish better memory retrieval. [MiniMax M3](https://openrouter.ai/minimax/minimax-m3), [Qwen3.6 Flash](https://openrouter.ai/qwen/qwen3.6-flash).
 

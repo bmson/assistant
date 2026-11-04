@@ -76,17 +76,17 @@ Source: [shared copy control](../apps/web/lib/copy-button.tsx), [recovery notice
 
 ## Design and architecture decisions
 
-| Decision | Practical reason | Tradeoff |
-| --- | --- | --- |
-| Verify candidate bootstrap before committing pairing | A typo must not destroy a working session | The form waits for authenticated verification |
-| Keep drafts in a private conversation-scoped value | Preserve text without publishing every keystroke to the transcript | Unsent text does not survive termination |
-| Fence asynchronous publication with connection generation | A delayed old response cannot become current owner state | Query and mutation methods must follow one explicit contract |
-| Keep one active foreground reply | Current transcript, speech, and Live Activity have one coordinator | Switching waits for completion or stop |
-| Preserve dirty fields independently | Refreshing a service must not undo an unsaved model choice | Baselines need explicit server acknowledgment |
-| Show existing connections before add forms | Routine management deserves the simplest path | Setup takes an intentional additional action |
-| Distinguish missing, loading, failed, and stale data | Blank fields and endless spinners cannot imply valid state | Screens need a recoverable read state |
-| Use actual snooze deadlines | A receipt should describe the server's decision accurately | Older server payloads may lack a return time |
-| Use native disclosure and popover behavior | Focus, tab order and dismissal have platform semantics | Browser support remains part of the client compatibility contract |
+| Decision                                                  | Practical reason                                                   | Tradeoff                                                          |
+| --------------------------------------------------------- | ------------------------------------------------------------------ | ----------------------------------------------------------------- |
+| Verify candidate bootstrap before committing pairing      | A typo must not destroy a working session                          | The form waits for authenticated verification                     |
+| Keep drafts in a private conversation-scoped value        | Preserve text without publishing every keystroke to the transcript | Unsent text does not survive termination                          |
+| Fence asynchronous publication with connection generation | A delayed old response cannot become current owner state           | Query and mutation methods must follow one explicit contract      |
+| Keep one active foreground reply                          | Current transcript, speech, and Live Activity have one coordinator | Switching waits for completion or stop                            |
+| Preserve dirty fields independently                       | Refreshing a service must not undo an unsaved model choice         | Baselines need explicit server acknowledgment                     |
+| Show existing connections before add forms                | Routine management deserves the simplest path                      | Setup takes an intentional additional action                      |
+| Distinguish missing, loading, failed, and stale data      | Blank fields and endless spinners cannot imply valid state         | Screens need a recoverable read state                             |
+| Use actual snooze deadlines                               | A receipt should describe the server's decision accurately         | Older server payloads may lack a return time                      |
+| Use native disclosure and popover behavior                | Focus, tab order and dismissal have platform semantics             | Browser support remains part of the client compatibility contract |
 
 ## Verification and remaining work
 

@@ -27,10 +27,10 @@ All final visible text lines and all three reserved labels fit their control bou
 
 The ConfirmButton event-handler block and the entire ActionMenu placement component are byte-identical to main. Local lint, typecheck and 53 existing source-fixture tests pass. Independent runtime QA, source review and final-head CI remain separate gates.
 
-| Example | Before | After |
-| --- | --- | --- |
-| Normal menu alignment | ![Centered menu labels](assets/menu-readability-2026-10-20/before-goal-rest.png) | ![Aligned menu labels](assets/menu-readability-2026-10-20/after-goal-rest.png) |
-| Enlarged autonomy confirmation | ![Clipped autonomy confirmation](assets/menu-readability-2026-10-20/before-goal-armed.png) | ![Full autonomy confirmation](assets/menu-readability-2026-10-20/after-goal-armed.png) |
+| Example                               | Before                                                                                     | After                                                                                  |
+| ------------------------------------- | ------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------- |
+| Normal menu alignment                 | ![Centered menu labels](assets/menu-readability-2026-10-20/before-goal-rest.png)           | ![Aligned menu labels](assets/menu-readability-2026-10-20/after-goal-rest.png)         |
+| Enlarged autonomy confirmation        | ![Clipped autonomy confirmation](assets/menu-readability-2026-10-20/before-goal-armed.png) | ![Full autonomy confirmation](assets/menu-readability-2026-10-20/after-goal-armed.png) |
 | Enlarged Security device confirmation | ![Clipped device confirmation](assets/menu-readability-2026-10-20/before-device-armed.png) | ![Full device confirmation](assets/menu-readability-2026-10-20/after-device-armed.png) |
 
 [Pending passkey control](assets/menu-readability-2026-10-20/after-passkey-pending.png) · [Disabled passkey control](assets/menu-readability-2026-10-20/after-passkey-disabled.png)

@@ -38,17 +38,17 @@ activation decision. Do not erase/reinitialize it or silently treat absence as z
 
 ## Which assumptions are already source/local facts
 
-| Item | Evidence / precise limit |
-|---|---|
-| Native clients and journal consistency contracts | Offline fixture suites, scripts typecheck, full lint; no provider or durable-auth proof |
-| Repository identity | Read-only GitHub metadata: PUBLIC bmson/assistant, repository1304152266, owner890821. Does not prove job artifact ZIP capability |
-| Existing declared deployment privileges | github-actions.md76–90: Run admin/Artifact Registry writer/Scheduler admin; explicitly NO Cloud Storage. Not a fresh IAM inventory |
-| Existing workflow shape | deploy.yml and retirement workflow: production-deploy, cancel-in-progress:false, main/attempt1/context guards, contents:read/id-token:write, pinned WIF/SDK/artifact actions. Actual environment policy/identity/liveness remains unproved |
-| SDK flag behavior | Exact official576 source audit with metadata MD5 match; both flags emit the problematic representation. No SDK/provider experiment |
-| Annotation contract | Official v2 annotations/field-mask/etag rules and Kubernetes syntax/size; own8KiB head/64KiB map caps. Actual metadata generation/preservation/conflict behavior unproved |
-| Existing verification dependency | apps/agent declares jose; lock pins6.2.14. No new dependency is needed in principle; a verifier import/path/policy still requires source review |
-| Last real web observation |41351973081 at6297a84a: exact3desired/2observed mismatch, no apply. This is historical evidence, not a fresh current state or new read budget |
-| Retention/phone | Manager-owned CURRENT_ONLY_CLEANUP=false receipt; phone install conditional on verified backend. Neither is changed here |
+| Item                                             | Evidence / precise limit                                                                                                                                                                                                                   |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Native clients and journal consistency contracts | Offline fixture suites, scripts typecheck, full lint; no provider or durable-auth proof                                                                                                                                                    |
+| Repository identity                              | Read-only GitHub metadata: PUBLIC bmson/assistant, repository1304152266, owner890821. Does not prove job artifact ZIP capability                                                                                                           |
+| Existing declared deployment privileges          | github-actions.md76–90: Run admin/Artifact Registry writer/Scheduler admin; explicitly NO Cloud Storage. Not a fresh IAM inventory                                                                                                         |
+| Existing workflow shape                          | deploy.yml and retirement workflow: production-deploy, cancel-in-progress:false, main/attempt1/context guards, contents:read/id-token:write, pinned WIF/SDK/artifact actions. Actual environment policy/identity/liveness remains unproved |
+| SDK flag behavior                                | Exact official576 source audit with metadata MD5 match; both flags emit the problematic representation. No SDK/provider experiment                                                                                                         |
+| Annotation contract                              | Official v2 annotations/field-mask/etag rules and Kubernetes syntax/size; own8KiB head/64KiB map caps. Actual metadata generation/preservation/conflict behavior unproved                                                                  |
+| Existing verification dependency                 | apps/agent declares jose; lock pins6.2.14. No new dependency is needed in principle; a verifier import/path/policy still requires source review                                                                                            |
+| Last real web observation                        | 41351973081 at6297a84a: exact3desired/2observed mismatch, no apply. This is historical evidence, not a fresh current state or new read budget                                                                                              |
+| Retention/phone                                  | Manager-owned CURRENT_ONLY_CLEANUP=false receipt; phone install conditional on verified backend. Neither is changed here                                                                                                                   |
 
 The independently reviewed simulation logic fixes the initial logical handoff:
 PREPARE first, then a fresh exact3/2 packet, then SAME run/job/check-run review
@@ -103,13 +103,14 @@ log sample, native/tag HTTP probe, IAM change, ADC fallback or credential inspec
 No automatic retries or broader capability request on failure.
 
 1. Obtain/verify an ephemeral GitHub OIDC assertion under existing id-token:write;
-fixed issuer/JWKS/audience and time/source/repository/environment/run/attempt claims.
-Keep bearer material private and ephemeral. Bind check_run_id to the actual job's
-exact GitHub check_run_url and numeric job/run/source metadata, never its name.
-Use the existing job capability for fixed GitHub metadata calls. Missing claim,
-invalid signature, wrong workflow/source/job, denied read or incomplete mapping is
-UNKNOWN/HOLD, not a weaker environment-variable substitute.
+   fixed issuer/JWKS/audience and time/source/repository/environment/run/attempt claims.
+   Keep bearer material private and ephemeral. Bind check_run_id to the actual job's
+   exact GitHub check_run_url and numeric job/run/source metadata, never its name.
+   Use the existing job capability for fixed GitHub metadata calls. Missing claim,
+   invalid signature, wrong workflow/source/job, denied read or incomplete mapping is
+   UNKNOWN/HOLD, not a weaker environment-variable substitute.
 2. Test READ access under the actual job capability to this ONE exact archive:
+
 - Repository bmson/assistant; deploy run40403696377, attempt1;
   source0c9a7ad7fc9c62b7ff166fe85bd023013ee88d43.
 - Artifact ID12690736934; exact name
@@ -132,14 +133,14 @@ permission is required by this read-only probe. Failure stops; do not try a PAT,
 connector token, anonymous fallback or new actions permission. This does not qualify
 streaming upload, finalize/collision behavior, durable private history or cold recovery.
 3. The exact reviewed operative set is:
-  .github/workflows/deploy.yml, cleanup.yml, owner-web-tag-retirement.yml,
-  owner-editor-v1-maintenance.yml, prepare-owner-editor-index.yml,
-  workspace-import.yml, workspace-export.yml, owner-editor-release-inventory.yml
-  (all basenames after the first are under .github/workflows/).
-  The inventory includes the diagnostic WIF holder conservatively. ci.yml and
-  self-repair.yml use the demo emulator without production WIF auth in reviewed
-  source; ios.yml and agent-image-pr-smoke.yml are not production writers.
-  Unknown active workflow paths are HOLD, never silently excluded.
+.github/workflows/deploy.yml, cleanup.yml, owner-web-tag-retirement.yml,
+owner-editor-v1-maintenance.yml, prepare-owner-editor-index.yml,
+workspace-import.yml, workspace-export.yml, owner-editor-release-inventory.yml
+(all basenames after the first are under .github/workflows/).
+The inventory includes the diagnostic WIF holder conservatively. ci.yml and
+self-repair.yml use the demo emulator without production WIF auth in reviewed
+source; ios.yml and agent-image-pr-smoke.yml are not production writers.
+Unknown active workflow paths are HOLD, never silently excluded.
 
 Query scope: five repository-wide GETs to /repos/bmson/assistant/actions/runs,
 per_page=100&page=1, one each status=in_progress, queued, waiting, pending, requested;

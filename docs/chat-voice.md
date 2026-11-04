@@ -6,13 +6,13 @@ something worth saying. A review of a week of production messages (192 assistant
 messages, 124 of them in the primary chat) found that most of what the owner
 scrolled past was the system talking about itself:
 
-| In the primary chat | Count | Now |
-| --- | ---: | --- |
-| Self-repair progress ("The fix for “…” needs attention: …") | 27 | Stays in Notifications and Improvements; never mirrored |
-| Approval requests rendered as the whole tool brief | 24 | One line: "Call Baldvin for up to 5 minutes — okay to go ahead?" |
-| Raw failures ("Last error: AI_APICallError: …") | 12 | One plain sentence, no error text |
-| Canned fallbacks ("no successful tool result was returned") | 6 | Names the step in words |
-| Real conversation | ~28 | Unchanged |
+| In the primary chat                                         | Count | Now                                                              |
+| ----------------------------------------------------------- | ----: | ---------------------------------------------------------------- |
+| Self-repair progress ("The fix for “…” needs attention: …") |    27 | Stays in Notifications and Improvements; never mirrored          |
+| Approval requests rendered as the whole tool brief          |    24 | One line: "Call Baldvin for up to 5 minutes — okay to go ahead?" |
+| Raw failures ("Last error: AI_APICallError: …")             |    12 | One plain sentence, no error text                                |
+| Canned fallbacks ("no successful tool result was returned") |     6 | Names the step in words                                          |
+| Real conversation                                           |   ~28 | Unchanged                                                        |
 
 ## The rules
 

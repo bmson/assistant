@@ -24,7 +24,7 @@ recorded rather than applied, for the reason given in that section.
 ### Fixed
 
 **The task record was unbounded, in rows and in bytes.** `getTaskDetail`
-selected *every* tool call, model call, message, and file for a task with no
+selected _every_ tool call, model call, message, and file for a task with no
 `LIMIT`, and the page rendered each one's full `args` and `result` through
 `JSON.stringify(value, null, 2)` inside `<details>` — collapsed markup is still
 in the RSC payload and still in the DOM. Tool results are persisted at whatever
@@ -44,7 +44,7 @@ happened to return.
 `decision` is no longer shipped whole either — the page read two fields out of
 it, so those two are extracted server-side.
 
-> The "what actually happened" section reads the *whole* task, not the visible
+> The "what actually happened" section reads the _whole_ task, not the visible
 > page, so it would have been quietly broken by paging alone. It now has its
 > own projection (`actions`) that carries every call with no `args` at all and
 > a 600-character result preview. `completedSuccessfully` moved into the
@@ -61,7 +61,7 @@ selects named columns and a boolean.
 
 **Every chat read performed a write.** `getChatConversationView` stamped
 `conversations.lastReadAt` unconditionally, and that path is the web page load,
-`GET /api/mobile/v1/chats/[id]`, *and* the mobile bootstrap. Every one of them
+`GET /api/mobile/v1/chats/[id]`, _and_ the mobile bootstrap. Every one of them
 queued an `UPDATE` against the same row the executor writes `updated_at` to.
 The stamp is now conditional on being more than 30 seconds stale — the unread
 dot is about whether you have looked recently, not about the exact second.
@@ -81,7 +81,7 @@ container count, and on Cloud Run that is up to 50 against defaults that are
 often 25.
 
 **`AutoRefresh` re-ran the entire route every 12 seconds.** `router.refresh()`
-re-runs the page's queries *and* the root layout's, so a tab left open on
+re-runs the page's queries _and_ the root layout's, so a tab left open on
 Activity or Approvals was re-querying the database all day to render the same
 screen. It now backs off geometrically to two minutes while the rendered output
 is unchanged, and resets to 12 seconds the moment something differs or the tab
@@ -101,20 +101,20 @@ constructions per token, all of them re-deriving an instant that cannot move.
 
 Send times are now parsed once per id and carried in a `ChatLogOrder` alongside
 the arrival map that was already there (the native client calls the same
-concept `ChatLogOrder`, so the two now agree). Only *real* timestamps are
+concept `ChatLogOrder`, so the two now agree). Only _real_ timestamps are
 cached: a message the client made itself has no send time yet and gets one when
 its durable twin arrives under the same id, so caching its absence would pin it
 after the log forever. That case is pinned by a test.
 
 **Idle polls churned the log whenever a decision card was open.** The poll
 sends `refresh=<ids>` for every unresolved approval, budget, or suggestion card
-on screen, and the route returns those rows on *every* tick. The merge counted
+on screen, and the route returns those rows on _every_ tick. The merge counted
 any arrival as a change, so a quiet thread holding one unanswered approval
 handed React a new array — and re-parsed that card's markdown — every twelve
 seconds to report that nothing had happened.
 
 The merge now compares a re-read row against the one on screen and returns the
-*same array reference* when the tick moved nothing. It also moved out of the
+_same array reference_ when the tick moved nothing. It also moved out of the
 effect closure into an exported `mergeChatLog`, which is what made it testable:
 the repo's web tests use `renderToStaticMarkup` and there is no DOM test
 infrastructure, so logic that matters has to be reachable without rendering.
@@ -137,11 +137,11 @@ place.
 
 **The local queue driver ran every task serially, and the maintenance sweep
 behind them.** `startPoller` held one `busy` flag and `await`ed up to five due
-tasks one at a time *in the same tick as the sweep*. One slow browser or code
+tasks one at a time _in the same tick as the sweep_. One slow browser or code
 step therefore blocked every other task — and blocked approval expiry, schedule
 firing, and both re-notify passes — for its entire duration. In production
 Cloud Tasks fans this out, but `docker compose up` is the README's quick start
-and Compose sets `QUEUE_DRIVER=local`: for a self-hosted install this loop *is*
+and Compose sets `QUEUE_DRIVER=local`: for a self-hosted install this loop _is_
 the queue, and a long task made the whole assistant look stalled.
 
 Tasks now run three at a time, and the sweep has its own guard so maintenance
@@ -167,7 +167,7 @@ writing them down.
 
 - **No optimistic updates on any mutation.** Every action in `AppModel.swift` —
   approve, deny, archive, retry, goal and memory edits — awaits the mutation and
-  *then* `refreshOverview()`, which is `/api/mobile/v1/overview`: four queries
+  _then_ `refreshOverview()`, which is `/api/mobile/v1/overview`: four queries
   (50 activity items, goals, approvals, documents) whose result replaces the
   whole `overview` object. One tap costs two serial round trips before anything
   on screen moves. The fix is to apply the change locally first and reconcile
@@ -192,7 +192,7 @@ writing them down.
   For an assistant opened a handful of times a day, that meant effectively every
   session paid a Next.js standalone cold start plus a fresh pool before the
   first byte. Compounding it, every Cloud Scheduler job targets `${AGENT_URL}`,
-  so the *agent* was kept permanently warm by the every-minute sweep while the
+  so the _agent_ was kept permanently warm by the every-minute sweep while the
   web service — the only thing the iOS app and the browser talk to — was
   reliably cold.
 
@@ -217,9 +217,9 @@ pnpm build         # web + agent production builds — clean
 
 New tests, each pinning a specific finding rather than the fix's shape:
 
-| File | Pins |
-| --- | --- |
-| `packages/application/src/task-detail.test.ts` | Timeline paging and `before`; large results clipped with the full size reported; the action summary still seeing every call while the timeline is paged |
-| `apps/web/app/chat/[id]/use-chat-polling.test.ts` | A no-op re-read returning the *same array reference*; genuine changes still applied; retraction and streaming behaviour unchanged |
-| `apps/web/app/chat/[id]/message-view.test.ts` | A message sorted by the send time it gains later, not the one it lacked; order identical whether or not times are cached |
-| `apps/agent/src/poller.test.ts` | Tasks running side by side; the concurrency budget holding under overlapping ticks; the sweep firing while a task is still running |
+| File                                              | Pins                                                                                                                                                    |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/application/src/task-detail.test.ts`    | Timeline paging and `before`; large results clipped with the full size reported; the action summary still seeing every call while the timeline is paged |
+| `apps/web/app/chat/[id]/use-chat-polling.test.ts` | A no-op re-read returning the _same array reference_; genuine changes still applied; retraction and streaming behaviour unchanged                       |
+| `apps/web/app/chat/[id]/message-view.test.ts`     | A message sorted by the send time it gains later, not the one it lacked; order identical whether or not times are cached                                |
+| `apps/agent/src/poller.test.ts`                   | Tasks running side by side; the concurrency budget holding under overlapping ticks; the sweep firing while a task is still running                      |

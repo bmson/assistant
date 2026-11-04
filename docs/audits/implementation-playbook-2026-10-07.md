@@ -29,254 +29,254 @@ The owner added simple, clean, minimal UI/UX with careful typography, grid align
 
 ## Canonical findings
 
-| ID | Finding | Status | Packet |
-| --- | --- | --- | --- |
-| APP-11 | Local Gmail polling bypasses the migration activation fence | Implemented and locally verified | P19 |
-| AUX-API-PARSING | Real-auth, bounded-body and per-section API tests must run beyond mocks | Partial; source changes and focused checks | P00 |
-| AUX-MIGRATIONS | Upgrade, ownership, transform and recovery requirements span migration prefixes | Partial; source changes and focused checks | P19 |
-| AUX-SINGLE-OWNER | Enforce one-owner installation or explicitly migrate global identities before multitenancy | Partial; source changes and focused checks | P04 |
-| AUX-TOOLS-ISOLATION | Worker cancellation, process-tree lifetime and local byte/path limits need adversarial validation | Partial; source changes and focused checks | P18 |
-| CC-01 | Updating or rolling back applies a foundation-only configuration to the live runtime state | Partial; source changes and focused checks | P20 |
-| CC-02 | Ready can be satisfied by an old or unrelated model call rather than a current owner response | Partial; source changes and focused checks | P20 |
-| CC-03 | A crash between a cutover mutation and its evidence write defeats rollback’s attempted-step detection | Partial; source changes and focused checks | P20 |
-| CC-04 | Rollback is not bound to the configuration and evidence chain that authorized the cutover | Partial; source changes and focused checks | P20 |
-| CC-05 | Retirement can report READY after a rollback, including with a fresh inventory | Partial; source changes and focused checks | P20 |
-| DM-01 | A journal timestamp inversion can skip the approval-policy uniqueness migration | Implemented and locally verified | P19 |
-| DM-04 | The consumer pilot requires a browser chat that route policy forbids | Partial; source changes and focused checks | P19 |
-| DM-05 | Living guidance contradicts current driver, module, queue and release behavior | Partial; source changes and focused checks | P19 |
-| DM-06 | The PostgreSQL restore drill starts a temporary runtime without fencing restored work | Partial; source changes and focused checks | P19 |
-| FS-15 | Valid migration documents can form an oversized transaction that cannot resume | Partial; source changes and focused checks | P19 |
-| IOS-13 | Native review export does not bind build/runtime provenance to the actual test run | Partial; source changes and focused checks | P00 |
-| IOS-14 | Shipping guide contradicts APNs implementation and portrait shipping contract | Partial; source changes and focused checks | P20 |
-| OPS-01 | Code job does not enforce its advertised network isolation | Partial; source changes and focused checks | P18 |
-| OPS-02 | Current-only cleanup destroys project-wide secret history using a regional dependency inventory | Partial; source changes and focused checks | P20 |
-| OPS-03 | Self-repair's trusted guard permits Firestore owner-authentication code | Partial; source changes and focused checks | P18 |
-| OPS-04 | Consumer private-agent Cloud Tasks/Scheduler audiences conflict with Cloud Run IAM | Partial; source changes and focused checks | P19 |
-| OPS-05 | The generated local .env is rejected by its own schema | Implemented and locally verified | P19 |
-| OPS-06 | Fresh legacy GCP provisioning cannot bootstrap its required agent URL | Partial; source changes and focused checks | P19 |
-| OPS-07 | Shipping agent dependencies differ from tested/audited lock and escape image JS scanning | Partial; source changes and focused checks | P20 |
-| OPS-08 | Consumer Google-auth native token provisioning is incompatible with read/rotation code | Partial; source changes and focused checks | P19 |
-| OPS-09 | Live goal verification can run unrelated due schedules and removes real cost evidence | Implemented and locally verified | P00 |
-| OPS-10 | Private Markdown voice samples are falsely described as gitignored | Implemented and locally verified | P20 |
-| OPS-11 | Independent service rollout leaves incompatible versions live after a failed agent release | Partial; source changes and focused checks | P20 |
-| OPS-12 | Manual/local release paths do not perform the advertised source verification | Partial; source changes and focused checks | P20 |
-| OPS-14 | Demo people purge deletes the real owner's graph relations | Partial; source changes and focused checks | P00 |
-| OPS-15 | Phone setup corrupts minimal module selection after changing Twilio state | Partial; source changes and focused checks | P19 |
-| OPS-16 | Several older visual utilities write authoritative fixture conversations into the ordinary owner database | Partial; source changes and focused checks | P00 |
-| OPS-17 | Selective screenshot recapture can relabel stale evidence as current CSS evidence | Implemented and locally verified | P00 |
-| R2 | Integration tests can destroy or corrupt unrelated data | Partial; source changes and focused checks | P00 |
-| TW-18 | Deployed code-worker permissions cannot stage its declared inputs | Partial; source changes and focused checks | P18 |
-| API-01 | Anonymous invalid bearer tokens bypass the secret-read cache | Partial; source changes and focused checks | P04 |
-| API-02 | Same-site cross-origin requests can use owner cookies on mobile mutations | Partial; source changes and focused checks | P04 |
-| API-03 | PostgreSQL object mutations do not consistently enforce the owner checked on reads | Partial; source changes and focused checks | P04 |
-| API-06 | Successful task-control responses do not identify what actually changed | Partial; source changes and focused checks | P07 |
-| API-10 | Goal target-date validation permits normalized nonexistent dates | Partial; source changes and focused checks | P03 |
-| APP-12 | A failed prior document attempt suppresses a fresh explicit read | Partial; source changes and focused checks | P03 |
-| CF-05 | Chat admission has no stable retry identity | Partial; source changes and focused checks | P02 |
-| CF-08 | An owner request can be mislabeled as an external request | Partial; source changes and focused checks | P04 |
-| FS-01 | Approval chat hydration loses the tool name | Partial; source changes and focused checks | P04 |
-| HC-03 | Task identity and latest intent are not a coherent runtime boundary | Partial; source changes and focused checks | P02 |
-| HC-05 | Clarification can finish before the sources that would answer it are loaded | Partial; source changes and focused checks | P03 |
-| HC-07 | Later owner changes suppress recovery but not obsolete completion requirements | Partial; source changes and focused checks | P03 |
-| HC-11 | Ordinary physical-card text can be promoted to an explicit UI-card obligation | Partial; source changes and focused checks | P03 |
-| HC-12 | Planner mistakes tainted third-party content for positive owner intent | Partial; source changes and focused checks | P04 |
-| MC-03 | Localized/unknown quoted owner email bypasses direct-email taint | Partial; source changes and focused checks | P04 |
-| MC-04 | Card observer executes before unauthenticated direct email is rejected | Partial; source changes and focused checks | P04 |
-| MC-05 | Explicit Gmail sync disable is ignored by Pub/Sub ingress | Partial; source changes and focused checks | P04 |
-| PG-02 | Approval expiry is not enforced at decision time | Partial; source changes and focused checks | P04 |
-| R12 | Calendar directions ignore the day the owner requested | Implemented and locally verified | P03 |
-| R7 | Direct Google Doc routing ignores an explicit prohibition on reading | Partial; source changes and focused checks | P03 |
-| R9 | Historical calendar questions are forced into future date windows | Implemented and locally verified | P03 |
-| TW-02 | A failed MCP preparation can remove the mandatory approval binding | Partial; source changes and focused checks | P04 |
-| TW-03 | Delayed approved execution does not revalidate current prohibitions | Partial; source changes and focused checks | P04 |
-| TW-07 | Public weather/maps capabilities expose the private owner-location fallback to external tasks | Partial; source changes and focused checks | P04 |
-| TW-08 | Investigating audit evidence can make the offered repair-report approval ineffective | Partial; source changes and focused checks | P04 |
-| TW-11 | File-prefix allowlists run before path normalization | Partial; source changes and focused checks | P04 |
-| TW-12 | Raw Gmail labels bypass the archive approval tier | Partial; source changes and focused checks | P04 |
-| TW-13 | Collaborative Google edits are incorrectly treated as private-only writes | Partial; source changes and focused checks | P04 |
-| APP-03 | Chat cursor's full-page shortcut defeats late-commit protection | Partial; source changes and focused checks | P02 |
-| APP-05 | Approval email overclaims that nothing has happened | Partial; source changes and focused checks | P07 |
-| APP-06 | Task audit timestamp pagination can permanently omit equal-time events | Partial; source changes and focused checks | P02 |
-| APP-09 | Production notification fanout can stamp total delivery failure as success | Partial; source changes and focused checks | P06 |
-| AUX-CONTRACT-SHAPES | Checkpoint shapes, money/time validators and import link constraints need real contract round-trips | Implemented and locally verified | P05 |
-| AUX-TOOLS-IDENTITY | Gmail/artifact keys conflate operation identity with title or nondeterministic content | Partial; source changes and focused checks | P05 |
-| CF-01 | Mission session instruction loss and recursive creation | Partial; source changes and focused checks | P07 |
-| CF-02 | The repeated confirmation is deterministic product copy | Partial; source changes and focused checks | P07 |
-| CF-03 | Reminder cards show superseded creations as active | Partial; source changes and focused checks | P07 |
-| CF-04 | Reminder creation is not retry-idempotent | Partial; source changes and focused checks | P05 |
-| CF-06 | “After the game tomorrow” has no enforced temporal dependency | Partial; source changes and focused checks | P07 |
-| CF-07 | Mission cadence is dropped, and recursive roots escape the original mission budget | Partial; source changes and focused checks | P07 |
-| DM-03 | Retiring the default morning brief also disables owner-customized schedules | Partial; source changes and focused checks | P07 |
-| FS-13 | A late/replayed callback can revive a timed-out job or overwrite an already-recorded result | Partial; source changes and focused checks | P05 |
-| HC-01 | Native Stop stops observation, not execution | Partial; source changes and focused checks | P01 |
-| HC-02 | Native poll failure/timeout can say “Your result is ready” | Partial; source changes and focused checks | P01 |
-| HC-04 | Correct silence from proactive work becomes an error | Partial; source changes and focused checks | P07 |
-| HC-08 | Future-notification request becomes a read-only answer, then an honest dead end | Partial; source changes and focused checks | P07 |
-| MC-01 | A placed call's selected voice route is not frozen for media connection | Partial; source changes and focused checks | P22 |
-| MC-02 | Terminal call status commits before durable result delivery, preventing retry | Partial; source changes and focused checks | P22 |
-| MC-10 | A skipped channel send is treated as a completed delivery attempt | Partial; source changes and focused checks | P06 |
-| MC-12 | Outbound call concurrency/day limits are check-then-create | Partial; source changes and focused checks | P22 |
-| PG-01 | Cancelling a watch can be undone by an in-flight fire | Partial; source changes and focused checks | P07 |
-| PG-03 | Primary-chat fallback can adopt the assistant-only Notifications thread | Partial; source changes and focused checks | P06 |
-| PG-06 | First concurrent SMS messages can split into a conversation with no return route | Partial; source changes and focused checks | P06 |
-| PG-08 | Self-repair claiming can overwrite an owner dismissal | Partial; source changes and focused checks | P07 |
-| PG-09 | Microsecond reply cursors can repeatedly re-inject prior owner messages on resume | Partial; source changes and focused checks | P02 |
-| R1 | Multi-call suspension loses earlier approvals and leaves an invalid transcript | Partial; source changes and focused checks | P05 |
-| R10 | Compound SMS sends remain incomplete after real successful sends | Partial; source changes and focused checks | P07 |
-| R13 | Calendar projections can merge distinct recurring occurrences and hide real conflicts | Partial; source changes and focused checks | P07 |
-| R14 | Watch suggestion recovery depends on the model repeating its earlier decision | Partial; source changes and focused checks | P06 |
-| R3 | Mission outcomes and alerts lack durable report delivery intent | Partial; source changes and focused checks | P06 |
-| R4 | Stalled-goal replacement can cancel a newly resumed task | Partial; source changes and focused checks | P07 |
-| R5 | Invalid autonomy expiration fails open | Partial; source changes and focused checks | P04 |
-| R6 | Retention can erase live task execution evidence | Partial; source changes and focused checks | P05 |
-| R8 | Checklist cannot represent owner-cancelled outcomes | Partial; source changes and focused checks | P07 |
-| TW-04 | Repeated jobs reuse earlier artifact identities | Partial; source changes and focused checks | P05 |
-| VH-04 | Call transcript flushing can discard unpersisted batches | Partial; source changes and focused checks | P22 |
-| FS-14 | Asynchronous learned-memory and voice writers can cross successful privacy erasure | Partial; source changes and focused checks | P08 |
-| HM03 | Document erasure acknowledges success after losing retryable blob work | Partial; source changes and focused checks | P08 |
-| HM05 | Import deletion does not erase derived archive content or occasions | Partial; source changes and focused checks | P08 |
-| HM06 | Untrusted occasion updates inherit an already-trusted row | Partial; source changes and focused checks | P08 |
-| HM21 | Transient location is copied into durable task instructions | Partial; source changes and focused checks | P08 |
-| PG-05 | Privacy erasure can lose to an in-flight card compilation or memory save | Partial; source changes and focused checks | P08 |
-| APP-07 | Relationship correction is split, and the old fact remains recallable | Partial; source changes and focused checks | P10 |
-| AUX-AUDIT-PRIVACY | Audit redaction is not anonymization and needs URL/field-aware handling | Partial; source changes and focused checks | P08 |
-| DM-07 | Audit capture is described as never reused in prompts although tools expose it to the assistant | Partial; source changes and focused checks | P08 |
-| FS-05 | Prior-conversation evidence window is not actually the newest tool receipts | Partial; source changes and focused checks | P09 |
-| FS-07 | Message embedding cursor permanently skips backfilled history and embedding-space changes | Partial; source changes and focused checks | P09 |
-| FS-08 | Commitment history eventually disables extraction for an otherwise valid recurring fact | Partial; source changes and focused checks | P09 |
-| FS-10 | Editing an occasion's date breaks the deterministic identity used by other writers | Partial; source changes and focused checks | P10 |
-| FS-11 | Deleting an auto-created person leaves a stale name identity that future learning trusts | Partial; source changes and focused checks | P10 |
-| FS-16 | Entity merge deletes an owner's rejection in favor of an unreviewed duplicate | Partial; source changes and focused checks | P10 |
-| FS-17 | Knowledge workspace reports relations as in recall when runtime necessarily rejects them | Partial; source changes and focused checks | P10 |
-| HM04 | Processor completion has a crash gap, and the last allowed live attempt can be retired early | Partial; source changes and focused checks | P09 |
-| HM07 | Consolidation can turn dated historical facts into current timeless facts | Partial; source changes and focused checks | P10 |
-| HM08 | Graph date normalization instructions conflict with literal grounding | Partial; source changes and focused checks | P10 |
-| HM09 | Predicate canonicalization erases past tense and grounding does not establish direction or negation | Partial; source changes and focused checks | P10 |
-| HM14 | Portable consolidation can retire every member of a fact cycle | Partial; source changes and focused checks | P10 |
-| HM15 | Voice archive ingestion can attribute third-party writing to the owner | Partial; source changes and focused checks | P09 |
-| HM16 | Archive parsing silently loses content and substitutes a window's median date for individual evidence | Partial; source changes and focused checks | P09 |
-| HM17 | Segment watermarks skip unresolved messages and can hide more relevant raw evidence | Partial; source changes and focused checks | P09 |
-| HM18 | SQL skill reflection can overwrite an owner edit made during model/embedding work | Partial; source changes and focused checks | P10 |
-| HM20 | All-day event display shifts dates in UTC+12 and later zones | Partial; source changes and focused checks | P13 |
-| HM22 | Large documents can be marked fully ready after indexing only a prefix | Partial; source changes and focused checks | P09 |
-| MC-11 | Forwarded ingestion loses the pipeline after a message-only crash checkpoint | Partial; source changes and focused checks | P09 |
-| ME-01 | One oversized contact poisons the whole job after paid work | Partial; source changes and focused checks | P09 |
-| ME-02 | Deterministic persistence errors regenerate and re-embed up to eight times | Partial; source changes and focused checks | P09 |
-| ME-03 | Unvalidated person creation feeds a polluted authoritative-looking catalog | Partial; source changes and focused checks | P10 |
-| ME-04 | Prefix matching can steal an exact identity or collapse distinct people | Partial; source changes and focused checks | P10 |
-| ME-05 | A discarded duplicate fact can still create a contact | Partial; source changes and focused checks | P09 |
-| ME-06 | Occasion-only output is silently discarded and checkpointed | Partial; source changes and focused checks | P09 |
-| DESIGN-KNOWLEDGE | Canonical assertions, inverse presentation, grouped curation and explained derivations | Partial; source changes and focused checks | P10 |
-| DESIGN-CONTEXT | Decision-aware context selection and relevance before planning | Partial; source changes and focused checks | P11 |
-| DESIGN-CONTEXT-UX | Selective use, conflict handling and useful contextual initiative | Partial; source changes and focused checks | P11 |
-| FS-12 | Every new Firestore watch suggestion has an ID the native decision route rejects | Partial; source changes and focused checks | P12 |
-| HC-09 | Proactive “Still open” is not proof the owner still owes an action | Partial; source changes and focused checks | P12 |
-| HM01 | Closing a commitment does not fence replay of the same source occurrence | Partial; source changes and focused checks | P12 |
-| HM02 | Time-based cleanup can discard future promises and the reminder just snoozed | Partial; source changes and focused checks | P12 |
-| HM10 | Calendar window disappearance is asserted as cancellation | Partial; source changes and focused checks | P12 |
-| HM11 | Candidate limits and snooze state can suppress valid due reminders | Partial; source changes and focused checks | P12 |
-| HM23 | Curiosity claims a question forever before durably posting it | Partial; source changes and focused checks | P12 |
-| MC-13 | Watch dedupe commits before notifications/suggestion enqueue | Partial; source changes and focused checks | P12 |
-| MC-14 | Web watch dedupe suppresses a genuine later repeated transition | Partial; source changes and focused checks | P12 |
-| PS-01 | Calendar conflict evidence and identity | Partial; source changes and focused checks | P12 |
-| PS-02 | Cancellation, supersession, and stale suggestions | Partial; source changes and focused checks | P12 |
-| PS-03 | Duplicate security alerts and cross-surface repetition | Partial; source changes and focused checks | P12 |
-| PS-04 | Ranking, context, and dismissed-card accumulation | Partial; source changes and focused checks | P12 |
-| PS-05 | Berlin spa timezone | Partial; source changes and focused checks | P12 |
-| MC-06 | Embedding calls ignore disabled model rows | Partial; source changes and focused checks | P14 |
-| MC-07 | Connection revocation has stale/fail-open windows | Partial; source changes and focused checks | P04 |
-| API-04 | Card-image response cap is enforced after allocation | Partial; source changes and focused checks | P13 |
-| API-05 | Card-image DNS preflight is not bound to the actual connection | Partial; source changes and focused checks | P13 |
-| API-09 | One workspace section failure blocks unrelated native screens | Partial; source changes and focused checks | P13 |
-| APP-01 | Firestore composition drops configured heavy-document processor | Partial; source changes and focused checks | P09 |
-| APP-04 | Local PostgreSQL sweep still aborts maintenance after owner-read failure | Partial; source changes and focused checks | P13 |
-| AUX-MAPS-SPORTS | Sports/maps must preserve coverage, historical scope, transport mode and trusted image hosts | Partial; source changes and focused checks | P13 |
-| AUX-TOOLS-MCP | MCP stream matching and ambiguous effects need an explicit transport contract | Partial; source changes and focused checks | P13 |
-| AUX-TOOLS-READS | Source reads need loss, structure, pagination and completeness receipts | Partial; source changes and focused checks | P13 |
-| FS-04 | Gmail's expiring lock does not fence the worker it replaces | Partial; source changes and focused checks | P09 |
-| FS-18 | Lifetime-history bounds make owner cleanup and live views fail on ordinary growth | Partial; source changes and focused checks | P09 |
-| FS-19 | Supported large documents become unreadable in the owner detail view | Partial; source changes and focused checks | P09 |
-| HC-06 | Mail lookup coverage conflates found hits with inspected answer evidence | Partial; source changes and focused checks | P11 |
-| MC-08 | Supported embedding dimensions are rejected by the common router | Partial; source changes and focused checks | P14 |
-| MC-09 | SMS budgets count one unit regardless of multipart encoding | Partial; source changes and focused checks | P15 |
-| MC-15 | Email attachment path collisions overwrite or delete referenced bytes | Partial; source changes and focused checks | P09 |
-| PROV-01 | Recoverable investigation failures become terminal | Partial; source changes and focused checks | P14 |
-| PROV-02 | Router and repair triage both own fallback, masking the recovery cause | Partial; source changes and focused checks | P14 |
-| PROV-03 | Capability metadata does not validate the actual request shape | Partial; source changes and focused checks | P14 |
-| PROV-04 | Raw, misleading, non-actionable repair notices | Partial; source changes and focused checks | P14 |
-| PROV-05 | Error classification traversal is artificially shallow | Partial; source changes and focused checks | P14 |
-| R11 | Grounding validates a bag of facts rather than the relationships the answer claims | Partial; source changes and focused checks | P11 |
-| R15 | Complete calendar answers silently drop rows and all-day dates can shift | Partial; source changes and focused checks | P13 |
-| R16 | URL provenance treats distinct resource addresses as equivalent | Partial; source changes and focused checks | P11 |
-| TW-01 | Code callback limits exceed the receiving webhook limit | Partial; source changes and focused checks | P13 |
-| TW-05 | Spreadsheet/PPTX extraction drops structural meaning | Partial; source changes and focused checks | P09 |
-| TW-10 | Provider deadlines stop short of complete response consumption | Partial; source changes and focused checks | P13 |
-| TW-14 | Calendar coverage can be reported complete after dropping requested calendars | Partial; source changes and focused checks | P13 |
-| TW-15 | Calendar attendee updates lose fields and can target the wrong shared-calendar identity | Partial; source changes and focused checks | P13 |
-| TW-16 | Slides “append” prepends new slides | Partial; source changes and focused checks | P13 |
-| TW-17 | Drive ingestion and attachment staging reuse mutable filenames | Partial; source changes and focused checks | P09 |
-| TW-19 | Native Google Sheets reading/ingestion silently exports only the first worksheet | Partial; source changes and focused checks | P09 |
-| VH-03 | Call interruption accounting estimates playback without transport acknowledgments | Partial; source changes and focused checks | P22 |
-| APP-02 | Withdrawn candidate: Firestore Shortcut location is intentionally unsupported | Withdrawn; intentionally unsupported | P21 |
-| HM12 | Deterministic hotel cards copy secret-bearing mail into an unmasked fact | Partial; source changes and focused checks | P08 |
-| IOS-01 | Transcription failure bypasses microphone teardown | Partial; source changes and focused checks | P01 |
-| IOS-03 | Undo-hide can publish stale conversation across navigation/account changes | Partial; source changes and focused checks | P16 |
-| IOS-06 | Foreground location opt-out is not rechecked before transmission | Partial; source changes and focused checks | P01 |
-| IOS-09 | Latched composer dictation has no background stop | Partial; source changes and focused checks | P01 |
-| IOS-10 | Automatic speech bypasses approval privacy projection | Partial; source changes and focused checks | P01 |
-| IOS-11 | Generated-card sensitivity is not enforced on secondary fields or accessible speech labels | Partial; source changes and focused checks | P08 |
-| API-08 | Coalescing can return a pre-mutation snapshot to a post-mutation refresh | Partial; source changes and focused checks | P16 |
-| DESIGN-COMPOSITION | Bounded native component composition with server-owned actions | Partial; source changes and focused checks | P17 |
-| FS-06 | Fresh goal work chats are missing from ordinary chat lists | Partial; source changes and focused checks | P16 |
-| HM19 | Nested card validation discards its own sanitized result | Partial; source changes and focused checks | P17 |
-| IOS-02 | Push registration dedupe has no server or owner scope | Partial; source changes and focused checks | P16 |
-| IOS-04 | Notification inline decisions skip notification-owner check | Partial; source changes and focused checks | P16 |
-| IOS-05 | Late speech cancellation can clear replacement speech | Partial; source changes and focused checks | P16 |
-| IOS-12 | Generated map refresh keys ignore changed place values | Partial; source changes and focused checks | P16 |
-| IOS-15 | Talk ignores failure to enable echo cancellation | Partial; source changes and focused checks | P16 |
-| IOS-16 | Scoreboard logo allowlist accepts lookalike external hosts | Partial; source changes and focused checks | P16 |
-| IOS-17 | Future scoreboards have no clock-driven transition into live polling | Partial; source changes and focused checks | P16 |
-| IOS-18 | Unbounded card numbers reach trapping integer conversions | Partial; source changes and focused checks | P16 |
-| IOS-19 | Duplicate knowledge-card node IDs trap during parsing | Partial; source changes and focused checks | P16 |
-| IOS-20 | Partial availability can be presented as unqualified “Free” | Partial; source changes and focused checks | P16 |
-| IOS-22 | Graph VoiceOver reverses directed relationships at the object endpoint | Partial; source changes and focused checks | P16 |
-| IOS-23 | Import size limits are enforced only after a full synchronous file read | Partial; source changes and focused checks | P16 |
-| IOS-24 | Knowledge item save can merge after rename/retype failed | Partial; source changes and focused checks | P16 |
-| WEB-01 | Local mobile-key rotation weakens .env file permissions | Partial; source changes and focused checks | P21 |
-| WEB-02 | Administration lost a discoverable per-browser sign-out | Implemented and locally verified | P21 |
-| WEB-03 | Retained provider form carries a credential across provider destinations | Partial; source changes and focused checks | P21 |
-| WEB-04 | Retained KG date correction submits the old date identity | Partial; source changes and focused checks | P21 |
-| WEB-05 | Retained editors let “Cancel” dismiss an already-submitted mutation | Partial; source changes and focused checks | P21 |
-| WEB-06 | Retained live-call controls can hide a second question | Partial; source changes and focused checks | P21 |
-| WEB-07 | Revealed sensitive values remain inaccessible through the control's accessible name | Partial; source changes and focused checks | P21 |
-| WEB-08 | Dormant cap form rejects values accepted and persisted by the API | Partial; source changes and focused checks | P21 |
-| WEB-09 | Uncontrolled action forms can erase a failed submission | Partial; source changes and focused checks | P21 |
-| WEB-10 | Retained scoreboards do not schedule their own future activation | Partial; source changes and focused checks | P21 |
-| WEB-11 | A settled task stops the retained thread's lifetime poll | Partial; source changes and focused checks | P21 |
-| WEB-12 | Text-only reconciliation removes legitimately repeated provisional turns | Partial; source changes and focused checks | P21 |
-| WEB-13 | Generated-card “ask” actions bypass the chat's busy exclusion | Partial; source changes and focused checks | P21 |
-| WEB-14 | Shallow card eligibility suppresses prose for unsupported v1 content | Partial; source changes and focused checks | P21 |
-| WEB-15 | Incomplete calendar evidence is still described as free | Partial; source changes and focused checks | P21 |
-| WEB-16 | Generated sensitive facts leak through secondary projections | Partial; source changes and focused checks | P21 |
-| WEB-17 | An old task poll can clear a newer task's state | Partial; source changes and focused checks | P21 |
-| VH-02 | Call ledger omits charge components and does not reconcile the complete bill | Partial; source changes and focused checks | P22 |
-| API-07 | Budget edits silently succeed on rejected input and use permissive numeric parsing | Partial; source changes and focused checks | P15 |
-| APP-08 | Text-model selection can retain a non-text fallback | Partial; source changes and focused checks | P14 |
-| AUX-MODELS-COST | Timeout/abort usage and metering failures need conservative durable reconciliation | Partial; source changes and focused checks | P15 |
-| AUX-VOICE-CONTRACT | Realtime session readiness, tool-follow-up and cost estimation need provider contract qualification | Open | P22 |
-| COST-03 | P1. Separate budget fallback from capability fallback | Partial; source changes and focused checks | P15 |
-| COST-04 | P1. Put actual price constraints around latency selection | Partial; source changes and focused checks | P15 |
-| COST-05 | P2. Improve reservations and cost evidence before tuning budgets | Partial; source changes and focused checks | P15 |
-| COST-06 | P2. Stabilize safe prefixes; reduce redundant evidence, not essential context | Partial; source changes and focused checks | P15 |
-| COST-07 | P2. Spend less reasoning only where the role passes without it | Open | P15 |
-| COST-08 | Lower priority: avoid paid no-op extraction and embedding | Partial; source changes and focused checks | P15 |
-| DESIGN-DECISIONS | Selective decision adapter and retrieval reranking, including Jev evaluation | Partial; source changes and focused checks | P15 |
-| DM-02 | PostgreSQL routing upgrades can replace custom settings outside the retired field | Partial; source changes and focused checks | P15 |
-| HC-10 | Audit index cannot discover old owner tasks beyond bounded recent results | Partial; source changes and focused checks | P00 |
-| IOS-21 | Selecting another model can silently retain the previous model’s prices | Partial; source changes and focused checks | P15 |
-| PG-07 | Accepted maximum task budget cannot fit the PostgreSQL field | Partial; source changes and focused checks | P15 |
-| DESIGN-HORIZON | Responsive voice and bounded delegated outcomes over the existing runtime | Design proposal; implementation open | P23 |
-| VH-01 | Existing call transcription default needs a dated provider migration | Partial; source changes and focused checks | P22 |
+| ID                  | Finding                                                                                                   | Status                                     | Packet |
+| ------------------- | --------------------------------------------------------------------------------------------------------- | ------------------------------------------ | ------ |
+| APP-11              | Local Gmail polling bypasses the migration activation fence                                               | Implemented and locally verified           | P19    |
+| AUX-API-PARSING     | Real-auth, bounded-body and per-section API tests must run beyond mocks                                   | Partial; source changes and focused checks | P00    |
+| AUX-MIGRATIONS      | Upgrade, ownership, transform and recovery requirements span migration prefixes                           | Partial; source changes and focused checks | P19    |
+| AUX-SINGLE-OWNER    | Enforce one-owner installation or explicitly migrate global identities before multitenancy                | Partial; source changes and focused checks | P04    |
+| AUX-TOOLS-ISOLATION | Worker cancellation, process-tree lifetime and local byte/path limits need adversarial validation         | Partial; source changes and focused checks | P18    |
+| CC-01               | Updating or rolling back applies a foundation-only configuration to the live runtime state                | Partial; source changes and focused checks | P20    |
+| CC-02               | Ready can be satisfied by an old or unrelated model call rather than a current owner response             | Partial; source changes and focused checks | P20    |
+| CC-03               | A crash between a cutover mutation and its evidence write defeats rollback’s attempted-step detection     | Partial; source changes and focused checks | P20    |
+| CC-04               | Rollback is not bound to the configuration and evidence chain that authorized the cutover                 | Partial; source changes and focused checks | P20    |
+| CC-05               | Retirement can report READY after a rollback, including with a fresh inventory                            | Partial; source changes and focused checks | P20    |
+| DM-01               | A journal timestamp inversion can skip the approval-policy uniqueness migration                           | Implemented and locally verified           | P19    |
+| DM-04               | The consumer pilot requires a browser chat that route policy forbids                                      | Partial; source changes and focused checks | P19    |
+| DM-05               | Living guidance contradicts current driver, module, queue and release behavior                            | Partial; source changes and focused checks | P19    |
+| DM-06               | The PostgreSQL restore drill starts a temporary runtime without fencing restored work                     | Partial; source changes and focused checks | P19    |
+| FS-15               | Valid migration documents can form an oversized transaction that cannot resume                            | Partial; source changes and focused checks | P19    |
+| IOS-13              | Native review export does not bind build/runtime provenance to the actual test run                        | Partial; source changes and focused checks | P00    |
+| IOS-14              | Shipping guide contradicts APNs implementation and portrait shipping contract                             | Partial; source changes and focused checks | P20    |
+| OPS-01              | Code job does not enforce its advertised network isolation                                                | Partial; source changes and focused checks | P18    |
+| OPS-02              | Current-only cleanup destroys project-wide secret history using a regional dependency inventory           | Partial; source changes and focused checks | P20    |
+| OPS-03              | Self-repair's trusted guard permits Firestore owner-authentication code                                   | Partial; source changes and focused checks | P18    |
+| OPS-04              | Consumer private-agent Cloud Tasks/Scheduler audiences conflict with Cloud Run IAM                        | Partial; source changes and focused checks | P19    |
+| OPS-05              | The generated local .env is rejected by its own schema                                                    | Implemented and locally verified           | P19    |
+| OPS-06              | Fresh legacy GCP provisioning cannot bootstrap its required agent URL                                     | Partial; source changes and focused checks | P19    |
+| OPS-07              | Shipping agent dependencies differ from tested/audited lock and escape image JS scanning                  | Partial; source changes and focused checks | P20    |
+| OPS-08              | Consumer Google-auth native token provisioning is incompatible with read/rotation code                    | Partial; source changes and focused checks | P19    |
+| OPS-09              | Live goal verification can run unrelated due schedules and removes real cost evidence                     | Implemented and locally verified           | P00    |
+| OPS-10              | Private Markdown voice samples are falsely described as gitignored                                        | Implemented and locally verified           | P20    |
+| OPS-11              | Independent service rollout leaves incompatible versions live after a failed agent release                | Partial; source changes and focused checks | P20    |
+| OPS-12              | Manual/local release paths do not perform the advertised source verification                              | Partial; source changes and focused checks | P20    |
+| OPS-14              | Demo people purge deletes the real owner's graph relations                                                | Partial; source changes and focused checks | P00    |
+| OPS-15              | Phone setup corrupts minimal module selection after changing Twilio state                                 | Partial; source changes and focused checks | P19    |
+| OPS-16              | Several older visual utilities write authoritative fixture conversations into the ordinary owner database | Partial; source changes and focused checks | P00    |
+| OPS-17              | Selective screenshot recapture can relabel stale evidence as current CSS evidence                         | Implemented and locally verified           | P00    |
+| R2                  | Integration tests can destroy or corrupt unrelated data                                                   | Partial; source changes and focused checks | P00    |
+| TW-18               | Deployed code-worker permissions cannot stage its declared inputs                                         | Partial; source changes and focused checks | P18    |
+| API-01              | Anonymous invalid bearer tokens bypass the secret-read cache                                              | Partial; source changes and focused checks | P04    |
+| API-02              | Same-site cross-origin requests can use owner cookies on mobile mutations                                 | Partial; source changes and focused checks | P04    |
+| API-03              | PostgreSQL object mutations do not consistently enforce the owner checked on reads                        | Partial; source changes and focused checks | P04    |
+| API-06              | Successful task-control responses do not identify what actually changed                                   | Partial; source changes and focused checks | P07    |
+| API-10              | Goal target-date validation permits normalized nonexistent dates                                          | Partial; source changes and focused checks | P03    |
+| APP-12              | A failed prior document attempt suppresses a fresh explicit read                                          | Partial; source changes and focused checks | P03    |
+| CF-05               | Chat admission has no stable retry identity                                                               | Partial; source changes and focused checks | P02    |
+| CF-08               | An owner request can be mislabeled as an external request                                                 | Partial; source changes and focused checks | P04    |
+| FS-01               | Approval chat hydration loses the tool name                                                               | Partial; source changes and focused checks | P04    |
+| HC-03               | Task identity and latest intent are not a coherent runtime boundary                                       | Partial; source changes and focused checks | P02    |
+| HC-05               | Clarification can finish before the sources that would answer it are loaded                               | Partial; source changes and focused checks | P03    |
+| HC-07               | Later owner changes suppress recovery but not obsolete completion requirements                            | Partial; source changes and focused checks | P03    |
+| HC-11               | Ordinary physical-card text can be promoted to an explicit UI-card obligation                             | Partial; source changes and focused checks | P03    |
+| HC-12               | Planner mistakes tainted third-party content for positive owner intent                                    | Partial; source changes and focused checks | P04    |
+| MC-03               | Localized/unknown quoted owner email bypasses direct-email taint                                          | Partial; source changes and focused checks | P04    |
+| MC-04               | Card observer executes before unauthenticated direct email is rejected                                    | Partial; source changes and focused checks | P04    |
+| MC-05               | Explicit Gmail sync disable is ignored by Pub/Sub ingress                                                 | Partial; source changes and focused checks | P04    |
+| PG-02               | Approval expiry is not enforced at decision time                                                          | Partial; source changes and focused checks | P04    |
+| R12                 | Calendar directions ignore the day the owner requested                                                    | Implemented and locally verified           | P03    |
+| R7                  | Direct Google Doc routing ignores an explicit prohibition on reading                                      | Partial; source changes and focused checks | P03    |
+| R9                  | Historical calendar questions are forced into future date windows                                         | Implemented and locally verified           | P03    |
+| TW-02               | A failed MCP preparation can remove the mandatory approval binding                                        | Partial; source changes and focused checks | P04    |
+| TW-03               | Delayed approved execution does not revalidate current prohibitions                                       | Partial; source changes and focused checks | P04    |
+| TW-07               | Public weather/maps capabilities expose the private owner-location fallback to external tasks             | Partial; source changes and focused checks | P04    |
+| TW-08               | Investigating audit evidence can make the offered repair-report approval ineffective                      | Partial; source changes and focused checks | P04    |
+| TW-11               | File-prefix allowlists run before path normalization                                                      | Partial; source changes and focused checks | P04    |
+| TW-12               | Raw Gmail labels bypass the archive approval tier                                                         | Partial; source changes and focused checks | P04    |
+| TW-13               | Collaborative Google edits are incorrectly treated as private-only writes                                 | Partial; source changes and focused checks | P04    |
+| APP-03              | Chat cursor's full-page shortcut defeats late-commit protection                                           | Partial; source changes and focused checks | P02    |
+| APP-05              | Approval email overclaims that nothing has happened                                                       | Partial; source changes and focused checks | P07    |
+| APP-06              | Task audit timestamp pagination can permanently omit equal-time events                                    | Partial; source changes and focused checks | P02    |
+| APP-09              | Production notification fanout can stamp total delivery failure as success                                | Partial; source changes and focused checks | P06    |
+| AUX-CONTRACT-SHAPES | Checkpoint shapes, money/time validators and import link constraints need real contract round-trips       | Implemented and locally verified           | P05    |
+| AUX-TOOLS-IDENTITY  | Gmail/artifact keys conflate operation identity with title or nondeterministic content                    | Partial; source changes and focused checks | P05    |
+| CF-01               | Mission session instruction loss and recursive creation                                                   | Partial; source changes and focused checks | P07    |
+| CF-02               | The repeated confirmation is deterministic product copy                                                   | Partial; source changes and focused checks | P07    |
+| CF-03               | Reminder cards show superseded creations as active                                                        | Partial; source changes and focused checks | P07    |
+| CF-04               | Reminder creation is not retry-idempotent                                                                 | Partial; source changes and focused checks | P05    |
+| CF-06               | “After the game tomorrow” has no enforced temporal dependency                                             | Partial; source changes and focused checks | P07    |
+| CF-07               | Mission cadence is dropped, and recursive roots escape the original mission budget                        | Partial; source changes and focused checks | P07    |
+| DM-03               | Retiring the default morning brief also disables owner-customized schedules                               | Partial; source changes and focused checks | P07    |
+| FS-13               | A late/replayed callback can revive a timed-out job or overwrite an already-recorded result               | Partial; source changes and focused checks | P05    |
+| HC-01               | Native Stop stops observation, not execution                                                              | Partial; source changes and focused checks | P01    |
+| HC-02               | Native poll failure/timeout can say “Your result is ready”                                                | Partial; source changes and focused checks | P01    |
+| HC-04               | Correct silence from proactive work becomes an error                                                      | Partial; source changes and focused checks | P07    |
+| HC-08               | Future-notification request becomes a read-only answer, then an honest dead end                           | Partial; source changes and focused checks | P07    |
+| MC-01               | A placed call's selected voice route is not frozen for media connection                                   | Partial; source changes and focused checks | P22    |
+| MC-02               | Terminal call status commits before durable result delivery, preventing retry                             | Partial; source changes and focused checks | P22    |
+| MC-10               | A skipped channel send is treated as a completed delivery attempt                                         | Partial; source changes and focused checks | P06    |
+| MC-12               | Outbound call concurrency/day limits are check-then-create                                                | Partial; source changes and focused checks | P22    |
+| PG-01               | Cancelling a watch can be undone by an in-flight fire                                                     | Partial; source changes and focused checks | P07    |
+| PG-03               | Primary-chat fallback can adopt the assistant-only Notifications thread                                   | Partial; source changes and focused checks | P06    |
+| PG-06               | First concurrent SMS messages can split into a conversation with no return route                          | Partial; source changes and focused checks | P06    |
+| PG-08               | Self-repair claiming can overwrite an owner dismissal                                                     | Partial; source changes and focused checks | P07    |
+| PG-09               | Microsecond reply cursors can repeatedly re-inject prior owner messages on resume                         | Partial; source changes and focused checks | P02    |
+| R1                  | Multi-call suspension loses earlier approvals and leaves an invalid transcript                            | Partial; source changes and focused checks | P05    |
+| R10                 | Compound SMS sends remain incomplete after real successful sends                                          | Partial; source changes and focused checks | P07    |
+| R13                 | Calendar projections can merge distinct recurring occurrences and hide real conflicts                     | Partial; source changes and focused checks | P07    |
+| R14                 | Watch suggestion recovery depends on the model repeating its earlier decision                             | Partial; source changes and focused checks | P06    |
+| R3                  | Mission outcomes and alerts lack durable report delivery intent                                           | Partial; source changes and focused checks | P06    |
+| R4                  | Stalled-goal replacement can cancel a newly resumed task                                                  | Partial; source changes and focused checks | P07    |
+| R5                  | Invalid autonomy expiration fails open                                                                    | Partial; source changes and focused checks | P04    |
+| R6                  | Retention can erase live task execution evidence                                                          | Partial; source changes and focused checks | P05    |
+| R8                  | Checklist cannot represent owner-cancelled outcomes                                                       | Partial; source changes and focused checks | P07    |
+| TW-04               | Repeated jobs reuse earlier artifact identities                                                           | Partial; source changes and focused checks | P05    |
+| VH-04               | Call transcript flushing can discard unpersisted batches                                                  | Partial; source changes and focused checks | P22    |
+| FS-14               | Asynchronous learned-memory and voice writers can cross successful privacy erasure                        | Partial; source changes and focused checks | P08    |
+| HM03                | Document erasure acknowledges success after losing retryable blob work                                    | Partial; source changes and focused checks | P08    |
+| HM05                | Import deletion does not erase derived archive content or occasions                                       | Partial; source changes and focused checks | P08    |
+| HM06                | Untrusted occasion updates inherit an already-trusted row                                                 | Partial; source changes and focused checks | P08    |
+| HM21                | Transient location is copied into durable task instructions                                               | Partial; source changes and focused checks | P08    |
+| PG-05               | Privacy erasure can lose to an in-flight card compilation or memory save                                  | Partial; source changes and focused checks | P08    |
+| APP-07              | Relationship correction is split, and the old fact remains recallable                                     | Partial; source changes and focused checks | P10    |
+| AUX-AUDIT-PRIVACY   | Audit redaction is not anonymization and needs URL/field-aware handling                                   | Partial; source changes and focused checks | P08    |
+| DM-07               | Audit capture is described as never reused in prompts although tools expose it to the assistant           | Partial; source changes and focused checks | P08    |
+| FS-05               | Prior-conversation evidence window is not actually the newest tool receipts                               | Partial; source changes and focused checks | P09    |
+| FS-07               | Message embedding cursor permanently skips backfilled history and embedding-space changes                 | Partial; source changes and focused checks | P09    |
+| FS-08               | Commitment history eventually disables extraction for an otherwise valid recurring fact                   | Partial; source changes and focused checks | P09    |
+| FS-10               | Editing an occasion's date breaks the deterministic identity used by other writers                        | Partial; source changes and focused checks | P10    |
+| FS-11               | Deleting an auto-created person leaves a stale name identity that future learning trusts                  | Partial; source changes and focused checks | P10    |
+| FS-16               | Entity merge deletes an owner's rejection in favor of an unreviewed duplicate                             | Partial; source changes and focused checks | P10    |
+| FS-17               | Knowledge workspace reports relations as in recall when runtime necessarily rejects them                  | Partial; source changes and focused checks | P10    |
+| HM04                | Processor completion has a crash gap, and the last allowed live attempt can be retired early              | Partial; source changes and focused checks | P09    |
+| HM07                | Consolidation can turn dated historical facts into current timeless facts                                 | Partial; source changes and focused checks | P10    |
+| HM08                | Graph date normalization instructions conflict with literal grounding                                     | Partial; source changes and focused checks | P10    |
+| HM09                | Predicate canonicalization erases past tense and grounding does not establish direction or negation       | Partial; source changes and focused checks | P10    |
+| HM14                | Portable consolidation can retire every member of a fact cycle                                            | Partial; source changes and focused checks | P10    |
+| HM15                | Voice archive ingestion can attribute third-party writing to the owner                                    | Partial; source changes and focused checks | P09    |
+| HM16                | Archive parsing silently loses content and substitutes a window's median date for individual evidence     | Partial; source changes and focused checks | P09    |
+| HM17                | Segment watermarks skip unresolved messages and can hide more relevant raw evidence                       | Partial; source changes and focused checks | P09    |
+| HM18                | SQL skill reflection can overwrite an owner edit made during model/embedding work                         | Partial; source changes and focused checks | P10    |
+| HM20                | All-day event display shifts dates in UTC+12 and later zones                                              | Partial; source changes and focused checks | P13    |
+| HM22                | Large documents can be marked fully ready after indexing only a prefix                                    | Partial; source changes and focused checks | P09    |
+| MC-11               | Forwarded ingestion loses the pipeline after a message-only crash checkpoint                              | Partial; source changes and focused checks | P09    |
+| ME-01               | One oversized contact poisons the whole job after paid work                                               | Partial; source changes and focused checks | P09    |
+| ME-02               | Deterministic persistence errors regenerate and re-embed up to eight times                                | Partial; source changes and focused checks | P09    |
+| ME-03               | Unvalidated person creation feeds a polluted authoritative-looking catalog                                | Partial; source changes and focused checks | P10    |
+| ME-04               | Prefix matching can steal an exact identity or collapse distinct people                                   | Partial; source changes and focused checks | P10    |
+| ME-05               | A discarded duplicate fact can still create a contact                                                     | Partial; source changes and focused checks | P09    |
+| ME-06               | Occasion-only output is silently discarded and checkpointed                                               | Partial; source changes and focused checks | P09    |
+| DESIGN-KNOWLEDGE    | Canonical assertions, inverse presentation, grouped curation and explained derivations                    | Partial; source changes and focused checks | P10    |
+| DESIGN-CONTEXT      | Decision-aware context selection and relevance before planning                                            | Partial; source changes and focused checks | P11    |
+| DESIGN-CONTEXT-UX   | Selective use, conflict handling and useful contextual initiative                                         | Partial; source changes and focused checks | P11    |
+| FS-12               | Every new Firestore watch suggestion has an ID the native decision route rejects                          | Partial; source changes and focused checks | P12    |
+| HC-09               | Proactive “Still open” is not proof the owner still owes an action                                        | Partial; source changes and focused checks | P12    |
+| HM01                | Closing a commitment does not fence replay of the same source occurrence                                  | Partial; source changes and focused checks | P12    |
+| HM02                | Time-based cleanup can discard future promises and the reminder just snoozed                              | Partial; source changes and focused checks | P12    |
+| HM10                | Calendar window disappearance is asserted as cancellation                                                 | Partial; source changes and focused checks | P12    |
+| HM11                | Candidate limits and snooze state can suppress valid due reminders                                        | Partial; source changes and focused checks | P12    |
+| HM23                | Curiosity claims a question forever before durably posting it                                             | Partial; source changes and focused checks | P12    |
+| MC-13               | Watch dedupe commits before notifications/suggestion enqueue                                              | Partial; source changes and focused checks | P12    |
+| MC-14               | Web watch dedupe suppresses a genuine later repeated transition                                           | Partial; source changes and focused checks | P12    |
+| PS-01               | Calendar conflict evidence and identity                                                                   | Partial; source changes and focused checks | P12    |
+| PS-02               | Cancellation, supersession, and stale suggestions                                                         | Partial; source changes and focused checks | P12    |
+| PS-03               | Duplicate security alerts and cross-surface repetition                                                    | Partial; source changes and focused checks | P12    |
+| PS-04               | Ranking, context, and dismissed-card accumulation                                                         | Partial; source changes and focused checks | P12    |
+| PS-05               | Berlin spa timezone                                                                                       | Partial; source changes and focused checks | P12    |
+| MC-06               | Embedding calls ignore disabled model rows                                                                | Partial; source changes and focused checks | P14    |
+| MC-07               | Connection revocation has stale/fail-open windows                                                         | Partial; source changes and focused checks | P04    |
+| API-04              | Card-image response cap is enforced after allocation                                                      | Partial; source changes and focused checks | P13    |
+| API-05              | Card-image DNS preflight is not bound to the actual connection                                            | Partial; source changes and focused checks | P13    |
+| API-09              | One workspace section failure blocks unrelated native screens                                             | Partial; source changes and focused checks | P13    |
+| APP-01              | Firestore composition drops configured heavy-document processor                                           | Partial; source changes and focused checks | P09    |
+| APP-04              | Local PostgreSQL sweep still aborts maintenance after owner-read failure                                  | Partial; source changes and focused checks | P13    |
+| AUX-MAPS-SPORTS     | Sports/maps must preserve coverage, historical scope, transport mode and trusted image hosts              | Partial; source changes and focused checks | P13    |
+| AUX-TOOLS-MCP       | MCP stream matching and ambiguous effects need an explicit transport contract                             | Partial; source changes and focused checks | P13    |
+| AUX-TOOLS-READS     | Source reads need loss, structure, pagination and completeness receipts                                   | Partial; source changes and focused checks | P13    |
+| FS-04               | Gmail's expiring lock does not fence the worker it replaces                                               | Partial; source changes and focused checks | P09    |
+| FS-18               | Lifetime-history bounds make owner cleanup and live views fail on ordinary growth                         | Partial; source changes and focused checks | P09    |
+| FS-19               | Supported large documents become unreadable in the owner detail view                                      | Partial; source changes and focused checks | P09    |
+| HC-06               | Mail lookup coverage conflates found hits with inspected answer evidence                                  | Partial; source changes and focused checks | P11    |
+| MC-08               | Supported embedding dimensions are rejected by the common router                                          | Partial; source changes and focused checks | P14    |
+| MC-09               | SMS budgets count one unit regardless of multipart encoding                                               | Partial; source changes and focused checks | P15    |
+| MC-15               | Email attachment path collisions overwrite or delete referenced bytes                                     | Partial; source changes and focused checks | P09    |
+| PROV-01             | Recoverable investigation failures become terminal                                                        | Partial; source changes and focused checks | P14    |
+| PROV-02             | Router and repair triage both own fallback, masking the recovery cause                                    | Partial; source changes and focused checks | P14    |
+| PROV-03             | Capability metadata does not validate the actual request shape                                            | Partial; source changes and focused checks | P14    |
+| PROV-04             | Raw, misleading, non-actionable repair notices                                                            | Partial; source changes and focused checks | P14    |
+| PROV-05             | Error classification traversal is artificially shallow                                                    | Partial; source changes and focused checks | P14    |
+| R11                 | Grounding validates a bag of facts rather than the relationships the answer claims                        | Partial; source changes and focused checks | P11    |
+| R15                 | Complete calendar answers silently drop rows and all-day dates can shift                                  | Partial; source changes and focused checks | P13    |
+| R16                 | URL provenance treats distinct resource addresses as equivalent                                           | Partial; source changes and focused checks | P11    |
+| TW-01               | Code callback limits exceed the receiving webhook limit                                                   | Partial; source changes and focused checks | P13    |
+| TW-05               | Spreadsheet/PPTX extraction drops structural meaning                                                      | Partial; source changes and focused checks | P09    |
+| TW-10               | Provider deadlines stop short of complete response consumption                                            | Partial; source changes and focused checks | P13    |
+| TW-14               | Calendar coverage can be reported complete after dropping requested calendars                             | Partial; source changes and focused checks | P13    |
+| TW-15               | Calendar attendee updates lose fields and can target the wrong shared-calendar identity                   | Partial; source changes and focused checks | P13    |
+| TW-16               | Slides “append” prepends new slides                                                                       | Partial; source changes and focused checks | P13    |
+| TW-17               | Drive ingestion and attachment staging reuse mutable filenames                                            | Partial; source changes and focused checks | P09    |
+| TW-19               | Native Google Sheets reading/ingestion silently exports only the first worksheet                          | Partial; source changes and focused checks | P09    |
+| VH-03               | Call interruption accounting estimates playback without transport acknowledgments                         | Partial; source changes and focused checks | P22    |
+| APP-02              | Withdrawn candidate: Firestore Shortcut location is intentionally unsupported                             | Withdrawn; intentionally unsupported       | P21    |
+| HM12                | Deterministic hotel cards copy secret-bearing mail into an unmasked fact                                  | Partial; source changes and focused checks | P08    |
+| IOS-01              | Transcription failure bypasses microphone teardown                                                        | Partial; source changes and focused checks | P01    |
+| IOS-03              | Undo-hide can publish stale conversation across navigation/account changes                                | Partial; source changes and focused checks | P16    |
+| IOS-06              | Foreground location opt-out is not rechecked before transmission                                          | Partial; source changes and focused checks | P01    |
+| IOS-09              | Latched composer dictation has no background stop                                                         | Partial; source changes and focused checks | P01    |
+| IOS-10              | Automatic speech bypasses approval privacy projection                                                     | Partial; source changes and focused checks | P01    |
+| IOS-11              | Generated-card sensitivity is not enforced on secondary fields or accessible speech labels                | Partial; source changes and focused checks | P08    |
+| API-08              | Coalescing can return a pre-mutation snapshot to a post-mutation refresh                                  | Partial; source changes and focused checks | P16    |
+| DESIGN-COMPOSITION  | Bounded native component composition with server-owned actions                                            | Partial; source changes and focused checks | P17    |
+| FS-06               | Fresh goal work chats are missing from ordinary chat lists                                                | Partial; source changes and focused checks | P16    |
+| HM19                | Nested card validation discards its own sanitized result                                                  | Partial; source changes and focused checks | P17    |
+| IOS-02              | Push registration dedupe has no server or owner scope                                                     | Partial; source changes and focused checks | P16    |
+| IOS-04              | Notification inline decisions skip notification-owner check                                               | Partial; source changes and focused checks | P16    |
+| IOS-05              | Late speech cancellation can clear replacement speech                                                     | Partial; source changes and focused checks | P16    |
+| IOS-12              | Generated map refresh keys ignore changed place values                                                    | Partial; source changes and focused checks | P16    |
+| IOS-15              | Talk ignores failure to enable echo cancellation                                                          | Partial; source changes and focused checks | P16    |
+| IOS-16              | Scoreboard logo allowlist accepts lookalike external hosts                                                | Partial; source changes and focused checks | P16    |
+| IOS-17              | Future scoreboards have no clock-driven transition into live polling                                      | Partial; source changes and focused checks | P16    |
+| IOS-18              | Unbounded card numbers reach trapping integer conversions                                                 | Partial; source changes and focused checks | P16    |
+| IOS-19              | Duplicate knowledge-card node IDs trap during parsing                                                     | Partial; source changes and focused checks | P16    |
+| IOS-20              | Partial availability can be presented as unqualified “Free”                                               | Partial; source changes and focused checks | P16    |
+| IOS-22              | Graph VoiceOver reverses directed relationships at the object endpoint                                    | Partial; source changes and focused checks | P16    |
+| IOS-23              | Import size limits are enforced only after a full synchronous file read                                   | Partial; source changes and focused checks | P16    |
+| IOS-24              | Knowledge item save can merge after rename/retype failed                                                  | Partial; source changes and focused checks | P16    |
+| WEB-01              | Local mobile-key rotation weakens .env file permissions                                                   | Partial; source changes and focused checks | P21    |
+| WEB-02              | Administration lost a discoverable per-browser sign-out                                                   | Implemented and locally verified           | P21    |
+| WEB-03              | Retained provider form carries a credential across provider destinations                                  | Partial; source changes and focused checks | P21    |
+| WEB-04              | Retained KG date correction submits the old date identity                                                 | Partial; source changes and focused checks | P21    |
+| WEB-05              | Retained editors let “Cancel” dismiss an already-submitted mutation                                       | Partial; source changes and focused checks | P21    |
+| WEB-06              | Retained live-call controls can hide a second question                                                    | Partial; source changes and focused checks | P21    |
+| WEB-07              | Revealed sensitive values remain inaccessible through the control's accessible name                       | Partial; source changes and focused checks | P21    |
+| WEB-08              | Dormant cap form rejects values accepted and persisted by the API                                         | Partial; source changes and focused checks | P21    |
+| WEB-09              | Uncontrolled action forms can erase a failed submission                                                   | Partial; source changes and focused checks | P21    |
+| WEB-10              | Retained scoreboards do not schedule their own future activation                                          | Partial; source changes and focused checks | P21    |
+| WEB-11              | A settled task stops the retained thread's lifetime poll                                                  | Partial; source changes and focused checks | P21    |
+| WEB-12              | Text-only reconciliation removes legitimately repeated provisional turns                                  | Partial; source changes and focused checks | P21    |
+| WEB-13              | Generated-card “ask” actions bypass the chat's busy exclusion                                             | Partial; source changes and focused checks | P21    |
+| WEB-14              | Shallow card eligibility suppresses prose for unsupported v1 content                                      | Partial; source changes and focused checks | P21    |
+| WEB-15              | Incomplete calendar evidence is still described as free                                                   | Partial; source changes and focused checks | P21    |
+| WEB-16              | Generated sensitive facts leak through secondary projections                                              | Partial; source changes and focused checks | P21    |
+| WEB-17              | An old task poll can clear a newer task's state                                                           | Partial; source changes and focused checks | P21    |
+| VH-02               | Call ledger omits charge components and does not reconcile the complete bill                              | Partial; source changes and focused checks | P22    |
+| API-07              | Budget edits silently succeed on rejected input and use permissive numeric parsing                        | Partial; source changes and focused checks | P15    |
+| APP-08              | Text-model selection can retain a non-text fallback                                                       | Partial; source changes and focused checks | P14    |
+| AUX-MODELS-COST     | Timeout/abort usage and metering failures need conservative durable reconciliation                        | Partial; source changes and focused checks | P15    |
+| AUX-VOICE-CONTRACT  | Realtime session readiness, tool-follow-up and cost estimation need provider contract qualification       | Open                                       | P22    |
+| COST-03             | P1. Separate budget fallback from capability fallback                                                     | Partial; source changes and focused checks | P15    |
+| COST-04             | P1. Put actual price constraints around latency selection                                                 | Partial; source changes and focused checks | P15    |
+| COST-05             | P2. Improve reservations and cost evidence before tuning budgets                                          | Partial; source changes and focused checks | P15    |
+| COST-06             | P2. Stabilize safe prefixes; reduce redundant evidence, not essential context                             | Partial; source changes and focused checks | P15    |
+| COST-07             | P2. Spend less reasoning only where the role passes without it                                            | Open                                       | P15    |
+| COST-08             | Lower priority: avoid paid no-op extraction and embedding                                                 | Partial; source changes and focused checks | P15    |
+| DESIGN-DECISIONS    | Selective decision adapter and retrieval reranking, including Jev evaluation                              | Partial; source changes and focused checks | P15    |
+| DM-02               | PostgreSQL routing upgrades can replace custom settings outside the retired field                         | Partial; source changes and focused checks | P15    |
+| HC-10               | Audit index cannot discover old owner tasks beyond bounded recent results                                 | Partial; source changes and focused checks | P00    |
+| IOS-21              | Selecting another model can silently retain the previous model’s prices                                   | Partial; source changes and focused checks | P15    |
+| PG-07               | Accepted maximum task budget cannot fit the PostgreSQL field                                              | Partial; source changes and focused checks | P15    |
+| DESIGN-HORIZON      | Responsive voice and bounded delegated outcomes over the existing runtime                                 | Design proposal; implementation open       | P23    |
+| VH-01               | Existing call transcription default needs a dated provider migration                                      | Partial; source changes and focused checks | P22    |
 
 ## Detailed improvement requirements
 
@@ -3241,96 +3241,96 @@ Source references: [reference 1](https://github.com/bmson/assistant/blob/ce348d4
 
 Each packet retains its original prerequisites, non-goals and acceptance conditions in the local source inventory. All packets are accounted for; none is certified complete as a packet.
 
-| Packet | Scope |
-| --- | --- |
-| P00 | P00 Make verification disposable and record the baseline |
-| P01 | P01 Fix native Stop unknown outcomes and audio privacy |
-| P02 | P02 Bind operations triggers and continuations |
-| P03 | P03 Interpret the whole request before routing |
-| P04 | P04 Bind authority approval and current policy |
-| P05 | P05 Persist batches effects and replay identity |
-| P06 | P06 Make owner delivery durable and truthful |
-| P07 | P07 Repair temporal work and effective outcomes |
-| P08 | P08 Fence erasure lineage and every privacy projection |
-| P09 | P09 Make ingestion extraction and coverage recoverable |
-| P10 | P10 Repair knowledge identity corrections and temporal meaning |
-| P11 | P11 Compose relevant complete and concise answers |
-| P12 | P12 Admit useful initiative through one attention policy |
-| P13 | P13 Enforce complete bounded tool and transport contracts |
-| P14 | P14 Unify provider attempts without losing safe recovery |
-| P15 | P15 Measure economics and qualify selective decisions |
-| P16 | P16 Make native state and accessibility reflect one outcome |
-| P17 | P17 Add bounded native composition after contract repair |
-| P18 | P18 Contain code execution and protected repair paths |
-| P19 | P19 Repair supported setup migrations activation and restore |
-| P20 | P20 Make release cutover and rollback evidence bound |
-| P21 | P21 Repair administration and keep dormant surfaces gated |
-| P22 | P22 Repair current call lifecycle transcripts and billing |
-| P23 | P23 Qualify future voice and bounded delegated outcomes |
-| P24 | P24 Prove composed journeys and control rollout |
+| Packet | Scope                                                          |
+| ------ | -------------------------------------------------------------- |
+| P00    | P00 Make verification disposable and record the baseline       |
+| P01    | P01 Fix native Stop unknown outcomes and audio privacy         |
+| P02    | P02 Bind operations triggers and continuations                 |
+| P03    | P03 Interpret the whole request before routing                 |
+| P04    | P04 Bind authority approval and current policy                 |
+| P05    | P05 Persist batches effects and replay identity                |
+| P06    | P06 Make owner delivery durable and truthful                   |
+| P07    | P07 Repair temporal work and effective outcomes                |
+| P08    | P08 Fence erasure lineage and every privacy projection         |
+| P09    | P09 Make ingestion extraction and coverage recoverable         |
+| P10    | P10 Repair knowledge identity corrections and temporal meaning |
+| P11    | P11 Compose relevant complete and concise answers              |
+| P12    | P12 Admit useful initiative through one attention policy       |
+| P13    | P13 Enforce complete bounded tool and transport contracts      |
+| P14    | P14 Unify provider attempts without losing safe recovery       |
+| P15    | P15 Measure economics and qualify selective decisions          |
+| P16    | P16 Make native state and accessibility reflect one outcome    |
+| P17    | P17 Add bounded native composition after contract repair       |
+| P18    | P18 Contain code execution and protected repair paths          |
+| P19    | P19 Repair supported setup migrations activation and restore   |
+| P20    | P20 Make release cutover and rollback evidence bound           |
+| P21    | P21 Repair administration and keep dormant surfaces gated      |
+| P22    | P22 Repair current call lifecycle transcripts and billing      |
+| P23    | P23 Qualify future voice and bounded delegated outcomes        |
+| P24    | P24 Prove composed journeys and control rollout                |
 
 ## Acceptance journeys
 
 Journey coverage is a separate gate from file coverage and focused regressions. These journeys are retained for implementation and qualification; they have not all been executed.
 
-| Journey | Scope |
-| --- | --- |
-| F01 | F01 Claim and pair an installation |
-| F02 | F02 Resume an existing connection |
-| F03 | F03 Discover capabilities and connect services |
-| F04 | F04 Configure model provider and roles |
-| F05 | F05 Add review a remote tool connection |
-| F06 | F06 Permission prompts and device settings |
-| F07 | F07 Ordinary and abstract discussion |
-| F08 | F08 Real personal lookup |
-| F09 | F09 Mixed answer and action |
-| F10 | F10 Draft quote edit translate |
-| F11 | F11 Clarification with partial answers |
-| F12 | F12 Short replies and approvals |
-| F13 | F13 Multi turn correction |
-| F14 | F14 Recall an earlier decision |
-| F15 | F15 Ask what happened historically |
-| F16 | F16 Admit one request |
-| F17 | F17 Execute bounded practical work |
-| F18 | F18 Review edit approve deny |
-| F19 | F19 Stop active work |
-| F20 | F20 Resume after interruption |
-| F21 | F21 Recover model provider failure |
-| F22 | F22 Budget decision and recovery |
-| F23 | F23 Create change cancel reminder |
-| F24 | F24 Long horizon goal or watch |
-| F25 | F25 Finish archive hide dismiss |
-| F26 | F26 Learn useful information |
-| F27 | F27 Correct confirm pin and forget |
-| F28 | F28 Resolve people and relationships |
-| F29 | F29 Open loops and goal progress |
-| F30 | F30 Useful in conversation initiative |
-| F31 | F31 Proactive issue detection and lifecycle |
-| F32 | F32 Cross producer attention |
-| F33 | F33 Accept snooze dismiss suggestion |
-| F34 | F34 Saved card and situation pack |
-| F35 | F35 Documents and backstory |
-| F36 | F36 Compose a new native interface |
-| F37 | F37 Interact refresh and replay a card |
-| F38 | F38 Stream and reconnect rich content |
-| F39 | F39 Move around while work continues |
-| F40 | F40 Dictate edit and send |
-| F41 | F41 Talk and read aloud |
-| F42 | F42 Outbound call task later phase |
-| F43 | F43 Notification badge and Live Activity |
-| F44 | F44 Accessibility and semantic fallback |
-| F45 | F45 Export erase and retention |
-| F46 | F46 Location aware help |
-| F47 | F47 Cost visibility and controls |
-| F48 | F48 Audit and investigate |
-| F49 | F49 Report and repair an issue |
-| F50 | F50 Pause schedules revoke autonomy disconnect |
-| F51 | F51 Install update restore and operate |
-| F52 | F52 Receive work through email SMS |
-| F53 | F53 Learn and apply writing voice |
-| F54 | F54 Inspect and edit skills |
-| F55 | F55 Review anomalies and standing rules |
-| F56 | F56 Deliver or share an artifact |
+| Journey | Scope                                          |
+| ------- | ---------------------------------------------- |
+| F01     | F01 Claim and pair an installation             |
+| F02     | F02 Resume an existing connection              |
+| F03     | F03 Discover capabilities and connect services |
+| F04     | F04 Configure model provider and roles         |
+| F05     | F05 Add review a remote tool connection        |
+| F06     | F06 Permission prompts and device settings     |
+| F07     | F07 Ordinary and abstract discussion           |
+| F08     | F08 Real personal lookup                       |
+| F09     | F09 Mixed answer and action                    |
+| F10     | F10 Draft quote edit translate                 |
+| F11     | F11 Clarification with partial answers         |
+| F12     | F12 Short replies and approvals                |
+| F13     | F13 Multi turn correction                      |
+| F14     | F14 Recall an earlier decision                 |
+| F15     | F15 Ask what happened historically             |
+| F16     | F16 Admit one request                          |
+| F17     | F17 Execute bounded practical work             |
+| F18     | F18 Review edit approve deny                   |
+| F19     | F19 Stop active work                           |
+| F20     | F20 Resume after interruption                  |
+| F21     | F21 Recover model provider failure             |
+| F22     | F22 Budget decision and recovery               |
+| F23     | F23 Create change cancel reminder              |
+| F24     | F24 Long horizon goal or watch                 |
+| F25     | F25 Finish archive hide dismiss                |
+| F26     | F26 Learn useful information                   |
+| F27     | F27 Correct confirm pin and forget             |
+| F28     | F28 Resolve people and relationships           |
+| F29     | F29 Open loops and goal progress               |
+| F30     | F30 Useful in conversation initiative          |
+| F31     | F31 Proactive issue detection and lifecycle    |
+| F32     | F32 Cross producer attention                   |
+| F33     | F33 Accept snooze dismiss suggestion           |
+| F34     | F34 Saved card and situation pack              |
+| F35     | F35 Documents and backstory                    |
+| F36     | F36 Compose a new native interface             |
+| F37     | F37 Interact refresh and replay a card         |
+| F38     | F38 Stream and reconnect rich content          |
+| F39     | F39 Move around while work continues           |
+| F40     | F40 Dictate edit and send                      |
+| F41     | F41 Talk and read aloud                        |
+| F42     | F42 Outbound call task later phase             |
+| F43     | F43 Notification badge and Live Activity       |
+| F44     | F44 Accessibility and semantic fallback        |
+| F45     | F45 Export erase and retention                 |
+| F46     | F46 Location aware help                        |
+| F47     | F47 Cost visibility and controls               |
+| F48     | F48 Audit and investigate                      |
+| F49     | F49 Report and repair an issue                 |
+| F50     | F50 Pause schedules revoke autonomy disconnect |
+| F51     | F51 Install update restore and operate         |
+| F52     | F52 Receive work through email SMS             |
+| F53     | F53 Learn and apply writing voice              |
+| F54     | F54 Inspect and edit skills                    |
+| F55     | F55 Review anomalies and standing rules        |
+| F56     | F56 Deliver or share an artifact               |
 
 ## Verification evidence
 

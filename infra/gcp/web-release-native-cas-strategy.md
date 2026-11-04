@@ -86,19 +86,19 @@ unpaused successor. Candidate/resume aliases bind the exact protected run/attemp
 Assume the reviewed initial known reconciliation has succeeded, followed by a NEW
 normal retirement plan and its full600s drain. Historical01080 stays retained.
 
-| Stage | Required result before continuing |
-|---|---|
-| Capture | Strict-equal C100; exact retained owned alias proofs; tombstones include already retired aliases. No writer has run. |
-| Create P (A) | New P native receipt, paused=true, traffic unchanged C100; no P alias yet. |
-| Attach P (B) | C100 retained as captured; P tagged0. Verify strict snapshot and native attachment, then existing `--record-candidate`, then tagged health/readiness probes. |
-| Promote P (B) | P tagged100, captured retained aliases0; no new revision/template change. Verify HTTP paused readiness; drain old canonical requests. |
+| Stage                   | Required result before continuing                                                                                                                                                                                                                                                 |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Capture                 | Strict-equal C100; exact retained owned alias proofs; tombstones include already retired aliases. No writer has run.                                                                                                                                                              |
+| Create P (A)            | New P native receipt, paused=true, traffic unchanged C100; no P alias yet.                                                                                                                                                                                                        |
+| Attach P (B)            | C100 retained as captured; P tagged0. Verify strict snapshot and native attachment, then existing `--record-candidate`, then tagged health/readiness probes.                                                                                                                      |
+| Promote P (B)           | P tagged100, captured retained aliases0; no new revision/template change. Verify HTTP paused readiness; drain old canonical requests.                                                                                                                                             |
 | Retire captured aliases | Existing strict normal planner/executor only: preserve P tagged100, remove exact proven captured aliases, NEW settled state and full600s stable-etag/generation barrier. Persist monotonic tombstones for removals, including any uncertain attempt that could have removed them. |
-| Agent/jobs | Keep existing paired ordering and contracts. Promote marker-aware agent; verify web-to-agent readiness. Web remains P100. |
-| Admission barrier | Fresh existing strict retirement/drain stability check immediately before unpaused create. Set admissionPossible durably BEFORE invoking createR, even though creation initially attaches no alias. |
-| Create R (A) | Native new R receipt with identical manifest image and allowed pause=true→false delta; P100 and its URI unchanged, retired aliases absent. R has no alias yet. |
-| Attach R (B) | P tagged100, R tagged0; exact retained P URI, verified new R URI, no retired aliases. Existing `--record-resume` and probes follow this strict-equal snapshot. |
-| Promote R (B) | R tagged100, P tagged0; no retired aliases. Health/source/readiness/writesPaused=false checks required. |
-| Close P (B) | R tagged100 only, owned P alias absent; record closure and tombstone. Preserve root cleanup hold until first successful paired capture and reviewed cleanup decision. |
+| Agent/jobs              | Keep existing paired ordering and contracts. Promote marker-aware agent; verify web-to-agent readiness. Web remains P100.                                                                                                                                                         |
+| Admission barrier       | Fresh existing strict retirement/drain stability check immediately before unpaused create. Set admissionPossible durably BEFORE invoking createR, even though creation initially attaches no alias.                                                                               |
+| Create R (A)            | Native new R receipt with identical manifest image and allowed pause=true→false delta; P100 and its URI unchanged, retired aliases absent. R has no alias yet.                                                                                                                    |
+| Attach R (B)            | P tagged100, R tagged0; exact retained P URI, verified new R URI, no retired aliases. Existing `--record-resume` and probes follow this strict-equal snapshot.                                                                                                                    |
+| Promote R (B)           | R tagged100, P tagged0; no retired aliases. Health/source/readiness/writesPaused=false checks required.                                                                                                                                                                           |
+| Close P (B)             | R tagged100 only, owned P alias absent; record closure and tombstone. Preserve root cleanup hold until first successful paired capture and reviewed cleanup decision.                                                                                                             |
 
 Creation receipts precede attachment; existing admission creation records remain
 AFTER attachment because they require a verified tag URI. They are distinct records,
@@ -137,26 +137,26 @@ successful template mutation. No admission verifier is weakened to ignore drift.
 ## Exact next implementation scope, still unwired
 
 1. Add a pure BASIC5 state/receipt model and adversarial tests for the above phase
-maps, monotonic tombstones/admissionPossible, creation template diff whitelist,
-pre/post identity invariants, safe hash-only packets and one-attempt uncertainty.
-Use injected fake IO only; no CLI/credential/workflow or production caller.
+   maps, monotonic tombstones/admissionPossible, creation template diff whitelist,
+   pre/post identity invariants, safe hash-only packets and one-attempt uncertainty.
+   Use injected fake IO only; no CLI/credential/workflow or production caller.
 2. Add separate source-only bounded native creation and multi-target traffic client
-modules with injected transport fixtures. Enforce exact masks/body/mode boundaries,
-fixed URLs, streamed byte/deadline/call limits, CAS/LRO scoping and no retry. Do not
-change the current retirement client or strict comparator. No token lookup adapter.
+   modules with injected transport fixtures. Enforce exact masks/body/mode boundaries,
+   fixed URLs, streamed byte/deadline/call limits, CAS/LRO scoping and no retry. Do not
+   change the current retirement client or strict comparator. No token lookup adapter.
 3. Independent source/docs/semantic review plus QA must approve exact source and
-failure fixtures, including creation BEFORE strict recording, uncertain createR,
-partial captured retirement then rollback, known unattached R, CAS loss, URL drift,
-forbidden alias recreation, LATEST targets and tag-cleanup representation. Run
-relevant existing retirement/admission/release tests, scriptsTSC, lint and diff.
+   failure fixtures, including creation BEFORE strict recording, uncertain createR,
+   partial captured retirement then rollback, known unattached R, CAS loss, URL drift,
+   forbidden alias recreation, LATEST targets and tag-cleanup representation. Run
+   relevant existing retirement/admission/release tests, scriptsTSC, lint and diff.
 4. ONLY after a new manager decision: implement thin protected production adapter
-and BASIC5-only call-site integration, preserving all other release paths. Then
-exact-head CI and independent final review before any merge/runtime authorization.
+   and BASIC5-only call-site integration, preserving all other release paths. Then
+   exact-head CI and independent final review before any merge/runtime authorization.
 5. Obtain separate reviewed fresh protected plan/read and explicit apply authority
-for initial reconciliation. Its equality receipt is followed by a NEW normal
-retirement plan/full600s drain. The first paired rollout needs its own source/run
-plan and phase-by-phase strict evidence; a first unsupported provider result stops
-it. No extra repair loop, repeated flag experiment or general equality exception.
+   for initial reconciliation. Its equality receipt is followed by a NEW normal
+   retirement plan/full600s drain. The first paired rollout needs its own source/run
+   plan and phase-by-phase strict evidence; a first unsupported provider result stops
+   it. No extra repair loop, repeated flag experiment or general equality exception.
 
 No source test establishes actual provider acceptance or serving delivery. Backend
 serving/source/readiness/delivery-guard restoration still precede the already

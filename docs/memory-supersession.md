@@ -21,7 +21,7 @@ Only a `knowledge` write from an owner- or assistant-trust task runs the check. 
 episode records that something happened and a later episode does not falsify it, and a quarantined
 save is still awaiting review.
 
-1. **Candidates.** Live, unquarantined `knowledge` facts about the *same subject*, ordered by
+1. **Candidates.** Live, unquarantined `knowledge` facts about the _same subject_, ordered by
    embedding distance, above `SUPERSEDE_SIMILARITY_FLOOR` and capped at `MAX_SUPERSEDE_CANDIDATES`.
    Subject scoping is the precision lever: two facts about different people cannot contradict each
    other, and "about no one" is its own bucket rather than a wildcard.
@@ -44,7 +44,7 @@ save is still awaiting review.
 
 The check fails open. A budget stop, a provider outage, or an unparseable verdict leaves the save
 exactly as it was — appended, with consolidation still due to catch it that night. The tool result
-reports the save either way. Losing a correction's *timeliness* is the bug this closes; losing the
+reports the save either way. Losing a correction's _timeliness_ is the bug this closes; losing the
 correction itself would be a worse one, so nothing here can fail a `memory.save`.
 
 When a write does retire something, the tool result carries `replacedEarlierFacts` so the assistant
@@ -52,13 +52,13 @@ can say it updated a fact rather than silently storing a second version of it.
 
 ## Where the code lives
 
-| Piece | Location |
-| --- | --- |
-| Portable contract (types, bounds, repository interface) | `packages/persistence/src/memory-supersede.ts` |
-| PostgreSQL adapter (candidate query, retirement) | `packages/db/src/memory-supersede-repository.ts` |
-| Policy and orchestration (`supersedableIds`, the classify call) | `packages/core/src/memory/supersede.ts` |
-| Precedence rule shared with consolidation | `pickWinner` in `packages/core/src/memory/consolidation.ts` |
-| Call site | `memory.save` in `packages/tools/src/builtin/index.ts` |
+| Piece                                                           | Location                                                    |
+| --------------------------------------------------------------- | ----------------------------------------------------------- |
+| Portable contract (types, bounds, repository interface)         | `packages/persistence/src/memory-supersede.ts`              |
+| PostgreSQL adapter (candidate query, retirement)                | `packages/db/src/memory-supersede-repository.ts`            |
+| Policy and orchestration (`supersedableIds`, the classify call) | `packages/core/src/memory/supersede.ts`                     |
+| Precedence rule shared with consolidation                       | `pickWinner` in `packages/core/src/memory/consolidation.ts` |
+| Call site                                                       | `memory.save` in `packages/tools/src/builtin/index.ts`      |
 
 The repository is wired in the agent composition root. There is no Firestore adapter yet, so this
 domain remains among those gating Firestore runtime activation; see

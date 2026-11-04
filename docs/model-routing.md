@@ -3,13 +3,13 @@
 Seed defaults use OpenRouter; owner connections can mix providers as described below. Defaults are declared in
 `packages/db/src/model-config.ts` and reconciled when the database is seeded.
 
-| Work | Primary | Budget/provider fallback |
-| --- | --- | --- |
-| Main agent and tool execution | MiniMax M2.7 | GPT-OSS-120B |
-| Conversational replies | Gemini 3.8 Flash | GPT-OSS-120B |
-| Planning | DeepSeek V4 Pro 0813 | GPT-OSS-120B |
-| Classification, extraction, rewriting, background synthesis | DeepSeek V4 Flash 0731 | GPT-OSS-120B |
-| Memory embeddings | Text Embedding 3 Small | Same embedding model |
+| Work                                                        | Primary                | Budget/provider fallback |
+| ----------------------------------------------------------- | ---------------------- | ------------------------ |
+| Main agent and tool execution                               | MiniMax M2.7           | GPT-OSS-120B             |
+| Conversational replies                                      | Gemini 3.8 Flash       | GPT-OSS-120B             |
+| Planning                                                    | DeepSeek V4 Pro 0813   | GPT-OSS-120B             |
+| Classification, extraction, rewriting, background synthesis | DeepSeek V4 Flash 0731 | GPT-OSS-120B             |
+| Memory embeddings                                           | Text Embedding 3 Small | Same embedding model     |
 
 Kimi K2.5, K2.6, and K3 are available in the conversation model picker. Select
 K3 explicitly for hard problems; it is never an automatic budget fallback.
@@ -64,12 +64,12 @@ OpenRouter key and a local seeded database, where usage is metered.
 Models can come from more than one provider at once. Each model ID names the
 connection that serves it:
 
-| Model ID | Served by |
-| --- | --- |
-| `minimax/minimax-m2.7` (no prefix) | OpenRouter |
-| `openai:gpt-5.1` | OpenAI, with a platform.openai.com API key |
-| `vertex:gemini-2.5-flash` | Google Vertex, through the service's own credentials |
-| `gw:<connection>:<model>` | An OpenAI-compatible gateway the owner added (Groq, Together, LiteLLM, Ollama) |
+| Model ID                           | Served by                                                                      |
+| ---------------------------------- | ------------------------------------------------------------------------------ |
+| `minimax/minimax-m2.7` (no prefix) | OpenRouter                                                                     |
+| `openai:gpt-5.1`                   | OpenAI, with a platform.openai.com API key                                     |
+| `vertex:gemini-2.5-flash`          | Google Vertex, through the service's own credentials                           |
+| `gw:<connection>:<model>`          | An OpenAI-compatible gateway the owner added (Groq, Together, LiteLLM, Ollama) |
 
 Connections are stored in `model_connections` (Firestore `modelConnections`),
 with API keys sealed by `MCP_ENC_KEY` and opened only when the adapter is

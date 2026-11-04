@@ -6,16 +6,16 @@ Updated September 2, 2026. Changes are implemented in the web transcript and nat
 
 The existing paper-on-green visual system is preserved: paper `#ffffff`, ink `#15201a`, muted sage `#5e7266`, separator `#d3e1d7`, inset `#e6efe9`, and leaf accent `#217a4b`. Existing app typefaces and native system fonts remain in use.
 
-| Content | Presentation |
-| --- | --- |
-| Latest-answer context | Quiet sentence-case header inside the card; never sticky or offset while scrolling |
-| Ordinary prose | Unboxed text, comfortable reading measure, preserved single line breaks |
-| Named sections | Stronger heading type and one quiet divider; short bold list labels are recognized conservatively |
-| Code | Small code icon and language header, separate monospaced body, safe wrapping |
-| Quotes | Small quote icon and tinted inset; native quoted lists retain their structure |
-| Tables | Readable labels and values; wide web tables become labeled records on phones; native rows wrap vertically |
-| Checklists | Hanging alignment keeps wrapped labels beside their checkboxes |
-| Arithmetic | Web KaTeX with safe wrapping and currency normalization; native elementary arithmetic fallback, not a full TeX engine |
+| Content               | Presentation                                                                                                          |
+| --------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| Latest-answer context | Quiet sentence-case header inside the card; never sticky or offset while scrolling                                    |
+| Ordinary prose        | Unboxed text, comfortable reading measure, preserved single line breaks                                               |
+| Named sections        | Stronger heading type and one quiet divider; short bold list labels are recognized conservatively                     |
+| Code                  | Small code icon and language header, separate monospaced body, safe wrapping                                          |
+| Quotes                | Small quote icon and tinted inset; native quoted lists retain their structure                                         |
+| Tables                | Readable labels and values; wide web tables become labeled records on phones; native rows wrap vertically             |
+| Checklists            | Hanging alignment keeps wrapped labels beside their checkboxes                                                        |
+| Arithmetic            | Web KaTeX with safe wrapping and currency normalization; native elementary arithmetic fallback, not a full TeX engine |
 
 The frontend-design skill guided this restrained hierarchy: structural UI encodes content types, while ordinary paragraphs remain simple. No decorative gradient rails were added.
 
@@ -35,18 +35,18 @@ The first web recapture raced initial scroll restoration and was rejected. The c
 
 ## Defects found and corrected
 
-| Finding | Resolution |
-| --- | --- |
-| Current answer covered scrolled text | Removed web sticky positioning and native visual-effect offsets |
-| Font hierarchy did not apply in Swift | Shared text helper now accepts the semantic font directly |
-| Hard breaks created extra blank lines | Removed the duplicate newline following a rendered hard break |
-| Explicit and generated dividers doubled | Corrected selector specificity and retained one separator |
-| Code/quote blocks lacked recognizable structure | Added quiet icon headers and consistent inset styling |
-| Small, fragmented mobile tables | Raised table type and used labeled records for wide tables |
-| Native table headers showed Markdown or truncation | Inline Markdown rendering and vertically wrapping labels |
-| Native quoted lists collapsed | Rendered quote contents as structured Markdown blocks |
-| Formula syntax appeared as red/raw source | Normalized mixed Markdown/currency in web math and added readable native arithmetic |
-| Checklist continuations fell below the checkbox | Correct hanging text alignment |
+| Finding                                            | Resolution                                                                          |
+| -------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| Current answer covered scrolled text               | Removed web sticky positioning and native visual-effect offsets                     |
+| Font hierarchy did not apply in Swift              | Shared text helper now accepts the semantic font directly                           |
+| Hard breaks created extra blank lines              | Removed the duplicate newline following a rendered hard break                       |
+| Explicit and generated dividers doubled            | Corrected selector specificity and retained one separator                           |
+| Code/quote blocks lacked recognizable structure    | Added quiet icon headers and consistent inset styling                               |
+| Small, fragmented mobile tables                    | Raised table type and used labeled records for wide tables                          |
+| Native table headers showed Markdown or truncation | Inline Markdown rendering and vertically wrapping labels                            |
+| Native quoted lists collapsed                      | Rendered quote contents as structured Markdown blocks                               |
+| Formula syntax appeared as red/raw source          | Normalized mixed Markdown/currency in web math and added readable native arithmetic |
+| Checklist continuations fell below the checkbox    | Correct hanging text alignment                                                      |
 
 ## Verification boundaries
 

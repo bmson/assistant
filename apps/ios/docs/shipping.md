@@ -16,7 +16,7 @@ provisioning profile, and an App Store Connect API key into repository secrets. 
 real option (see [Automating it](#automating-it)) but it is a decision about where signing
 material lives, not a missing workflow.
 
-What CI *does* cover is `ios.yml`: it builds both targets and runs the test bundle on a
+What CI _does_ cover is `ios.yml`: it builds both targets and runs the test bundle on a
 simulator for any change under `apps/ios/`. That proves the code compiles and the tests
 pass. It produces nothing installable.
 

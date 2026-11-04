@@ -3,6 +3,25 @@ name: Observe owner editor release prerequisites
 on:
   workflow_dispatch:
     inputs:
+      observation_mode:
+        description: Separate reviewed read allocation; recovery proof is encrypted and never a crypto PASS
+        type: choice
+        default: prerequisites
+        options:
+          - prerequisites
+          - recovery-pair
+      recovery_source_sha:
+        description: Exact approved current main SHA; recovery-pair only
+        type: string
+        required: false
+      recovery_approval_expires_at:
+        description: Approved UTC start deadline, at most 30 minutes ahead; recovery-pair only
+        type: string
+        required: false
+      recovery_recipient_public_key:
+        description: Existing operator RSA public key only; private key never leaves operator
+        type: string
+        required: false
       diagnostic_source_sha:
         description: Exact reviewed current main SHA, required only for encrypted failure diagnosis
         type: string
@@ -22,7 +41,7 @@ concurrency:
 
 jobs:
   observe:
-    if: github.ref == 'refs/heads/main' && github.run_attempt == 1
+    if: github.ref == 'refs/heads/main' && github.run_attempt == 1 && (inputs.observation_mode == '' || inputs.observation_mode == 'prerequisites')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     environment: production
@@ -79,3 +98,51 @@ jobs:
           path: owner-editor-inventory-failure.encrypted.json
           if-no-files-found: ignore
           retention-days: 1
+
+  recovery-pair:
+    if: github.ref == 'refs/heads/main' && github.run_attempt == 1 && inputs.observation_mode == 'recovery-pair'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: production
+    env:
+      GCP_PROJECT: ${{ vars.GCP_PROJECT }}
+      GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+      GCP_DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+      RECOVERY_MODE: ${{ inputs.observation_mode }}
+      RECOVERY_SOURCE_SHA: ${{ inputs.recovery_source_sha }}
+      RECOVERY_APPROVAL_EXPIRES_AT: ${{ inputs.recovery_approval_expires_at }}
+      RECOVERY_RECIPIENT_PUBLIC_KEY: ${{ inputs.recovery_recipient_public_key }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+      - name: Verify source and recipient before any authentication
+        run: |
+          python3 scripts/owner_editor_recovery_pair.py --verify-source
+          node scripts/owner-editor-recovery-envelope.mjs --verify-recipient
+      - name: Read exact recovery proof objects with bounded existing WIF only
+        run: python3 scripts/owner_editor_recovery_pair.py --collect
+      - name: Encrypt proof objects for the existing operator recipient
+        run: node scripts/owner-editor-recovery-envelope.mjs --seal
+      - name: Remove private raw objects even after failure or cancellation
+        if: always()
+        run: python3 scripts/owner_editor_recovery_pair.py --cleanup
+      - name: Retain encrypted proof objects only
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        with:
+          name: owner-editor-recovery-proof-${{ github.sha }}-${{ github.run_id }}
+          path: owner-editor-recovery-pair.encrypted.json
+          if-no-files-found: error
+          retention-days: 1
+      - name: Retain closed collection outcome
+        if: always()
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        with:
+          name: owner-editor-recovery-outcome-${{ github.sha }}-${{ github.run_id }}
+          path: owner-editor-recovery-pair-receipt.json
+          if-no-files-found: ignore
+          retention-days: 14

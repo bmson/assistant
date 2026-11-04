@@ -70,7 +70,7 @@ When building the owner's iOS Shortcut:
 
 1. Compute the JSON body with the live reading, e.g.
    `{ "lat": 64.1466, "lng": -21.9426, "label": "Reykjavík", "capturedAt": "<Current Date, ISO 8601>" }`.
-   Use the Shortcut's *Format Date* action with the ISO 8601 preset for `capturedAt` — do not
+   Use the Shortcut's _Format Date_ action with the ISO 8601 preset for `capturedAt` — do not
    hardcode it.
 2. HMAC-SHA256 the exact body bytes with `LOCATION_PING_SECRET`, hex-encoded, into the
    `X-Signature` header.

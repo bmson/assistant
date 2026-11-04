@@ -22,8 +22,8 @@ All twenty retain the synthetic file and label after rejection; both attempts co
 
 Seventy-nine tests pass: 27 helper/route-contract cases plus 52 existing product-fixture checks. Route tests verify enhanced success after the existing command, native success redirect, and invalid-field/signed-out denial under both Accept modes. Helper tests include HTTP 415, unconfirmed HTML/JSON responses, disallowed destinations, and no automatic retry after a transport failure. Local lint and typecheck pass. The generated support matrix changes only the fingerprints of the two upload handlers. Independent QA and exact-head CI remain separate gates.
 
-| Before: raw response | After: retained form and retry | After: confirmed navigation |
-| --- | --- | --- |
+| Before: raw response                                                            | After: retained form and retry                                                             | After: confirmed navigation                                                                          |
+| ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
 | ![Raw JSON upload rejection](assets/upload-recovery-2026-10-20/before-json.png) | ![Upload recovery with preserved input](assets/upload-recovery-2026-10-20/after-error.png) | ![Representative successful upload destination](assets/upload-recovery-2026-10-20/after-success.png) |
 
 ## Limits and replay

@@ -1,39 +1,62 @@
-import { loadConfig } from '@assistant/config';
+import type { Config } from '@assistant/config';
+import { context, propagation, trace } from '@opentelemetry/api';
+import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
+import {
+  CompositePropagator,
+  W3CBaggagePropagator,
+  W3CTraceContextPropagator,
+} from '@opentelemetry/core';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
 import { resourceFromAttributes } from '@opentelemetry/resources';
-import { BatchSpanProcessor, ConsoleSpanExporter } from '@opentelemetry/sdk-trace-base';
-import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
+import {
+  BatchSpanProcessor,
+  ConsoleSpanExporter,
+  type SpanExporter,
+  TracerProvider,
+} from '@opentelemetry/sdk-trace';
+
+type OtelConfig = Pick<Config, 'OTEL_EXPORTER' | 'OTEL_SERVICE_NAME'>;
+type ExporterMode = Exclude<Config['OTEL_EXPORTER'], 'none'>;
+type ExporterFactory = (mode: ExporterMode) => SpanExporter;
+
+function createExporter(mode: ExporterMode): SpanExporter {
+  return mode === 'console' ? new ConsoleSpanExporter() : new OTLPTraceExporter();
+}
 
 /**
- * Initialize OpenTelemetry tracing for this process. Library code only uses
- * @opentelemetry/api (withSpan); exporters are an app concern.
- *
- * This deliberately wires a bare NodeTracerProvider rather than sdk-node: the
- * full SDK drags gRPC, protobuf, metrics, and logs exporters into the esbuild
- * bundle (~2.5 MB of cold-start parse) while the only thing this process ever
- * emits is OTLP/HTTP traces.
- *
- * - 'none' (default): no-op tracer, zero overhead.
- * - 'console': spans to stdout, for local inspection.
- * - 'otlp': standard OTLP/HTTP export to OTEL_EXPORTER_OTLP_ENDPOINT (a
- *   collector sidecar or a managed endpoint — e.g. the Google Cloud OTLP
- *   ingest). The exporter reads its endpoint/headers from the standard
- *   OTEL_EXPORTER_OTLP_* env vars.
+ * Register the configured trace SDK and its Node async context manager.
+ * Exporting this small seam keeps the disabled and context behavior testable
+ * without activating an external exporter.
  */
-export function initOtel(): void {
-  const config = loadConfig();
-  const traceExporter =
-    config.OTEL_EXPORTER === 'console'
-      ? new ConsoleSpanExporter()
-      : config.OTEL_EXPORTER === 'otlp'
-        ? new OTLPTraceExporter()
-        : null;
-  if (!traceExporter) return;
+export function createOtelProvider(
+  config: OtelConfig,
+  exporterFactory: ExporterFactory = createExporter,
+): TracerProvider | undefined {
+  if (config.OTEL_EXPORTER === 'none') return undefined;
 
-  const provider = new NodeTracerProvider({
+  const provider = new TracerProvider({
     resource: resourceFromAttributes({ 'service.name': config.OTEL_SERVICE_NAME }),
-    spanProcessors: [new BatchSpanProcessor(traceExporter)],
+    spanProcessors: [new BatchSpanProcessor({ exporter: exporterFactory(config.OTEL_EXPORTER) })],
   });
-  provider.register();
+
+  trace.setGlobalTracerProvider(provider);
+
+  const contextManager = new AsyncLocalStorageContextManager();
+  contextManager.enable();
+  context.setGlobalContextManager(contextManager);
+  propagation.setGlobalPropagator(
+    new CompositePropagator({
+      propagators: [new W3CTraceContextPropagator(), new W3CBaggagePropagator()],
+    }),
+  );
+
+  return provider;
+}
+
+/** Initialize tracing only when an explicit exporter mode is configured. */
+export function initOtel(config: OtelConfig): void {
+  const provider = createOtelProvider(config);
+  if (!provider) return;
+
   process.on('SIGTERM', () => void provider.shutdown());
 }

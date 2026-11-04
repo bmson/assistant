@@ -3,16 +3,16 @@ name: Agent PDF copied-assets proof (PR only)
 on:
   pull_request:
     paths:
-      - '.github/workflows/agent-image-pr-smoke.yml'
-      - '.github/workflows/deploy.yml'
-      - 'scripts/smoke-agent-image.sh'
-      - 'infra/gcp/release-staged-services*'
-      - 'infra/docker/agent.Dockerfile'
-      - 'apps/agent/runtime-dependencies/package.json'
-      - 'packages/core/package.json'
-      - 'packages/core/src/memory/documents*'
-      - 'scripts/agent-runtime-dependencies.test.ts'
-      - 'pnpm-lock.yaml'
+      - ".github/workflows/agent-image-pr-smoke.yml"
+      - ".github/workflows/deploy.yml"
+      - "scripts/smoke-agent-image.sh"
+      - "infra/gcp/release-staged-services*"
+      - "infra/docker/agent.Dockerfile"
+      - "apps/agent/runtime-dependencies/package.json"
+      - "packages/core/package.json"
+      - "packages/core/src/memory/documents*"
+      - "scripts/agent-runtime-dependencies.test.ts"
+      - "pnpm-lock.yaml"
 permissions:
   contents: read
 jobs:
