@@ -46,8 +46,7 @@ export default async function ChatListPage({
       stageObserver = createWeb17ChatAllStageObserver({
         enabled: true,
         host: requestHeaders.get('host'),
-        rsc: requestHeaders.get('rsc'),
-        prefetch: requestHeaders.get('next-router-prefetch'),
+        requestClass: requestHeaders.get('x-web17-request-class'),
         nonce: requestHeaders.get('x-web17-attempt'),
       });
     } catch {

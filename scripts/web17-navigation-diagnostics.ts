@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 export const WEB17_NAVIGATION_DIAGNOSTIC_CAP = 8;
 export const WEB17_RSC_ATTEMPT_NONCE_HEADER = 'x-web17-attempt';
+export const WEB17_REQUEST_CLASS_HEADER = 'x-web17-request-class';
 
 export type Web17PathClass =
   | 'all_chats'
