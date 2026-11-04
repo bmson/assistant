@@ -95,6 +95,10 @@ describe('server editor view builds real grants only for the same displayed nati
       aliases: ['Samuel'],
       revision,
     });
+    expect(props?.personNoteCreate).toMatchObject({
+      snapshot: { contactId, name: 'Sam', trust: 'unknown', revision },
+      grant: { command: 'create_owner_memory' },
+    });
     expect(props?.family).toMatchObject({
       anchorContactId: contactId,
       people: snapshot.people,
@@ -109,6 +113,16 @@ describe('server editor view builds real grants only for the same displayed nati
     expect(result).toMatchObject({
       kind: 'verified',
       scope: { command: 'update_person_identity', targetId: contactId },
+    });
+    const noteGrant = verifyOwnerEditorHandle({
+      token: props?.personNoteCreate?.grant.issuedOperationHandle ?? '',
+      session: { ownerId, formSessionScope },
+      secret,
+      now,
+    });
+    expect(noteGrant).toMatchObject({
+      kind: 'verified',
+      scope: { command: 'create_owner_memory', targetId: contactId },
     });
     expect(props?.identity).not.toHaveProperty('trust'); // No client trust mutation field.
   });

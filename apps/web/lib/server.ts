@@ -449,11 +449,16 @@ export async function readPostgresOwnerEditorViewInputs(
   );
   const ownerId = await assertPostgresInstallationOwner(db);
   const context = await readPostgresOwnerEditorIssuanceContext(db, ownerId);
-  if (!context) return null;
+  if (!context)
+    return {
+      ownerId,
+      context: null,
+      snapshot: { ownerId, identity: null, people: [], corrections: [] },
+    };
   if (!input.contactId)
-    return { context, snapshot: { ownerId, identity: null, people: [], corrections: [] } };
+    return { ownerId, context, snapshot: { ownerId, identity: null, people: [], corrections: [] } };
   const snapshot = await postgresOwnerEditorViewSnapshot(db, ownerId, input);
-  return { context, snapshot: { ...snapshot, ownerId } };
+  return { ownerId, context, snapshot: { ...snapshot, ownerId } };
 }
 
 export function getDb(): Db {

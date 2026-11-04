@@ -85,7 +85,7 @@ function service(target?: { workspaceId: string; ownerId: string }) {
   };
 }
 describe('protected read-only release inventory', () => {
-  it('requires the exact intrinsic five-command source capability when the runtime exists', () => {
+  it('requires the exact intrinsic person-note capability when the runtime exists', () => {
     const contract = (capability?: unknown) => ({
       components: { web: capability === undefined ? {} : { ownerEditorV1: capability } },
     });
@@ -95,6 +95,8 @@ describe('protected read-only release inventory', () => {
       [undefined, true],
       [[], true],
       [[...BASIC_EDITOR_COMMANDS, 'remove_person'], true],
+      [BASIC_EDITOR_COMMANDS.filter((command) => command !== 'create_owner_memory'), true],
+      [[...BASIC_EDITOR_COMMANDS, 'unknown_command'], true],
       [BASIC_EDITOR_COMMANDS, false],
     ] as const)
       expect(() => requiresBasicEditorPreflight(contract(capability), present)).toThrow();
