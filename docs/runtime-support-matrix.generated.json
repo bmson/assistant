@@ -4,7 +4,7 @@
   "runtimeSources": {
     "packages/config/src/index.ts": "1775232bbff153dc4bbfb9dc9fec659a38fd0afdce7f0e67f50d8c6c1822c6d7",
     "apps/agent/src/deps.ts": "fb30df8600bbcf24da0d5cfa9ef1c92e28700b663429cdbbe37d65ecee0ea655",
-    "apps/agent/src/index.ts": "6da57b60f853ca6622142a12b70bb31a73e8155eac30dd7d905218c19ca2fd56",
+    "apps/agent/src/index.ts": "21a70b139b7603c5cae0dee7bc24b28c9dab2c8263095d2ed8804cd30d2232c6",
     "apps/web/lib/server.ts": "6daeeb56a0d673549468fe73f8f77681e91a034593010abe7e8fefa813e7ca20",
     "apps/web/proxy.ts": "0d3bae71bd7a094b3e70615c89bd82db8b2fa1196e7ccde8a1d7b2e6c4872cc6",
     "packages/db/drizzle/meta/_journal.json": "ac17b3e7559af6f8d95401ca274579fec87011f3c17cb62ca996f91acae3bb72",

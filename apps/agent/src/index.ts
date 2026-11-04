@@ -35,7 +35,7 @@ if (configProblems.length > 0) {
 }
 
 if (config.RESTORE_REHEARSAL) installRestoreNetworkFence();
-initOtel();
+initOtel(config);
 
 // Build the dependency graph — and with it install the modules — at boot, not
 // lazily on the first request. installModules validates the composition (every
