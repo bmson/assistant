@@ -6,8 +6,46 @@ import { stripVTControlCharacters } from 'node:util';
 export const WEB17_PREVIEW_LOG_BYTE_CAP = 64 * 1024;
 export const WEB17_PREVIEW_LINE_CAP = 256;
 export const WEB17_PREVIEW_COUNT_CAP = 8;
+export const WEB17_PREVIEW_CHAT_ALL_STAGE_EVENT_CAP = 40;
 
 const routes = ['api_health', 'chat_home', 'chat_all', 'chat_detail'] as const;
+const chatAllPhases = new Set([
+  'request_received',
+  'auth_started',
+  'auth_completed',
+  'auth_failed',
+  'search_params_started',
+  'search_params_completed',
+  'search_params_failed',
+  'history_started',
+  'history_completed',
+  'history_failed',
+  'page_data_ready',
+  'agent_started',
+  'agent_completed',
+  'agent_failed',
+  'conversations_started',
+  'conversations_completed',
+  'conversations_failed',
+  'archived_count_started',
+  'archived_count_completed',
+  'archived_count_failed',
+  'scope_count_started',
+  'scope_count_completed',
+  'scope_count_failed',
+  'active_ids_started',
+  'active_ids_completed',
+  'active_ids_failed',
+]);
+const chatAllElapsedBuckets = new Set([
+  'under_1s',
+  'under_5s',
+  'under_20s',
+  '20s_or_more',
+  'unknown',
+]);
+const chatAllStageMarker = '[WEB17_CHAT_ALL_STAGE] ';
+const chatAllNonce = /^[A-Za-z0-9_-]{22,32}$/;
 type Route = (typeof routes)[number];
 type DurationBucket = 'under_1s' | 'under_5s' | 'under_20s' | '20s_or_more' | 'unknown';
 
@@ -27,6 +65,14 @@ export type Web17PreviewDiagnostics = {
   overflow: boolean;
   readyMarkers: number;
   routes: Record<Route, RouteDiagnostics>;
+  serverStageStatus: 'unavailable' | 'no_matching_event' | 'observed' | 'incomplete';
+  chatAllStageEvents: Array<{
+    kind: 'WEB17_CHAT_ALL_STAGE';
+    nonce: string;
+    prefetch: boolean;
+    phase: string;
+    elapsed: DurationBucket;
+  }>;
   errors: {
     compileFailure: number;
     moduleResolution: number;
@@ -62,10 +108,10 @@ function classifyRoute(value: string): Route | undefined {
 }
 
 function durationBucket(value: string): DurationBucket {
-  const match = /\bin\s+(\d+(?:\.\d+)?)\s*(ms|s)\b/i.exec(value);
+  const match = /\bin\s+(-?\d+(?:\.\d+)?)\s*(ms|s)\b/i.exec(value);
   if (!match) return 'unknown';
   const amount = Number(match[1]);
-  if (!Number.isFinite(amount)) return 'unknown';
+  if (!Number.isFinite(amount) || amount < 0) return 'unknown';
   const milliseconds = match[2]?.toLowerCase() === 's' ? amount * 1_000 : amount;
   if (milliseconds < 1_000) return 'under_1s';
   if (milliseconds < 5_000) return 'under_5s';
@@ -85,6 +131,12 @@ function createResult(logAvailable: boolean, inputTruncated: boolean): Web17Prev
       Route,
       RouteDiagnostics
     >,
+    serverStageStatus: !logAvailable
+      ? 'unavailable'
+      : inputTruncated
+        ? 'incomplete'
+        : 'no_matching_event',
+    chatAllStageEvents: [],
     errors: { compileFailure: 0, moduleResolution: 0, syntax: 0, runtime: 0, other: 0 },
   };
 }
@@ -129,6 +181,50 @@ export function projectWeb17PreviewDiagnostics(
 
   for (const rawLine of lines) {
     const line = stripVTControlCharacters(rawLine);
+    const markerIndex = line.indexOf(chatAllStageMarker);
+    if (markerIndex >= 0) {
+      const encoded = line.slice(markerIndex + chatAllStageMarker.length);
+      if (encoded.length > 512) {
+        result.overflow = true;
+        result.serverStageStatus = 'incomplete';
+      } else {
+        try {
+          const candidate = JSON.parse(encoded) as Record<string, unknown>;
+          const keys = Object.keys(candidate).sort();
+          const valid =
+            keys.join(',') === 'elapsed,kind,nonce,phase,prefetch' &&
+            candidate.kind === 'WEB17_CHAT_ALL_STAGE' &&
+            typeof candidate.nonce === 'string' &&
+            chatAllNonce.test(candidate.nonce) &&
+            typeof candidate.prefetch === 'boolean' &&
+            typeof candidate.phase === 'string' &&
+            chatAllPhases.has(candidate.phase) &&
+            typeof candidate.elapsed === 'string' &&
+            chatAllElapsedBuckets.has(candidate.elapsed);
+          if (valid) {
+            if (result.chatAllStageEvents.length >= WEB17_PREVIEW_CHAT_ALL_STAGE_EVENT_CAP) {
+              result.overflow = true;
+              result.serverStageStatus = 'incomplete';
+            } else {
+              result.chatAllStageEvents.push({
+                kind: 'WEB17_CHAT_ALL_STAGE',
+                nonce: candidate.nonce as string,
+                prefetch: candidate.prefetch as boolean,
+                phase: candidate.phase as string,
+                elapsed: candidate.elapsed as DurationBucket,
+              });
+              if (result.serverStageStatus !== 'incomplete') result.serverStageStatus = 'observed';
+            }
+          } else {
+            result.overflow = true;
+            result.serverStageStatus = 'incomplete';
+          }
+        } catch {
+          result.overflow = true;
+          result.serverStageStatus = 'incomplete';
+        }
+      }
+    }
     if (/\bready in\b/i.test(line)) result.readyMarkers = increment(result.readyMarkers, result);
 
     const compileStarted = /\bcompiling\s+(\/[^\s]+)/i.exec(line)?.[1];

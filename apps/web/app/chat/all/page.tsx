@@ -1,4 +1,5 @@
 import { MessageSquareText } from 'lucide-react';
+import { headers } from 'next/headers';
 import Link from 'next/link';
 import { requireOwner } from '@/auth';
 import { relativeTime } from '@/lib/format';
@@ -19,6 +20,10 @@ import {
   newConversation,
   restoreConversation,
 } from '../actions';
+import {
+  createWeb17ChatAllStageObserver,
+  isWeb17ChatAllPreviewEnabled,
+} from './web17-preview-stage';
 
 export const metadata = { title: 'All chats' };
 
@@ -29,17 +34,67 @@ export default async function ChatListPage({
 }: {
   searchParams: Promise<{ view?: string }>;
 }) {
-  await requireOwner();
-  const { view } = await searchParams;
-  const archived = view === 'archived';
+  const diagnosticsEnabled = isWeb17ChatAllPreviewEnabled({
+    nodeEnv: process.env.NODE_ENV,
+    previewEnabled: process.env.WEB_APP_PREVIEW_ENABLED,
+    diagnosticsEnabled: process.env.WEB17_DIAGNOSTICS,
+  });
+  let stageObserver: ReturnType<typeof createWeb17ChatAllStageObserver>;
+  if (diagnosticsEnabled) {
+    try {
+      const requestHeaders = await headers();
+      stageObserver = createWeb17ChatAllStageObserver({
+        enabled: true,
+        host: requestHeaders.get('host'),
+        requestClass: requestHeaders.get('x-web17-request-class'),
+        nonce: requestHeaders.get('x-web17-attempt'),
+      });
+    } catch {
+      // Optional diagnostics must not change the chat list response.
+    }
+  }
+  const recordStage = stageObserver?.record;
+  recordStage?.('request_received');
+  recordStage?.('auth_started');
+  try {
+    await requireOwner();
+    recordStage?.('auth_completed');
+  } catch (error) {
+    recordStage?.('auth_failed');
+    throw error;
+  }
+  let view: { view?: string };
+  recordStage?.('search_params_started');
+  try {
+    view = await searchParams;
+    recordStage?.('search_params_completed');
+  } catch (error) {
+    recordStage?.('search_params_failed');
+    throw error;
+  }
+  const { view: viewName } = view;
+  const archived = viewName === 'archived';
+  recordStage?.('history_started');
+  let history: Awaited<ReturnType<ReturnType<typeof getChatApplication>['listChatHistory']>>;
+  try {
+    history = await getChatApplication().listChatHistory(
+      archived,
+      stageObserver?.recordHistoryStage,
+    );
+    recordStage?.('history_completed');
+  } catch (error) {
+    recordStage?.('history_failed');
+    throw error;
+  }
   const {
     conversations: chatRows,
     archivedCount,
     totalInScope,
     activeConversationIds: activeIds,
-  } = await getChatApplication().listChatHistory(archived);
+  } = history;
   const activeConversationIds = new Set(activeIds);
   const now = new Date();
+  recordStage?.('page_data_ready');
 
   return (
     <PageShell size="reading">

@@ -9,6 +9,7 @@ import {
   applyImprovementProposal,
   archiveChatConversation,
   archiveInactiveChats,
+  type ChatHistoryStageObserver,
   cancelChatTurn,
   changeChatModel,
   checkReadiness,
@@ -769,7 +770,8 @@ function createApplication(options: { profileMemory?: ProfileMemoryCommandPersis
     acknowledgeMessageDelivery: (conversationId: string, messageId: string, clientId: string) =>
       acknowledgeChatMessageDelivery(db, conversationId, messageId, clientId),
     archiveInactiveChats: () => archiveInactiveChats(db),
-    listChatHistory: (archived: boolean) => listChatHistory(db, archived),
+    listChatHistory: (archived: boolean, observeStage?: ChatHistoryStageObserver) =>
+      listChatHistory(db, archived, observeStage),
     getChatConversation: (conversationId: string, input: { taskId?: string; cursor?: string }) =>
       getChatConversationView(db, conversationId, input),
     getChatUpdates: (input: {
@@ -1630,7 +1632,8 @@ function createFirestoreChatApplication() {
     acknowledgeMessageDelivery: (conversationId: string, messageId: string, clientId: string) =>
       acknowledgeChatMessageDelivery(chat, conversationId, messageId, clientId),
     archiveInactiveChats: () => archiveInactiveChats(chat),
-    listChatHistory: (archived: boolean) => listChatHistory(chat, archived),
+    listChatHistory: (archived: boolean, observeStage?: ChatHistoryStageObserver) =>
+      listChatHistory(chat, archived, observeStage),
     getChatConversation: (conversationId: string, input: { taskId?: string; cursor?: string }) =>
       getChatConversationView(chatReads, conversationId, input),
     cancelChatTurn: (input: { conversationId: string; clientOperationId: string }) =>

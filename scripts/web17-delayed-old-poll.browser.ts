@@ -6,7 +6,7 @@
  * client ownership race without invoking a worker or model.
  */
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { createUIMessageStream, createUIMessageStreamResponse } from 'ai';
 import {
   chromium,
@@ -22,6 +22,8 @@ import {
   createWeb17NavigationDiagnostics,
   observeWeb17AllChatsLinks,
   projectWeb17NavigationDiagnostics,
+  WEB17_REQUEST_CLASS_HEADER,
+  WEB17_RSC_ATTEMPT_NONCE_HEADER,
 } from './web17-navigation-diagnostics.js';
 
 const baseUrl = process.env.SMOKE_BASE_URL;
@@ -31,6 +33,7 @@ assert.equal(origin.protocol, 'http:');
 assert(['localhost', '127.0.0.1', '::1'].includes(origin.hostname));
 const databaseUrl = process.env.DATABASE_URL;
 assert(databaseUrl, 'Set DATABASE_URL to the isolated CI PostgreSQL database');
+const web17PreviewDiagnosticsEnabled = process.env.WEB17_DIAGNOSTICS === '1';
 
 function isPathOrChild(pathname: string, basePath: string): boolean {
   return pathname === basePath || pathname.startsWith(`${basePath}/`);
@@ -629,30 +632,32 @@ function observeAllChatsNavigation(
       if (frame === page.mainFrame()) diagnostics.recordMainFrameNavigation(frame.url());
     });
   const onRequest = (request: PlaywrightRequest) =>
-    safely(() =>
+    safely(() => {
       diagnostics.recordRequestStarted(
         request.url(),
         request.resourceType(),
         request.isNavigationRequest(),
-      ),
-    );
+      );
+    });
   const onRequestFinished = (request: PlaywrightRequest) =>
-    safely(() =>
+    safely(() => {
       diagnostics.recordRequestFinished(
         request.url(),
         request.resourceType(),
         request.isNavigationRequest(),
-      ),
-    );
+      );
+      diagnostics.recordRscAttemptFinished(request.headers()[WEB17_RSC_ATTEMPT_NONCE_HEADER]);
+    });
   const onRequestFailed = (request: PlaywrightRequest) =>
-    safely(() =>
+    safely(() => {
       diagnostics.recordRequestFailed(
         request.url(),
         request.resourceType(),
         request.isNavigationRequest(),
         request.failure()?.errorText,
-      ),
-    );
+      );
+      diagnostics.recordRscAttemptFailed(request.headers()[WEB17_RSC_ATTEMPT_NONCE_HEADER]);
+    });
   const onResponse = (response: PlaywrightResponse) =>
     safely(() => {
       const request = response.request();
@@ -660,6 +665,10 @@ function observeAllChatsNavigation(
         response.url(),
         request.resourceType(),
         request.isNavigationRequest(),
+        response.status(),
+      );
+      diagnostics.recordRscAttemptResponse(
+        request.headers()[WEB17_RSC_ATTEMPT_NONCE_HEADER],
         response.status(),
       );
     });
@@ -868,7 +877,8 @@ async function verifyUnmountedPollDoesNotPublishAfterRemount(): Promise<void> {
   const isChatSafetyRoute = (url: URL) =>
     isPathOrChild(url.pathname, '/api/chat') || isPathOrChild(url.pathname, '/api/mobile/v1/chat');
   await context.route('**/*', async (route) => {
-    const requestUrl = new URL(route.request().url());
+    const request = route.request();
+    const requestUrl = new URL(request.url());
     if (
       (requestUrl.protocol === 'http:' || requestUrl.protocol === 'https:') &&
       requestUrl.origin !== origin.origin
@@ -876,9 +886,46 @@ async function verifyUnmountedPollDoesNotPublishAfterRemount(): Promise<void> {
       await route.abort('blockedbyclient');
       return;
     }
+    const requestHeaders = request.headers();
+    if (
+      web17PreviewDiagnosticsEnabled &&
+      requestUrl.origin === origin.origin &&
+      requestUrl.pathname === '/chat/all' &&
+      requestUrl.searchParams.has('_rsc') &&
+      request.method() === 'GET' &&
+      requestHeaders.rsc === '1'
+    ) {
+      let continuedHeaders: Record<string, string> | undefined;
+      try {
+        const allHeaders = await request.allHeaders();
+        const nonce = randomBytes(16).toString('base64url');
+        const recorded = navigationDiagnostics.recordRscAttemptStarted(
+          nonce,
+          typeof requestHeaders['next-router-prefetch'] === 'string' &&
+            requestHeaders['next-router-prefetch'].length > 0,
+        );
+        if (recorded) {
+          const requestClass =
+            typeof requestHeaders['next-router-prefetch'] === 'string' &&
+            requestHeaders['next-router-prefetch'].length > 0
+              ? 'rsc-prefetch'
+              : 'rsc';
+          continuedHeaders = {
+            ...allHeaders,
+            [WEB17_RSC_ATTEMPT_NONCE_HEADER]: nonce,
+            [WEB17_REQUEST_CLASS_HEADER]: requestClass,
+          };
+        }
+      } catch {
+        // If diagnostic correlation is unavailable, preserve the original request.
+      }
+      await route.continue(continuedHeaders ? { headers: continuedHeaders } : undefined);
+      return;
+    }
     await route.continue();
   });
   await page.route(isChatSafetyRoute, routeHandler);
+  stopNavigationObservers = observeAllChatsNavigation(page, navigationDiagnostics);
 
   try {
     const deepLink = () =>
@@ -916,7 +963,6 @@ async function verifyUnmountedPollDoesNotPublishAfterRemount(): Promise<void> {
     } catch {
       navigationDiagnostics.setAllChatsLinkObservation(null, null);
     }
-    stopNavigationObservers = observeAllChatsNavigation(page, navigationDiagnostics);
     navigationDiagnostics.markClickAttempted();
     try {
       await allChatsLink.click();
