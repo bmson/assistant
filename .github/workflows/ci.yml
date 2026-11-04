@@ -51,6 +51,10 @@ jobs:
           bash infra/ci/install-postgres17.test.sh
           bash infra/ci/postgres-service.test.sh
           PYTHONDONTWRITEBYTECODE=1 python3 tests/test_ci_postgres_workflow.py
+      - name: Verify recovery proof collection without credentials or network
+        run: |
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_owner_editor_recovery_pair.py
+          node --test scripts/owner-editor-recovery-envelope.test.mjs
       # 900+ lines of deploy bash run against production with no other check.
       - name: Lint shell scripts
         run: |
