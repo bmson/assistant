@@ -105,6 +105,7 @@ struct MemoryCorrectionPresentation: Equatable, Sendable {
             && draft.trimmingCharacters(in: .whitespacesAndNewlines).count >= 3
     }
     var canCheckResult: Bool { [.unknown, .pending].contains(phase) && operation != nil && !isChecking }
+    var canRefreshSavedNote: Bool { phase == .stale || ([.saved, .unchanged].contains(phase) && resultReadback == nil) }
     var canReviewCurrent: Bool { phase == .stale && currentSnapshot != nil }
     var hasDispatchedSave: Bool { operation != nil }
 
@@ -119,7 +120,7 @@ struct MemoryCorrectionPresentation: Equatable, Sendable {
         case .unknown: isChecking ? "Checking save result…" : "Save result unknown. Check result before saving again."
         case .stale: "Review the current saved note before saving your draft."
         case .saved: resultReadback == nil ? "Saved. The latest view has not been refreshed." : "Saved."
-        case .unchanged: "No change was needed."
+        case .unchanged: resultReadback == nil ? "No change was needed. The latest view has not been refreshed." : "No change was needed."
         case .unavailable: message ?? "Editing is unavailable. Your draft is still here."
         }
     }

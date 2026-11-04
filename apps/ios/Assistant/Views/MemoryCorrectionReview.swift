@@ -51,7 +51,7 @@ struct MemoryCorrectionReview: View {
                         .buttonStyle(AssistantActionButtonStyle(kind: .primary, minimumHeight: 48))
                         .disabled(!presentation.canCheckResult)
                     }
-                    if presentation.phase == .stale || (presentation.phase == .saved && presentation.resultReadback == nil) {
+                    if presentation.canRefreshSavedNote {
                         Button("Refresh saved note") {
                             if let intent = presentation.requestRefresh() { onIntent(intent) }
                         }

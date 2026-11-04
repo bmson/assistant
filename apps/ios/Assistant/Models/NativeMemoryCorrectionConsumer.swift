@@ -100,6 +100,9 @@ final class NativeMemoryCorrectionConsumer {
                 return // Reopening never authorizes or replays an apply, or checks status automatically.
             }
             noPendingVerified = true
+            // A successful scoped lookup can finish a previously interrupted qualified
+            // cleanup. Reopening is the explicit recovery action for an old I/O fence.
+            unblock(memoryID, scope: scope)
             let wire = try await transport.ownerMemoryCorrectionSnapshot(memoryID: memoryID)
             guard valid(token, target) else { return }
             snapshotOwnerCorrected[wire.revision] = wire.ownerCorrected
@@ -204,6 +207,9 @@ final class NativeMemoryCorrectionConsumer {
             }
         } catch {
             guard valid(token, target), presentation?.authorizationRequest == request else { return }
+            if case NativeMemoryCorrectionRecoveryError.recoveryCleanupUncertain = error {
+                cleanupMessage = "No correction was sent. Local recovery cleanup could not be confirmed. Reopen this note before saving again."
+            }
             if case APIError.server(status: 409, _) = error,
                let wire = try? await transport.ownerMemoryCorrectionSnapshot(memoryID: target.memoryID),
                valid(token, target), let current = try? Self.snapshot(wire, target: target) {
@@ -296,7 +302,7 @@ final class NativeMemoryCorrectionConsumer {
             guard valid(token, record.presentationTarget) else { return }
             // Cleanup may have removed the record before failing on its locator.
             retainedOnDevice = false
-            cleanupMessage = "The save result was checked, but local recovery cleanup is still pending. Reopen this note to check it again."
+            cleanupMessage = "The save result was checked, but local recovery cleanup is still pending. Reopen this note to finish cleanup."
         }
     }
 
@@ -315,7 +321,27 @@ final class NativeMemoryCorrectionConsumer {
         let available = wire.eligible && hash(wire.contentHash)
         return .init(target: target, revision: wire.revision, storedContentHash: wire.contentHash,
             content: wire.content, sourceLabel: wire.sourceLabel,
-            availability: available ? .mayRequestAuthorization : .readOnly(reason: wire.readOnlyReason ?? "Editing is unavailable for this saved note."))
+            availability: available ? .mayRequestAuthorization : .readOnly(reason: readOnlyMessage(for: wire.readOnlyReason)))
+    }
+    /// Server reason codes are protocol metadata, never user-facing copy.
+    static func readOnlyMessage(for reason: String?) -> String {
+        switch reason {
+        case "shared_source": return "This note has shared evidence and cannot be changed here."
+        case "conflicting_lineage": return "This note combines source evidence and cannot be changed here."
+        case "superseded": return "A newer saved note has replaced this one."
+        case "tombstoned": return "This note has been forgotten and cannot be edited."
+        case "quarantined": return "This note needs source review before it can be edited."
+        case "expired_or_invalid_lifecycle": return "This note is expired or its saved state cannot be verified."
+        case "memory_content_hash_mismatch": return "This note’s saved content could not be verified, so correction attribution is unavailable."
+        case "malformed_owner_correction": return "This note’s correction history could not be verified."
+        case "unsupported_import_provenance": return "A single source item for this imported note could not be verified."
+        case "unverified_extraction_source": return "The conversation or email behind this saved note could not be verified."
+        case "incomplete_provenance": return "Source verification could not be completed within the supported limits."
+        case "unverified_subject": return "The person this note belongs to could not be verified."
+        case "unsupported_memory_category": return "This item is not a durable knowledge note and cannot be edited here."
+        case "source_identity_mismatch": return "The saved source reference does not match this note."
+        default: return "The exact source of this note could not be verified, so it is read-only here."
+        }
     }
     private static func snapshot(_ record: NativeMemoryCorrectionRecoveryRecord) -> MemoryCorrectionSnapshot {
         .init(target: record.presentationTarget, revision: record.snapshot.revision,
