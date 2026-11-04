@@ -573,8 +573,9 @@ private final class LocalNotificationRecorder {
 @MainActor
 private final class RecordingAppSystemSurfaces: AppSystemSurfaces {
     private let id = UUID().uuidString
-    private let holdFinish: Bool
+    private var holdFinish: Bool
     private var finishContinuations: [Int: CheckedContinuation<Void, Never>] = [:]
+    private var releasedFinishIndices = Set<Int>()
     private(set) var operations: [String] = []
     private(set) var finishCount = 0
     private(set) var finishReturnedCount = 0
@@ -582,6 +583,21 @@ private final class RecordingAppSystemSurfaces: AppSystemSurfaces {
 
     init(holdFinish: Bool = false) {
         self.holdFinish = holdFinish
+    }
+
+    /// Arm only after fixture bootstrap; bootstrap itself calls finish(false).
+    /// Pausing affects future calls and leaves already-held continuations intact.
+    func armFinishHolding() { holdFinish = true }
+    func pauseFinishHolding() { holdFinish = false }
+
+    /// Teardown is safe after partial setup and prevents late callbacks from
+    /// creating a continuation that the test has already stopped waiting for.
+    func releaseAllFinishes() {
+        holdFinish = false
+        let continuations = Array(finishContinuations.values)
+        finishContinuations.removeAll()
+        for continuation in continuations { continuation.resume() }
+        releasedFinishIndices.removeAll()
     }
 
     private func record(_ operation: String, thought: AssistantThought? = nil) {
@@ -611,11 +627,21 @@ private final class RecordingAppSystemSurfaces: AppSystemSurfaces {
         guard holdFinish else { return }
         let index = finishCount
         finishCount += 1
+        if releasedFinishIndices.remove(index) != nil {
+            finishReturnedCount += 1
+            return
+        }
         await withCheckedContinuation { finishContinuations[index] = $0 }
         finishReturnedCount += 1
     }
 
-    func releaseFinish(_ index: Int = 0) { finishContinuations.removeValue(forKey: index)?.resume() }
+    func releaseFinish(_ index: Int = 0) {
+        if let continuation = finishContinuations.removeValue(forKey: index) {
+            continuation.resume()
+        } else {
+            releasedFinishIndices.insert(index)
+        }
+    }
 
     func dismiss() async { record("dismiss") }
     func updateBadge(_ count: Int) async { record("updateBadge(\(count))") }
@@ -5396,13 +5422,27 @@ extension APIClientRetryTests {
     private func notificationModel(
         enqueueAutomaticSpeech: ((ChatMessage) -> Void)? = nil,
         scheduleLocalNotification: LocalNotificationScheduler? = nil,
+        isolatedDefaults: UserDefaults? = nil,
         systemSurfaces suppliedSystemSurfaces: RecordingAppSystemSurfaces? = nil
     ) async throws -> AppModel {
         let systemSurfaces = suppliedSystemSurfaces ?? RecordingAppSystemSurfaces()
         let notificationScheduler: LocalNotificationScheduler = scheduleLocalNotification
             ?? { _, _, _, _, _, _ in false }
         let model: AppModel
-        if let enqueueAutomaticSpeech {
+        if let isolatedDefaults, let enqueueAutomaticSpeech {
+            model = AppModel(
+                apiClient: makeClient(), defaults: isolatedDefaults, storeConnectionToken: { _ in },
+                enqueueAutomaticSpeech: enqueueAutomaticSpeech,
+                scheduleLocalNotification: notificationScheduler,
+                systemSurfaces: systemSurfaces
+            )
+        } else if let isolatedDefaults {
+            model = AppModel(
+                apiClient: makeClient(), defaults: isolatedDefaults, storeConnectionToken: { _ in },
+                scheduleLocalNotification: notificationScheduler,
+                systemSurfaces: systemSurfaces
+            )
+        } else if let enqueueAutomaticSpeech {
             model = AppModel(
                 apiClient: makeClient(),
                 enqueueAutomaticSpeech: enqueueAutomaticSpeech,
@@ -5416,7 +5456,7 @@ extension APIClientRetryTests {
         model.scenePhaseDidChange(.background)
         StubURLProtocol.primeBootstrap(try notificationBootstrap())
         await model.refreshAll(reportFailure: false)
-        XCTAssertNotNil(model.bootstrap)
+        _ = try XCTUnwrap(model.bootstrap, "Notification fixture bootstrap did not become ready")
         return model
     }
 
@@ -5479,6 +5519,11 @@ extension APIClientRetryTests {
             try await Task.sleep(for: .milliseconds(10))
         }
         return condition()
+    }
+
+    @MainActor
+    private func requireReplyPollFixtureStage(_ ready: Bool, _ message: String) throws {
+        _ = try XCTUnwrap(ready ? true : nil, message)
     }
 
     private func replyProgressFixture(status: String? = "working") throws -> Data {
@@ -5623,8 +5668,13 @@ extension APIClientRetryTests {
 
     @MainActor
     func testNextOrdinaryTurnStartsWithAFreshReplyProgressSnapshot() async throws {
-        let surfaces = RecordingAppSystemSurfaces(holdFinish: true)
-        let model = try await notificationModel(systemSurfaces: surfaces)
+        let suite = "assistant.send-settlement-next-turn.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(true, forKey: "assistant.push-prompted")
+        let surfaces = RecordingAppSystemSurfaces()
+        let model = try await notificationModel(isolatedDefaults: defaults, systemSurfaces: surfaces)
+        surfaces.armFinishHolding()
         let path = "/api/mobile/v1/chat/status"
         let taskIDs = ["33333333-3333-4333-8333-333333333333", "44444444-4444-4444-8444-444444444444"]
         let sendStartedAt = ProcessInfo.processInfo.systemUptime
@@ -5638,7 +5688,7 @@ extension APIClientRetryTests {
             ],
         ])
         defer { StubURLProtocol.retireHeldResponse(path: path, testCaseID: testCaseID) }
-        defer { surfaces.releaseFinish() }
+        defer { surfaces.releaseAllFinishes() }
 
         func diagnostics() -> String {
             let timeline = StubURLProtocol.requestTimeline.suffix(12).map {
@@ -5669,17 +5719,17 @@ extension APIClientRetryTests {
         let firstProgress = try await waitForReplyPollFixture {
             requestCount(path) >= 1 && !model.toolActivity.isEmpty
         }
-        XCTAssertTrue(firstProgress, "First turn did not expose progress. \(diagnostics())")
+        try requireReplyPollFixtureStage(firstProgress, "First turn did not expose progress. \(diagnostics())")
         let firstFinalHeld = try await waitForReplyPollFixture(seconds: 1) {
             requestCount(path) >= 2 && StubURLProtocol.isHoldingResponse(path: path)
         }
-        XCTAssertTrue(firstFinalHeld, "First terminal status was not held. \(diagnostics())")
+        try requireReplyPollFixtureStage(firstFinalHeld, "First terminal status was not held. \(diagnostics())")
         StubURLProtocol.releaseHeldResponse(path: path)
 
         let settlementHeld = try await waitForReplyPollFixture {
             surfaces.finishCount >= 1
         }
-        XCTAssertTrue(settlementHeld, "Post-reply system-surface settlement was not held. \(diagnostics())")
+        try requireReplyPollFixtureStage(settlementHeld, "Post-reply system-surface settlement was not held. \(diagnostics())")
         XCTAssertTrue(model.messages.contains { $0.id == "final-\(firstTask)" }, diagnostics())
         XCTAssertFalse(model.isSending, "A terminal reply should stop the working indicator. \(diagnostics())")
         XCTAssertTrue(model.isSettlingOrdinaryTurn, "Post-reply work must remain observable. \(diagnostics())")
@@ -5726,16 +5776,23 @@ extension APIClientRetryTests {
         let secondProgressAndFinalHeld = try await waitForReplyPollFixture(seconds: 1) {
             requestCount(path) >= 4 && !model.toolActivity.isEmpty && StubURLProtocol.isHoldingResponse(path: path)
         }
-        XCTAssertTrue(secondProgressAndFinalHeld,
-                      "Identical progress must be observed as fresh for the second poll invocation. \(diagnostics())")
+        try requireReplyPollFixtureStage(
+            secondProgressAndFinalHeld,
+            "Identical progress must be observed as fresh for the second poll invocation. \(diagnostics())"
+        )
         XCTAssertEqual(model.toolActivity.first?.toolName, "fixture.read", diagnostics())
         XCTAssertTrue(StubURLProtocol.isHoldingResponse(path: path), diagnostics())
     }
 
     @MainActor
     func testOldSettlementCannotReleaseReplacementOwnersHeldSettlement() async throws {
-        let surfaces = RecordingAppSystemSurfaces(holdFinish: true)
-        let model = try await notificationModel(systemSurfaces: surfaces)
+        let suite = "assistant.send-settlement-owner-swap.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(true, forKey: "assistant.push-prompted")
+        let surfaces = RecordingAppSystemSurfaces()
+        let model = try await notificationModel(isolatedDefaults: defaults, systemSurfaces: surfaces)
+        surfaces.armFinishHolding()
         let statusPath = "/api/mobile/v1/chat/status"
         let chatPath = "/api/mobile/v1/chat"
         let taskIDs = ["33333333-3333-4333-8333-333333333333", "44444444-4444-4444-8444-444444444444"]
@@ -5754,7 +5811,7 @@ extension APIClientRetryTests {
             "/api/mobile/v1/overview": [.success(status: 401, body: Data())],
         ])
         defer { StubURLProtocol.retireHeldResponse(path: statusPath, testCaseID: testCaseID) }
-        defer { surfaces.releaseFinish(0); surfaces.releaseFinish(1) }
+        defer { surfaces.releaseAllFinishes() }
 
         func diagnostics() -> String {
             let timeline = StubURLProtocol.requestTimeline.suffix(14).map {
@@ -5774,15 +5831,17 @@ extension APIClientRetryTests {
         let firstFinalHeld = try await waitForReplyPollFixture {
             requestCount(statusPath) >= 2 && StubURLProtocol.isHoldingResponse(path: statusPath)
         }
-        XCTAssertTrue(firstFinalHeld, "Old-owner terminal response was not held. \(diagnostics())")
+        try requireReplyPollFixtureStage(firstFinalHeld, "Old-owner terminal response was not held. \(diagnostics())")
         StubURLProtocol.releaseHeldResponse(path: statusPath)
         let firstSettlementHeld = try await waitForReplyPollFixture { surfaces.finishCount == 1 }
-        XCTAssertTrue(firstSettlementHeld, "Old-owner settlement was not held. \(diagnostics())")
+        try requireReplyPollFixtureStage(firstSettlementHeld, "Old-owner settlement was not held. \(diagnostics())")
         XCTAssertTrue(model.isSettlingOrdinaryTurn, diagnostics())
         XCTAssertFalse(model.canAdmitOrdinarySend, diagnostics())
 
+        surfaces.pauseFinishHolding()
         let saved = await model.saveConnection(serverURL: "https://candidate.test", token: "fixture-token")
-        XCTAssertTrue(saved, "The replacement owner fixture must reset the prior settlement. \(diagnostics())")
+        surfaces.armFinishHolding()
+        try requireReplyPollFixtureStage(saved, "The replacement owner fixture must reset the prior settlement. \(diagnostics())")
         XCTAssertEqual(model.bootstrap?.identity.id, "replacement-settlement-owner")
         XCTAssertFalse(model.isSettlingOrdinaryTurn, diagnostics())
         XCTAssertTrue(model.canAdmitOrdinarySend, diagnostics())
@@ -5791,10 +5850,10 @@ extension APIClientRetryTests {
         let secondFinalHeld = try await waitForReplyPollFixture {
             requestCount(statusPath) >= 4 && StubURLProtocol.isHoldingResponse(path: statusPath)
         }
-        XCTAssertTrue(secondFinalHeld, "Replacement-owner terminal response was not held. \(diagnostics())")
+        try requireReplyPollFixtureStage(secondFinalHeld, "Replacement-owner terminal response was not held. \(diagnostics())")
         StubURLProtocol.releaseHeldResponse(path: statusPath)
         let secondSettlementHeld = try await waitForReplyPollFixture { surfaces.finishCount == 2 }
-        XCTAssertTrue(secondSettlementHeld, "Replacement-owner settlement was not held. \(diagnostics())")
+        try requireReplyPollFixtureStage(secondSettlementHeld, "Replacement-owner settlement was not held. \(diagnostics())")
         XCTAssertTrue(model.isSettlingOrdinaryTurn, diagnostics())
         XCTAssertFalse(model.canAdmitOrdinarySend, diagnostics())
 
@@ -5802,7 +5861,7 @@ extension APIClientRetryTests {
         let oldSettlementReturned = try await waitForReplyPollFixture {
             surfaces.finishReturnedCount >= 1
         }
-        XCTAssertTrue(oldSettlementReturned, "The retired settlement did not return. \(diagnostics())")
+        try requireReplyPollFixtureStage(oldSettlementReturned, "The retired settlement did not return. \(diagnostics())")
         XCTAssertTrue(model.isSettlingOrdinaryTurn,
                       "The old settlement must not clear the replacement owner's active readiness fence. \(diagnostics())")
         XCTAssertFalse(model.canAdmitOrdinarySend, diagnostics())
@@ -5810,14 +5869,19 @@ extension APIClientRetryTests {
 
         surfaces.releaseFinish(1)
         let replacementSettled = try await waitForReplyPollFixture { model.canAdmitOrdinarySend }
-        XCTAssertTrue(replacementSettled, "The matching settlement did not release admission. \(diagnostics())")
+        try requireReplyPollFixtureStage(replacementSettled, "The matching settlement did not release admission. \(diagnostics())")
         XCTAssertFalse(model.isSettlingOrdinaryTurn, diagnostics())
     }
 
     @MainActor
     func testHeldKnownFailureKeepsDraftAndReadinessFencedAcrossOwnerReplacement() async throws {
-        let surfaces = RecordingAppSystemSurfaces(holdFinish: true)
-        let model = try await notificationModel(systemSurfaces: surfaces)
+        let suite = "assistant.send-settlement-known-failure.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(true, forKey: "assistant.push-prompted")
+        let surfaces = RecordingAppSystemSurfaces()
+        let model = try await notificationModel(isolatedDefaults: defaults, systemSurfaces: surfaces)
+        surfaces.armFinishHolding()
         let chatPath = "/api/mobile/v1/chat"
         let statusPath = "/api/mobile/v1/chat/status"
         let firstTask = "33333333-3333-4333-8333-333333333333"
@@ -5836,7 +5900,7 @@ extension APIClientRetryTests {
             "/api/mobile/v1/overview": [.success(status: 401, body: Data())],
             "/api/mobile/v1/workspace": [.success(status: 401, body: Data())],
         ])
-        defer { surfaces.releaseFinish(0); surfaces.releaseFinish(1) }
+        defer { surfaces.releaseAllFinishes() }
 
         func chatPosts() -> Int { StubURLProtocol.urls.filter { $0.path == chatPath }.count }
         func diagnostics() -> String {
@@ -5851,7 +5915,7 @@ extension APIClientRetryTests {
         let failedSettlementHeld = try await waitForReplyPollFixture {
             surfaces.finishCount == 1
         }
-        XCTAssertTrue(failedSettlementHeld, "The known failure did not reach held local settlement. \(diagnostics())")
+        try requireReplyPollFixtureStage(failedSettlementHeld, "The known failure did not reach held local settlement. \(diagnostics())")
         XCTAssertFalse(model.isSending, diagnostics())
         XCTAssertTrue(model.isSettlingOrdinaryTurn, "Known failures need the same visible settlement fence. \(diagnostics())")
         XCTAssertFalse(model.canAdmitOrdinarySend, diagnostics())
@@ -5862,8 +5926,10 @@ extension APIClientRetryTests {
         model.send("Do not replay while the failed turn settles")
         XCTAssertEqual(chatPosts(), 1, "The held failure settlement must reject a new chat POST. \(diagnostics())")
 
+        surfaces.pauseFinishHolding()
         let saved = await model.saveConnection(serverURL: "https://candidate.test", token: "fixture-token")
-        XCTAssertTrue(saved, "Replacement owner fixture must complete. \(diagnostics())")
+        surfaces.armFinishHolding()
+        try requireReplyPollFixtureStage(saved, "Replacement owner fixture must complete. \(diagnostics())")
         XCTAssertEqual(model.bootstrap?.identity.id, "replacement-failure-owner", diagnostics())
         XCTAssertFalse(model.isSettlingOrdinaryTurn, diagnostics())
         XCTAssertTrue(model.canAdmitOrdinarySend, diagnostics())
@@ -5872,13 +5938,13 @@ extension APIClientRetryTests {
         let newOwnerSettlementHeld = try await waitForReplyPollFixture {
             chatPosts() == 2 && surfaces.finishCount == 2
         }
-        XCTAssertTrue(newOwnerSettlementHeld, "The replacement owner's turn did not reach settlement. \(diagnostics())")
+        try requireReplyPollFixtureStage(newOwnerSettlementHeld, "The replacement owner's turn did not reach settlement. \(diagnostics())")
         XCTAssertTrue(model.isSettlingOrdinaryTurn, diagnostics())
         XCTAssertFalse(model.canAdmitOrdinarySend, diagnostics())
 
         surfaces.releaseFinish(0)
         let retiredFailureReturned = try await waitForReplyPollFixture { surfaces.finishReturnedCount >= 1 }
-        XCTAssertTrue(retiredFailureReturned, "The old known-failure settlement did not return. \(diagnostics())")
+        try requireReplyPollFixtureStage(retiredFailureReturned, "The old known-failure settlement did not return. \(diagnostics())")
         XCTAssertTrue(model.isSettlingOrdinaryTurn,
                       "A retired failed turn cannot clear the replacement owner's settlement. \(diagnostics())")
         XCTAssertFalse(model.canAdmitOrdinarySend, diagnostics())
@@ -5886,14 +5952,19 @@ extension APIClientRetryTests {
 
         surfaces.releaseFinish(1)
         let replacementSettled = try await waitForReplyPollFixture { model.canAdmitOrdinarySend }
-        XCTAssertTrue(replacementSettled, "The matching replacement settlement did not release readiness. \(diagnostics())")
+        try requireReplyPollFixtureStage(replacementSettled, "The matching replacement settlement did not release readiness. \(diagnostics())")
         XCTAssertFalse(model.isSettlingOrdinaryTurn, diagnostics())
     }
 
     @MainActor
     func testNilTokenCardFormPollKeepsComposerFencedDuringHeldSettlement() async throws {
-        let surfaces = RecordingAppSystemSurfaces(holdFinish: true)
-        let model = try await notificationModel(systemSurfaces: surfaces)
+        let suite = "assistant.send-settlement-card-form.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(true, forKey: "assistant.push-prompted")
+        let surfaces = RecordingAppSystemSurfaces()
+        let model = try await notificationModel(isolatedDefaults: defaults, systemSurfaces: surfaces)
+        surfaces.armFinishHolding()
         let taskID = UUID().uuidString.lowercased()
         let messageID = UUID().uuidString.lowercased()
         let form = CardFormDescriptor(
@@ -5920,7 +5991,7 @@ extension APIClientRetryTests {
             "/api/mobile/v1/overview": [.success(status: 401, body: Data())],
             "/api/mobile/v1/workspace": [.success(status: 401, body: Data())],
         ])
-        defer { surfaces.releaseFinish() }
+        defer { surfaces.releaseAllFinishes() }
 
         let (scope, _) = try await model.openCardForm(form)
         _ = try await model.setCardFormValue(
@@ -5932,7 +6003,7 @@ extension APIClientRetryTests {
         let settlementHeld = try await waitForReplyPollFixture {
             surfaces.finishCount == 1
         }
-        XCTAssertTrue(settlementHeld, "The accepted card-form poll did not reach held settlement.")
+        try requireReplyPollFixtureStage(settlementHeld, "The accepted card-form poll did not reach held settlement.")
         XCTAssertTrue(model.isSettlingOrdinaryTurn,
                       "Card-form polling has no ordinary-turn token but still owns composer settlement.")
         XCTAssertFalse(model.canAdmitOrdinarySend)
@@ -5947,7 +6018,7 @@ extension APIClientRetryTests {
 
         surfaces.releaseFinish()
         let ready = try await waitForReplyPollFixture { model.canAdmitOrdinarySend }
-        XCTAssertTrue(ready, "Releasing tokenless settlement should restore composer readiness.")
+        try requireReplyPollFixtureStage(ready, "Releasing tokenless settlement should restore composer readiness.")
     }
 
     @MainActor
