@@ -285,18 +285,24 @@ beforeAll(async () => {
     };
     await exec('pnpm', ['migrate'], { cwd, env, timeout: 45_000, maxBuffer: 2 * 1024 * 1024 });
     client = postgres(target.databaseUrl, { max: 1, onnotice: () => {} });
-    const expectedFinalHash = createHash('sha256')
+    const expectedOwnerMemoryHash = createHash('sha256')
       .update(await readFile(join(folder, '0134_owner_memory_creation.sql')))
+      .digest('hex');
+    const expectedFinalHash = createHash('sha256')
+      .update(await readFile(join(folder, '0135_memory_write_witness.sql')))
       .digest('hex');
     const [endpoint] = await client`
       SELECT hash FROM drizzle.__drizzle_migrations ORDER BY id DESC LIMIT 1`;
     expect(endpoint?.hash).toBe(expectedFinalHash);
     const [ledgerCount] =
       await client`SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations`;
-    expect(ledgerCount?.count).toBe(135);
+    expect(ledgerCount?.count).toBe(136);
     const ledgerBeforeRerun = await client`
       SELECT hash,created_at::text AS "createdAt"
       FROM drizzle.__drizzle_migrations ORDER BY id`;
+    expect(ledgerBeforeRerun).toHaveLength(136);
+    expect(ledgerBeforeRerun.at(-2)?.hash).toBe(expectedOwnerMemoryHash);
+    expect(ledgerBeforeRerun.at(-1)?.hash).toBe(expectedFinalHash);
     await client.end();
     client = undefined;
     await exec('pnpm', ['migrate'], { cwd, env, timeout: 45_000, maxBuffer: 2 * 1024 * 1024 });

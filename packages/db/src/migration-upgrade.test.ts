@@ -345,15 +345,13 @@ it.each(historicalPrefixes)(
 );
 
 it('upgrades a populated 0134 memory through the standard 0135 migration and portable export', async () => {
-  assertAllocatedTestTarget({
+  const outerDatabaseName = assertAllocatedTestTarget({
     databaseUrl: process.env.DATABASE_URL,
     testDatabaseUrl: process.env.TEST_DATABASE_URL,
     token: process.env.ASSISTANT_TEST_TARGET_TOKEN,
   });
-  const target = allocateTestTarget(
-    process.env.DATABASE_URL,
-    process.env.ASSISTANT_TEST_TARGET_TOKEN,
-  );
+  const target = allocateTestTarget(process.env.DATABASE_URL);
+  expect(target.databaseName).not.toBe(outerDatabaseName);
   const adminUrl = new URL(target.databaseUrl);
   adminUrl.pathname = '/postgres';
   const admin = postgres(adminUrl.toString(), { max: 1, onnotice: () => {} });

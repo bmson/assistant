@@ -28,6 +28,7 @@ export function decodeMemoryRecord(value: unknown): Records['memories'] {
 
   return {
     ...record,
+    memoryWriteWitness: row.memoryWriteWitness ?? null,
     embeddingSpaceKey: explicitValid ? explicit : aliasValid ? alias : null,
   } as Records['memories'];
 }
