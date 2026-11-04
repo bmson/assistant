@@ -687,14 +687,103 @@ export async function archiveInactiveChats(store: ChatStore, olderThanDays = 30)
   return persistence.archiveInactiveConversations(agent.id, cutoff, 100);
 }
 
-export async function listChatHistory(store: ChatStore, archived: boolean) {
+export type ChatHistoryStage =
+  | 'agent_started'
+  | 'agent_completed'
+  | 'agent_failed'
+  | 'conversations_started'
+  | 'conversations_completed'
+  | 'conversations_failed'
+  | 'archived_count_started'
+  | 'archived_count_completed'
+  | 'archived_count_failed'
+  | 'scope_count_started'
+  | 'scope_count_completed'
+  | 'scope_count_failed'
+  | 'active_ids_started'
+  | 'active_ids_completed'
+  | 'active_ids_failed';
+
+export type ChatHistoryStageObserver = (stage: ChatHistoryStage) => void;
+
+const chatHistoryOperationStages = {
+  agent: {
+    started: 'agent_started',
+    completed: 'agent_completed',
+    failed: 'agent_failed',
+  },
+  conversations: {
+    started: 'conversations_started',
+    completed: 'conversations_completed',
+    failed: 'conversations_failed',
+  },
+  archived_count: {
+    started: 'archived_count_started',
+    completed: 'archived_count_completed',
+    failed: 'archived_count_failed',
+  },
+  scope_count: {
+    started: 'scope_count_started',
+    completed: 'scope_count_completed',
+    failed: 'scope_count_failed',
+  },
+  active_ids: {
+    started: 'active_ids_started',
+    completed: 'active_ids_completed',
+    failed: 'active_ids_failed',
+  },
+} as const;
+
+function notifyChatHistoryStage(
+  observer: ChatHistoryStageObserver | undefined,
+  stage: ChatHistoryStage,
+) {
+  try {
+    observer?.(stage);
+  } catch {
+    // Optional diagnostics must not change the history read result.
+  }
+}
+
+async function observeChatHistoryOperation<T>(
+  observer: ChatHistoryStageObserver | undefined,
+  name: keyof typeof chatHistoryOperationStages,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const stages = chatHistoryOperationStages[name];
+  notifyChatHistoryStage(observer, stages.started);
+  try {
+    const value = await operation();
+    notifyChatHistoryStage(observer, stages.completed);
+    return value;
+  } catch (error) {
+    notifyChatHistoryStage(observer, stages.failed);
+    throw error;
+  }
+}
+
+export async function listChatHistory(
+  store: ChatStore,
+  archived: boolean,
+  observeStage?: ChatHistoryStageObserver,
+) {
   const persistence = chatPersistence(store);
-  const agent = await persistence.resolveAgent();
+  const agent = await observeChatHistoryOperation(observeStage, 'agent', () =>
+    persistence.resolveAgent(),
+  );
   const [page, archivedCount, totalInScope, activeConversationIds] = await Promise.all([
-    persistence.listConversations(agent.id, { archived }),
-    persistence.countConversations(agent.id, true),
-    persistence.countConversations(agent.id, archived),
-    persistence.listActiveConversationIds(agent.id),
+    observeChatHistoryOperation(observeStage, 'conversations', () =>
+      persistence.listConversations(agent.id, { archived }),
+    ),
+    observeChatHistoryOperation(observeStage, 'archived_count', () =>
+      persistence.countConversations(agent.id, true),
+    ),
+    observeChatHistoryOperation(observeStage, 'scope_count', () =>
+      persistence.countConversations(agent.id, archived),
+    ),
+    observeChatHistoryOperation(observeStage, 'active_ids', () =>
+      persistence.listActiveConversationIds(agent.id),
+    ),
   ]);
   return {
     conversations: page.conversations,

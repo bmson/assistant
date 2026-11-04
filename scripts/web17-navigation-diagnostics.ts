@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 export const WEB17_NAVIGATION_DIAGNOSTIC_CAP = 8;
+export const WEB17_RSC_ATTEMPT_NONCE_HEADER = 'x-web17-attempt';
 
 export type Web17PathClass =
   | 'all_chats'
@@ -40,6 +41,17 @@ const requestGroups = z
 const transitions = z
   .object({ all_chats: count, fixture_chat: count, other_same_origin: count, off_origin: count })
   .strict();
+const correlationNonce = z.string().regex(/^[A-Za-z0-9_-]{22,32}$/);
+const correlatedAttempt = z
+  .object({
+    nonce: correlationNonce,
+    prefetch: z.boolean(),
+    startedAfterClick: z.boolean(),
+    finished: z.boolean(),
+    failed: z.boolean(),
+    responseStatus: z.enum(statusClasses).nullable(),
+  })
+  .strict();
 const diagnosticsSchema = z
   .object({
     observerAvailable: z.boolean().nullable(),
@@ -47,10 +59,12 @@ const diagnosticsSchema = z
     allChatsLinkTargetMatches: z.boolean().nullable(),
     clickAttempted: z.boolean().nullable(),
     clickCompleted: z.boolean().nullable(),
-    eventCountsAreUncorrelatedObservations: z.literal(true),
+    aggregateEventCountsAreUncorrelatedObservations: z.literal(true),
     mainFrameExpectedRouteCommitted: z.boolean().nullable(),
     mainFrameTransitions: transitions.nullable(),
     requests: requestGroups.nullable(),
+    correlatedRscAttempts: z.array(correlatedAttempt).max(WEB17_NAVIGATION_DIAGNOSTIC_CAP),
+    selectedClickRscNonce: correlationNonce.nullable(),
     pageErrorCount: count.nullable(),
     overflow: z.boolean(),
   })
@@ -197,6 +211,7 @@ export function createWeb17NavigationDiagnostics(expectedOrigin: string) {
   let mainFrameExpectedRouteCommitted: boolean | null = null;
   let pageErrorCount: number | null = null;
   let overflow = false;
+  const correlatedRscAttempts: Array<z.infer<typeof correlatedAttempt>> = [];
   const mainFrameTransitions = zeros([
     'all_chats',
     'fixture_chat',
@@ -252,6 +267,46 @@ export function createWeb17NavigationDiagnostics(expectedOrigin: string) {
     },
     markClickAttempted() {
       clickAttempted = true;
+    },
+    recordRscAttemptStarted(nonce: unknown, prefetch: unknown) {
+      if (typeof nonce !== 'string' || !correlationNonce.safeParse(nonce).success) {
+        overflow = true;
+        return;
+      }
+      if (
+        typeof prefetch !== 'boolean' ||
+        correlatedRscAttempts.some((item) => item.nonce === nonce)
+      ) {
+        overflow = true;
+        return;
+      }
+      if (correlatedRscAttempts.length >= WEB17_NAVIGATION_DIAGNOSTIC_CAP) {
+        overflow = true;
+        return;
+      }
+      correlatedRscAttempts.push({
+        nonce,
+        prefetch,
+        startedAfterClick: clickAttempted === true,
+        finished: false,
+        failed: false,
+        responseStatus: null,
+      });
+    },
+    recordRscAttemptFinished(nonce: unknown) {
+      if (typeof nonce !== 'string') return;
+      const attempt = correlatedRscAttempts.find((item) => item.nonce === nonce);
+      if (attempt) attempt.finished = true;
+    },
+    recordRscAttemptFailed(nonce: unknown) {
+      if (typeof nonce !== 'string') return;
+      const attempt = correlatedRscAttempts.find((item) => item.nonce === nonce);
+      if (attempt) attempt.failed = true;
+    },
+    recordRscAttemptResponse(nonce: unknown, status: unknown) {
+      if (typeof nonce !== 'string') return;
+      const attempt = correlatedRscAttempts.find((item) => item.nonce === nonce);
+      if (attempt) attempt.responseStatus = statusClass(status);
     },
     setClickCompleted(value: unknown) {
       clickCompleted = typeof value === 'boolean' ? value : null;
@@ -330,12 +385,16 @@ export function createWeb17NavigationDiagnostics(expectedOrigin: string) {
         allChatsLinkTargetMatches,
         clickAttempted,
         clickCompleted,
-        eventCountsAreUncorrelatedObservations: true,
+        aggregateEventCountsAreUncorrelatedObservations: true,
         mainFrameExpectedRouteCommitted:
           observerAvailable === true ? mainFrameExpectedRouteCommitted : null,
         mainFrameTransitions:
           observerAvailable === true ? structuredClone(mainFrameTransitions) : null,
         requests: observerAvailable === true ? structuredClone(requests) : null,
+        correlatedRscAttempts: structuredClone(correlatedRscAttempts),
+        selectedClickRscNonce:
+          correlatedRscAttempts.find((item) => item.startedAfterClick && !item.prefetch)?.nonce ??
+          null,
         pageErrorCount,
         overflow,
       };
