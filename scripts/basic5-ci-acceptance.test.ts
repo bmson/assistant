@@ -2533,6 +2533,83 @@ describe('one-shot BASIC5 CI controller', () => {
     expect(ops.events).toEqual(['preflight', 'prepare', 'case', 'quiesce', 'receipt']);
   });
 
+  it('preserves only the closed census stage and reason through a case-entry HOLD', async () => {
+    const ops = new FakeOps();
+    ops.caseEntryFailure = {
+      stage: 'vitest_child_execution',
+      error: new Basic5CiHold(
+        'owned_session_census_unverified',
+        false,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { stage: 'known_identity_read', reason: 'process_census_unavailable' },
+      ),
+    };
+    const result = await runBasic5CiAcceptance(ops);
+    expect(result).toMatchObject({
+      result: 'hold',
+      errorCode: 'owned_session_census_unverified',
+      operationSettled: false,
+      quiescenceStatus: 'not_attempted_pending_phase_operation',
+      cleanupComplete: false,
+      targetRetained: true,
+      caseEntryDiagnostic: {
+        stage: 'vitest_child_execution',
+        category: 'controller_hold',
+        censusDiagnostic: {
+          stage: 'known_identity_read',
+          reason: 'process_census_unavailable',
+        },
+      },
+    });
+    expect(ops.writtenReceipt?.caseEntryDiagnostic).toEqual(result.caseEntryDiagnostic);
+    expect(ops.events).toEqual(['preflight', 'prepare', 'case', 'receipt']);
+    expect(JSON.stringify(result)).not.toMatch(/pid|https?:\/\/|private/);
+  });
+
+  it.each([
+    {
+      label: 'unknown fields',
+      census: {
+        stage: 'snapshot',
+        reason: 'process_census_unavailable',
+        processId: 1234,
+        url: 'https://private.invalid/path',
+      },
+    },
+    {
+      label: 'unknown stage',
+      census: { stage: 'private_stage', reason: 'process_census_unavailable' },
+    },
+    {
+      label: 'unknown reason',
+      census: { stage: 'snapshot', reason: 'private_reason' },
+    },
+  ])('rejects $label in case-entry census diagnostics', async ({ census }) => {
+    const ops = new FakeOps();
+    ops.caseEntryFailure = {
+      stage: 'vitest_child_execution',
+      error: new Basic5CiHold(
+        'owned_session_census_unverified',
+        false,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        census as never,
+      ),
+    };
+    await expect(runBasic5CiAcceptance(ops)).rejects.toThrow('case_entry_diagnostic_invalid');
+    expect(ops.events).toEqual(['preflight', 'prepare', 'case']);
+    expect(ops.writtenReceipt).toBeUndefined();
+  });
+
   it('retains a failed runner summary through case wrapping and the final HOLD receipt', async () => {
     const stdout = Buffer.from(
       JSON.stringify({

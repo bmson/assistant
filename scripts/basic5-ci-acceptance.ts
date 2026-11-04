@@ -529,6 +529,7 @@ export type Basic5CiCaseEntryDiagnostic = {
     | 'vitest_child_execution'
     | 'vitest_output_parse';
   category: Basic5CiPreparationDiagnostic['category'];
+  censusDiagnostic?: Basic5CiCensusDiagnostic;
 };
 
 export type Basic5CiBuildDiagnostic = {
@@ -721,6 +722,7 @@ export class Basic5CiHold extends Error {
     readonly caseEntryDiagnostic?: Basic5CiCaseEntryDiagnostic,
     readonly utilityChildDiagnostic?: Basic5CiUtilityChildDiagnostic,
     readonly vitestDiagnostic?: Basic5CiVitestDiagnostic,
+    readonly censusDiagnostic?: Basic5CiCensusDiagnostic,
   ) {
     super(code);
   }
@@ -728,10 +730,20 @@ export class Basic5CiHold extends Error {
 
 class Basic5CiCensusHold extends Basic5CiHold {
   constructor(
-    readonly censusDiagnostic: Basic5CiCensusDiagnostic,
+    censusDiagnostic: Basic5CiCensusDiagnostic,
     code = 'owned_session_census_unverified',
   ) {
-    super(code, false);
+    super(
+      code,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      censusDiagnostic,
+    );
   }
 }
 
@@ -770,9 +782,14 @@ export async function runBasic5CiCaseEntryStep<T>(
       hold?.buildDiagnostic,
       hold?.chromeVersionDiagnostic,
       hold?.preparationDiagnostic,
-      { stage, category: classifyPreparationError(error) },
+      {
+        stage,
+        category: classifyPreparationError(error),
+        ...(hold?.censusDiagnostic ? { censusDiagnostic: hold.censusDiagnostic } : {}),
+      },
       hold?.utilityChildDiagnostic,
       hold?.vitestDiagnostic,
+      hold?.censusDiagnostic,
     );
   }
 }
@@ -929,7 +946,8 @@ function contentFreeCaseEntryDiagnostic(value: unknown): Basic5CiCaseEntryDiagno
     !value ||
     typeof value !== 'object' ||
     Array.isArray(value) ||
-    Object.keys(value).length !== 2 ||
+    Object.keys(value).length !== 2 + (Object.hasOwn(value, 'censusDiagnostic') ? 1 : 0) ||
+    Object.keys(value).some((key) => !['stage', 'category', 'censusDiagnostic'].includes(key)) ||
     !stages.includes(
       (value as Record<string, unknown>).stage as Basic5CiCaseEntryDiagnostic['stage'],
     ) ||
@@ -939,6 +957,28 @@ function contentFreeCaseEntryDiagnostic(value: unknown): Basic5CiCaseEntryDiagno
   )
     throw new Basic5CiHold('case_entry_diagnostic_invalid');
   const diagnostic = value as Basic5CiCaseEntryDiagnostic;
+  if (Object.hasOwn(value, 'censusDiagnostic')) {
+    const census = diagnostic.censusDiagnostic as unknown;
+    if (
+      !census ||
+      typeof census !== 'object' ||
+      Array.isArray(census) ||
+      Object.keys(census).length !== 2 ||
+      !Object.hasOwn(census, 'stage') ||
+      !Object.hasOwn(census, 'reason') ||
+      !CENSUS_STAGES.includes((census as Basic5CiCensusDiagnostic).stage) ||
+      !CENSUS_REASONS.includes((census as Basic5CiCensusDiagnostic).reason)
+    )
+      throw new Basic5CiHold('case_entry_diagnostic_invalid');
+    return {
+      stage: diagnostic.stage,
+      category: diagnostic.category,
+      censusDiagnostic: {
+        stage: (census as Basic5CiCensusDiagnostic).stage,
+        reason: (census as Basic5CiCensusDiagnostic).reason,
+      },
+    };
+  }
   return { stage: diagnostic.stage, category: diagnostic.category };
 }
 
