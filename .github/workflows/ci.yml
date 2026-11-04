@@ -123,7 +123,7 @@ jobs:
       - name: Qualify PostgreSQL native owner-editor recovery adapter
         timeout-minutes: 8
         env:
-          OWNER_EDITOR_RECOVERY_PG_QUALIFICATION: '1'
+          OWNER_EDITOR_RECOVERY_PG_QUALIFICATION: "1"
         run: pnpm test packages/db/src/owner-editor-recovery.native.test.ts
       - name: Verify isolated snapshot restore stays read-only and inert
         timeout-minutes: 8
@@ -172,7 +172,7 @@ jobs:
         shell: bash
         env:
           OWNER_EDITOR_RECOVERY_FS_QUALIFICATION_PROJECT: demo-owner-editor-recovery-qualification
-          ASSISTANT_TEST_NO_EXTERNAL_CREDENTIALS: '1'
+          ASSISTANT_TEST_NO_EXTERNAL_CREDENTIALS: "1"
           TMPDIR: ${{ runner.temp }}/owner-editor-recovery-qualification
         run: |
           if [ -e "$TMPDIR" ]; then
@@ -352,7 +352,7 @@ jobs:
           AUTH_DEV_BYPASS: "false"
           AUTH_LOCALHOST_BYPASS: "true"
           AUTH_URL: http://127.0.0.1:3001
-          WEB17_DIAGNOSTICS: '1'
+          WEB17_DIAGNOSTICS: "1"
           PERSISTENCE_DRIVER: postgres
           QUEUE_DRIVER: local
           WEB_APP_PREVIEW_ENABLED: "true"
