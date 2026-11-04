@@ -25,4 +25,6 @@ The report keeps these distinctions:
 
 The native execution adapter recognizes the existing `actualEvidence` XCTest-summary receipt with a log hash. It reports what the receipt records; it does not reread/reverify the original log, authenticate receipts or establish device acceptance. The tool does not consume free-form “passed” prose or a build-only line as executed tests. Provider/production freshness remains outside its scope.
 
+Both retained root merge formats are supported: older `merged: true`/`mergedAt` records, and current `ROOT-MERGE-*.json` claims with a positive PR/CI run and complete `head,priorMain,merge,tree` hashes. The latter is reported as a historical `root_merge_claim` with an unknown timestamp. `priorMain` is never used as a verified Git parent; ancestry remains unknown without supplied `parents` links (apart from literal equality with the selected commit). Incomplete, malformed, explicit non-merged or proposal metadata is not asserted to be merged. A recognized receipt shape does not authenticate its author or independently verify GitHub state.
+
 Run its offline fixtures with `python3 -m unittest discover -s scripts -p test_release_status.py`. No production workflow or dashboard is added.

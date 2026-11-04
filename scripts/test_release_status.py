@@ -99,6 +99,48 @@ class ReleaseStatusTests(unittest.TestCase):
         self.assertTrue(all(row['includedInSelectedMain'] == 'receipt_graph' for row in result))
         self.assertEqual(m.merge_status(rows[1:], MAIN)[0]['includedInSelectedMain'], 'unknown')
 
+    def root_851(self):
+        # Exact shape and public identifiers from retained ROOT-MERGE-851.json.
+        return {'pr': 851, 'head': '2be3499c3e5f98687dabf7a3f5bcf64f95a72a91',
+                'priorMain': '6e6c2faaff988b7ffe2f87bdef22d80c86b4d26a',
+                'merge': 'a9b07c7419754f6292a877b180a1da3c20595f1c',
+                'tree': '5b8553809138a16be92aff5485fa02824bbeb7bf',
+                'ci': 41778861760, 'passed': 12210, 'skipped': 1616,
+                'deployed': False, 'installed': False}
+
+    def test_current_root_merge_shape_is_recorded_with_unknown_timestamp(self):
+        result = m.merge_status([self.root_851()], MAIN)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]['pr'], 851)
+        self.assertEqual(result[0]['receiptFormat'], 'root_merge_claim')
+        self.assertEqual(result[0]['status'], 'recorded_merged')
+        self.assertIsNone(result[0]['mergedAt'])
+        self.assertEqual(result[0]['includedInSelectedMain'], 'unknown')
+
+    def test_mixed_old_and_new_receipts_do_not_turn_prior_main_into_git_parents(self):
+        current = self.root_851()
+        old = {'pr': 837, 'merged': True, 'mergeCommit': current['priorMain'],
+               'mergedAt': '2029-12-31T23:00:00Z'}
+        result = m.merge_status([old, current], current['merge'])
+        self.assertEqual([record['pr'] for record in result], [837, 851])
+        self.assertEqual(result[0]['includedInSelectedMain'], 'unknown')
+        self.assertIsNone(result[1]['mergedAt'])
+        summary = m.summarize(current['merge'], NOW, merges=[old, current])
+        self.assertEqual(summary['deployed']['current'], 'unknown')
+        self.assertEqual(summary['installed']['current'], 'unknown')
+
+    def test_incomplete_or_proposal_root_metadata_does_not_assert_merge(self):
+        for key in ['head', 'priorMain', 'tree', 'ci', 'merge']:
+            receipt = self.root_851()
+            del receipt[key]
+            self.assertEqual(m.merge_status([receipt], MAIN), [], key)
+        for changes in [{'ci': True}, {'tree': 'short'}, {'head': None},
+                        {'merged': False}, {'merged': None}, {'mergedAt': 'invalid'},
+                        {'state': 'PROPOSED'}, {'status': 'awaiting_approval'},
+                        {'proposal': True}, {'proposedMerge': OTHER}]:
+            receipt = {**self.root_851(), **changes}
+            self.assertEqual(m.merge_status([receipt], MAIN), [], changes)
+
     def test_expired_condition_does_not_prove_grant_application_or_renewal(self):
         authority = {'condition': {'expression': 'resource.name == "fixed" && request.time < timestamp("2029-12-31T23:59:59Z")'}}
         result = m.authority_status(authority, MAIN, NOW)

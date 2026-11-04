@@ -98,14 +98,30 @@ def merge_status(receipts, main):
         pr = receipt.get('pr')
         if type(pr) is not int or pr <= 0 or not commit:
             continue
-        if receipt.get('merged') is not True and not timestamp(receipt.get('mergedAt')):
+        # Explicit non-merge/proposal metadata cannot acquire merge semantics
+        # merely by containing plausible commit fields.
+        if (receipt.get('merged') is False
+                or any(key in receipt for key in ('proposal', 'proposed', 'proposedMerge', 'plannedMerge'))
+                or any(key in receipt and str(receipt[key]).lower() != 'merged' for key in ('state', 'status'))):
+            continue
+        legacy = receipt.get('merged') is True or timestamp(receipt.get('mergedAt')) is not None
+        # Current ROOT-MERGE-*.json is a historical recorded claim, not a GitHub
+        # PR snapshot. Its priorMain is NOT promoted to verified Git parents.
+        root_claim = ('merged' not in receipt and 'mergedAt' not in receipt
+                      and sha(receipt.get('head')) is not None
+                      and sha(receipt.get('priorMain')) is not None
+                      and sha(receipt.get('merge')) is not None
+                      and sha(receipt.get('tree')) is not None
+                      and identifier(receipt.get('ci')) is not None)
+        if not legacy and not root_claim:
             continue
         raw_parents = receipt.get('parents')
         if isinstance(raw_parents, list) and raw_parents and all(sha(p) for p in raw_parents):
             parents[commit] = raw_parents
         records.append({'pr': pr, 'head': sha(receipt.get('head')), 'mergeCommit': commit,
                         'mergedAt': timestamp(receipt.get('mergedAt')).isoformat() if timestamp(receipt.get('mergedAt')) else None,
-                        'status': 'recorded_merged'})
+                        'status': 'recorded_merged',
+                        'receiptFormat': 'legacy_merge' if legacy else 'root_merge_claim'})
     reachable, pending = set(), [main]
     while pending:
         current = pending.pop()
