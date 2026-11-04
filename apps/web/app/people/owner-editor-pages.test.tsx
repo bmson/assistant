@@ -11,7 +11,9 @@ const ports = vi.hoisted(() => ({
   people: vi.fn(),
   person: vi.fn(),
   pgRead: vi.fn(),
+  pgOwner: vi.fn(),
   pgEditor: vi.fn(),
+  recoveryPartition: vi.fn(),
   fsPeople: vi.fn(),
   fsPerson: vi.fn(),
   fsContext: vi.fn(),
@@ -51,9 +53,13 @@ vi.mock('@assistant/application/people', async (original) => ({
   getPersonDossier: ports.person,
 }));
 vi.mock('@/lib/server', () => ({
+  assertPostgresInstallationOwner: ports.pgOwner,
   getFirestoreInstallationStore: ports.getStore,
   withPostgresMemoryBrowseRead: ports.pgRead,
   readPostgresOwnerEditorViewInputs: ports.pgEditor,
+}));
+vi.mock('@/app/people/person-note-recovery-scope', () => ({
+  personNoteRecoveryPartition: ports.recoveryPartition,
 }));
 vi.mock('@/lib/firestore-people', () => ({
   listFirestorePeopleDirectory: ports.fsPeople,
@@ -149,6 +155,8 @@ beforeEach(() => {
     ports.trace.push('pg-after');
     return value;
   });
+  ports.pgOwner.mockResolvedValue(ownerId);
+  ports.recoveryPartition.mockReturnValue('offline-recovery-partition');
   ports.people.mockImplementation(async (db) => {
     expect(db).toBe(leased);
     ports.trace.push('browse');
@@ -390,6 +398,18 @@ describe('actual page + real issuance builder composition, named reader/fence po
     expect(html).toContain('Adding a note is unavailable for this person view.');
     expect(html).toContain('Choose another existing person');
     expect(html).not.toContain('Your sign-in changed');
+  });
+  it('retains only the independently verified owner partition when optional issuance read throws', async () => {
+    ports.pgEditor.mockRejectedValueOnce(Error('bounded editor snapshot read failed'));
+    const html = renderToStaticMarkup(await noteIntentDossier());
+    expect(ports.pgOwner).toHaveBeenCalledExactlyOnceWith(leased);
+    expect(ports.recoveryPartition).toHaveBeenCalledWith(
+      expect.objectContaining({ ownerId, formSessionScope: 'offline_page_form_session' }),
+    );
+    expect(ports.trace.at(-1)).toBe('pg-after');
+    expect(html).toContain(`Add a saved note about ${contact.name}`);
+    expect(html).toContain('Adding a note is unavailable for this person view.');
+    expect(html).not.toContain('Could not load this view');
   });
   it('PG dossier binds same displayed/native identity/options and preserves q back/map context', async () => {
     const node = data.map.nodes.find((node) => node.contactId === contact.id);

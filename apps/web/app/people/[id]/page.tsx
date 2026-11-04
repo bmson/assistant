@@ -36,6 +36,7 @@ import { ownerEditorAvailability } from '@/lib/owner-editor-availability';
 import { buildOwnerEditorView } from '@/lib/owner-editor-view';
 import { savedNoteCreatedLabel, savedNoteValidityLabel } from '@/lib/saved-note-date-display';
 import {
+  assertPostgresInstallationOwner,
   getFirestoreInstallationStore,
   readPostgresOwnerEditorViewInputs,
   withPostgresMemoryBrowseRead,
@@ -131,6 +132,10 @@ async function loadPersonDossier(
       let editor: OwnerEditorControlsProps | null = null;
       let ownerId: string | null = null;
       if (data && formSessionScope) {
+        // Establish the installation owner before the optional issuance/snapshot
+        // read. If that bounded read fails, same-owner recovery can remain
+        // visible without deriving identity from the dossier or a cached grant.
+        ownerId = await assertPostgresInstallationOwner(db);
         try {
           const inputs = await readPostgresOwnerEditorViewInputs(db, editorInput(data));
           if (inputs) {
