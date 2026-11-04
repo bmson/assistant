@@ -13,20 +13,23 @@ const jobs = new Map(
 function nativeWebQualificationDefault(source: string): string | undefined {
   const lines = source.split(/\r?\n/);
   const starts = lines.flatMap((line, index) =>
-    /^ {6}native_web_qualification:[ \t]*$/.test(line) ? [index] : [],
+    /^ {6}native_web_qualification:/.test(line) ? [index] : [],
   );
   if (starts.length !== 1) return undefined;
+  const start = starts[0] as number;
+  if (!/^ {6}native_web_qualification:[ \t]*(?:#.*)?$/.test(lines[start] as string))
+    return undefined;
 
   const defaults: string[] = [];
-  for (const line of lines.slice((starts[0] as number) + 1)) {
-    if (/^ {6}[A-Za-z_][A-Za-z0-9_-]*:[ \t]*$/.test(line)) break;
+  for (const line of lines.slice(start + 1)) {
+    if (/^ {6}[A-Za-z_][A-Za-z0-9_-]*:/.test(line)) break;
     if (/^ {0,5}\S/.test(line)) break;
     const match = /^ {8}default:[ \t]*(.*?)[ \t]*$/.exec(line);
     if (match) defaults.push(match[1] as string);
   }
   if (defaults.length !== 1) return undefined;
   const value = defaults[0] as string;
-  return value === 'off' || value === "'off'" || value === '"off"' ? 'off' : undefined;
+  return /^(?:off|'off'|"off")(?:[ \t]+#.*)?$/.test(value) ? 'off' : undefined;
 }
 function condition(job: string) {
   const text = jobs.get(job);
@@ -74,8 +77,8 @@ describe('default-off workflow isolation for the read-only qualification', () =>
   });
   it.each(["'off'", '"off"', 'off'])('reads valid YAML default formatting %s as off', (value) => {
     const source = [
-      '      native_web_qualification:',
-      `        default: ${value}`,
+      '      native_web_qualification: # selector block',
+      `        default: ${value} # YAML comment`,
       '      sha:',
       '        default: "on"',
     ].join('\n');
@@ -83,9 +86,10 @@ describe('default-off workflow isolation for the read-only qualification', () =>
   });
   it.each([
     '      native_web_qualification:\n        default: on\n      sha:\n        default: off',
-    '      native_web_qualification:\n        description: no default\n      sha:\n        default: off',
+    '      native_web_qualification:\n        description: no default\n      sha: # sibling option\n        default: off',
     '      native_web_qualification:\n        default: off\n        default: "off"\n      sha:',
-    '      native_web_qualification:\n        description: one\n      native_web_qualification:\n        default: off',
+    '      native_web_qualification:\n        description: one\n      native_web_qualification: # duplicate\n        default: off',
+    '      native_web_qualification: off\n        default: off',
   ])('rejects changed, missing, or ambiguous selector defaults', (source) => {
     expect(nativeWebQualificationDefault(source)).toBeUndefined();
   });
