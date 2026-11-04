@@ -719,9 +719,12 @@ final class APIClientRetryTests: XCTestCase {
             "/api/mobile/v1/memory/\(memoryID)/correction/authorize",
             "/api/mobile/v1/memory/\(memoryID)/correction/\(operationID)/apply",
             "/api/mobile/v1/memory/\(memoryID)/correction/\(operationID)/status",
+            "/api/mobile/v1/memory/\(memoryID)/correction/\(operationID)/status",
         ])
-        XCTAssertEqual(requests[0].2["authorization"], "Bearer bearer-token")
-        XCTAssertEqual(requests[1].2["x-owner-memory-correction-authorization"], handle)
+        let authorizeHeaders = Dictionary(uniqueKeysWithValues: requests[0].2.map { ($0.key.lowercased(), $0.value) })
+        let applyHeaders = Dictionary(uniqueKeysWithValues: requests[1].2.map { ($0.key.lowercased(), $0.value) })
+        XCTAssertEqual(authorizeHeaders["authorization"], "Bearer bearer-token")
+        XCTAssertEqual(applyHeaders["x-owner-memory-correction-authorization"], handle)
         let authorizeBody = try XCTUnwrap(JSONSerialization.jsonObject(with: requests[0].3) as? [String: Any])
         XCTAssertEqual(authorizeBody["version"] as? Int, 1)
         XCTAssertEqual(authorizeBody["intent"] as? String, "authorize")
