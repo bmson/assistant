@@ -316,6 +316,8 @@ final class NativeMemoryCorrectionConsumerTests: XCTestCase {
 
         await storage.releaseRemove()
         await oldSave.value
+        XCTAssertTrue(consumer.blockedMemoryIDs.contains(memoryA),
+                      "Late cleanup must preserve B's block before any legacy lookup can repair it")
 
         let authorizations = await transport.authorizationCount
         let applies = await transport.applyCount
