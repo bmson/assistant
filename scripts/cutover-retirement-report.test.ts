@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { EvidenceStore } from './cutover-evidence.js';
 import {
+  analyzeRepository,
   buildRetirementReport,
   classifyPath,
   type OwnerDecisions,
@@ -249,6 +250,52 @@ describe('repository dependency scan', () => {
 });
 
 describe('Firestore release path proof', () => {
+  it('keeps a lost guard blocking in the shared proof and dependency findings', () => {
+    const { firestorePath, findings } = analyzeRepository(
+      releaseRepo({ 'infra/gcp/deploy.sh': 'make_secret database-url "$X"' }),
+    );
+    expect(firestorePath.ok).toBe(false);
+    expect(firestorePath.problems).toEqual([
+      'infra/gcp/deploy.sh lost its guard (refuse_firestore_installation || exit 1)',
+    ]);
+    expect(findings.find((item) => item.path === 'infra/gcp/deploy.sh')).toEqual({
+      path: 'infra/gcp/deploy.sh',
+      lines: [1],
+      class: 'release-pipeline',
+    });
+  });
+
+  it('follows transitive PostgreSQL dependencies and ignores comment-only references regardless of input order', () => {
+    const files = releaseRepo({
+      'infra/gcp/release-firestore.sh': [
+        '# source infra/docker/backup.sh',
+        'source infra/gcp/bridge.sh',
+      ].join('\n'),
+      'infra/gcp/bridge.sh': 'source infra/gcp/release-diagnostics.sh',
+    });
+    const result = analyzeRepository(files);
+    expect(result.firestorePath.ok).toBe(false);
+    expect(result.firestorePath.closure).toEqual([
+      'infra/gcp/bridge.sh',
+      'infra/gcp/release-diagnostics.sh',
+      'infra/gcp/release-firestore.sh',
+    ]);
+    expect(result.firestorePath.problems).toContain(
+      'infra/gcp/release-diagnostics.sh is reachable from the Firestore release path',
+    );
+    expect(
+      result.findings.find((item) => item.path === 'infra/gcp/release-diagnostics.sh'),
+    ).toEqual({
+      path: 'infra/gcp/release-diagnostics.sh',
+      lines: [1],
+      class: 'release-pipeline',
+    });
+    expect(result.findings.find((item) => item.path === 'infra/docker/backup.sh')?.class).toBe(
+      'postgres-only',
+    );
+    expect(analyzeRepository([...files].reverse())).toEqual(result);
+  });
+
   it('proves PostgreSQL-only files unreachable and keeps guards non-blocking', () => {
     const result = verifyFirestorePath(releaseRepo());
     expect(result).toMatchObject({ ok: true, problems: [] });
@@ -328,8 +375,9 @@ describe('Firestore release path proof', () => {
           return [];
         }
       });
-    expect(verifyFirestorePath(files).problems).toEqual([]);
-    const blocking = scanRepository(files)
+    const { firestorePath, findings } = analyzeRepository(files);
+    expect(firestorePath.problems).toEqual([]);
+    const blocking = findings
       .filter((item) =>
         ['release-pipeline', 'backup-tooling', 'terraform', 'ci-workflow', 'unclassified'].includes(
           item.class,
