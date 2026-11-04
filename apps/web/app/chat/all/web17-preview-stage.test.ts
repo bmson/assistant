@@ -1,3 +1,4 @@
+import { createRequestStore } from 'next/dist/server/async-storage/request-store';
 import { describe, expect, it } from 'vitest';
 import {
   createWeb17ChatAllStageObserver,
@@ -45,8 +46,7 @@ describe('WEB-17 chat list stage diagnostics', () => {
     const base = {
       enabled: true,
       host: '127.0.0.1:3001',
-      rsc: '1',
-      prefetch: '0',
+      requestClass: 'rsc',
       nonce: 'Abcdef0123456789_-xyz0',
       write: () => {},
     };
@@ -55,7 +55,7 @@ describe('WEB-17 chat list stage diagnostics', () => {
     expect(
       createWeb17ChatAllStageObserver({ ...base, host: 'preview.example.test' }),
     ).toBeUndefined();
-    expect(createWeb17ChatAllStageObserver({ ...base, rsc: '0' })).toBeUndefined();
+    expect(createWeb17ChatAllStageObserver({ ...base, requestClass: 'document' })).toBeUndefined();
     expect(createWeb17ChatAllStageObserver({ ...base, nonce: 'not a nonce' })).toBeUndefined();
     expect(isWeb17ChatAllNonce('Abcdef0123456789_-xyz0')).toBe(true);
     expect(isWeb17ChatAllNonce('private-owner-id')).toBe(false);
@@ -67,8 +67,7 @@ describe('WEB-17 chat list stage diagnostics', () => {
     const observer = createWeb17ChatAllStageObserver({
       enabled: true,
       host: 'localhost:3001',
-      rsc: '1',
-      prefetch: '3',
+      requestClass: 'rsc-prefetch',
       nonce: 'Abcdef0123456789_-xyz0',
       now: () => now,
       write: (line) => writes.push(line),
@@ -126,8 +125,7 @@ describe('WEB-17 chat list stage diagnostics', () => {
     const observer = createWeb17ChatAllStageObserver({
       enabled: true,
       host: '127.0.0.1',
-      rsc: '1',
-      prefetch: '0',
+      requestClass: 'rsc',
       nonce: 'Abcdef0123456789_-xyz0',
       now: () => 0,
       write: (line) => writes.push(line),
@@ -154,8 +152,7 @@ describe('WEB-17 chat list stage diagnostics', () => {
     const observer = createWeb17ChatAllStageObserver({
       enabled: true,
       host: 'localhost:3001',
-      rsc: '1',
-      prefetch: null,
+      requestClass: 'rsc',
       nonce: 'Abcdef0123456789_-xyz0',
       now: () => {
         throw new Error('synthetic clock failure');
@@ -174,5 +171,49 @@ describe('WEB-17 chat list stage diagnostics', () => {
     expect(elapsedBucket(Number.NEGATIVE_INFINITY)).toBe('unknown');
     expect(elapsedBucket(-0.1)).toBe('unknown');
     expect(elapsedBucket(0)).toBe('under_1s');
+  });
+
+  it('uses a browser-validated marker that survives Next request header filtering', () => {
+    const requestHeaders = new Headers({
+      host: '127.0.0.1:3001',
+      rsc: '1',
+      'next-router-prefetch': '1',
+      'x-web17-attempt': 'Abcdef0123456789_-xyz0',
+      'x-web17-request-class': 'rsc-prefetch',
+    });
+    const store = createRequestStore({
+      phase: 'render',
+      headers: requestHeaders,
+      onUpdateCookies: undefined,
+      url: { pathname: '/chat/all' },
+      rootParams: {},
+      implicitTags: { tags: [], expirationsByCacheKind: new Map() },
+      resumeDataCache: null,
+      previewProps: undefined,
+      isHmrRefresh: false,
+      serverComponentsHmrCache: undefined,
+      hmrRefreshHash: undefined,
+      stagedFallbackParams: null,
+    });
+    const userlandHeaders = store.headers;
+
+    expect(userlandHeaders.get('rsc')).toBeNull();
+    expect(userlandHeaders.get('next-router-prefetch')).toBeNull();
+    expect(userlandHeaders.get('x-web17-request-class')).toBe('rsc-prefetch');
+    expect(userlandHeaders.get('x-web17-attempt')).toBe('Abcdef0123456789_-xyz0');
+    const writes: string[] = [];
+    const observer = createWeb17ChatAllStageObserver({
+      enabled: true,
+      host: userlandHeaders.get('host'),
+      requestClass: userlandHeaders.get('x-web17-request-class'),
+      nonce: userlandHeaders.get('x-web17-attempt'),
+      write: (line) => writes.push(line),
+    });
+    expect(observer).toBeDefined();
+    observer?.record('request_received');
+    expect(JSON.parse(writes[0]?.slice(WEB17_CHAT_ALL_STAGE_PREFIX.length) ?? '{}')).toMatchObject({
+      prefetch: true,
+      phase: 'request_received',
+    });
   });
 });

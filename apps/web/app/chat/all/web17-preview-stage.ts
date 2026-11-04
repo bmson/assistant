@@ -90,17 +90,22 @@ export function elapsedBucket(milliseconds: unknown): Web17ElapsedBucket {
 export function createWeb17ChatAllStageObserver(input: {
   enabled: boolean;
   host: unknown;
-  rsc: unknown;
-  prefetch: unknown;
+  requestClass: unknown;
   nonce: unknown;
   now?: () => number;
   write?: (line: string) => void;
 }): Web17ChatAllStageObserver | undefined {
-  if (!input.enabled || !isLoopbackHost(input.host) || input.rsc !== '1' || !isNonce(input.nonce))
+  if (
+    !input.enabled ||
+    !isLoopbackHost(input.host) ||
+    (input.requestClass !== 'rsc' && input.requestClass !== 'rsc-prefetch') ||
+    !isNonce(input.nonce)
+  )
     return undefined;
 
   const nonce = input.nonce;
-  const prefetch = typeof input.prefetch === 'string' && input.prefetch.length > 0;
+  // Browser-side classification is a correlation hint, not server-proven RSC state or authority.
+  const prefetch = input.requestClass === 'rsc-prefetch';
   const now = input.now ?? (() => performance.now());
   const write = input.write ?? ((line: string) => console.error(line));
   let startedAt = Number.NaN;

@@ -22,6 +22,7 @@ import {
   createWeb17NavigationDiagnostics,
   observeWeb17AllChatsLinks,
   projectWeb17NavigationDiagnostics,
+  WEB17_REQUEST_CLASS_HEADER,
   WEB17_RSC_ATTEMPT_NONCE_HEADER,
 } from './web17-navigation-diagnostics.js';
 
@@ -903,7 +904,18 @@ async function verifyUnmountedPollDoesNotPublishAfterRemount(): Promise<void> {
           typeof requestHeaders['next-router-prefetch'] === 'string' &&
             requestHeaders['next-router-prefetch'].length > 0,
         );
-        if (recorded) continuedHeaders = { ...allHeaders, [WEB17_RSC_ATTEMPT_NONCE_HEADER]: nonce };
+        if (recorded) {
+          const requestClass =
+            typeof requestHeaders['next-router-prefetch'] === 'string' &&
+            requestHeaders['next-router-prefetch'].length > 0
+              ? 'rsc-prefetch'
+              : 'rsc';
+          continuedHeaders = {
+            ...allHeaders,
+            [WEB17_RSC_ATTEMPT_NONCE_HEADER]: nonce,
+            [WEB17_REQUEST_CLASS_HEADER]: requestClass,
+          };
+        }
       } catch {
         // If diagnostic correlation is unavailable, preserve the original request.
       }
