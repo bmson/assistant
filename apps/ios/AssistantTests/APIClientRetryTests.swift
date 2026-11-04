@@ -3019,21 +3019,59 @@ final class APIClientRetryTests: XCTestCase {
 
     @MainActor
     func testStandingApprovalDoesNotWaitOnTheWorkspaceRead() async throws {
+        let workspacePath = "/api/mobile/v1/workspace"
         StubURLProtocol.prime([
-            .success(status: 200, body: Data(#"{"ok":true,"taskId":"t1","toolCallId":"tc1","approvalId":"a1"}"#.utf8)),
-            .delayed(after: 1.5, status: 401, body: Data()),
-            .delayed(after: 1.5, status: 401, body: Data())
-        ])
+            .success(status: 200, body: Data(#"{"ok":true,"taskId":"t1","toolCallId":"tc1","approvalId":"a1"}"#.utf8))
+        ], paths: [workspacePath: [.held(status: 401, body: Data())]])
         let model = AppModel(apiClient: makeClient())
-        let started = ContinuousClock.now
-        let accepted = await model.approveAndRemember(id: "a1")
-        let elapsed = ContinuousClock.now - started
+        let approval = Task { await model.approveAndRemember(id: "a1") }
+        defer { StubURLProtocol.releaseHeldResponse(path: workspacePath) }
 
-        XCTAssertTrue(accepted)
-        XCTAssertLessThan(elapsed, .milliseconds(750))
+        // This is a bounded test deadline, not a performance threshold. The
+        // workspace response stays held until the approval itself completes.
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !StubURLProtocol.isHoldingResponse(path: workspacePath), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        guard StubURLProtocol.isHoldingResponse(path: workspacePath) else {
+            approval.cancel()
+            XCTFail("The workspace read did not reach its held response before the test deadline")
+            return
+        }
+
+        enum ApprovalCompletion: Sendable {
+            case completed(Bool)
+            case deadline
+        }
+        let remaining = deadline - ContinuousClock.now
+        let completion = await withTaskGroup(of: ApprovalCompletion.self) { group in
+            group.addTask { .completed(await approval.value) }
+            group.addTask {
+                try? await Task.sleep(for: remaining)
+                return .deadline
+            }
+            let first = await group.next() ?? .deadline
+            if case .deadline = first {
+                // Release before the group joins its approval waiter so a
+                // regression cannot leave this test hanging.
+                StubURLProtocol.releaseHeldResponse(path: workspacePath)
+            }
+            group.cancelAll()
+            return first
+        }
+
+        switch completion {
+        case .completed(let accepted):
+            XCTAssertTrue(accepted)
+            XCTAssertTrue(StubURLProtocol.isHoldingResponse(path: workspacePath),
+                          "The standing approval must finish before the workspace response is released")
+        case .deadline:
+            XCTFail("The standing approval waited for the held workspace response")
+        }
+        StubURLProtocol.releaseHeldResponse(path: workspacePath)
         await model.settleApprovalReconciliation()
         XCTAssertEqual(StubURLProtocol.attempts.first, "POST")
-        XCTAssertTrue(StubURLProtocol.urls.contains { $0.path.hasSuffix("/workspace") })
+        XCTAssertTrue(StubURLProtocol.urls.contains { $0.path == workspacePath })
     }
 
     /// An overview request that left before the tap comes back still listing
