@@ -88,6 +88,26 @@ final class MemoryCorrectionPresentationTests: XCTestCase {
         XCTAssertEqual(state.draft, snapshot().content)
     }
 
+    func testEqualVersionPendingCheckCompletesWithoutAdmittingTerminalOrStaleResponses() throws {
+        var state = MemoryCorrectionPresentation(snapshot: snapshot())
+        let operation = try authorize(&state)
+        XCTAssertTrue(state.receiveOutcome(presentationID: state.presentationID, operation: operation,
+                                          version: 1, disposition: .uncertain))
+        XCTAssertEqual(state.checkResult(), .checkResult(operation))
+        XCTAssertFalse(state.receiveOutcome(presentationID: state.presentationID, operation: operation,
+                                           version: 1, disposition: .saved(readback: nil)))
+        XCTAssertFalse(state.receiveOutcome(presentationID: state.presentationID, operation: operation,
+                                           version: 0, disposition: .pending))
+        XCTAssertFalse(state.receiveOutcome(presentationID: UUID(), operation: operation,
+                                           version: 1, disposition: .pending))
+        XCTAssertTrue(state.isChecking)
+        XCTAssertTrue(state.receiveOutcome(presentationID: state.presentationID, operation: operation,
+                                          version: 1, disposition: .pending))
+        XCTAssertEqual(state.phase, .pending)
+        XCTAssertEqual(state.outcomeVersion, 1)
+        XCTAssertTrue(state.canCheckResult)
+    }
+
     func testReadRefreshDoesNotResolveUnknownOrSilentlyRebaseDraft() throws {
         var state = MemoryCorrectionPresentation(snapshot: snapshot())
         state.editDraft("My kept correction")

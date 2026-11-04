@@ -127,10 +127,15 @@ final class NativeMemoryCorrectionConsumerTests: XCTestCase {
         let issued = try XCTUnwrap(consumer.presentation?.operation)
 
         var pendingState = try XCTUnwrap(consumer.presentation)
+        XCTAssertEqual(pendingState.phase, .unknown)
+        XCTAssertEqual(pendingState.outcomeVersion, 0)
         let pendingCheck = try XCTUnwrap(pendingState.checkResult())
         consumer.updatePresentation(pendingState)
         await consumer.handle(pendingCheck)
         XCTAssertEqual(consumer.presentation?.phase, .pending)
+        XCTAssertEqual(consumer.presentation?.outcomeVersion, 0, "A status check must not fabricate a newer version")
+        XCTAssertEqual(consumer.presentation?.isChecking, false)
+        XCTAssertEqual(consumer.presentation?.canCheckResult, true)
 
         var terminalState = try XCTUnwrap(consumer.presentation)
         let terminalCheck = try XCTUnwrap(terminalState.checkResult())

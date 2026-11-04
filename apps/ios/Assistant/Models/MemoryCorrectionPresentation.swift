@@ -187,7 +187,10 @@ struct MemoryCorrectionPresentation: Equatable, Sendable {
                 isChecking = false
                 return true
             }
-            if version == outcomeVersion, phase == .pending, case .pending = disposition {
+            // A completed explicit status read may refine an unresolved result at the
+            // same version. It cannot admit a terminal result or an older response.
+            if version == outcomeVersion, isChecking, [.unknown, .pending].contains(phase), case .pending = disposition {
+                phase = .pending
                 isChecking = false
                 return true
             }
