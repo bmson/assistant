@@ -102,7 +102,7 @@
     "@assistant/persistence": "workspace:*",
     "@assistant/setup": "workspace:*",
     "@assistant/tools": "workspace:*",
-    "@biomejs/biome": "^2.5.15",
+    "@biomejs/biome": "^2.6.4",
     "@google-cloud/firestore": "^9.4.0",
     "@types/node": "^26.6.6",
     "ai": "^7.0.156",
