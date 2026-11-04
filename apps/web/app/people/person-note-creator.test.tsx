@@ -475,11 +475,25 @@ describe('dormant person-note request and receipt contract', () => {
       marker: { id: grant.issuedOperationHandle, command: grant.command, targetId: subjectId },
       message: 'Save could not be confirmed. Check its result before saving again.',
     });
-    const html = renderToStaticMarkup(<PersonNoteRecovery state={state} checkResult={() => {}} />);
+    const html = renderToStaticMarkup(
+      <PersonNoteRecovery state={state} checkResult={() => {}} draftPresent={false} />,
+    );
     expect(html).toContain('Check result');
     expect(html).not.toContain('disabled=""');
     expect(html).not.toContain('Add saved note');
     expect(html).toContain('Reloading loses the note text.');
+    expect(html).toContain('Save result unknown. Check result before adding another note.');
+    expect(html).not.toContain('Your draft is kept');
     expect(html).not.toContain(content);
+  });
+  it('claims same-page draft retention only while the note text remains mounted', () => {
+    const state = operationState({
+      phase: 'pending',
+      marker: { id: grant.issuedOperationHandle, command: grant.command, targetId: subjectId },
+    });
+    const html = renderToStaticMarkup(
+      <PersonNoteRecovery state={state} checkResult={() => {}} draftPresent />,
+    );
+    expect(html).toContain('Your draft is kept on this page.');
   });
 });

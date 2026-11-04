@@ -258,6 +258,16 @@ export default async function KnowledgePage({
           with its source.
         </p>
       ) : null}
+      {view === 'library' ? (
+        <div className="mt-4 flex flex-wrap items-center gap-3 rounded-xl border border-edge bg-raised p-4">
+          <p className="min-w-0 flex-1 text-sm text-muted">
+            You can add a plain-text note about an existing person.
+          </p>
+          <Link href="/people?addNote=1" className={btn.outline}>
+            Add a note about someone
+          </Link>
+        </div>
+      ) : null}
       {view === 'connections' ? (
         <ConnectionsFilters
           query={query}

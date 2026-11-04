@@ -22,6 +22,7 @@ import {
   type OwnerEditorControlsProps,
 } from '@/app/people/owner-editor-controls';
 import { PersonAvatar } from '@/app/people/person-avatar';
+import { PersonNoteCreator } from '@/app/people/person-note-creator';
 import { ConnectionList, RelationshipList } from '@/app/people/relationship-list';
 import { BrowseFact } from '@/app/profile/browse-fact';
 import type { FactView } from '@/app/profile/fact-row';
@@ -191,7 +192,12 @@ export default async function PersonPage({
   searchParams,
 }: {
   params: Promise<{ id: string }>;
-  searchParams?: Promise<{ q?: string; returnTo?: string; connectionId?: string }>;
+  searchParams?: Promise<{
+    q?: string;
+    returnTo?: string;
+    connectionId?: string;
+    addNote?: string;
+  }>;
 }) {
   const session = await requireOwner();
   const { id } = await params;
@@ -206,8 +212,10 @@ export default async function PersonPage({
     typeof rawConnectionId === 'string' && CONNECTION_UUID_RE.test(rawConnectionId)
       ? rawConnectionId.toLowerCase()
       : null;
-  const backHref = mapReturnTo ?? `/people${query ? `?q=${encodeURIComponent(query)}` : ''}`;
-  const retryBase = `/people/${id}${mapReturnTo ? `?returnTo=${encodeURIComponent(mapReturnTo)}` : query ? `?q=${encodeURIComponent(query)}` : ''}`;
+  const notePickerSuffix = search?.addNote === '1' ? `${query ? '&' : '?'}addNote=1` : '';
+  const peopleBack = `/people${query ? `?q=${encodeURIComponent(query)}` : ''}${notePickerSuffix}`;
+  const backHref = mapReturnTo ?? peopleBack;
+  const retryBase = `/people/${id}${mapReturnTo ? `?returnTo=${encodeURIComponent(mapReturnTo)}` : query ? `?q=${encodeURIComponent(query)}` : ''}${!mapReturnTo ? notePickerSuffix : ''}`;
   const retryHref = requestedConnectionId
     ? `${retryBase}${retryBase.includes('?') ? '&' : '?'}connectionId=${requestedConnectionId}#person-connection-${requestedConnectionId}`
     : retryBase;
@@ -250,7 +258,7 @@ export default async function PersonPage({
           confirmed, open People to check that same request.
         </p>
         <Link
-          href={`/people${query ? `?q=${encodeURIComponent(query)}` : ''}`}
+          href={peopleBack}
           className="mt-4 inline-flex min-h-11 items-center text-accent underline"
         >
           Open People
@@ -337,6 +345,13 @@ export default async function PersonPage({
           <OwnerEditorContextTrigger entry="identity" />
           <OwnerEditorContextTrigger entry="create" />
         </div>
+        {search?.addNote === '1' && editor?.personNoteCreate ? (
+          <PersonNoteCreator
+            session={editor.session}
+            snapshot={editor.personNoteCreate.snapshot}
+            grant={editor.personNoteCreate.grant}
+          />
+        ) : null}
         {!detailEditingAvailable && contact.trust !== 'owner' ? (
           <p className="mt-3 text-sm text-muted">
             {editorAvailability.kind === 'available'

@@ -366,6 +366,8 @@ describe.skipIf(!localEmulator)('Firestore knowledge workspace with PostgreSQL o
     const library = await render({});
     expect(auth.owner).toHaveBeenCalled();
     expect(library).toContain('Saved notes');
+    expect(library).toContain('You can add a plain-text note about an existing person.');
+    expect(library).toContain('href="/people?addNote=1"');
     expect(library).toContain('Grace lives in Oslo');
     expect(library).toContain('Open a saved note or person to review available edits.');
     const map = await render({ view: 'map', entity: seeded.grace });

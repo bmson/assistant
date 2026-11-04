@@ -47,6 +47,10 @@ export interface OwnerEditorControlsProps {
     aliases: string[];
     revision: string;
   };
+  personNoteCreate?: {
+    grant: OwnerEditorFormGrant;
+    snapshot: { contactId: string; name: string; trust: string; revision: string };
+  };
   family?: {
     grant: OwnerEditorFormGrant;
     anchorContactId: string;

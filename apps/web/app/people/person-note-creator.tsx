@@ -87,9 +87,11 @@ export function PersonNoteResultStatus({
 export function PersonNoteRecovery({
   state,
   checkResult,
+  draftPresent,
 }: {
   state: ReturnType<OwnerEditorOperation['getSnapshot']>;
   checkResult: () => void;
+  draftPresent: boolean;
 }) {
   if (state.phase !== 'pending') return null;
   return (
@@ -98,7 +100,9 @@ export function PersonNoteRecovery({
         Check result
       </button>
       <p className="text-sm text-muted">
-        Check the same save before trying again. Reloading loses the note text.
+        {state.busy ? 'Saving…' : 'Save result unknown. Check result before adding another note.'}{' '}
+        {draftPresent ? 'Your draft is kept on this page. ' : ''}
+        Reloading loses the note text.
       </p>
     </div>
   );
@@ -301,10 +305,7 @@ const EMPTY_STATE = Object.freeze({
 });
 const noSnapshot = () => EMPTY_STATE;
 
-/**
- * Dormant person-note form. Do not mount it until its command has separate
- * release authorization, grant issuance and capability coverage.
- */
+/** Creates a plain-text note about one currently verified, non-owner person. */
 export function PersonNoteCreator({ session, snapshot, grant }: PersonNoteCreatorProps) {
   const router = useRouter();
   const [operationSession, setOperationSession] = useState(session);
@@ -603,6 +604,7 @@ export function PersonNoteCreator({ session, snapshot, grant }: PersonNoteCreato
         <PersonNoteRecovery
           state={state}
           checkResult={() => void controller?.checkPendingResult()}
+          draftPresent={draft.length > 0}
         />
         {state.phase === 'resolved' && !state.reviewRequired && hasNewGrant ? (
           <button type="button" className={btn.outline} onClick={reviewFreshPerson}>

@@ -7,13 +7,14 @@ import {
 } from './owner-editor-release-policy';
 
 describe('basic owner-editor release policy', () => {
-  it('allows exactly the five reviewed basic editing commands', () => {
+  it('allows exactly the reviewed basic editing and person-note commands', () => {
     expect(BASIC_OWNER_EDITOR_COMMANDS).toEqual([
       'create_person',
       'update_person_identity',
       'add_family_relationship',
       'correct_owner_family_relationship',
       'correct_owner_memory',
+      'create_owner_memory',
     ]);
     for (const command of BASIC_OWNER_EDITOR_COMMANDS)
       expect(isBasicOwnerEditorCommand(command)).toBe(true);
@@ -25,7 +26,6 @@ describe('basic owner-editor release policy', () => {
   });
 
   it.each([
-    'create_owner_memory',
     'remove_person',
     'remove_owner_family_relationship',
     'unknown_command',
@@ -38,7 +38,7 @@ describe('basic owner-editor release policy', () => {
     expect(isBasicOwnerEditorCommand(value)).toBe(false);
   });
 
-  it('declares the same five commands for deployment readiness', () => {
+  it('declares the same commands for deployment readiness', () => {
     expect(releaseContracts.components.web.ownerEditorV1).toEqual(BASIC_OWNER_EDITOR_COMMANDS);
   });
 

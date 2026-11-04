@@ -10,6 +10,8 @@ export const BASIC_OWNER_EDITOR_COMMANDS = Object.freeze([
   'add_family_relationship',
   'correct_owner_family_relationship',
   'correct_owner_memory',
+  // Person-scoped plain-text notes; this does not enable standalone memories.
+  'create_owner_memory',
 ] as const satisfies readonly OwnerEditorCommand[]);
 
 export type BasicOwnerEditorCommand = (typeof BASIC_OWNER_EDITOR_COMMANDS)[number];

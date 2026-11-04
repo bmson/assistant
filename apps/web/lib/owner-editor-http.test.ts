@@ -105,7 +105,7 @@ function fixture(command: OwnerEditorCommand = 'create_person') {
       command === 'update_person_identity' ||
       command === 'remove_person'
         ? { contactId: target }
-        : command === 'correct_owner_memory'
+        : command === 'correct_owner_memory' || command === 'create_owner_memory'
           ? { memoryId: target }
           : { relationId: target, memoryId: other, assertionId: third },
     revision: 'b'.repeat(64),
@@ -305,6 +305,7 @@ describe('actual two HTTP factories, actual crypto/parser/body guards, offline b
     'add_family_relationship',
     'correct_owner_family_relationship',
     'correct_owner_memory',
+    'create_owner_memory',
   ] as const)(
     'dispatches exactly %s with verified owner scope on its declared route',
     async (command) => {
@@ -320,7 +321,7 @@ describe('actual two HTTP factories, actual crypto/parser/body guards, offline b
       expect(f.lookup).not.toHaveBeenCalled();
     },
   );
-  it.each(['create_owner_memory', 'remove_person', 'remove_owner_family_relationship'] as const)(
+  it.each(['remove_person', 'remove_owner_family_relationship'] as const)(
     'rejects a correctly signed %s scope before GET or POST reaches the backend',
     async (command) => {
       const f = fixture(command);

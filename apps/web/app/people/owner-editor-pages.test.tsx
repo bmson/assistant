@@ -113,6 +113,12 @@ const dossier = () =>
     params: Promise.resolve({ id: contact.id }),
     searchParams: Promise.resolve({ q: 'retained search' }),
   });
+const noteIntentDirectory = () => People({ searchParams: Promise.resolve({ addNote: '1' }) });
+const noteIntentDossier = () =>
+  Person({
+    params: Promise.resolve({ id: contact.id }),
+    searchParams: Promise.resolve({ q: 'retained search', addNote: '1' }),
+  });
 beforeEach(() => {
   vi.resetAllMocks();
   ports.driver = 'postgres';
@@ -310,6 +316,21 @@ describe('actual page + real issuance builder composition, named reader/fence po
     expect(html).toContain(`?q=${encodeURIComponent(contact.name)}`);
     expect(html).not.toContain('Edit details');
     expect(html).not.toContain('method="post"');
+  });
+  it('Saved-notes entry carries person-note intent through People search and the exact person dossier', async () => {
+    const directoryHtml = renderToStaticMarkup(await noteIntentDirectory());
+    expect(directoryHtml).toContain(
+      'Choose an existing person. The note will be saved about that person.',
+    );
+    expect(directoryHtml).toContain(`href="/people/${contact.id}?addNote=1"`);
+    ports.owner.mockResolvedValueOnce({
+      user: { email: 'offline-owner@example.test' },
+      formSessionScope: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    });
+    const personHtml = renderToStaticMarkup(await noteIntentDossier());
+    expect(personHtml).toContain(`Add a saved note about ${contact.name}`);
+    expect(personHtml).not.toContain('Adding a note is unavailable');
+    expect(personHtml).toContain(`href="/people?q=retained%20search&amp;addNote=1"`);
   });
   it('PG dossier binds same displayed/native identity/options and preserves q back/map context', async () => {
     const node = data.map.nodes.find((node) => node.contactId === contact.id);
