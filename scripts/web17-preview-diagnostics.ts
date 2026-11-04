@@ -14,6 +14,7 @@ const chatAllPhases = new Set([
   'auth_started',
   'auth_completed',
   'auth_failed',
+  'search_params_started',
   'search_params_completed',
   'search_params_failed',
   'history_started',
@@ -36,7 +37,13 @@ const chatAllPhases = new Set([
   'active_ids_completed',
   'active_ids_failed',
 ]);
-const chatAllElapsedBuckets = new Set(['under_1s', 'under_5s', 'under_20s', '20s_or_more']);
+const chatAllElapsedBuckets = new Set([
+  'under_1s',
+  'under_5s',
+  'under_20s',
+  '20s_or_more',
+  'unknown',
+]);
 const chatAllStageMarker = '[WEB17_CHAT_ALL_STAGE] ';
 const chatAllNonce = /^[A-Za-z0-9_-]{22,32}$/;
 type Route = (typeof routes)[number];
@@ -64,7 +71,7 @@ export type Web17PreviewDiagnostics = {
     nonce: string;
     prefetch: boolean;
     phase: string;
-    elapsed: string;
+    elapsed: DurationBucket;
   }>;
   errors: {
     compileFailure: number;
@@ -101,10 +108,10 @@ function classifyRoute(value: string): Route | undefined {
 }
 
 function durationBucket(value: string): DurationBucket {
-  const match = /\bin\s+(\d+(?:\.\d+)?)\s*(ms|s)\b/i.exec(value);
+  const match = /\bin\s+(-?\d+(?:\.\d+)?)\s*(ms|s)\b/i.exec(value);
   if (!match) return 'unknown';
   const amount = Number(match[1]);
-  if (!Number.isFinite(amount)) return 'unknown';
+  if (!Number.isFinite(amount) || amount < 0) return 'unknown';
   const milliseconds = match[2]?.toLowerCase() === 's' ? amount * 1_000 : amount;
   if (milliseconds < 1_000) return 'under_1s';
   if (milliseconds < 5_000) return 'under_5s';
@@ -204,7 +211,7 @@ export function projectWeb17PreviewDiagnostics(
                 nonce: candidate.nonce as string,
                 prefetch: candidate.prefetch as boolean,
                 phase: candidate.phase as string,
-                elapsed: candidate.elapsed as string,
+                elapsed: candidate.elapsed as DurationBucket,
               });
               if (result.serverStageStatus !== 'incomplete') result.serverStageStatus = 'observed';
             }

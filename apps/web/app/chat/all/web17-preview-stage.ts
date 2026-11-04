@@ -8,6 +8,7 @@ const requestStages = [
   'auth_started',
   'auth_completed',
   'auth_failed',
+  'search_params_started',
   'search_params_completed',
   'search_params_failed',
   'history_started',
@@ -36,7 +37,7 @@ const historyStages: readonly ChatHistoryStage[] = [
 
 export const WEB17_CHAT_ALL_PHASES = [...requestStages, ...historyStages] as const;
 export type Web17ChatAllPhase = (typeof WEB17_CHAT_ALL_PHASES)[number];
-export type Web17ElapsedBucket = 'under_1s' | 'under_5s' | 'under_20s' | '20s_or_more';
+export type Web17ElapsedBucket = 'under_1s' | 'under_5s' | 'under_20s' | '20s_or_more' | 'unknown';
 
 export type Web17ChatAllStageEvent = {
   kind: 'WEB17_CHAT_ALL_STAGE';
@@ -79,7 +80,7 @@ function isPhase(value: unknown): value is Web17ChatAllPhase {
 
 export function elapsedBucket(milliseconds: unknown): Web17ElapsedBucket {
   if (typeof milliseconds !== 'number' || !Number.isFinite(milliseconds) || milliseconds < 0)
-    return '20s_or_more';
+    return 'unknown';
   if (milliseconds < 1_000) return 'under_1s';
   if (milliseconds < 5_000) return 'under_5s';
   if (milliseconds < 20_000) return 'under_20s';
@@ -113,7 +114,7 @@ export function createWeb17ChatAllStageObserver(input: {
   const record = (phase: Web17ChatAllPhase | ChatHistoryStage) => {
     if (!isPhase(phase) || events >= WEB17_CHAT_ALL_STAGE_EVENT_CAP) return;
     events += 1;
-    let elapsed = Number.POSITIVE_INFINITY;
+    let elapsed = Number.NaN;
     try {
       elapsed = now() - startedAt;
     } catch {

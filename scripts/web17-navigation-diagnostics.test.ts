@@ -176,7 +176,7 @@ describe('bounded WEB-17 navigation diagnostics', () => {
     });
   });
 
-  it('correlates a post-click non-prefetch RSC by opaque nonce', () => {
+  it('records a post-click-attempt non-prefetch temporal candidate by opaque nonce', () => {
     const diagnostics = createWeb17NavigationDiagnostics(origin);
     diagnostics.setFixtureChatPath(fixturePath);
     diagnostics.setObserverAvailable(true);
@@ -192,7 +192,7 @@ describe('bounded WEB-17 navigation diagnostics', () => {
       {
         nonce: prefetchNonce,
         prefetch: true,
-        startedAfterClick: false,
+        startedAfterClickAttempt: false,
         finished: false,
         failed: false,
         responseStatus: null,
@@ -200,13 +200,13 @@ describe('bounded WEB-17 navigation diagnostics', () => {
       {
         nonce: clickNonce,
         prefetch: false,
-        startedAfterClick: true,
+        startedAfterClickAttempt: true,
         finished: false,
         failed: false,
         responseStatus: 'success',
       },
     ]);
-    expect(snapshot.selectedClickRscNonce).toBe(clickNonce);
+    expect(snapshot.selectedPostClickNonPrefetchCandidateNonce).toBe(clickNonce);
     expect(projectWeb17NavigationDiagnostics(snapshot)).toEqual(snapshot);
     expect(JSON.stringify(snapshot)).not.toContain('/chat/all');
     expect(JSON.stringify(snapshot)).not.toContain('private-query');

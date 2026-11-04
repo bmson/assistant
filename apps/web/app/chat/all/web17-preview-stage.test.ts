@@ -76,6 +76,7 @@ describe('WEB-17 chat list stage diagnostics', () => {
     expect(observer).toBeDefined();
     observer?.record('request_received');
     now = 1_500;
+    observer?.record('search_params_started');
     observer?.recordHistoryStage('conversations_started');
     observer?.record('page_data_ready');
 
@@ -90,6 +91,13 @@ describe('WEB-17 chat list stage diagnostics', () => {
         prefetch: true,
         phase: 'request_received',
         elapsed: 'under_1s',
+      },
+      {
+        kind: 'WEB17_CHAT_ALL_STAGE',
+        nonce: 'Abcdef0123456789_-xyz0',
+        prefetch: true,
+        phase: 'search_params_started',
+        elapsed: 'under_5s',
       },
       {
         kind: 'WEB17_CHAT_ALL_STAGE',
@@ -113,7 +121,7 @@ describe('WEB-17 chat list stage diagnostics', () => {
     expect(isWeb17ChatAllPhase('private-stage')).toBe(false);
   });
 
-  it('saturates stage event emission at a fixed cap and coarsens invalid timing', () => {
+  it('saturates stage event emission at a fixed cap and marks invalid timing unknown', () => {
     const writes: string[] = [];
     const observer = createWeb17ChatAllStageObserver({
       enabled: true,
@@ -121,7 +129,7 @@ describe('WEB-17 chat list stage diagnostics', () => {
       rsc: '1',
       prefetch: '0',
       nonce: 'Abcdef0123456789_-xyz0',
-      now: () => Number.NaN,
+      now: () => 0,
       write: (line) => writes.push(line),
     });
     for (let index = 0; index < WEB17_CHAT_ALL_STAGE_EVENT_CAP + 2; index++)
@@ -131,12 +139,40 @@ describe('WEB-17 chat list stage diagnostics', () => {
     const firstLine = writes[0];
     expect(firstLine).toBeDefined();
     expect(JSON.parse(firstLine?.slice(WEB17_CHAT_ALL_STAGE_PREFIX.length) ?? '{}').elapsed).toBe(
-      '20s_or_more',
+      'under_1s',
     );
+    expect(elapsedBucket(-1)).toBe('unknown');
     expect(elapsedBucket(0)).toBe('under_1s');
     expect(elapsedBucket(1_000)).toBe('under_5s');
     expect(elapsedBucket(5_000)).toBe('under_20s');
     expect(elapsedBucket(20_000)).toBe('20s_or_more');
-    expect(elapsedBucket(Number.NaN)).toBe('20s_or_more');
+    expect(elapsedBucket(Number.NaN)).toBe('unknown');
+  });
+
+  it('marks elapsed time unknown when the clock is unavailable', () => {
+    const writes: string[] = [];
+    const observer = createWeb17ChatAllStageObserver({
+      enabled: true,
+      host: 'localhost:3001',
+      rsc: '1',
+      prefetch: null,
+      nonce: 'Abcdef0123456789_-xyz0',
+      now: () => {
+        throw new Error('synthetic clock failure');
+      },
+      write: (line) => writes.push(line),
+    });
+    observer?.record('request_received');
+    expect(JSON.parse(writes[0]?.slice(WEB17_CHAT_ALL_STAGE_PREFIX.length) ?? '{}').elapsed).toBe(
+      'unknown',
+    );
+  });
+
+  it('marks non-finite elapsed measurements unknown while retaining zero as under one second', () => {
+    expect(elapsedBucket(Number.NaN)).toBe('unknown');
+    expect(elapsedBucket(Number.POSITIVE_INFINITY)).toBe('unknown');
+    expect(elapsedBucket(Number.NEGATIVE_INFINITY)).toBe('unknown');
+    expect(elapsedBucket(-0.1)).toBe('unknown');
+    expect(elapsedBucket(0)).toBe('under_1s');
   });
 });

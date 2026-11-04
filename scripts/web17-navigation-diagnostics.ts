@@ -46,7 +46,7 @@ const correlatedAttempt = z
   .object({
     nonce: correlationNonce,
     prefetch: z.boolean(),
-    startedAfterClick: z.boolean(),
+    startedAfterClickAttempt: z.boolean(),
     finished: z.boolean(),
     failed: z.boolean(),
     responseStatus: z.enum(statusClasses).nullable(),
@@ -64,7 +64,7 @@ const diagnosticsSchema = z
     mainFrameTransitions: transitions.nullable(),
     requests: requestGroups.nullable(),
     correlatedRscAttempts: z.array(correlatedAttempt).max(WEB17_NAVIGATION_DIAGNOSTIC_CAP),
-    selectedClickRscNonce: correlationNonce.nullable(),
+    selectedPostClickNonPrefetchCandidateNonce: correlationNonce.nullable(),
     pageErrorCount: count.nullable(),
     overflow: z.boolean(),
   })
@@ -287,7 +287,7 @@ export function createWeb17NavigationDiagnostics(expectedOrigin: string) {
       correlatedRscAttempts.push({
         nonce,
         prefetch,
-        startedAfterClick: clickAttempted === true,
+        startedAfterClickAttempt: clickAttempted === true,
         finished: false,
         failed: false,
         responseStatus: null,
@@ -393,9 +393,10 @@ export function createWeb17NavigationDiagnostics(expectedOrigin: string) {
           observerAvailable === true ? structuredClone(mainFrameTransitions) : null,
         requests: observerAvailable === true ? structuredClone(requests) : null,
         correlatedRscAttempts: structuredClone(correlatedRscAttempts),
-        selectedClickRscNonce:
-          correlatedRscAttempts.find((item) => item.startedAfterClick && !item.prefetch)?.nonce ??
-          null,
+        // This is a temporal candidate after the click attempt boundary, not proof of causation.
+        selectedPostClickNonPrefetchCandidateNonce:
+          correlatedRscAttempts.find((item) => item.startedAfterClickAttempt && !item.prefetch)
+            ?.nonce ?? null,
         pageErrorCount,
         overflow,
       };

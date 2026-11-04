@@ -65,6 +65,7 @@ export default async function ChatListPage({
     throw error;
   }
   let view: { view?: string };
+  recordStage?.('search_params_started');
   try {
     view = await searchParams;
     recordStage?.('search_params_completed');

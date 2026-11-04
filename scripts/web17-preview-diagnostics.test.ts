@@ -74,6 +74,14 @@ describe('bounded WEB-17 preview diagnostics', () => {
     expect(JSON.stringify(result).length).toBeLessThan(2_500);
   });
 
+  it('keeps invalid compile durations unknown instead of classifying them as long', () => {
+    const result = projectWeb17PreviewDiagnostics(
+      ['Compiled /chat/all in -1ms', 'Compiled /chat/all in Infinityms'].join('\n'),
+    );
+    expect(result.routes.chat_all.compileDuration.unknown).toBe(2);
+    expect(result.routes.chat_all.compileDuration['20s_or_more']).toBe(0);
+  });
+
   it('reports an unavailable preview log without exposing an error message', () => {
     expect(projectWeb17PreviewDiagnostics(undefined, { logAvailable: false })).toMatchObject({
       kind: 'WEB17_PREVIEW_DIAGNOSTICS',
@@ -93,6 +101,11 @@ describe('bounded WEB-17 preview diagnostics', () => {
       phase: 'conversations_started',
       elapsed: 'under_1s',
     };
+    const unknownElapsed = {
+      ...safe,
+      phase: 'search_params_started',
+      elapsed: 'unknown',
+    };
     const hostile = {
       ...safe,
       phase: 'conversations_started',
@@ -100,6 +113,7 @@ describe('bounded WEB-17 preview diagnostics', () => {
     };
     const input = [
       `[WEB17_CHAT_ALL_STAGE] ${JSON.stringify(safe)}`,
+      `[WEB17_CHAT_ALL_STAGE] ${JSON.stringify(unknownElapsed)}`,
       `[WEB17_CHAT_ALL_STAGE] ${JSON.stringify(hostile)}`,
       `[WEB17_CHAT_ALL_STAGE] ${JSON.stringify({ ...safe, nonce: 'private-owner-id' })}`,
     ].join('\n');
@@ -109,7 +123,7 @@ describe('bounded WEB-17 preview diagnostics', () => {
     ).toBe('observed');
     const result = projectWeb17PreviewDiagnostics(input);
 
-    expect(result.chatAllStageEvents).toEqual([safe]);
+    expect(result.chatAllStageEvents).toEqual([safe, unknownElapsed]);
     expect(result.serverStageStatus).toBe('incomplete');
     expect(result.overflow).toBe(true);
     expect(JSON.stringify(result)).not.toContain('private=query');
