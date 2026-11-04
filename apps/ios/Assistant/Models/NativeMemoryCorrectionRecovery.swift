@@ -113,6 +113,8 @@ struct NativeMemoryCorrectionRecoveryRecord: Codable, Equatable, Sendable {
     let draft: String
     /// Opaque, purpose-bound server authorization handle. Never put the mobile bearer here.
     let authorizationHandle: String
+    /// Server-issued metadata retained for exact authorization restoration when present.
+    let authorizationExpiresAt: String?
 
     init(
         serverIdentity: String,
@@ -120,7 +122,8 @@ struct NativeMemoryCorrectionRecoveryRecord: Codable, Equatable, Sendable {
         operation: Operation,
         snapshot: Snapshot,
         draft: String,
-        authorizationHandle: String
+        authorizationHandle: String,
+        authorizationExpiresAt: String? = nil
     ) {
         self.serverIdentity = serverIdentity
         self.target = target
@@ -128,6 +131,7 @@ struct NativeMemoryCorrectionRecoveryRecord: Codable, Equatable, Sendable {
         self.snapshot = snapshot
         self.draft = draft
         self.authorizationHandle = authorizationHandle
+        self.authorizationExpiresAt = authorizationExpiresAt
     }
 }
 
@@ -138,6 +142,9 @@ struct NativeMemoryCorrectionRecoveryRecord: Codable, Equatable, Sendable {
 actor NativeMemoryCorrectionRecoveryStore {
     static let maximumRecordBytes = 48 * 1024
     private static let magic = Data([0x4e, 0x4d, 0x43, 0x52, 0x01]) // NMCR, envelope v1
+    private static let pendingMagic = Data([0x4e, 0x4d, 0x43, 0x50, 0x01]) // NMCP, pending locator v1
+    private static let pendingFilename = "pending.nmcp"
+    private static let mutationLock = NSLock()
 
     private let root: URL
     private let keyVault: any CardFormDraftKeyVault
@@ -159,6 +166,8 @@ actor NativeMemoryCorrectionRecoveryStore {
     }
 
     func saveBeforeDispatch(_ record: NativeMemoryCorrectionRecoveryRecord) throws {
+        Self.mutationLock.lock()
+        defer { Self.mutationLock.unlock() }
         try Self.validate(record)
         let partition = Self.partition(record)
         try keyVault.assertOpen(partition: partition)
@@ -169,22 +178,25 @@ actor NativeMemoryCorrectionRecoveryStore {
         if files.exists(url) {
             let existing = try loadFile(at: url, record: record, partition: partition)
             guard existing == record else { throw NativeMemoryCorrectionRecoveryError.operationConflict }
-            return
+        } else {
+            let key = try keyVault.key(for: partition, createIfMissing: true)
+            guard let sealed = try AES.GCM.seal(
+                plaintext,
+                using: key,
+                authenticating: Self.associatedData(record, partition: partition)
+            ).combined else { throw NativeMemoryCorrectionRecoveryError.corruptRecord }
+            let installed = try files.installAtomicallyIfAbsent(Self.magic + sealed, to: url)
+            if !installed {
+                // A different store actor may have installed this operation after our initial read.
+                // Authenticate the winner and accept only an exact idempotent save.
+                let existing = try loadFile(at: url, record: record, partition: partition)
+                guard existing == record else { throw NativeMemoryCorrectionRecoveryError.operationConflict }
+            }
         }
-
-        let key = try keyVault.key(for: partition, createIfMissing: true)
-        guard let sealed = try AES.GCM.seal(
-            plaintext,
-            using: key,
-            authenticating: Self.associatedData(record, partition: partition)
-        ).combined else { throw NativeMemoryCorrectionRecoveryError.corruptRecord }
-        let installed = try files.installAtomicallyIfAbsent(Self.magic + sealed, to: url)
-        if !installed {
-            // A different store actor may have installed this operation after our initial read.
-            // Authenticate the winner and accept only an exact idempotent save.
-            let existing = try loadFile(at: url, record: record, partition: partition)
-            guard existing == record else { throw NativeMemoryCorrectionRecoveryError.operationConflict }
-        }
+        // Publish discoverability only after the immutable operation is durable. A conflict here
+        // throws before the caller can dispatch this operation.
+        try installPendingLocator(serverIdentity: record.serverIdentity, target: record.target,
+                                  operationID: record.operation.operationID, partition: partition)
     }
 
     func load(
@@ -200,6 +212,23 @@ actor NativeMemoryCorrectionRecoveryStore {
                             operationID: operationID, partition: identity)
     }
 
+    /// Finds the exact pending operation for this server and target without enumerating files.
+    func loadPending(
+        serverIdentity: String,
+        target: NativeMemoryCorrectionRecoveryRecord.Target
+    ) throws -> NativeMemoryCorrectionRecoveryRecord? {
+        let partition = try Self.partition(serverIdentity: serverIdentity, target: target)
+        try keyVault.assertOpen(partition: partition)
+        let url = pendingURL(partition: partition)
+        guard files.exists(url) else { return nil }
+        let operationID = try loadPendingOperationID(at: url, serverIdentity: serverIdentity,
+                                                     target: target, partition: partition)
+        guard let record = try load(serverIdentity: serverIdentity, target: target, operationID: operationID) else {
+            throw NativeMemoryCorrectionRecoveryError.operationNotFound
+        }
+        return record
+    }
+
     /// Removal is an explicit caller action after a qualified operation-bound disposition.
     /// This method does not infer terminality from HTTP, queue acceptance, or readback alone.
     func remove(
@@ -208,6 +237,8 @@ actor NativeMemoryCorrectionRecoveryStore {
         operationID: String,
         disposition: NativeMemoryCorrectionRecoveryTerminalDisposition
     ) throws {
+        Self.mutationLock.lock()
+        defer { Self.mutationLock.unlock() }
         _ = disposition // A required, explicit acknowledgement from the qualified adapter.
         let identity = try Self.identity(serverIdentity: serverIdentity, target: target, operationID: operationID)
         try keyVault.assertOpen(partition: identity)
@@ -216,7 +247,74 @@ actor NativeMemoryCorrectionRecoveryStore {
         // Authenticate and compare the exact tuple before deleting; corrupt or foreign bytes stay in place.
         _ = try loadFile(at: url, serverIdentity: serverIdentity, target: target,
                          operationID: operationID, partition: identity)
+        let locator = pendingURL(partition: identity)
+        if files.exists(locator) {
+            let pendingID = try loadPendingOperationID(at: locator, serverIdentity: serverIdentity,
+                                                       target: target, partition: identity)
+            guard pendingID == operationID else { throw NativeMemoryCorrectionRecoveryError.operationConflict }
+        }
         try files.removeFile(url)
+        if files.exists(locator) { try files.removeFile(locator) }
+    }
+
+    private func installPendingLocator(
+        serverIdentity: String,
+        target: NativeMemoryCorrectionRecoveryRecord.Target,
+        operationID: String,
+        partition: String
+    ) throws {
+        let url = pendingURL(partition: partition)
+        if files.exists(url) {
+            let existingID = try loadPendingOperationID(at: url, serverIdentity: serverIdentity,
+                                                        target: target, partition: partition)
+            guard existingID == operationID else { throw NativeMemoryCorrectionRecoveryError.operationConflict }
+            return
+        }
+        let key = try keyVault.key(for: partition, createIfMissing: true)
+        guard let sealed = try AES.GCM.seal(
+            Data(operationID.utf8),
+            using: key,
+            authenticating: Self.pendingAssociatedData(serverIdentity: serverIdentity, target: target,
+                                                       partition: partition)
+        ).combined else { throw NativeMemoryCorrectionRecoveryError.corruptRecord }
+        if try !files.installAtomicallyIfAbsent(Self.pendingMagic + sealed, to: url) {
+            let existingID = try loadPendingOperationID(at: url, serverIdentity: serverIdentity,
+                                                        target: target, partition: partition)
+            guard existingID == operationID else { throw NativeMemoryCorrectionRecoveryError.operationConflict }
+        }
+    }
+
+    private func loadPendingOperationID(
+        at url: URL,
+        serverIdentity: String,
+        target: NativeMemoryCorrectionRecoveryRecord.Target,
+        partition: String
+    ) throws -> String {
+        let data = try files.read(url, maximumBytes: 4_096)
+        guard data.count >= Self.pendingMagic.count,
+              data.prefix(Self.pendingMagic.count) == Self.pendingMagic else {
+            if data.first == 0x4e { throw NativeMemoryCorrectionRecoveryError.unsupportedVersion }
+            throw NativeMemoryCorrectionRecoveryError.corruptRecord
+        }
+        do {
+            let box = try AES.GCM.SealedBox(combined: Data(data.dropFirst(Self.pendingMagic.count)))
+            let key = try keyVault.key(for: partition, createIfMissing: false)
+            let plaintext = try AES.GCM.open(
+                box,
+                using: key,
+                authenticating: Self.pendingAssociatedData(serverIdentity: serverIdentity, target: target,
+                                                          partition: partition)
+            )
+            guard let operationID = String(data: plaintext, encoding: .utf8),
+                  Self.validIdentifier(operationID, max: 256) else {
+                throw NativeMemoryCorrectionRecoveryError.corruptRecord
+            }
+            return operationID
+        } catch let error as NativeMemoryCorrectionRecoveryError {
+            throw error
+        } catch {
+            throw NativeMemoryCorrectionRecoveryError.corruptRecord
+        }
     }
 
     private func loadFile(
@@ -278,18 +376,31 @@ actor NativeMemoryCorrectionRecoveryStore {
         return root.appendingPathComponent(partition, isDirectory: true).appendingPathComponent(filename)
     }
 
+    private func pendingURL(partition: String) -> URL {
+        root.appendingPathComponent(partition, isDirectory: true).appendingPathComponent(Self.pendingFilename)
+    }
+
     private static func identity(
         serverIdentity: String,
         target: NativeMemoryCorrectionRecoveryRecord.Target,
         operationID: String
     ) throws -> String {
-        guard validServerIdentity(serverIdentity), validTarget(target), validIdentifier(operationID, max: 256) else {
+        guard validIdentifier(operationID, max: 256) else {
             throw NativeMemoryCorrectionRecoveryError.invalidRecord
         }
-        let partition = digest(tuple(["native-memory-correction-partition-v1", serverIdentity,
-                                      target.ownerID, target.serverID, target.memoryID,
-                                      target.sourceIdentity ?? ""]))
-        return (partition)
+        return try partition(serverIdentity: serverIdentity, target: target)
+    }
+
+    private static func partition(
+        serverIdentity: String,
+        target: NativeMemoryCorrectionRecoveryRecord.Target
+    ) throws -> String {
+        guard validServerIdentity(serverIdentity), validTarget(target) else {
+            throw NativeMemoryCorrectionRecoveryError.invalidRecord
+        }
+        return digest(tuple(["native-memory-correction-partition-v1", serverIdentity,
+                             target.ownerID, target.serverID, target.memoryID,
+                             target.sourceIdentity ?? ""]))
     }
 
     private static func validate(_ record: NativeMemoryCorrectionRecoveryRecord) throws {
@@ -301,6 +412,7 @@ actor NativeMemoryCorrectionRecoveryStore {
               record.snapshot.storedContentHash == record.operation.expectedStoredContentHash,
               record.snapshot.content.utf8.count <= 16_000, record.snapshot.sourceLabel.utf8.count <= 1_000,
               record.draft.utf8.count <= 16_000,
+              record.authorizationExpiresAt.map({ $0.utf8.count <= 256 }) ?? true,
               record.authorizationHandle.utf8.count <= 8_192,
               record.authorizationHandle.hasPrefix("omc1."),
               record.authorizationHandle.split(separator: ".").count == 3,
@@ -351,6 +463,15 @@ actor NativeMemoryCorrectionRecoveryStore {
     ) -> Data {
         tuple(["native-memory-correction-recovery-v1", partition, serverIdentity, target.ownerID,
                target.serverID, target.memoryID, target.sourceIdentity ?? "", operationID])
+    }
+
+    private static func pendingAssociatedData(
+        serverIdentity: String,
+        target: NativeMemoryCorrectionRecoveryRecord.Target,
+        partition: String
+    ) -> Data {
+        tuple(["native-memory-correction-pending-v1", partition, serverIdentity, target.ownerID,
+               target.serverID, target.memoryID, target.sourceIdentity ?? ""])
     }
 
     private static func tuple(_ values: [String]) -> Data {

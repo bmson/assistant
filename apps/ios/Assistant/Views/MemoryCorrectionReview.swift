@@ -1,9 +1,11 @@
 import SwiftUI
 
-/// Isolated presentation fixture. No current editor entry point mounts this view.
+/// Shared review surface; the mounted host supplies the qualified adapter and retention acknowledgment.
 struct MemoryCorrectionReview: View {
     @Binding var presentation: MemoryCorrectionPresentation
     let onIntent: (MemoryCorrectionIntent) -> Void
+    var retentionText: String? = nil
+    var cleanupText: String? = nil
 
     var body: some View {
         AssistantForm {
@@ -42,7 +44,7 @@ struct MemoryCorrectionReview: View {
                     Text(status)
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityIdentifier("memory-correction-status")
-                    if presentation.phase == .unknown {
+                    if [.unknown, .pending].contains(presentation.phase) {
                         Button(presentation.isChecking ? "Checking result…" : "Check result") {
                             if let intent = presentation.checkResult() { onIntent(intent) }
                         }
@@ -55,14 +57,16 @@ struct MemoryCorrectionReview: View {
                         }
                         .buttonStyle(AssistantActionButtonStyle(kind: .secondary, minimumHeight: 48))
                     }
-                    if presentation.phase == .submitting || presentation.phase == .unknown {
+                    if [.submitting, .pending, .unknown].contains(presentation.phase) {
                         Text("Closing does not cancel the save. Check its result before saving again.")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
                 }
             }
+            if let retentionText { Section { Text(retentionText).font(.footnote).foregroundStyle(.secondary) } }
+            if let cleanupText { Section { Text(cleanupText).font(.footnote).foregroundStyle(.secondary) } }
         }
-        .navigationTitle("Correct memory")
+        .navigationTitle("Edit saved note")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
@@ -107,3 +111,69 @@ enum MemoryCorrectionLayoutFixtures {
     }
 }
 #endif
+
+
+/// Ordinary existing-note route. No locally displayed row is treated as authorization.
+struct NativeMemoryCorrectionHost: View {
+    let memoryID: String
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        NativeMemoryCorrectionScreen(consumer: model.memoryCorrections, memoryID: memoryID,
+            onOpen: { await model.openNativeMemoryCorrection(memoryID: memoryID) }, onClose: { dismiss() })
+    }
+}
+
+/// Shared mounted consumer surface, injectable for hosted transport/retention tests.
+struct NativeMemoryCorrectionScreen: View {
+    let consumer: NativeMemoryCorrectionConsumer
+    let memoryID: String
+    let onOpen: @MainActor () async -> Void
+    let onClose: @MainActor () -> Void
+    @State private var mountedPresentationID: UUID?
+    var body: some View {
+        Group {
+            if let state = consumer.presentation, state.reviewedSnapshot.target.memoryID == memoryID {
+                MemoryCorrectionReview(presentation: Binding(
+                    get: {
+                        guard let current = consumer.presentation, current.presentationID == state.presentationID else { return state }
+                        return current
+                    },
+                    set: { consumer.updatePresentation($0) }
+                ), onIntent: { intent in
+                    guard consumer.presentation?.presentationID == state.presentationID else { return }
+                    if case .close = intent { consumer.close(); onClose() }
+                    else { Task { await consumer.handle(intent) } }
+                }, retentionText: retention(state), cleanupText: consumer.cleanupMessage)
+            } else {
+                AssistantForm {
+                    Section {
+                        if consumer.loading { ProgressView("Loading saved note…") }
+                        else { Text(consumer.errorMessage ?? "This saved note is unavailable.") }
+                    }
+                }
+                .navigationTitle("Edit saved note")
+                .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close") { onClose() } } }
+            }
+        }
+        .task(id: memoryID) {
+            await onOpen()
+            if consumer.presentation?.reviewedSnapshot.target.memoryID == memoryID {
+                mountedPresentationID = consumer.presentation?.presentationID
+            }
+        }
+        .onDisappear {
+            if consumer.presentation?.presentationID == mountedPresentationID,
+               consumer.presentation?.reviewedSnapshot.target.memoryID == memoryID { consumer.close() }
+        }
+    }
+    private func retention(_ state: MemoryCorrectionPresentation) -> String? {
+        if consumer.retainedOnDevice && state.hasDispatchedSave {
+            return "Your draft is kept on this device. Closing does not cancel the save."
+        }
+        if [.editing, .authorizing, .stale, .unavailable].contains(state.phase), !state.draft.isEmpty {
+            return "Your draft is kept on this screen. Leaving the app may lose it."
+        }
+        return nil
+    }
+}

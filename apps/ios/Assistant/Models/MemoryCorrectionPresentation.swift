@@ -65,6 +65,7 @@ enum MemoryCorrectionDisposition: Equatable, Sendable {
     case saved(readback: MemoryCorrectionSnapshot?)
     case unchanged(readback: MemoryCorrectionSnapshot?)
     case uncertain
+    case pending
     case staleNoWrite(MemoryCorrectionSnapshot)
     case rejectedNoWrite(String)
 }
@@ -72,7 +73,7 @@ enum MemoryCorrectionDisposition: Equatable, Sendable {
 /// Unmounted in-memory state. It performs no networking, grant validation, or persistence.
 struct MemoryCorrectionPresentation: Equatable, Sendable {
     enum Phase: Equatable, Sendable {
-        case editing, authorizing, submitting, unknown, stale, saved, unchanged, unavailable, cancelled
+        case editing, authorizing, submitting, pending, unknown, stale, saved, unchanged, unavailable, cancelled
     }
 
     /// Local view lifetime, deliberately unrelated to mobile authentication/session semantics.
@@ -103,7 +104,7 @@ struct MemoryCorrectionPresentation: Equatable, Sendable {
             && reviewedSnapshot.availability == .mayRequestAuthorization
             && draft.trimmingCharacters(in: .whitespacesAndNewlines).count >= 3
     }
-    var canCheckResult: Bool { phase == .unknown && operation != nil && !isChecking }
+    var canCheckResult: Bool { [.unknown, .pending].contains(phase) && operation != nil && !isChecking }
     var canReviewCurrent: Bool { phase == .stale && currentSnapshot != nil }
     var hasDispatchedSave: Bool { operation != nil }
 
@@ -114,6 +115,7 @@ struct MemoryCorrectionPresentation: Equatable, Sendable {
         case .cancelled: nil
         case .authorizing: "Checking editing availability…"
         case .submitting: "Saving…"
+        case .pending: isChecking ? "Checking save result…" : "Save pending. Its result is not confirmed yet."
         case .unknown: isChecking ? "Checking save result…" : "Save result unknown. Check result before saving again."
         case .stale: "Review the current saved note before saving your draft."
         case .saved: resultReadback == nil ? "Saved. The latest view has not been refreshed." : "Saved."
@@ -179,9 +181,13 @@ struct MemoryCorrectionPresentation: Equatable, Sendable {
         disposition: MemoryCorrectionDisposition
     ) -> Bool {
         guard deliveredPresentationID == presentationID, issued == operation,
-              [.submitting, .unknown].contains(phase), version >= 0 else { return false }
+              [.submitting, .unknown, .pending].contains(phase), version >= 0 else { return false }
         if let outcomeVersion, version <= outcomeVersion {
-            if version == outcomeVersion, phase == .unknown, case .uncertain = disposition {
+            if version == outcomeVersion, [.unknown, .pending].contains(phase), case .uncertain = disposition {
+                isChecking = false
+                return true
+            }
+            if version == outcomeVersion, phase == .pending, case .pending = disposition {
                 isChecking = false
                 return true
             }
@@ -195,6 +201,8 @@ struct MemoryCorrectionPresentation: Equatable, Sendable {
             if case .saved = disposition { phase = .saved } else { phase = .unchanged }
         case .uncertain:
             phase = .unknown
+        case .pending:
+            phase = .pending
         case .staleNoWrite(let current):
             guard current.target == reviewedSnapshot.target else { return false }
             currentSnapshot = current
@@ -208,6 +216,14 @@ struct MemoryCorrectionPresentation: Equatable, Sendable {
         return true
     }
 
+    /// A terminal stale disposition without a new snapshot cannot fabricate a current value.
+    mutating func requireCurrentReview(presentationID deliveredID: UUID, operation issued: MemoryCorrectionOperation, version: Int) {
+        guard deliveredID == presentationID, issued == operation,
+              [.submitting, .unknown, .pending].contains(phase) else { return }
+        phase = .stale; currentSnapshot = nil; resultReadback = nil
+        outcomeVersion = version; isChecking = false
+    }
+
     mutating func checkResult() -> MemoryCorrectionIntent? {
         guard canCheckResult, let operation else { return nil }
         isChecking = true
@@ -216,7 +232,7 @@ struct MemoryCorrectionPresentation: Equatable, Sendable {
 
     /// A failed status read is still unknown; it neither retries the mutation nor drops its identity.
     mutating func checkFailed(presentationID deliveredID: UUID, operation issued: MemoryCorrectionOperation) {
-        guard deliveredID == presentationID, operation == issued, phase == .unknown else { return }
+        guard deliveredID == presentationID, operation == issued, [.unknown, .pending].contains(phase) else { return }
         isChecking = false
     }
 

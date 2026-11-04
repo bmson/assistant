@@ -22,10 +22,126 @@ final class NativeMemoryCorrectionRecoveryTests: XCTestCase {
                                                     target: record.target,
                                                     operationID: record.operation.operationID)
         XCTAssertNil(foreignServer)
-        let bytes = try XCTUnwrap(files.onlyValue)
-        XCTAssertNil(bytes.range(of: Data(record.draft.utf8)))
-        XCTAssertNil(bytes.range(of: Data(record.authorizationHandle.utf8)))
-        XCTAssertNil(bytes.range(of: Data("never-persist-this-bearer".utf8)))
+        XCTAssertEqual(recovered?.authorizationExpiresAt, record.authorizationExpiresAt)
+        for bytes in files.values {
+            XCTAssertNil(bytes.range(of: Data(record.draft.utf8)))
+            XCTAssertNil(bytes.range(of: Data(record.authorizationHandle.utf8)))
+            XCTAssertNil(bytes.range(of: Data(record.operation.operationID.utf8)))
+            XCTAssertNil(bytes.range(of: Data("never-persist-this-bearer".utf8)))
+        }
+    }
+
+    func testPendingLocatorSurvivesStoreRecreationAndQualifiedRemovalClearsIt() async throws {
+        let files = RecoveryMemoryFiles()
+        let vault = RecoveryMemoryVault()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let record = fixture(authorizationExpiresAt: "2026-11-03T00:00:00.000Z")
+        try await makeStore(files: files, vault: vault, root: root).saveBeforeDispatch(record)
+
+        let reopened = try makeStore(files: files, vault: vault, root: root)
+        let recovered = try await reopened.loadPending(serverIdentity: record.serverIdentity, target: record.target)
+        XCTAssertEqual(recovered, record)
+        try await reopened.remove(serverIdentity: record.serverIdentity, target: record.target,
+                                  operationID: record.operation.operationID,
+                                  disposition: .rejectedNoWrite)
+        let pendingAfterRemoval = try await reopened.loadPending(serverIdentity: record.serverIdentity, target: record.target)
+        XCTAssertNil(pendingAfterRemoval)
+        XCTAssertTrue(files.values.isEmpty)
+    }
+
+    func testPendingLocatorConflictBlocksDifferentOperationBeforeDispatchAndKeepsOriginal() async throws {
+        let files = RecoveryMemoryFiles()
+        let store = try makeStore(files: files, vault: RecoveryMemoryVault())
+        let first = fixture(operationID: "pending-A")
+        let second = fixture(operationID: "pending-B", draft: "Another authorized correction")
+        try await store.saveBeforeDispatch(first)
+        do {
+            try await store.saveBeforeDispatch(second)
+            XCTFail("A second operation must fail before the caller can dispatch it")
+        } catch let error as NativeMemoryCorrectionRecoveryError {
+            XCTAssertEqual(error, .operationConflict)
+        }
+        let pending = try await store.loadPending(serverIdentity: first.serverIdentity, target: first.target)
+        XCTAssertEqual(pending, first)
+        XCTAssertEqual(files.values.count, 3) // The second immutable operation is not made pending.
+    }
+
+    func testTamperedPendingLocatorFailsClosedAndIsNotReplacedOrRemoved() async throws {
+        let files = RecoveryMemoryFiles()
+        let store = try makeStore(files: files, vault: RecoveryMemoryVault())
+        let record = fixture()
+        try await store.saveBeforeDispatch(record)
+        let locatorPath = try XCTUnwrap(files.paths.first(where: { $0.hasSuffix("pending.nmcp") }))
+        var bytes = try XCTUnwrap(files.value(at: locatorPath))
+        bytes[bytes.count - 1] ^= 0xff
+        files.replace(bytes, at: locatorPath)
+
+        do {
+            _ = try await store.loadPending(serverIdentity: record.serverIdentity, target: record.target)
+            XCTFail("A tampered locator must not be interpreted as no pending operation")
+        } catch let error as NativeMemoryCorrectionRecoveryError {
+            XCTAssertEqual(error, .corruptRecord)
+        }
+        do {
+            try await store.saveBeforeDispatch(record)
+            XCTFail("A corrupt pending locator must not be overwritten")
+        } catch let error as NativeMemoryCorrectionRecoveryError {
+            XCTAssertEqual(error, .corruptRecord)
+        }
+        do {
+            try await store.remove(serverIdentity: record.serverIdentity, target: record.target,
+                                   operationID: record.operation.operationID,
+                                   disposition: .rejectedNoWrite)
+            XCTFail("A corrupt pending locator must prevent deletion")
+        } catch let error as NativeMemoryCorrectionRecoveryError {
+            XCTAssertEqual(error, .corruptRecord)
+        }
+        XCTAssertEqual(files.value(at: locatorPath), bytes)
+        XCTAssertEqual(files.values.count, 2)
+    }
+
+    func testPendingLocatorIsPartitionedByFullTargetAndServer() async throws {
+        let files = RecoveryMemoryFiles()
+        let store = try makeStore(files: files, vault: RecoveryMemoryVault())
+        let record = fixture()
+        try await store.saveBeforeDispatch(record)
+        let otherTargets = [
+            NativeMemoryCorrectionRecoveryRecord.Target(ownerID: "owner-b", serverID: record.target.serverID,
+                memoryID: record.target.memoryID, sourceIdentity: record.target.sourceIdentity),
+            NativeMemoryCorrectionRecoveryRecord.Target(ownerID: record.target.ownerID, serverID: "server-b",
+                memoryID: record.target.memoryID, sourceIdentity: record.target.sourceIdentity),
+            NativeMemoryCorrectionRecoveryRecord.Target(ownerID: record.target.ownerID, serverID: record.target.serverID,
+                memoryID: record.target.memoryID, sourceIdentity: "source-b"),
+        ]
+        for target in otherTargets {
+            let pending = try await store.loadPending(serverIdentity: record.serverIdentity, target: target)
+            XCTAssertNil(pending)
+        }
+        let otherServer = try await store.loadPending(serverIdentity: "https://example.test/other", target: record.target)
+        XCTAssertNil(otherServer)
+        let pending = try await store.loadPending(serverIdentity: record.serverIdentity, target: record.target)
+        XCTAssertEqual(pending, record)
+    }
+
+    func testPendingLocatorWriteFailureLeavesOperationUndiscoverableAndBlocksDispatch() async throws {
+        let files = RecoveryMemoryFiles()
+        let store = try makeStore(files: files, vault: RecoveryMemoryVault())
+        let record = fixture()
+        files.failPendingLocatorWrites = true
+        do {
+            try await store.saveBeforeDispatch(record)
+            XCTFail("Failure to install discoverability must block dispatch")
+        } catch let error as EncryptedCardFormDraftStorageError {
+            XCTAssertEqual(error, .writeFailed)
+        }
+        files.failPendingLocatorWrites = false
+        XCTAssertEqual(files.values.count, 1) // The immutable operation is retained for explicit recovery.
+        let pending = try await store.loadPending(serverIdentity: record.serverIdentity, target: record.target)
+        XCTAssertNil(pending)
+        let operation = try await store.load(serverIdentity: record.serverIdentity, target: record.target,
+                                             operationID: record.operation.operationID)
+        XCTAssertEqual(operation, record)
     }
 
     func testRemovalRequiresExactOperationAndCannotClearNewerDifferentOperation() async throws {
@@ -35,7 +151,12 @@ final class NativeMemoryCorrectionRecoveryTests: XCTestCase {
         let newerB = fixture(operationID: "server-op-B", draft: "New wording B")
         let otherOwner = fixture(operationID: "server-op-A", draft: "Other owner's wording", ownerID: "owner-2")
         try await store.saveBeforeDispatch(oldA)
-        try await store.saveBeforeDispatch(newerB)
+        do {
+            try await store.saveBeforeDispatch(newerB)
+            XCTFail("A different pending operation for the same target must not be installed")
+        } catch let error as NativeMemoryCorrectionRecoveryError {
+            XCTAssertEqual(error, .operationConflict)
+        }
         try await store.saveBeforeDispatch(otherOwner)
 
         try await store.remove(serverIdentity: oldA.serverIdentity, target: oldA.target,
@@ -49,8 +170,11 @@ final class NativeMemoryCorrectionRecoveryTests: XCTestCase {
                                                        target: otherOwner.target,
                                                        operationID: otherOwner.operation.operationID)
         XCTAssertNil(removedOldA)
-        XCTAssertEqual(recoveredNewerB, newerB)
+        XCTAssertNil(recoveredNewerB)
         XCTAssertEqual(recoveredOtherOwner, otherOwner)
+        try await store.saveBeforeDispatch(newerB)
+        let discoveredNewerB = try await store.loadPending(serverIdentity: newerB.serverIdentity, target: newerB.target)
+        XCTAssertEqual(discoveredNewerB, newerB)
     }
 
     func testSameOperationCannotBeSilentlyChangedOrOverwritten() async throws {
@@ -117,7 +241,7 @@ final class NativeMemoryCorrectionRecoveryTests: XCTestCase {
         XCTAssertFalse(files.barrierTimedOut, "Both independent actors should reach the idempotent-write barrier")
         XCTAssertEqual(outcomes.0, .firstStored)
         XCTAssertEqual(outcomes.1, .secondStored)
-        XCTAssertEqual(files.values.count, 1)
+        XCTAssertEqual(files.values.count, 2) // Immutable operation plus encrypted pending locator.
         let recovered = try await secondStore.load(serverIdentity: record.serverIdentity, target: record.target,
                                                    operationID: record.operation.operationID)
         XCTAssertEqual(recovered, record)
@@ -151,7 +275,7 @@ final class NativeMemoryCorrectionRecoveryTests: XCTestCase {
             let store = try makeStore(files: files, vault: RecoveryMemoryVault())
             let record = fixture()
             try await store.saveBeforeDispatch(record)
-            let path = try XCTUnwrap(files.onlyPath)
+            let path = try XCTUnwrap(files.paths.first(where: { $0.hasSuffix(".nmcr") }))
             var bytes = try XCTUnwrap(files.value(at: path))
             if unknownVersion {
                 bytes.replaceSubrange(4..<5, with: [0x02])
@@ -280,7 +404,8 @@ final class NativeMemoryCorrectionRecoveryTests: XCTestCase {
     private func fixture(
         operationID: String = "server-issued-operation-1",
         draft: String = "A reviewed correction draft",
-        ownerID: String = "owner-1"
+        ownerID: String = "owner-1",
+        authorizationExpiresAt: String? = nil
     ) -> NativeMemoryCorrectionRecoveryRecord {
         NativeMemoryCorrectionRecoveryRecord(
             serverIdentity: "https://assistant.example/deployment/base",
@@ -291,7 +416,8 @@ final class NativeMemoryCorrectionRecoveryTests: XCTestCase {
                             content: "Original saved wording", sourceLabel: "Imported note",
                             ownerCorrected: true, readOnlyReason: nil),
             draft: draft,
-            authorizationHandle: "omc1.c2VydmVyLWlzc3VlZC1jbGFpbXM.c2lnbmF0dXJl"
+            authorizationHandle: "omc1.c2VydmVyLWlzc3VlZC1jbGFpbXM.c2lnbmF0dXJl",
+            authorizationExpiresAt: authorizationExpiresAt
         )
     }
 }
@@ -333,6 +459,7 @@ private final class RecoveryMemoryFiles: NativeMemoryCorrectionRecoveryFileAcces
     private var blockTwoMissingReads = false
     private var missingReadCount = 0
     private var didTimeOutBarrier = false
+    var failPendingLocatorWrites = false
 
     var barrierTimedOut: Bool { lock.withLock { didTimeOutBarrier } }
 
@@ -345,6 +472,7 @@ private final class RecoveryMemoryFiles: NativeMemoryCorrectionRecoveryFileAcces
     }
 
     var values: [Data] { lock.withLock { Array(storage.values) } }
+    var paths: [String] { lock.withLock { Array(storage.keys) } }
     var onlyValue: Data? { lock.withLock { storage.count == 1 ? storage.values.first : nil } }
     var onlyPath: String? { lock.withLock { storage.count == 1 ? storage.keys.first : nil } }
     func value(at path: String) -> Data? { lock.withLock { storage[path] } }
@@ -390,6 +518,9 @@ private final class RecoveryMemoryFiles: NativeMemoryCorrectionRecoveryFileAcces
 
     func installAtomicallyIfAbsent(_ data: Data, to url: URL) throws -> Bool {
         try lock.withLock {
+            if failPendingLocatorWrites && url.lastPathComponent == "pending.nmcp" {
+                throw EncryptedCardFormDraftStorageError.writeFailed
+            }
             if failWrites { throw EncryptedCardFormDraftStorageError.writeFailed }
             guard storage[url.path] == nil else { return false }
             storage[url.path] = data

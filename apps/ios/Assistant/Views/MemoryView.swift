@@ -1498,6 +1498,14 @@ struct MemoryEditor: View {
     }
 
     var body: some View {
+        if let factId {
+            NativeMemoryCorrectionHost(memoryID: factId)
+        } else {
+            creationBody
+        }
+    }
+
+    private var creationBody: some View {
         AssistantForm {
             Section(factId == nil ? "New fact" : "Correction") {
                 TextField("Something durable the assistant should remember", text: $content, axis: .vertical)

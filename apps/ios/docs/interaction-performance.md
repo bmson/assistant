@@ -43,6 +43,16 @@ local memory projections so queued work cannot recreate erased content.
 
 ## Surface inventory
 
+Existing saved-note editing uses `NativeMemoryCorrectionConsumer` rather than an
+optimistic correction patch. It loads a qualified snapshot, obtains exact server
+authorization, and acknowledges encrypted recovery storage before sending one
+apply. Pending or unknown results offer an explicit check of the original
+operation; reopening never repeats the apply. A save receipt and refreshed note
+are separate evidence. Recovery is released only after an operation-bound
+terminal result and, for saved or unchanged results, matching qualified readback.
+Unresolved corrections block legacy writes and retries for the same note.
+Creation and other row actions retain their existing paths.
+
 | Surface                                                   | Local feedback and read behavior                                                                                |
 | --------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
 | Assistant settings                                        | Optimistic timezone, locale and signature; sheet closes on acceptance                                           |
@@ -51,8 +61,8 @@ local memory projections so queued work cannot recreate erased content.
 | Goals                                                     | Optimistic creation, field edits, status/autonomy, archive and restore                                          |
 | People                                                    | Warm directory; optimistic creation, editing and deletion; cached profiles update together                      |
 | Occasions                                                 | Optimistic creation, editing and deletion; profile and directory reconcile                                      |
-| Memory home                                               | Optimistic corrections, creation, approval, rejection, forget and prominence                                    |
-| Memory library                                            | Cached filter/page results; corrections and row actions update the shared cache                                 |
+| Memory home                                               | Qualified saved-note correction with explicit pending/recovery; optimistic creation and other row actions        |
+| Memory library                                            | Cached filter/page results; existing-note editor uses qualified correction; other row actions update shared cache |
 | Writing voice                                             | Cached editor load; optimistic save                                                                             |
 | Open loops                                                | Cached list shared with editor; optimistic correction and row actions                                           |
 | Saved cards                                               | Cached list; optimistic dismissal; source refresh remains a pending server operation                            |
