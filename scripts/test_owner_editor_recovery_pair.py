@@ -455,7 +455,7 @@ class AuthAndLifecycleTests(unittest.TestCase):
         self.assertLess(recovery.index('--cleanup'), recovery.index('name: Retain closed collection outcome'))
         ci = (Path(__file__).parents[1] / '.github/workflows/ci.yml').read_text()
         self.assertIn('python3 -m unittest discover -s scripts -p test_owner_editor_recovery_pair.py', ci)
-        self.assertIn('node --test scripts/owner-editor-recovery-envelope.test.mjs', ci)
+        self.assertIn('node --test scripts/owner-editor-recovery-envelope.node-test.mjs', ci)
 
 
 if __name__ == '__main__':

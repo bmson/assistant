@@ -33,4 +33,4 @@ Collection reports `cryptographicVerification: not_performed`. The pinned Darwin
 
 ## Offline validation
 
-Run `python3 -m unittest discover -s scripts -p test_owner_editor_recovery_pair.py` and `node --test scripts/owner-editor-recovery-envelope.test.mjs`. Tests use mocked transports/processes, synthetic keys/data and no live credentials or services. They establish source behavior, not real WIF issuance, registry access, artifact retention or production compatibility.
+Run `python3 -m unittest discover -s scripts -p test_owner_editor_recovery_pair.py` and `node --test scripts/owner-editor-recovery-envelope.node-test.mjs`. Tests use mocked transports/processes, synthetic keys/data and no live credentials or services. They establish source behavior, not real WIF issuance, registry access, artifact retention or production compatibility.
