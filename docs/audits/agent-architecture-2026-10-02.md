@@ -18,17 +18,17 @@ This standard argues for strengthening the current modular system, rather than m
 
 ## Existing architecture worth preserving
 
-| Responsibility | Current implementation | Why it matters |
-| --- | --- | --- |
-| Durable work | Task leases, generations, checkpoints, parked states, queue outbox | A process restart and a repeated queue delivery do not imply repeated effects |
-| External effects | Tool registry, argument-specific approval policy, trust/taint, provider-result ledger | Models propose; policy and evidence establish authority and outcomes |
-| Private context | Compact owner context, bounded conversation recall, optional graph recall | The owner can have long history without sending all history to every model |
-| Memory provenance | Quarantine, temporal validity, confirmation, supersession, tombstones | Remembering accurately requires correcting and forgetting, not only storing |
-| Grounded replies | Deterministic response contract plus bounded model review | A verifier outage must not remove the deterministic evidence boundary |
-| Proactivity | Deterministic pulse, watches, briefing, arrival nudges, curiosity, nudge policy | Important information can surface without granting a proactive job outward-action tools |
-| Long-running goals | Bounded sessions, durable progress, next actions, goal evidence checks | Continuation can be independent of the current client session |
-| Improvement | Reliability proposals, skill outcomes, quarantined dream hypotheses, bounded repair workflow | Advice, learning, code changes, deployment, and verified recovery remain separate stages |
-| Storage portability | SDK-independent repository contracts with selected PostgreSQL/Firestore composition | A storage migration should change persistence, not the meaning of approvals or outcomes |
+| Responsibility      | Current implementation                                                                       | Why it matters                                                                           |
+| ------------------- | -------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| Durable work        | Task leases, generations, checkpoints, parked states, queue outbox                           | A process restart and a repeated queue delivery do not imply repeated effects            |
+| External effects    | Tool registry, argument-specific approval policy, trust/taint, provider-result ledger        | Models propose; policy and evidence establish authority and outcomes                     |
+| Private context     | Compact owner context, bounded conversation recall, optional graph recall                    | The owner can have long history without sending all history to every model               |
+| Memory provenance   | Quarantine, temporal validity, confirmation, supersession, tombstones                        | Remembering accurately requires correcting and forgetting, not only storing              |
+| Grounded replies    | Deterministic response contract plus bounded model review                                    | A verifier outage must not remove the deterministic evidence boundary                    |
+| Proactivity         | Deterministic pulse, watches, briefing, arrival nudges, curiosity, nudge policy              | Important information can surface without granting a proactive job outward-action tools  |
+| Long-running goals  | Bounded sessions, durable progress, next actions, goal evidence checks                       | Continuation can be independent of the current client session                            |
+| Improvement         | Reliability proposals, skill outcomes, quarantined dream hypotheses, bounded repair workflow | Advice, learning, code changes, deployment, and verified recovery remain separate stages |
+| Storage portability | SDK-independent repository contracts with selected PostgreSQL/Firestore composition          | A storage migration should change persistence, not the meaning of approvals or outcomes  |
 
 Evidence: [task machine](../../packages/core/src/workflow/machine.ts), [queue outbox dispatch](../../packages/core/src/workflow/dispatch.ts), [response contract](../../packages/core/src/workflow/response-contract.ts), [goal evidence](../../packages/core/src/workflow/goal-evidence.ts), [memory recall](../../packages/core/src/memory/recall.ts), [GraphRAG](../../packages/core/src/memory/graph-recall.ts), [executor notices](../../packages/core/src/workflow/executor/notices.ts), [self-improvement](../../packages/core/src/workflow/improve.ts), and [repair contract](../self-repair.md).
 
@@ -98,13 +98,13 @@ Suggestion hydration already supplies `snoozedUntil` from the authoritative row.
 
 Native now preserves the optional wire timestamp and uses a shared Foundation presentation value for settled status, task progress, and scheduling copy. A snoozed receipt shows its absolute return date and time while collapsed, using the device's locale/timezone; VoiceOver reads state, subject, and return time together. Fractional-second, whole-second, and offset internet timestamps are accepted. Missing/malformed legacy timestamps say “Return time unavailable”; they do not create a fictional date. No date formatter is allocated per row.
 
-| State | Native treatment | Authority preserved |
-| --- | --- | --- |
-| Pending | One proposed next step with its explicitly paired source, action label, Later, and No thanks | A suggestion is an offer, separate from an approval |
-| Answer in flight | Controls are disabled; inline progress/error remains at the question | No success receipt before server acknowledgement |
-| Snoozed | Quiet receipt with visible local return time, or honest unavailable-time copy | Server hydration determines when the question reopens |
-| Accepted | Actual task progress: queued, working, waiting, needs attention, completed, cancelled, or failed | Acceptance creates work under existing action permissions; it does not prove completion |
-| Dismissed/expired/missing | Quiet non-actionable receipt retaining the original subject/details | Passing on an offer is not an error; removed work cannot be revived by a device shadow |
+| State                     | Native treatment                                                                                 | Authority preserved                                                                     |
+| ------------------------- | ------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------- |
+| Pending                   | One proposed next step with its explicitly paired source, action label, Later, and No thanks     | A suggestion is an offer, separate from an approval                                     |
+| Answer in flight          | Controls are disabled; inline progress/error remains at the question                             | No success receipt before server acknowledgement                                        |
+| Snoozed                   | Quiet receipt with visible local return time, or honest unavailable-time copy                    | Server hydration determines when the question reopens                                   |
+| Accepted                  | Actual task progress: queued, working, waiting, needs attention, completed, cancelled, or failed | Acceptance creates work under existing action permissions; it does not prove completion |
+| Dismissed/expired/missing | Quiet non-actionable receipt retaining the original subject/details                              | Passing on an offer is not an error; removed work cannot be revived by a device shadow  |
 
 Known-deadline local snoozes cover older pending reads only until the acknowledged deadline. An unknown-deadline legacy snooze can settle the immediate acknowledgement, but later server reads prevail; otherwise it could remain locally snoozed forever. A conflicting terminal server status wins over every local answer. The server's accepted task identity and progress remain intact, even if a device retained an older task ID. These changes do not infer source pairing, rewrite the proposed action, add approval scope, or change suggestion expiry.
 
@@ -120,16 +120,16 @@ The notification policy currently brings ambient producers together at the phone
 
 Use one durable candidate contract upstream of both in-app presentation and out-of-band delivery:
 
-| Candidate field | Meaning |
-| --- | --- |
-| Owner and source identity | Scope and stable deduplication key |
-| Source version and observed time | Which actual change earned attention; avoids “a cancelled event” becoming an eternal key |
-| Evidence references and freshness | Why this is true now; when revalidation is needed |
-| Consequence and useful-until | What the owner loses by learning late, and when the notice expires |
-| Decision/next action | One specific choice or action, using ordinary approval policy when accepted |
-| Group identity | A trip, person, goal, booking, or thread through which related changes can be combined |
-| Interaction state | Presented, read, accepted, dismissed, snoozed, resolved; these are different outcomes |
-| Delivery state | Claimed, message committed, channel queued, channel result, retry state |
+| Candidate field                   | Meaning                                                                                  |
+| --------------------------------- | ---------------------------------------------------------------------------------------- |
+| Owner and source identity         | Scope and stable deduplication key                                                       |
+| Source version and observed time  | Which actual change earned attention; avoids “a cancelled event” becoming an eternal key |
+| Evidence references and freshness | Why this is true now; when revalidation is needed                                        |
+| Consequence and useful-until      | What the owner loses by learning late, and when the notice expires                       |
+| Decision/next action              | One specific choice or action, using ordinary approval policy when accepted              |
+| Group identity                    | A trip, person, goal, booking, or thread through which related changes can be combined   |
+| Interaction state                 | Presented, read, accepted, dismissed, snoozed, resolved; these are different outcomes    |
+| Delivery state                    | Claimed, message committed, channel queued, channel result, retry state                  |
 
 The arbiter should choose the next useful interruption from current evidence and user availability. It should combine related observations, suppress duplicates across producers, retain unpresented candidates until expiry, and record a concise suppression reason. An atomic admission operation must reserve the pace slot and commit the owner-visible notice together. Phone delivery should follow through its own retryable outbox.
 
@@ -181,13 +181,13 @@ Evidence: [goal evidence](../../packages/core/src/workflow/goal-evidence.ts), [m
 
 The current code has several distinct learning paths:
 
-| Path | Current value | Limit to preserve or improve |
-| --- | --- | --- |
-| `self.improve` | Aggregates repeated tool failures, stuck tasks, cost outliers, response-quality counters, and graph health; drafts proposals | These patterns are evidence for investigation, not proof that a proposed model or policy will be better |
-| Skill reflection | Stores learned procedures and outcome counts | A task outcome alone does not isolate whether the skill caused success/failure |
-| Dreaming | Produces internal observations and quarantined low-confidence hypotheses | No tools for outward action; hypotheses require review and must not become confirmed owner preferences |
-| Self-maintenance | Identifies code-shaped proposals | An advisory proposal is not an implemented fix |
-| Self-repair | Bounded diagnosis, synthetic reproduction, independent checks, reviewable PR, deployment monitoring | A model-completed run is not a verified patch; a deployed patch is not a confirmed behavior fix |
+| Path             | Current value                                                                                                                | Limit to preserve or improve                                                                            |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `self.improve`   | Aggregates repeated tool failures, stuck tasks, cost outliers, response-quality counters, and graph health; drafts proposals | These patterns are evidence for investigation, not proof that a proposed model or policy will be better |
+| Skill reflection | Stores learned procedures and outcome counts                                                                                 | A task outcome alone does not isolate whether the skill caused success/failure                          |
+| Dreaming         | Produces internal observations and quarantined low-confidence hypotheses                                                     | No tools for outward action; hypotheses require review and must not become confirmed owner preferences  |
+| Self-maintenance | Identifies code-shaped proposals                                                                                             | An advisory proposal is not an implemented fix                                                          |
+| Self-repair      | Bounded diagnosis, synthetic reproduction, independent checks, reviewable PR, deployment monitoring                          | A model-completed run is not a verified patch; a deployed patch is not a confirmed behavior fix         |
 
 The next evolution should be an experiment ledger linked to an immutable baseline: observed problem, representative fixture set, proposed change, expected metric, budget, result, and promotion/rollback decision. Candidate prompt/model/skill changes should pass a holdout suite that was not used to write the proposal. Model routing experiments must keep tool correctness, structured-output reliability, refusal/uncertainty handling, latency, total cost, and privacy/provider eligibility separate; one cheap call is not proof of low total task cost.
 
@@ -215,19 +215,19 @@ These are proposed measurements, not measured benchmark results. Use redacted co
 
 ## Remaining concrete risks and acceptance work
 
-| Concern | Evidence and implication | Completion criterion |
-| --- | --- | --- |
-| Historical ledger-only claims have unknown notice history | Imported/pre-refactor claims may lack an owner message and stay inert to avoid repeated notices | A separate evidence-based reconciliation can identify and review lost legacy notices without assuming every old claim needs re-sending |
-| Producers still have independent in-app admission | Pulse now has atomic owner admission, but briefing, watches, arrivals and curiosity do not share its ranking/cap contract | Concurrent candidates from multiple producers obey one attention contract |
-| Calendar absence is not necessarily cancellation | A forward window can omit an event moved beyond that window; completeness describes that read, not a provider-wide deletion | Reconcile missing IDs against provider change/deletion evidence before claiming cancellation |
-| Snapshot retention is a comparison baseline, not an event log | Intermediate edits can revert or pass their useful time before admission | Define whether changes need a durable source outbox, expiry, and provider version keys |
-| Some pulse reads are sequential and can fail the whole observation pass | Mail, commitments, situation packs, and snapshot work remain separate awaited dependencies | Independent source failures degrade only that source; deadlines bound optional work; tests retain healthy-source notices |
-| Tick backpressure is process-local | One active-tick set prevents local accumulation but supplies no distributed lease or provider abort | Replayed/multi-instance sync has source-owned leases/idempotency and bounded provider cancellation |
-| Notification summaries can overstate actual phone delivery | `pingOwner` reports a fulfilled `Promise<void>` as success, which cannot distinguish suppression/no-channel from delivery | Notifier returns explicit delivered/suppressed/unconfigured/failed results; UI/telemetry use the actual outcome |
-| Self-improvement experience mixes diagnostics with trusted internal memories | Error signatures may originate in external tool errors; improvement summaries are stored as assistant experience | Treat diagnostics as data with provenance; validate promoted procedures against tests and trust policy |
-| Live proposal changes are not comparative experiments | An evidence-bearing known enabled model may be applied without candidate holdout results | Model change has task-based evaluation, provider/privacy compatibility, canary, and rollback evidence |
-| Goal completion can rely on model reflection | Reflection chooses complete based on narrative progress | Completion requires explicit acceptance criteria and verified outcome evidence |
-| No source inspection proves device/deployment behavior | Native foreground/background, notification channels, storage backend, feature flags, and release identity vary | Run installation-specific end-to-end/device checks and record the exact runtime/client versions |
+| Concern                                                                      | Evidence and implication                                                                                                    | Completion criterion                                                                                                                   |
+| ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| Historical ledger-only claims have unknown notice history                    | Imported/pre-refactor claims may lack an owner message and stay inert to avoid repeated notices                             | A separate evidence-based reconciliation can identify and review lost legacy notices without assuming every old claim needs re-sending |
+| Producers still have independent in-app admission                            | Pulse now has atomic owner admission, but briefing, watches, arrivals and curiosity do not share its ranking/cap contract   | Concurrent candidates from multiple producers obey one attention contract                                                              |
+| Calendar absence is not necessarily cancellation                             | A forward window can omit an event moved beyond that window; completeness describes that read, not a provider-wide deletion | Reconcile missing IDs against provider change/deletion evidence before claiming cancellation                                           |
+| Snapshot retention is a comparison baseline, not an event log                | Intermediate edits can revert or pass their useful time before admission                                                    | Define whether changes need a durable source outbox, expiry, and provider version keys                                                 |
+| Some pulse reads are sequential and can fail the whole observation pass      | Mail, commitments, situation packs, and snapshot work remain separate awaited dependencies                                  | Independent source failures degrade only that source; deadlines bound optional work; tests retain healthy-source notices               |
+| Tick backpressure is process-local                                           | One active-tick set prevents local accumulation but supplies no distributed lease or provider abort                         | Replayed/multi-instance sync has source-owned leases/idempotency and bounded provider cancellation                                     |
+| Notification summaries can overstate actual phone delivery                   | `pingOwner` reports a fulfilled `Promise<void>` as success, which cannot distinguish suppression/no-channel from delivery   | Notifier returns explicit delivered/suppressed/unconfigured/failed results; UI/telemetry use the actual outcome                        |
+| Self-improvement experience mixes diagnostics with trusted internal memories | Error signatures may originate in external tool errors; improvement summaries are stored as assistant experience            | Treat diagnostics as data with provenance; validate promoted procedures against tests and trust policy                                 |
+| Live proposal changes are not comparative experiments                        | An evidence-bearing known enabled model may be applied without candidate holdout results                                    | Model change has task-based evaluation, provider/privacy compatibility, canary, and rollback evidence                                  |
+| Goal completion can rely on model reflection                                 | Reflection chooses complete based on narrative progress                                                                     | Completion requires explicit acceptance criteria and verified outcome evidence                                                         |
+| No source inspection proves device/deployment behavior                       | Native foreground/background, notification channels, storage backend, feature flags, and release identity vary              | Run installation-specific end-to-end/device checks and record the exact runtime/client versions                                        |
 
 The follow-up changes pulse storage adapters and the shared admission port. It introduces no schema migration, outward-action authority, provider credentials, production setting, or deployed service change.
 

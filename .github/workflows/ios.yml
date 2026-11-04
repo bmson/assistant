@@ -28,10 +28,10 @@ on:
   # trigger keeps its filter — nothing is waiting on a check that never appears.
   push:
     paths:
-      - 'apps/ios/**'
-      - '.github/workflows/ios.yml'
-      - 'infra/ios-detect-changes.sh'
-      - 'infra/ios-detect-changes.test.sh'
+      - "apps/ios/**"
+      - ".github/workflows/ios.yml"
+      - "infra/ios-detect-changes.sh"
+      - "infra/ios-detect-changes.test.sh"
   workflow_dispatch:
 
 jobs:
@@ -156,7 +156,7 @@ jobs:
       - name: Optional single Debug profiling capability attempt
         if: github.event_name == 'push' && github.ref == 'refs/heads/codex/native-profiling-capability' && !github.event.deleted && github.run_attempt == '1' && vars.NATIVE_PROFILING_CAPABILITY_SHA == github.sha
         env:
-          ASSISTANT_PROFILE_CAPABILITY: '1'
+          ASSISTANT_PROFILE_CAPABILITY: "1"
           DESTINATION_UDID: ${{ steps.simulator.outputs.udid }}
           PROFILE_OUTPUT_PARENT: ${{ runner.temp }}/Assistant-profile
         run: |

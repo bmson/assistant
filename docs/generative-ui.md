@@ -37,18 +37,18 @@ The rules that make this safe, and that every layer below keeps:
 
 ### Layer 1 — layout and richer blocks
 
-| Block | Shape | For |
-|---|---|---|
-| `section` | authored `title` + 1–6 leaf blocks | Grouping: Outbound / Return, Today / Tomorrow |
-| `metrics` | 2–4 fact ids | Headline values side by side: Gate · Seat · Boards |
-| `journey` | `mode`, from/to facts, optional depart/arrive/status/duration | Flights, trains, drives between two places |
-| `progress` | value fact, optional total and label | "76%", "3 of 5 stops" as a bar |
-| `stages` | 2–8 fact ids + current fact | Package tracking, application pipelines |
-| `countdown` | ISO 8601 date fact with offset, optional label | Departure, kickoff, deadline — ticks live |
-| `table` | 2–4 authored column labels, rows of fact ids | Comparing hotels, flights, options |
-| `chart` | `bar`/`line`, 2–12 label/value points | Temperatures, spend, scores over time |
-| `checklist` | fact ids | Packing list, prep list; ticks are kept on device |
-| `map` | 1–6 place facts (address or `lat, lng`) | Hotel, venue, a day plan; tap opens Maps |
+| Block       | Shape                                                         | For                                                |
+| ----------- | ------------------------------------------------------------- | -------------------------------------------------- |
+| `section`   | authored `title` + 1–6 leaf blocks                            | Grouping: Outbound / Return, Today / Tomorrow      |
+| `metrics`   | 2–4 fact ids                                                  | Headline values side by side: Gate · Seat · Boards |
+| `journey`   | `mode`, from/to facts, optional depart/arrive/status/duration | Flights, trains, drives between two places         |
+| `progress`  | value fact, optional total and label                          | "76%", "3 of 5 stops" as a bar                     |
+| `stages`    | 2–8 fact ids + current fact                                   | Package tracking, application pipelines            |
+| `countdown` | ISO 8601 date fact with offset, optional label                | Departure, kickoff, deadline — ticks live          |
+| `table`     | 2–4 authored column labels, rows of fact ids                  | Comparing hotels, flights, options                 |
+| `chart`     | `bar`/`line`, 2–12 label/value points                         | Temperatures, spend, scores over time              |
+| `checklist` | fact ids                                                      | Packing list, prep list; ticks are kept on device  |
+| `map`       | 1–6 place facts (address or `lat, lng`)                       | Hotel, venue, a day plan; tap opens Maps           |
 
 Sections nest one level only; a section holds leaf blocks. Shape problems a
 model can make without lying (a chart value that isn't a number, a countdown

@@ -22,7 +22,7 @@ against a real Postgres (901 passing at time of writing), and `pnpm build`.
 
 **Fork PRs could trigger a production deploy.** `deploy.yml` fired on
 `workflow_run` completion of CI with `branches: [main]` — but for a
-`pull_request` run that filter matches the *head* branch name, which a fork
+`pull_request` run that filter matches the _head_ branch name, which a fork
 controls. An attacker could fork the repo, name their branch `main`, open a PR,
 let CI pass, and the deploy job would build attacker-controlled Dockerfiles and
 run attacker-controlled `pnpm modules:plan` under the Workload Identity

@@ -179,17 +179,17 @@ bootstrap stays blocked. After bootstrap, missing/malformed journal means corrup
 not a fresh installation. Pin the genesis/UID in reviewed source or an independently
 reviewed durable anchor before enabling further actions; deletion cannot reset it.
 
-| Crash/cancellation window | Required outcome |
-|---|---|
-| Before PREPARE persistence | No action PATCH. A failed metadata CAS has unknown metadata outcome and stops; observe only after authorization. |
-| PREPARE committed, before action send | Treat action as possibly attempted after crash; never infer safe retry from missing local marker or absent revision. |
-| Action sent, response lost | Head remains inflight/unknown. No operation discovery/listing/adoption; no duplicate creation/write. |
-| Operation known, before binding artifact confirmed | Unknown until verified original binding exists; no invented operation. |
-| Binding archived, process lost | New protected recovery may GET only the authenticated original LRO and fixed raw poststate under a separate bounded decision. No write authority from that record. |
-| Native success, completion archival uncertain | HOLD; verify only original operation/poststate and exact completion slot; never send the action again. |
-| Completion archived, next PREPARE not committed | Revalidate current native state and exact authenticated completion, then CAS expected head/etag once. No replay of action. |
-| Lock released while intent unresolved | Next normal run refuses ownership. Explicit recovery fence uses exact observed etag once; if an old write wins the race, fencing CAS loses and stops. |
-| Artifact/head absent, expired, replaced or history truncated | HOLD; no empty-history fallback or automatic checkpoint/expiry reset. |
+| Crash/cancellation window                                    | Required outcome                                                                                                                                                   |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Before PREPARE persistence                                   | No action PATCH. A failed metadata CAS has unknown metadata outcome and stops; observe only after authorization.                                                   |
+| PREPARE committed, before action send                        | Treat action as possibly attempted after crash; never infer safe retry from missing local marker or absent revision.                                               |
+| Action sent, response lost                                   | Head remains inflight/unknown. No operation discovery/listing/adoption; no duplicate creation/write.                                                               |
+| Operation known, before binding artifact confirmed           | Unknown until verified original binding exists; no invented operation.                                                                                             |
+| Binding archived, process lost                               | New protected recovery may GET only the authenticated original LRO and fixed raw poststate under a separate bounded decision. No write authority from that record. |
+| Native success, completion archival uncertain                | HOLD; verify only original operation/poststate and exact completion slot; never send the action again.                                                             |
+| Completion archived, next PREPARE not committed              | Revalidate current native state and exact authenticated completion, then CAS expected head/etag once. No replay of action.                                         |
+| Lock released while intent unresolved                        | Next normal run refuses ownership. Explicit recovery fence uses exact observed etag once; if an old write wins the race, fencing CAS loses and stops.              |
+| Artifact/head absent, expired, replaced or history truncated | HOLD; no empty-history fallback or automatic checkpoint/expiry reset.                                                                                              |
 
 Artifact retention is bounded90days using the existing workflow policy. Keep a
 bounded head chain/checkpoint anchor; reaching retention/history limits needs a
@@ -203,19 +203,19 @@ not permanent storage or an append-only database guarantee.
 Line references are release-staged-services.sh at6297a84a; other release modes keep
 existing behavior and must not inherit a shared helper change.
 
-| Existing callsite | Proposed BASIC5 path |
-|---|---|
-|500–502 paused web SDK update | journal PREPARE createP; template-only native create; raw receipt; PREPARE attachP; traffic-only P0; strict existing record-candidate506 and probes follow |
-|575–576 paused --to-revisions | PREPARE promoteP; exact P100/captured aliases0; existing readiness/old canonical drain587 |
-|589 captured retirement | PREPARE retirement with conservative tombstones BEFORE fresh normal planner; existing planner/executor/one-target client and full600s stable drain unchanged |
-|604–605 agent promotion and worker job staging | Existing ordering/contracts retained; journal web metadata must not interfere with these checks |
-|623 admission verifier then628 marker | Existing exact retirement/drain stability verification FIRST. PREPARE createR CAS consumes that exact barrier service etag and persists admissionPossible=true; prove metadata-only delta, then createR. A mismatch stops before unpaused creation. |
-|630–632 resume SDK update | template-only createR, then PREPARE attachR and traffic-only R0; strict native resume verification/record658 and probes follow |
-|685–686 resume --to-revisions | PREPARE promoteR; native R100/P0; existing source/ready/writesPaused=false checks |
-|725 post-admission restore helper | reviewed PREPARE repauseP for known verified R100; no old runtime rollback; already-paused/unattached cases use read-only confirmed-state recovery |
-|733 close resume helper | PREPARE closeR only after P100 and exact R proof; native closure and full required R drain |
-|771 pre-admission restore helper | PREPARE restoreC; exact captured serving identity or C untagged if retired; preserve tombstones, then existing agent/jobs rollback domain only when permitted |
-|789 successful candidate helper | PREPARE closeP; exact owned P0 removed, R100 kept; terminal completion head CAS only after final proof |
+| Existing callsite                              | Proposed BASIC5 path                                                                                                                                                                                                                                |
+| ---------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 500–502 paused web SDK update                  | journal PREPARE createP; template-only native create; raw receipt; PREPARE attachP; traffic-only P0; strict existing record-candidate506 and probes follow                                                                                          |
+| 575–576 paused --to-revisions                  | PREPARE promoteP; exact P100/captured aliases0; existing readiness/old canonical drain587                                                                                                                                                           |
+| 589 captured retirement                        | PREPARE retirement with conservative tombstones BEFORE fresh normal planner; existing planner/executor/one-target client and full600s stable drain unchanged                                                                                        |
+| 604–605 agent promotion and worker job staging | Existing ordering/contracts retained; journal web metadata must not interfere with these checks                                                                                                                                                     |
+| 623 admission verifier then628 marker          | Existing exact retirement/drain stability verification FIRST. PREPARE createR CAS consumes that exact barrier service etag and persists admissionPossible=true; prove metadata-only delta, then createR. A mismatch stops before unpaused creation. |
+| 630–632 resume SDK update                      | template-only createR, then PREPARE attachR and traffic-only R0; strict native resume verification/record658 and probes follow                                                                                                                      |
+| 685–686 resume --to-revisions                  | PREPARE promoteR; native R100/P0; existing source/ready/writesPaused=false checks                                                                                                                                                                   |
+| 725 post-admission restore helper              | reviewed PREPARE repauseP for known verified R100; no old runtime rollback; already-paused/unattached cases use read-only confirmed-state recovery                                                                                                  |
+| 733 close resume helper                        | PREPARE closeR only after P100 and exact R proof; native closure and full required R drain                                                                                                                                                          |
+| 771 pre-admission restore helper               | PREPARE restoreC; exact captured serving identity or C untagged if retired; preserve tombstones, then existing agent/jobs rollback domain only when permitted                                                                                       |
+| 789 successful candidate helper                | PREPARE closeP; exact owned P0 removed, R100 kept; terminal completion head CAS only after final proof                                                                                                                                              |
 
 NO journal annotation updates between the retirement PATCH/postcheck and completion
 of its full600s stable-etag/generation drain, or between that completion and the
@@ -264,26 +264,26 @@ at each unsupported provider shape. Do not infer native acceptance from fixtures
 ## Next bounded implementation proposal and validation
 
 1. Pure journal/fence/rebase model and offline tests ONLY: authenticated context
-projection contracts, genesis requirement, exact annotation-only delta, sequence/
-owner CAS, hash chain/history bounds, sticky flags/tombstones and barrier-consumption
-transition. Explicitly model the initial known-state/handoff gate before offering
-any production adapter. No credentials/workflows yet.
+   projection contracts, genesis requirement, exact annotation-only delta, sequence/
+   owner CAS, hash chain/history bounds, sticky flags/tombstones and barrier-consumption
+   transition. Explicitly model the initial known-state/handoff gate before offering
+   any production adapter. No credentials/workflows yet.
 2. Injected tests for simultaneous duplicate artifact uploads, finalize timeout,
-cancel after upload, attempt2 namespace, wrong run/source/job, expired/deleted or
-recreated ID/digest, ZIP permission failure and public-metadata-only success. No
-permission changes; unsupported guarantees stay blockers.
+   cancel after upload, attempt2 namespace, wrong run/source/job, expired/deleted or
+   recreated ID/digest, ZIP permission failure and public-metadata-only success. No
+   permission changes; unsupported guarantees stay blockers.
 3. Two simulated runners: old PREPARE vs new head claim, old paused writer after
-cancellation, fresh-etag theft with wrong owner, old-state prefix replay, action
-wins recovery fence race, missing genesis and context reset. Native412 must stop
-with no refresh/retry. Test that no metadata write occurs during600s drain and that
-PREPARE-createR consumes the exact verified barrier etag.
+   cancellation, fresh-etag theft with wrong owner, old-state prefix replay, action
+   wins recovery fence race, missing genesis and context reset. Native412 must stop
+   with no refresh/retry. Test that no metadata write occurs during600s drain and that
+   PREPARE-createR consumes the exact verified barrier etag.
 4. Review exact pure model/strategy with QA and independent reviewer. Only after
-all authority/handoff gates are resolved, request a separately scoped adapter/local
-JavaScript action and BASIC5-only integration, with targeted shell/admission/native
-fixtures, scriptsTSC/full lint/diff, exact-head CI and final review before merge.
+   all authority/handoff gates are resolved, request a separately scoped adapter/local
+   JavaScript action and BASIC5-only integration, with targeted shell/admission/native
+   fixtures, scriptsTSC/full lint/diff, exact-head CI and final review before merge.
 5. Explicit manager-approved bounded runtime qualification above. No production
-mutation or permission request is implied by this document. Backend serving health,
-exact source and delivery guard proof still precede authorized matching phone install.
+   mutation or permission request is implied by this document. Backend serving health,
+   exact source and delivery guard proof still precede authorized matching phone install.
 
 ## Existing actual test evidence for the unwired8a4ba865 head
 

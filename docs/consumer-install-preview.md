@@ -110,7 +110,12 @@ New installations should use [owner passkeys](consumer-owner-passkeys.md). Add `
 ```json
 {
   "firestoreAgentId": "11111111-1111-4111-8111-111111111111",
-  "firestoreEmbeddingSpace": { "provider": "vertex", "model": "gemini-embedding-001", "dimensions": 1536, "revision": "customer-seed-v1" },
+  "firestoreEmbeddingSpace": {
+    "provider": "vertex",
+    "model": "gemini-embedding-001",
+    "dimensions": 1536,
+    "revision": "customer-seed-v1"
+  },
   "vertexLocation": "global",
   "ownerEmail": "owner@example.com",
   "ownerAuth": "passkey"

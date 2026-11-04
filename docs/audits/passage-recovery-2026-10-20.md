@@ -25,8 +25,8 @@ The [receipt](assets/passage-recovery-2026-10-20/verification.json) contains sou
 
 Actual native Tab/Return reaches and activates Retry in the retained numeric and opaque paths. The error is linked to that control. Held responses check that repeated activation and Hide/Read add no request while pending; disabled-control DOM events are a separately identified synthetic probe. Each final error view captures the actual Retry control within the viewport. Successful retry clears the error; subsequent pagination retains earlier text without duplicate headings.
 
-| Before: dead end | After: retry available | After: continued reading |
-| --- | --- | --- |
+| Before: dead end                                                                | After: retry available                                                      | After: continued reading                                                     |
+| ------------------------------------------------------------------------------- | --------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
 | ![Passage failure without retry](assets/passage-recovery-2026-10-20/before.png) | ![Passage failure with retry](assets/passage-recovery-2026-10-20/retry.png) | ![Recovered final passage](assets/passage-recovery-2026-10-20/recovered.png) |
 
 Local lint, typecheck and 54 existing passage-state/product-fixture tests passed. Independent QA and final-head CI remain separate gates. This matrix uses the actual React component, real compiled stylesheet and root main-container classes with loopback GET responses. No authenticated route, owner account, provider, database or storage write is exercised. It does not claim native or deployed behavior.

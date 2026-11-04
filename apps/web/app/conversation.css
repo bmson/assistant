@@ -204,7 +204,7 @@ body:has(.chat-viewport) > main > .route-surface {
 /* The web and native conversation controls share the same legible well ink.
    Supporting bare-stage text keeps its separate, brighter treatment above. */
 .chat-viewport
-:where(.bubble-owner, .scroll-subtle .my-auto > .grid, [data-testid="chat-composer-surface"]) {
+  :where(.bubble-owner, .scroll-subtle .my-auto > .grid, [data-testid="chat-composer-surface"]) {
   --stage-strong: #f4faf5;
   --stage-muted: #c6ddcf;
 }

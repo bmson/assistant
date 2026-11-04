@@ -12,12 +12,12 @@ The vision is feasible because roughly seventy percent of it is already built. T
 framing is not "convert a standalone bot into a platform" but "close four specific gaps in an
 already-platform-shaped codebase":
 
-| Vision pillar | Current state |
-| --- | --- |
+| Vision pillar             | Current state                                                                          |
+| ------------------------- | -------------------------------------------------------------------------------------- |
 | Strict UI/core separation | **Done.** Layered packages with CI-enforced boundaries (`scripts/check-boundaries.ts`) |
-| Composable plugins | **Partial.** Eight env-selected, hard-gated modules; no module contract type |
-| One-file onboarding | **Not built.** The only composition lever is the `ASSISTANT_MODULES` string |
-| Wizard + billing clarity | **Embryonic.** Idempotent gcloud bash provisioner; no cost documentation at all |
+| Composable plugins        | **Partial.** Eight env-selected, hard-gated modules; no module contract type           |
+| One-file onboarding       | **Not built.** The only composition lever is the `ASSISTANT_MODULES` string            |
+| Wizard + billing clarity  | **Embryonic.** Idempotent gcloud bash provisioner; no cost documentation at all        |
 
 ## 1. Architecture feedback
 
@@ -58,7 +58,7 @@ already-platform-shaped codebase":
 
 3. **Configuration is centralized by design, and that property is worth keeping.** The 63-key
    flat schema in `packages/config` maps one-to-one to Secret Manager names. First-party
-   modules should therefore *pick* the keys they own (declared metadata: `configKeys`,
+   modules should therefore _pick_ the keys they own (declared metadata: `configKeys`,
    readiness, production problems) rather than extend the schema. Schema extension with
    namespaced keys is a third-party-plugin feature, deferred until that phase.
 
@@ -91,7 +91,7 @@ already-platform-shaped codebase":
 - **Infrastructure as code: Pulumi TypeScript with the Automation API**, scoped to the control
   plane only — API enablement, service accounts, IAM (including the conditional prefix grants,
   fixing the current remove-then-add flap), buckets, Cloud Tasks, Pub/Sub, Scheduler, Artifact
-  Registry, and Secret Manager *containers*. The module manifest is TypeScript data that a
+  Registry, and Secret Manager _containers_. The module manifest is TypeScript data that a
   Pulumi program consumes natively; `preview` gives the wizard a plan it can translate into
   plain language and cost notes; state lives in a GCS bucket; teardown comes for free.
   **Pulumi must never own images, service revisions, or secret versions** — the imperative
@@ -138,7 +138,7 @@ alias plus one `COPY` line in the agent Dockerfile — the missing-COPY failure 
 assertion). Composition is thereby baked into the signed image: unused modules are genuinely
 tree-shaken out, and the SBOM/Cosign attestation covers exactly what runs. Scripts read the
 file on the host via tsx/jiti and derive everything else from it. `ASSISTANT_MODULES` is
-demoted from selector to *restrictor* (effective = file ∩ env) so an environment variable can
+demoted from selector to _restrictor_ (effective = file ∩ env) so an environment variable can
 never appear to enable code that was compiled out. When the file is absent, the default is all
 in-repo modules, so existing installations stay green throughout the migration.
 
@@ -200,7 +200,7 @@ projects, and existing installations keep `deploy.sh` until a `pulumi import` gu
 
 ### Later phases
 
-Third-party plugins via a types-only `@assistant/plugin-kit` with *required* (non-defaulted)
+Third-party plugins via a types-only `@assistant/plugin-kit` with _required_ (non-defaulted)
 security flags; owner capability-acknowledgment cards per `package@version`; namespaced plugin
 configuration keys merged by `defineAssistant`.
 
@@ -235,12 +235,12 @@ steps the composed modules actually need, and then runs the provisioner.
 
 **Deliberately not done, with reasons.**
 
-*Bundle-level tree-shaking.* Composition controls what is installed, built, and provisioned, but
+_Bundle-level tree-shaking._ Composition controls what is installed, built, and provisioned, but
 not yet what is compiled: `apps/agent` still imports the `@assistant/tools` root barrel, which
 pulls every provider in regardless. Measured on a build with browser and code removed from the
 composition, the bundle shrank by 35 bytes. Removing that barrel import is the prerequisite.
 
-*Relocating provider behavior.* Done in a follow-up refactor: the module contract gained a
+_Relocating provider behavior._ Done in a follow-up refactor: the module contract gained a
 runtime hook surface (webhooks with a closed auth union, internal routes, sweep steps, poller
 ticks, deterministic task handlers, delivery channels, an owner-notifier port, and inbound-email
 observers), and mail sync, the SMS and email channels, watches, and application confirmations all
@@ -248,7 +248,7 @@ moved into their modules behind narrow deps types. Modules may not import each o
 `pnpm check:boundaries`); cross-module needs flow through the ports. Canaries remain agent-owned —
 the one recorded exception, alongside the platform's own `/webhooks/location`.
 
-*Infrastructure as code.* `deploy.sh` remains the provisioner. Preview, teardown, and drift
+_Infrastructure as code._ `deploy.sh` remains the provisioner. Preview, teardown, and drift
 detection are real gaps that Pulumi would close, but replacing working, idempotent provisioning
 with a program that cannot be exercised against a real project is not an improvement. The module
 manifest that a Pulumi program would consume now exists, so that work is unblocked whenever a

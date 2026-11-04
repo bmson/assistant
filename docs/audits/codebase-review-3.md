@@ -79,7 +79,7 @@ speculative exports that never got callers:
   `PROFILE_OBJECT`, `MAX_TEXT_CHARS`, and the unused `signIn` from the
   NextAuth destructure.
 
-Kept deliberately: exported *types* that document DI ports and exported
+Kept deliberately: exported _types_ that document DI ports and exported
 function signatures (`WebWatchDeps`, worker `BlobStore`, etc.) — they are
 API documentation, not dead weight — and `scripts/verify-browse.ts` /
 `scripts/verify-goal-session.ts`, which are live-verification tools now

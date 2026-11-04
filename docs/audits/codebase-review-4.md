@@ -24,7 +24,7 @@ Most of what this audit went looking for was simply not there to find:
 - **Debt markers.** No TODO/FIXME/HACK comments anywhere in the tree.
   `console.log` appears only in process entry points, seeds, and scripts,
   where it is operational output rather than leftover debugging.
-- **Comments.** The density is high and almost entirely *rationale*: comments
+- **Comments.** The density is high and almost entirely _rationale_: comments
   explain invariants, prod incidents that motivated a guard, and why the
   obvious alternative is wrong. Exported surfaces carry doc comments.
 

@@ -31,7 +31,7 @@ Head sequences, parent digests and acknowledged predecessor artifact IDs/digests
 are bound. History records include native post-etag/generation/full-envelope digest,
 source/run/attempt/job/check-run and exact member digest. Old prefixes, mismatched
 origin, missing/expired records, acknowledged-ID delete/recreate and native etag or
-full-state rollback refuse. These are *projection contract tests*: they do NOT
+full-state rollback refuse. These are _projection contract tests_: they do NOT
 verify archive ZIP bytes, authenticated artifact origin, complete remote discovery,
 or immunity to privileged deletion. The final unacknowledged archive's authenticity
 still requires the qualified protected writer/runtime history reader. No artifact
@@ -53,7 +53,7 @@ All of these are simulated conditions, not proof that a hosted writer/token is g
 The journal plane's normal-action completion fixtures deliberately model supplied
 phase postconditions; they are not a replacement for the existing raw lifecycle,
 retirement/admission and transport verifiers. A future integration must compose
-those verifiers. The known reconciliation path *does* directly compose its existing
+those verifiers. The known reconciliation path _does_ directly compose its existing
 exact3desired/2observed planner and strict post-verifier, and refuses generic action
 entry/confirmation shortcuts. Private templates and unowned annotation values are
 in-memory model frames, not public receipts or durable artifact bodies.
@@ -61,24 +61,24 @@ in-memory model frames, not public receipts or durable artifact bodies.
 ## Concrete initial reconciliation handoff selected
 
 1. Genesis/metadata qualification and its bootstrap-run completion/anchor remain
-separately authorized runtime gates. A later protected owner must explicitly CAS
-claim the exact idle genesis before preparing reconciliation; a new run is never
-implicitly allowed to reuse the old owner's etag.
+   separately authorized runtime gates. A later protected owner must explicitly CAS
+   claim the exact idle genesis before preparing reconciliation; a new run is never
+   implicitly allowed to reuse the old owner's etag.
 2. Under that owner, validate the actual exact known3/2 topology with the existing
-planner. PREPARE only the owned journal key, preserving that mismatch verbatim.
-Confirm the original metadata operation and exact sole-key native delta. No normal
-reader is told that this mismatch is equal.
+   planner. PREPARE only the owned journal key, preserving that mismatch verbatim.
+   Confirm the original metadata operation and exact sole-key native delta. No normal
+   reader is told that this mismatch is equal.
 3. AFTER PREPARE, construct a NEW known reconciliation packet from the actual new
-etag/config/head and raw immutable revisions. Its review names exact packet/head,
-source/run/attempt/job/check-run and bounded time. The selected composition permits
-ONLY that SAME protected run AND SAME actual job/check-run to consume the review.
-No ownership/head update or metadata write is allowed between review and action.
-A changed run/job/head/config, old review or canceled job requires HOLD and a new
-explicit recovery decision; it is not an adapter-defined handoff.
+   etag/config/head and raw immutable revisions. Its review names exact packet/head,
+   source/run/attempt/job/check-run and bounded time. The selected composition permits
+   ONLY that SAME protected run AND SAME actual job/check-run to consume the review.
+   No ownership/head update or metadata write is allowed between review and action.
+   A changed run/job/head/config, old review or canceled job requires HOLD and a new
+   explicit recovery decision; it is not an adapter-defined handoff.
 4. Consume the exact packet once, bind the returned original operation, and invoke
-the existing strict known-reconciliation postcheck. Its distinct equality receipt
-still requires a NEW normal retirement plan and full600s drain. A generic journal
-completion cannot manufacture the reconciliation receipt.
+   the existing strict known-reconciliation postcheck. Its distinct equality receipt
+   still requires a NEW normal retirement plan and full600s drain. A generic journal
+   completion cannot manufacture the reconciliation receipt.
 
 The delivery/authentication of a real manager decision to that same live job within
 TTL remains an operational qualification blocker. This model fixes its exact logical

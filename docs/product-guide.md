@@ -36,26 +36,26 @@ The owner can inspect, correct, confirm, pin, and forget remembered information;
 
 ## Core concepts
 
-| Concept | Meaning | Example |
-| --- | --- | --- |
-| Primary conversation | The stable default owner thread | Everyday conversation with Assistant |
-| Side chat | A separate visible conversation | A goal's work chat or a deliberately created new chat |
-| Task | A durable unit of work with status, budget, and execution evidence | Research three options or send an approved message |
-| Goal | An outcome pursued across work sessions | Organize a trip before a target date |
-| Mission | Runtime work pursuing a goal | Today's bounded session researching the trip |
-| Schedule | A future or recurring trigger | A daily briefing or goal check-in |
-| Reminder | A schedule whose purpose is to notify the owner | A one-time sunglasses reminder tomorrow |
-| Approval | Permission for a concrete queued action or another specific decision | Send this exact email to these recipients |
-| Standing approval | A saved rule permitting eligible matching actions | Allow future calls to one reviewed MCP tool |
-| Suggestion | An inert proposal that can be accepted, dismissed, or snoozed | Investigate a calendar conflict |
-| Memory | A saved fact, preference, episode, or experience with lifecycle metadata | The owner's preferred airport |
-| Conversation segment | A summary/index over a run of historical messages | The discussion in which an itinerary was chosen |
-| Knowledge graph | Source-backed entities and direct relationships derived from memory | A person works at an organization |
-| Owner profile summary | A compiled selection of important and pinned facts for permitted prompts | Identity, preferences, and important people |
-| Open loop | A decision, question, promise, or dependency still being held | Waiting for a friend's confirmation |
-| Saved card | A grounded, revisioned presentation of useful information | A ticket, booking, delivery, or score |
-| Situation pack | A bounded plan connecting saved cards, commitments, and decision reasons | A weekend plan with dependencies |
-| Skill | Advisory procedural knowledge used during planning | A reliable process for completing a recurring task |
+| Concept               | Meaning                                                                  | Example                                               |
+| --------------------- | ------------------------------------------------------------------------ | ----------------------------------------------------- |
+| Primary conversation  | The stable default owner thread                                          | Everyday conversation with Assistant                  |
+| Side chat             | A separate visible conversation                                          | A goal's work chat or a deliberately created new chat |
+| Task                  | A durable unit of work with status, budget, and execution evidence       | Research three options or send an approved message    |
+| Goal                  | An outcome pursued across work sessions                                  | Organize a trip before a target date                  |
+| Mission               | Runtime work pursuing a goal                                             | Today's bounded session researching the trip          |
+| Schedule              | A future or recurring trigger                                            | A daily briefing or goal check-in                     |
+| Reminder              | A schedule whose purpose is to notify the owner                          | A one-time sunglasses reminder tomorrow               |
+| Approval              | Permission for a concrete queued action or another specific decision     | Send this exact email to these recipients             |
+| Standing approval     | A saved rule permitting eligible matching actions                        | Allow future calls to one reviewed MCP tool           |
+| Suggestion            | An inert proposal that can be accepted, dismissed, or snoozed            | Investigate a calendar conflict                       |
+| Memory                | A saved fact, preference, episode, or experience with lifecycle metadata | The owner's preferred airport                         |
+| Conversation segment  | A summary/index over a run of historical messages                        | The discussion in which an itinerary was chosen       |
+| Knowledge graph       | Source-backed entities and direct relationships derived from memory      | A person works at an organization                     |
+| Owner profile summary | A compiled selection of important and pinned facts for permitted prompts | Identity, preferences, and important people           |
+| Open loop             | A decision, question, promise, or dependency still being held            | Waiting for a friend's confirmation                   |
+| Saved card            | A grounded, revisioned presentation of useful information                | A ticket, booking, delivery, or score                 |
+| Situation pack        | A bounded plan connecting saved cards, commitments, and decision reasons | A weekend plan with dependencies                      |
+| Skill                 | Advisory procedural knowledge used during planning                       | A reliable process for completing a recurring task    |
 
 The same underlying record can appear in several places. An approval in chat, Activity, and Approvals is one decision. A person in People and the memory map is one related body of knowledge. A saved card can appear in chat, Cards, and a Situation Pack without becoming three independent facts.
 
@@ -480,42 +480,42 @@ Sources: [setup](../apps/web/app/setup/page.tsx), [sign in](../apps/web/app/sign
 
 This register includes all 34 `page.tsx` files under `apps/web/app` at review time. Bracketed paths are dynamic route patterns. The current source exposes six owner console routes (three are passkey-only) and three owner-authenticated chat routes; 24 retained pages remain dormant, and the landing route redirects. API routes, actions, loading states, and shared components are not independent pages.
 
-| Route | Responsibility | Documentation above | Current browser access |
-| --- | --- | --- | --- |
-| `/` | Redirect to Settings | Application navigation | Redirect to Settings |
-| `/chat` | Stable primary chat | Chat | Reachable; owner authenticated |
-| `/chat/[id]` | Specific conversation | Chat | Reachable; owner authenticated |
-| `/chat/all` | Current/archived chat directory | Chats | Reachable; owner authenticated |
-| `/tasks` | Activity list | Activity | Dormant; redirect to Settings |
-| `/tasks/[id]` | Work details and controls | Activity details | Dormant; redirect to Settings |
-| `/goals` | Goal list and editors | Goals | Dormant; redirect to Settings |
-| `/approvals` | Decision inbox | Approvals | Dormant; redirect to Settings |
-| `/cards` | Active saved cards | Cards | Dormant; redirect to Settings |
-| `/packs` | Plans and follow-through | Situation Packs | Dormant; redirect to Settings |
-| `/people` | Contact/person directory | People | Dormant; redirect to Settings |
-| `/people/[id]` | Person details | People | Dormant; redirect to Settings |
-| `/profile` | Memory home and Open Loops | Memory | Dormant; redirect to Settings |
-| `/profile/memories` | Memory hub and legacy workspace-link routing | Memory library | Dormant; redirect to Settings |
-| `/profile/knowledge` | Library, map, and cleanup views | Memory library, Knowledge map, Tidy up | Dormant; redirect to Settings |
-| `/profile/about` | Owner facts and compact profile | Profile summary | Dormant; redirect to Settings |
-| `/profile/voice` | Writing style and samples | Writing voice | Dormant; redirect to Settings |
-| `/profile/data` | Export and erasure controls | Your data | Dormant; redirect to Settings |
-| `/profile/people/[id]` | Legacy redirect to person detail | People | Dormant; redirect to Settings |
-| `/settings` | Pairing and owner access | Settings and More | Reachable console |
-| `/calls` | Outgoing calls | Calls | Dormant; redirect to Settings |
-| `/calls/[id]` | Live/completed call details | Calls | Dormant; redirect to Settings |
-| `/capabilities` | Optional module readiness | Capabilities | Dormant; redirect to Settings |
-| `/documents` | File ingestion and search library | Documents | Dormant; redirect to Settings |
-| `/import` | Historical archive distillation | Backstory import | Dormant; redirect to Settings |
-| `/skills` | Advisory procedure library | Skills | Dormant; redirect to Settings |
-| `/costs` | Billing, ledger, and budgets | Costs | Dormant; redirect to Settings |
-| `/anomalies` | Approval-policy anomalies | Anomalies | Dormant; redirect to Settings |
-| `/improvements` | Proposals and repair tracking | Improvements | Dormant; redirect to Settings |
-| `/audit` | Execution evidence index | Audit trail | Reachable console |
-| `/audit/[id]` | Task investigation | Audit investigations | Reachable console |
-| `/setup` | Initial owner claim | Secure your assistant | Passkey mode only |
-| `/signin` | Owner passkey login/recovery | Sign in | Passkey mode only |
-| `/security` | Passkeys, devices, recovery, and sessions | Security | Passkey mode only |
+| Route                  | Responsibility                               | Documentation above                    | Current browser access         |
+| ---------------------- | -------------------------------------------- | -------------------------------------- | ------------------------------ |
+| `/`                    | Redirect to Settings                         | Application navigation                 | Redirect to Settings           |
+| `/chat`                | Stable primary chat                          | Chat                                   | Reachable; owner authenticated |
+| `/chat/[id]`           | Specific conversation                        | Chat                                   | Reachable; owner authenticated |
+| `/chat/all`            | Current/archived chat directory              | Chats                                  | Reachable; owner authenticated |
+| `/tasks`               | Activity list                                | Activity                               | Dormant; redirect to Settings  |
+| `/tasks/[id]`          | Work details and controls                    | Activity details                       | Dormant; redirect to Settings  |
+| `/goals`               | Goal list and editors                        | Goals                                  | Dormant; redirect to Settings  |
+| `/approvals`           | Decision inbox                               | Approvals                              | Dormant; redirect to Settings  |
+| `/cards`               | Active saved cards                           | Cards                                  | Dormant; redirect to Settings  |
+| `/packs`               | Plans and follow-through                     | Situation Packs                        | Dormant; redirect to Settings  |
+| `/people`              | Contact/person directory                     | People                                 | Dormant; redirect to Settings  |
+| `/people/[id]`         | Person details                               | People                                 | Dormant; redirect to Settings  |
+| `/profile`             | Memory home and Open Loops                   | Memory                                 | Dormant; redirect to Settings  |
+| `/profile/memories`    | Memory hub and legacy workspace-link routing | Memory library                         | Dormant; redirect to Settings  |
+| `/profile/knowledge`   | Library, map, and cleanup views              | Memory library, Knowledge map, Tidy up | Dormant; redirect to Settings  |
+| `/profile/about`       | Owner facts and compact profile              | Profile summary                        | Dormant; redirect to Settings  |
+| `/profile/voice`       | Writing style and samples                    | Writing voice                          | Dormant; redirect to Settings  |
+| `/profile/data`        | Export and erasure controls                  | Your data                              | Dormant; redirect to Settings  |
+| `/profile/people/[id]` | Legacy redirect to person detail             | People                                 | Dormant; redirect to Settings  |
+| `/settings`            | Pairing and owner access                     | Settings and More                      | Reachable console              |
+| `/calls`               | Outgoing calls                               | Calls                                  | Dormant; redirect to Settings  |
+| `/calls/[id]`          | Live/completed call details                  | Calls                                  | Dormant; redirect to Settings  |
+| `/capabilities`        | Optional module readiness                    | Capabilities                           | Dormant; redirect to Settings  |
+| `/documents`           | File ingestion and search library            | Documents                              | Dormant; redirect to Settings  |
+| `/import`              | Historical archive distillation              | Backstory import                       | Dormant; redirect to Settings  |
+| `/skills`              | Advisory procedure library                   | Skills                                 | Dormant; redirect to Settings  |
+| `/costs`               | Billing, ledger, and budgets                 | Costs                                  | Dormant; redirect to Settings  |
+| `/anomalies`           | Approval-policy anomalies                    | Anomalies                              | Dormant; redirect to Settings  |
+| `/improvements`        | Proposals and repair tracking                | Improvements                           | Dormant; redirect to Settings  |
+| `/audit`               | Execution evidence index                     | Audit trail                            | Reachable console              |
+| `/audit/[id]`          | Task investigation                           | Audit investigations                   | Reachable console              |
+| `/setup`               | Initial owner claim                          | Secure your assistant                  | Passkey mode only              |
+| `/signin`              | Owner passkey login/recovery                 | Sign in                                | Passkey mode only              |
+| `/security`            | Passkeys, devices, recovery, and sessions    | Security                               | Passkey mode only              |
 
 ## Supporting native surfaces
 

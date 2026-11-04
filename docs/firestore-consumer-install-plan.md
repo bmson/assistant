@@ -22,40 +22,40 @@ Build a version of the current assistant that a customer installs into their own
 
 The original planning baseline contained 63 `pgTable` declarations; the current schema now has 66. A source scan found approximately 140 non-test TypeScript files importing database or Drizzle APIs, including 66 in core and 31 in application. This is a persistence refactor across business use cases, not a replacement of `createDb()` alone.
 
-| Current area | Evidence and implication |
-|---|---|
-| Database adapter | `packages/db/src/client.ts` exposes a concrete Drizzle `Db`; schema-derived types leak into consumers. |
-| Application boundary | `docs/architecture.md` already calls out incremental migration toward repository interfaces; retain its presentation boundaries. |
-| Composition | `apps/agent/src/deps.ts` and `apps/web/lib/server.ts` construct database and model adapters. |
-| Correctness | `packages/core/src/cost.ts` and `packages/core/src/workflow/reminders.ts` use PostgreSQL transactions and advisory locks. |
-| Retrieval | Six vector-bearing tables use 1,536-dimensional embeddings and HNSW indexes. Graph and conversation recall also join related rows. |
-| Models | `packages/core/src/model-router/router.ts` constructs OpenRouter directly and uses its options and usage metadata. |
-| Authentication | `apps/web/auth.ts` requires owner-allowlisted Google login in production; mobile access uses a separate credential. |
-| Configuration | `packages/config/src/index.ts`, setup preflight, and deployment assume PostgreSQL and require an OpenRouter key. |
-| Deployment | `infra/gcp/deploy.sh` expects an external database and runs initial SQL migrations locally. Releases use migration/backup jobs. |
-| Idle cost | Deployment sets the web minimum to one instance and runs a sweep every minute. The Google module also polls Gmail every minute. |
-| Privacy | `packages/application/src/profile/privacy.ts` has export/erasure behavior and durable tombstones that must survive migration. |
+| Current area         | Evidence and implication                                                                                                           |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Database adapter     | `packages/db/src/client.ts` exposes a concrete Drizzle `Db`; schema-derived types leak into consumers.                             |
+| Application boundary | `docs/architecture.md` already calls out incremental migration toward repository interfaces; retain its presentation boundaries.   |
+| Composition          | `apps/agent/src/deps.ts` and `apps/web/lib/server.ts` construct database and model adapters.                                       |
+| Correctness          | `packages/core/src/cost.ts` and `packages/core/src/workflow/reminders.ts` use PostgreSQL transactions and advisory locks.          |
+| Retrieval            | Six vector-bearing tables use 1,536-dimensional embeddings and HNSW indexes. Graph and conversation recall also join related rows. |
+| Models               | `packages/core/src/model-router/router.ts` constructs OpenRouter directly and uses its options and usage metadata.                 |
+| Authentication       | `apps/web/auth.ts` requires owner-allowlisted Google login in production; mobile access uses a separate credential.                |
+| Configuration        | `packages/config/src/index.ts`, setup preflight, and deployment assume PostgreSQL and require an OpenRouter key.                   |
+| Deployment           | `infra/gcp/deploy.sh` expects an external database and runs initial SQL migrations locally. Releases use migration/backup jobs.    |
+| Idle cost            | Deployment sets the web minimum to one instance and runs a sweep every minute. The Google module also polls Gmail every minute.    |
+| Privacy              | `packages/application/src/profile/privacy.ts` has export/erasure behavior and durable tombstones that must survive migration.      |
 
 Re-run this inventory at implementation start because other repository work may have landed. Preserve existing worktree changes. Apply `apps/web/AGENTS.md` and read the installed Next.js documentation before implementing web changes.
 
 **3. Target architecture and resource ownership**
 
-| Responsibility | Target | Ownership |
-|---|---|---|
-| Web dashboard and API | Cloud Run `assistant-web`, minimum zero instances | Customer |
-| Agent execution and callbacks | Cloud Run `assistant-agent`, minimum zero instances | Customer |
-| Operational records and semantic memory | Firestore Native mode, Standard edition | Customer |
-| Files, oversized payloads, recovery artifacts | Private Cloud Storage buckets | Customer |
-| Durable dispatch | Cloud Tasks with application idempotency | Customer |
-| Future scheduling and repair | Indexed Firestore schedule records plus bounded Scheduler jobs | Customer |
-| Gmail push, when connected | Pub/Sub and scheduled watch renewal | Customer |
-| Isolated work and maintenance | Cloud Run Jobs, created only when needed by the installation | Customer |
-| Models and embeddings | Google provider using service identity; optional OpenRouter | Customer |
-| Secrets | Secret Manager and existing encrypted connector storage where appropriate | Customer |
-| Build and images | Cloud Build and Artifact Registry | Customer |
-| Infrastructure state | Versioned private Cloud Storage bucket | Customer |
-| Logs, alerts, billing visibility | Cloud Logging/Monitoring and project billing links | Customer |
-| Source releases | Versioned downloadable source, initially a public repository release | Distribution only; no runtime dependency |
+| Responsibility                                | Target                                                                    | Ownership                                |
+| --------------------------------------------- | ------------------------------------------------------------------------- | ---------------------------------------- |
+| Web dashboard and API                         | Cloud Run `assistant-web`, minimum zero instances                         | Customer                                 |
+| Agent execution and callbacks                 | Cloud Run `assistant-agent`, minimum zero instances                       | Customer                                 |
+| Operational records and semantic memory       | Firestore Native mode, Standard edition                                   | Customer                                 |
+| Files, oversized payloads, recovery artifacts | Private Cloud Storage buckets                                             | Customer                                 |
+| Durable dispatch                              | Cloud Tasks with application idempotency                                  | Customer                                 |
+| Future scheduling and repair                  | Indexed Firestore schedule records plus bounded Scheduler jobs            | Customer                                 |
+| Gmail push, when connected                    | Pub/Sub and scheduled watch renewal                                       | Customer                                 |
+| Isolated work and maintenance                 | Cloud Run Jobs, created only when needed by the installation              | Customer                                 |
+| Models and embeddings                         | Google provider using service identity; optional OpenRouter               | Customer                                 |
+| Secrets                                       | Secret Manager and existing encrypted connector storage where appropriate | Customer                                 |
+| Build and images                              | Cloud Build and Artifact Registry                                         | Customer                                 |
+| Infrastructure state                          | Versioned private Cloud Storage bucket                                    | Customer                                 |
+| Logs, alerts, billing visibility              | Cloud Logging/Monitoring and project billing links                        | Customer                                 |
+| Source releases                               | Versioned downloadable source, initially a public repository release      | Distribution only; no runtime dependency |
 
 Do not provision Cloud SQL, a dedicated vector service, Kubernetes, a load balancer, or a permanent installation server for the default profile. These are unnecessary for the proposed base deployment.
 
@@ -79,21 +79,21 @@ Proposed central configuration additions: `DATABASE_DRIVER`, `FIRESTORE_DATABASE
 
 Use installation-scoped collections with stable IDs and explicit relationship IDs. One document per message, task, approval, event, or memory; never grow an entire conversation or ledger inside one document. The following is a coverage inventory of the original 63 table exports (extend this inventory for subsequent schema additions), not a requirement to translate each into exactly one collection.
 
-| Domain | Current table exports that must be mapped |
-|---|---|
-| Identity and configuration | `agents`, `channelBindings`, `mcpConnections`, `notificationPrefs`, `deviceTokens` |
-| Conversation and presentation | `conversations`, `messages`, `conversationSegments`, `generatedCards`, `generatedCardRevisions` |
-| Goals and execution | `goals`, `tasks`, `toolCalls`, `approvals`, `applicationConfirmations`, `approvalPolicies` |
-| Memory and people | `memories`, `memoryTombstones`, `ownerCard`, `contacts`, `occasions` |
-| Knowledge graph | `knowledgeGraphEntities`, `knowledgeGraphEntityAliases`, `knowledgeGraphSources`, `knowledgeGraphRelations` |
-| Situations and commitments | `situationPacks`, `situationPreviews`, `commitments`, `suggestions` |
-| Models and costs | `models`, `modelRoles`, `modelCalls`, `costEvents`, `costReservations`, `rateTable`, `budgets` |
-| Documents and imports | `files`, `documents`, `documentChunks`, `importSources` |
-| Writing and learned skills | `writingSamples`, `voiceProfile`, `skills`, `improvementProposals` |
-| Email and watches | `gmailSyncState`, `emailIngest`, `watches`, `watchFires` |
-| Scheduling and coordination | `schedules`, `toolCache`, `rateLimits` |
-| Proactive context | `proactivePings`, `proactiveMoments`, `locationPings`, `ambientSnapshots`, `dreamNotes` |
-| Diagnostics and maintenance | `anomalies`, `assistantHealthAlerts`, `canaryRuns`, `selfMaintenance`, `responseChecks`, `recallMetrics`, `recallFeedback` |
+| Domain                        | Current table exports that must be mapped                                                                                  |
+| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| Identity and configuration    | `agents`, `channelBindings`, `mcpConnections`, `notificationPrefs`, `deviceTokens`                                         |
+| Conversation and presentation | `conversations`, `messages`, `conversationSegments`, `generatedCards`, `generatedCardRevisions`                            |
+| Goals and execution           | `goals`, `tasks`, `toolCalls`, `approvals`, `applicationConfirmations`, `approvalPolicies`                                 |
+| Memory and people             | `memories`, `memoryTombstones`, `ownerCard`, `contacts`, `occasions`                                                       |
+| Knowledge graph               | `knowledgeGraphEntities`, `knowledgeGraphEntityAliases`, `knowledgeGraphSources`, `knowledgeGraphRelations`                |
+| Situations and commitments    | `situationPacks`, `situationPreviews`, `commitments`, `suggestions`                                                        |
+| Models and costs              | `models`, `modelRoles`, `modelCalls`, `costEvents`, `costReservations`, `rateTable`, `budgets`                             |
+| Documents and imports         | `files`, `documents`, `documentChunks`, `importSources`                                                                    |
+| Writing and learned skills    | `writingSamples`, `voiceProfile`, `skills`, `improvementProposals`                                                         |
+| Email and watches             | `gmailSyncState`, `emailIngest`, `watches`, `watchFires`                                                                   |
+| Scheduling and coordination   | `schedules`, `toolCache`, `rateLimits`                                                                                     |
+| Proactive context             | `proactivePings`, `proactiveMoments`, `locationPings`, `ambientSnapshots`, `dreamNotes`                                    |
+| Diagnostics and maintenance   | `anomalies`, `assistantHealthAlerts`, `canaryRuns`, `selfMaintenance`, `responseChecks`, `recallMetrics`, `recallFeedback` |
 
 Add operational records for installation state, migrations, owner credentials/sessions, device pairing, dispatch outbox, deduplication, unique-value reservations, and query projections.
 
@@ -107,15 +107,15 @@ Use the server SDK with dedicated runtime identities. Deny browser/mobile access
 
 **6. Atomic workflows: implement and prove these first**
 
-| Behavior | Firestore design | Required evidence |
-|---|---|---|
-| Budget reservations | Transactionally update daily/monthly/task counters and a stable reservation ID; settle/release idempotently | Concurrent requests cannot reserve beyond the allowed ceiling; retries do not double-charge |
-| Task claiming | Compare state/version, then set lease owner, expiration, and fencing generation | An expired worker cannot overwrite a newer worker's state |
-| Approvals | Atomic pending-to-decided transition and one durable continuation intent | Double clicks and duplicate callbacks cause one continuation |
-| Reminders | Cancellation/generation state and delivery commitment share a transaction boundary | A cancellation that wins the race prevents subsequent delivery commitment |
-| External actions | Persist an outbox intent atomically, then dispatch outside the transaction | A committed action is recoverable after a crash; retries use provider idempotency when available |
-| Uniqueness | Deterministic reservation documents for channel IDs, ingest IDs, and other unique keys | Parallel inserts preserve each existing uniqueness rule |
-| Privacy erasure | Durable tombstone/erasure generation, bounded deletion job, and immediate read/recall exclusion | Interrupted deletion or stale extraction cannot reintroduce forgotten data |
+| Behavior            | Firestore design                                                                                            | Required evidence                                                                                |
+| ------------------- | ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| Budget reservations | Transactionally update daily/monthly/task counters and a stable reservation ID; settle/release idempotently | Concurrent requests cannot reserve beyond the allowed ceiling; retries do not double-charge      |
+| Task claiming       | Compare state/version, then set lease owner, expiration, and fencing generation                             | An expired worker cannot overwrite a newer worker's state                                        |
+| Approvals           | Atomic pending-to-decided transition and one durable continuation intent                                    | Double clicks and duplicate callbacks cause one continuation                                     |
+| Reminders           | Cancellation/generation state and delivery commitment share a transaction boundary                          | A cancellation that wins the race prevents subsequent delivery commitment                        |
+| External actions    | Persist an outbox intent atomically, then dispatch outside the transaction                                  | A committed action is recoverable after a crash; retries use provider idempotency when available |
+| Uniqueness          | Deterministic reservation documents for channel IDs, ingest IDs, and other unique keys                      | Parallel inserts preserve each existing uniqueness rule                                          |
+| Privacy erasure     | Durable tombstone/erasure generation, bounded deletion job, and immediate read/recall exclusion             | Interrupted deletion or stale extraction cannot reintroduce forgotten data                       |
 
 Firestore transactions can retry. Never call an LLM, send a message, enqueue a Cloud Task, or modify an external system inside the transaction callback. Persist the decision first, then perform the side effect. Handle ambiguous provider responses explicitly rather than promising exactly-once behavior across external services. [Firestore transactions](https://firebase.google.com/docs/firestore/manage-data/transactions)
 
@@ -196,16 +196,16 @@ The installer should ask only for installation name, project/billing selection, 
 
 **12. Consumer onboarding screens and account connections**
 
-| Screen | Customer action | System action |
-|---|---|---|
-| Install | Click the release's installation button | Open the supported Google setup environment |
-| Google account and billing | Sign in, complete payment setup if needed, select project | Validate authority and supported location |
-| Review | Confirm estimated usage/capabilities and installation | Persist manifest and start customer build |
-| Progress | Wait or close/reopen | Show resumable resource/build/check status |
-| Secure your assistant | Open private setup link, register passkey, save recovery method | Atomically bind owner and enable authenticated use |
-| First conversation | Enter name/timezone and send a message | Use Google model credentials from service identity |
-| Optional connections | Connect desired accounts or pair a device | Store credentials only in their installation |
-| Ownership | Open billing, update, restore, export, or uninstall | Hand privileged operations to cloud-owner authorization |
+| Screen                     | Customer action                                                 | System action                                           |
+| -------------------------- | --------------------------------------------------------------- | ------------------------------------------------------- |
+| Install                    | Click the release's installation button                         | Open the supported Google setup environment             |
+| Google account and billing | Sign in, complete payment setup if needed, select project       | Validate authority and supported location               |
+| Review                     | Confirm estimated usage/capabilities and installation           | Persist manifest and start customer build               |
+| Progress                   | Wait or close/reopen                                            | Show resumable resource/build/check status              |
+| Secure your assistant      | Open private setup link, register passkey, save recovery method | Atomically bind owner and enable authenticated use      |
+| First conversation         | Enter name/timezone and send a message                          | Use Google model credentials from service identity      |
+| Optional connections       | Connect desired accounts or pair a device                       | Store credentials only in their installation            |
+| Ownership                  | Open billing, update, restore, export, or uninstall             | Hand privileged operations to cloud-owner authorization |
 
 After passkey setup, chat/memory/tasks must work before Gmail is connected. Build a separate Workspace wizard in the deployed app: exact console links, app/audience values, copyable callback URL, credential entry, then browser consent. Replace `scripts/auth-bot.ts`'s localhost callback with a customer-hosted callback for this flow. Keep OAuth state/PKCE where applicable, secret handling, token revocation, and reconnect UX explicit.
 
@@ -242,20 +242,20 @@ Before Firestore accepts new writes, rollback can return to the frozen PostgreSQ
 
 These are planning estimates in engineer-days for one experienced engineer, including focused tests and documentation. They are not elapsed-time commitments. Full parity is substantially larger than the earlier Cloud SQL migration estimate.
 
-| Phase | Deliverable and main files | Depends on | Estimate | Exit gate |
-|---|---|---|---|---|
-| P0 | Feasibility spikes: Firestore atomic commands/vector costs; actual Cloud Shell entry/auth; Google models; passkey claim | None | 3–5 | No unresolved blocker hidden behind the installer promise; record measured baselines |
-| P1 | Provider-neutral entities and repository contracts; boundary checks; PostgreSQL adapter parity | P0 | 4–7 | First use cases pass identical behavioral contracts; public API shape unchanged |
-| P2 | Firestore chat, tasks, approvals, budgets, outbox, leases, reminders | P1 | 6–10 | Concurrency/crash/replay suite passes on emulator and real Firestore |
-| P3 | Remaining application/module repositories, graph/recall, imports, privacy, diagnostics | P2 | 8–12 | All current table families mapped; no live SQL requirement for Firestore profile |
-| P4 | Google provider, optional OpenRouter, versioned embeddings | P1; integrate with P2/P3 | 3–5 | Tool, streaming, cost, fallback, and recall evaluations pass |
-| P5 | Due-work scheduling, polling reduction, idle-cost profile | P2/P3 | 3–5 | Reminders remain timely and measured idle/database costs meet agreed targets |
-| P6 | Passkeys, owner recovery, sessions, per-device pairing | P1/P2 | 4–7 | Unclaimed server cannot be taken over; web/mobile authentication and recovery pass |
-| P7 | Terraform, customer builds, install manifest, resumable bootstrap | P0; integrates P3–P6 | 4–7 | Clean account/project installation needs no publisher credentials or existing database |
-| P8 | Onboarding UX and optional Workspace connection wizard | P6/P7 | 3–5 | Users can reach first chat without OAuth client or API-key setup |
-| P9 | PostgreSQL export/import, rehearsal and cutover runbooks | P3–P5/P7 | 4–6 | Data parity and rollback boundaries proven against a realistic copy |
-| P10 | Updates, consistent backup/restore, export, uninstall | P7/P9 | 3–5 | Restore and upgrade rehearsals succeed; uninstall accounts for retained charges |
-| P11 | Fresh-account pilot, full regression, docs and source release preparation | All | 4–6 | Acceptance checklist below complete before general release |
+| Phase | Deliverable and main files                                                                                              | Depends on               | Estimate | Exit gate                                                                              |
+| ----- | ----------------------------------------------------------------------------------------------------------------------- | ------------------------ | -------- | -------------------------------------------------------------------------------------- |
+| P0    | Feasibility spikes: Firestore atomic commands/vector costs; actual Cloud Shell entry/auth; Google models; passkey claim | None                     | 3–5      | No unresolved blocker hidden behind the installer promise; record measured baselines   |
+| P1    | Provider-neutral entities and repository contracts; boundary checks; PostgreSQL adapter parity                          | P0                       | 4–7      | First use cases pass identical behavioral contracts; public API shape unchanged        |
+| P2    | Firestore chat, tasks, approvals, budgets, outbox, leases, reminders                                                    | P1                       | 6–10     | Concurrency/crash/replay suite passes on emulator and real Firestore                   |
+| P3    | Remaining application/module repositories, graph/recall, imports, privacy, diagnostics                                  | P2                       | 8–12     | All current table families mapped; no live SQL requirement for Firestore profile       |
+| P4    | Google provider, optional OpenRouter, versioned embeddings                                                              | P1; integrate with P2/P3 | 3–5      | Tool, streaming, cost, fallback, and recall evaluations pass                           |
+| P5    | Due-work scheduling, polling reduction, idle-cost profile                                                               | P2/P3                    | 3–5      | Reminders remain timely and measured idle/database costs meet agreed targets           |
+| P6    | Passkeys, owner recovery, sessions, per-device pairing                                                                  | P1/P2                    | 4–7      | Unclaimed server cannot be taken over; web/mobile authentication and recovery pass     |
+| P7    | Terraform, customer builds, install manifest, resumable bootstrap                                                       | P0; integrates P3–P6     | 4–7      | Clean account/project installation needs no publisher credentials or existing database |
+| P8    | Onboarding UX and optional Workspace connection wizard                                                                  | P6/P7                    | 3–5      | Users can reach first chat without OAuth client or API-key setup                       |
+| P9    | PostgreSQL export/import, rehearsal and cutover runbooks                                                                | P3–P5/P7                 | 4–6      | Data parity and rollback boundaries proven against a realistic copy                    |
+| P10   | Updates, consistent backup/restore, export, uninstall                                                                   | P7/P9                    | 3–5      | Restore and upgrade rehearsals succeed; uninstall accounts for retained charges        |
+| P11   | Fresh-account pilot, full regression, docs and source release preparation                                               | All                      | 4–6      | Acceptance checklist below complete before general release                             |
 
 Total: approximately 49–80 engineer-days, or 10–16 engineer-weeks. Infrastructure, auth, and provider work can overlap once interfaces stabilize if staffing permits. Re-estimate after P0 and P1; query complexity and current production data volume are the largest unknowns.
 

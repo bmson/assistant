@@ -4,15 +4,15 @@ This is a **production-data rehearsal**, not a cutover. PostgreSQL remained writ
 
 ## Pinned source and import
 
-| Evidence | Result |
-| --- | --- |
-| Export image commit | `78575823aec7b0de4db1982807159a163ece202a` |
-| Cloud Run export execution | `assistant-workspace-export-vgq8x` |
-| Private snapshot | `gs://bmson-assistant-workspace/workspace/assistant/migration/snapshots/assistant-workspace-export-vgq8x.json` |
-| Object generation | `1790148472668678` |
-| Object SHA-256 | `d57140413a27d4bc78594dadc43d783d401d0545930417917550e3f746e80a58` |
-| Bundle checksum | `7d2c7cc21a6086d60336527e3a67d766066782785cf82176d272b397c949c6c2` |
-| Target | `bmson-assistant`, `assistant-rehearsal-20260923b`, installation `assistant` |
+| Evidence                   | Result                                                                                                         |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| Export image commit        | `78575823aec7b0de4db1982807159a163ece202a`                                                                     |
+| Cloud Run export execution | `assistant-workspace-export-vgq8x`                                                                             |
+| Private snapshot           | `gs://bmson-assistant-workspace/workspace/assistant/migration/snapshots/assistant-workspace-export-vgq8x.json` |
+| Object generation          | `1790148472668678`                                                                                             |
+| Object SHA-256             | `d57140413a27d4bc78594dadc43d783d401d0545930417917550e3f746e80a58`                                             |
+| Bundle checksum            | `7d2c7cc21a6086d60336527e3a67d766066782785cf82176d272b397c949c6c2`                                             |
+| Target                     | `bmson-assistant`, `assistant-rehearsal-20260923b`, installation `assistant`                                   |
 
 The export held 70,372 source records. Cloud Run preview (`assistant-workspace-import-p8ltk`) calculated 17,145 derived metadata records and 87,517 total Firestore writes, including the migration marker. Write (`assistant-workspace-import-t6kcq`) completed with `resumed: false` and `verified: true`. An independent verify-only execution (`assistant-workspace-import-dwxxb`) read the target and reported the same record totals and pinned source checksums. The marker remains `pending_activation`; its completed-write counter is 87,516, excluding the marker itself.
 

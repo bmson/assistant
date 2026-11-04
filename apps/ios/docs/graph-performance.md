@@ -66,11 +66,11 @@ Temporary source and binaries are removed after the run.
 The [October 3 result](../../../docs/audits/assets/graph-layout-host-2026-10-03.json)
 used arm64 macOS, Swift 6.4 and `-O`:
 
-| Nodes / links | Seed | 150-step preparation | 400-step preparation | Live step median / p95 |
-| --- | --- | --- | --- | --- |
-| 50 / 100 | 0.30 ms | 9.46 ms | 15.98 ms | 0.004 / 0.183 ms |
-| 200 / 400 | 0.28 ms | 59.18 ms | 178.18 ms | 0.072 / 1.017 ms |
-| 1,000 / 2,000 | 1.37 ms | 553.90 ms | 1,039.36 ms | 1.637 / 7.547 ms |
+| Nodes / links | Seed    | 150-step preparation | 400-step preparation | Live step median / p95 |
+| ------------- | ------- | -------------------- | -------------------- | ---------------------- |
+| 50 / 100      | 0.30 ms | 9.46 ms              | 15.98 ms             | 0.004 / 0.183 ms       |
+| 200 / 400     | 0.28 ms | 59.18 ms             | 178.18 ms            | 0.072 / 1.017 ms       |
+| 1,000 / 2,000 | 1.37 ms | 553.90 ms            | 1,039.36 ms          | 1.637 / 7.547 ms       |
 
 This single synthetic run makes the opening batch's CPU cost concrete and
 provides a repeatable solver baseline. It excludes UIKit drawing, text,

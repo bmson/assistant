@@ -34,9 +34,19 @@ Before the maintenance window:
   "workspaceBucket": "bmson-assistant-workspace",
   "releaseSha": "<40-hex release commit>",
   "sourceAgentId": "<PostgreSQL owner agent UUID>",
-  "embedding": { "provider": "<source provider>", "model": "<model>", "dimensions": 1536, "revision": "<revision>" },
+  "embedding": {
+    "provider": "<source provider>",
+    "model": "<model>",
+    "dimensions": 1536,
+    "revision": "<revision>"
+  },
   "firestoreDatabaseId": "assistant-production",
-  "neon": { "projectId": "<neon project>", "branchId": "br-...", "endpointId": "ep-...", "snapshotBranchName": "cutover-final-YYYYMMDD" },
+  "neon": {
+    "projectId": "<neon project>",
+    "branchId": "br-...",
+    "endpointId": "ep-...",
+    "snapshotBranchName": "cutover-final-YYYYMMDD"
+  },
   "fence": { "samples": 3, "intervalSeconds": 3600, "allowAvailabilityStarts": false },
   "sourceDatabaseSecret": "database-url",
   "exportDatabaseSecret": "database-url-final-export",
@@ -55,12 +65,27 @@ Before the maintenance window:
     "restoreDatabaseId": "assistant-restore-final-YYYYMMDD"
   },
   "services": [
-    { "name": "assistant-web", "image": "<web image @sha256 digest>", "env": { "PERSISTENCE_DRIVER": "firestore", "FIRESTORE_DATABASE_ID": "assistant-production" },
-      "secrets": {}, "health": { "path": "/api/health", "expectReleaseSha": true } },
-    { "name": "assistant-agent", "image": "<agent image @sha256 digest>", "env": { "PERSISTENCE_DRIVER": "firestore", "FIRESTORE_DATABASE_ID": "assistant-production" },
-      "secrets": {}, "ready": { "path": "/ready", "authenticated": true, "expectDatabase": "firestore" } }
+    {
+      "name": "assistant-web",
+      "image": "<web image @sha256 digest>",
+      "env": { "PERSISTENCE_DRIVER": "firestore", "FIRESTORE_DATABASE_ID": "assistant-production" },
+      "secrets": {},
+      "health": { "path": "/api/health", "expectReleaseSha": true }
+    },
+    {
+      "name": "assistant-agent",
+      "image": "<agent image @sha256 digest>",
+      "env": { "PERSISTENCE_DRIVER": "firestore", "FIRESTORE_DATABASE_ID": "assistant-production" },
+      "secrets": {},
+      "ready": { "path": "/ready", "authenticated": true, "expectDatabase": "firestore" }
+    }
   ],
-  "dispatcher": { "schedulerJobs": ["assistant-sweep"], "queues": [], "pushSubscriptions": [], "acceptLegacyTaskBacklog": false }
+  "dispatcher": {
+    "schedulerJobs": ["assistant-sweep"],
+    "queues": [],
+    "pushSubscriptions": [],
+    "acceptLegacyTaskBacklog": false
+  }
 }
 ```
 
@@ -89,23 +114,23 @@ pnpm cutover run dispatcher $C --confirm dispatcher
 pnpm cutover run live-verify $C
 ```
 
-| # | Step | Changes production | Pass criteria recorded in evidence |
-| --- | --- | --- | --- |
-| 1 | `preflight` | no | Active `gcloud` account. Writer inventory recorded as names, states, hosts, and secret references (full push endpoints go only to `private/`). Migration image matches `releaseSha`. Target database exists with PITR. Restore database does not exist yet. The configured services and dispatch resources exist. `database-url` points at the configured Neon endpoint. The recovery manifest lists the expected 12 recovered and 5 unresolved references. Last aggregate source session inventory. |
-| 2 | `quiesce` | yes | Every enabled Scheduler job is paused, every running queue is paused, and every push subscription that targets a Cloud Run service is converted to pull (its backlog is kept). `POSTGRES_SOURCE_WRITES_FENCED=true` is set on the listed services as defense in depth. A fresh inventory shows nothing dispatching. |
-| 3 | `fence` | yes | Neon read-write endpoint disabled and idle. The `suspend_compute` operation ID becomes the fence ID. |
-| 4 | `drain-proof` | no | Repeated fence samples over `samples × intervalSeconds`, each refused by the server on both the direct and pooled hosts. No compute start after the fence. Dispatch still idle. Queue backlog counted. `drainedAt` is recorded. |
-| 5 | `snapshot-branch` | yes | Read-only snapshot branch, its LSN, and proof that the standby rejects writes. The `database-url-final-export` secret version (the value is never recorded), granted to the export identity. |
-| 6 | `final-export` | yes (Cloud Run job, new GCS object) | The export job reads the snapshot secret. The v3 bundle is complete and has the configured source and target identities. Object generation, size, and SHA-256 are pinned. The bytes are downloaded to `private/final-snapshot.json`, and `exportedAt` is at or after `drainedAt`. Per-table counts and checksums are recorded. |
-| 7 | `source-witness` | yes (temporary branch) | The witness branch LSN equals the snapshot LSN, the source is still fenced, and the witness has been deleted. |
-| 8 | `import` | yes | Preview, then write into the empty target. The write verified itself, its write count equals the preview's, and it pinned the exported SHA-256. |
-| 9 | `verify-import` | no | A separate verify-mode job matches record count, document writes, per-collection counts, and bundle checksum. |
-| 10 | `assets` | yes (create-only copies) | The asset audit shows no digest or size mismatch. The recovery resolver has nothing left to copy, and all 12 recovered objects are live with their recovery SHA-256. Every present referenced object is copied create-only to the backup prefix and restored to a separate prefix with identical SHA-256. No missing object falls outside the recovery manifest. The 5 unresolved references are listed as `owner-accepted-loss-required`. |
-| 11 | `firestore-backup` | yes | Managed backup of the target (document count equals imported writes) is restored into the isolated `assistant-restore-*` database with equal document count and canonical hash. The isolated database is then deleted. |
-| 12 | `activate` | yes | Runs only while zero dispatchers are running. Runs `workspace:import --activate` with the Neon fence ID, `drainedAt`, and the pinned snapshot, and checks that the bundle checksum matches. |
-| 13 | `switch-services` | yes | Each service runs the configured image and the Firestore env, with every database env name and secret reference removed and 100% of traffic on the new revision. The previous revision is recorded for rollback. |
-| 14 | `dispatcher` | yes | Enabled Scheduler jobs, running queues, and push subscriptions are exactly the configured sets, and each targets a switched service. It refuses to resume a queue that holds legacy tasks unless `acceptLegacyTaskBacklog` is set. |
-| 15 | `live-verify` | no | Each service reports the release SHA (`/api/health`), and Firestore readiness where configured (`/ready` with `database: firestore`). Templates have no database env or secret. No other serving service references the database, and jobs that still do are listed. The Neon source is still fenced, so no PostgreSQL connection is possible. |
+| #   | Step               | Changes production                  | Pass criteria recorded in evidence                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| --- | ------------------ | ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | `preflight`        | no                                  | Active `gcloud` account. Writer inventory recorded as names, states, hosts, and secret references (full push endpoints go only to `private/`). Migration image matches `releaseSha`. Target database exists with PITR. Restore database does not exist yet. The configured services and dispatch resources exist. `database-url` points at the configured Neon endpoint. The recovery manifest lists the expected 12 recovered and 5 unresolved references. Last aggregate source session inventory. |
+| 2   | `quiesce`          | yes                                 | Every enabled Scheduler job is paused, every running queue is paused, and every push subscription that targets a Cloud Run service is converted to pull (its backlog is kept). `POSTGRES_SOURCE_WRITES_FENCED=true` is set on the listed services as defense in depth. A fresh inventory shows nothing dispatching.                                                                                                                                                                                  |
+| 3   | `fence`            | yes                                 | Neon read-write endpoint disabled and idle. The `suspend_compute` operation ID becomes the fence ID.                                                                                                                                                                                                                                                                                                                                                                                                 |
+| 4   | `drain-proof`      | no                                  | Repeated fence samples over `samples × intervalSeconds`, each refused by the server on both the direct and pooled hosts. No compute start after the fence. Dispatch still idle. Queue backlog counted. `drainedAt` is recorded.                                                                                                                                                                                                                                                                      |
+| 5   | `snapshot-branch`  | yes                                 | Read-only snapshot branch, its LSN, and proof that the standby rejects writes. The `database-url-final-export` secret version (the value is never recorded), granted to the export identity.                                                                                                                                                                                                                                                                                                         |
+| 6   | `final-export`     | yes (Cloud Run job, new GCS object) | The export job reads the snapshot secret. The v3 bundle is complete and has the configured source and target identities. Object generation, size, and SHA-256 are pinned. The bytes are downloaded to `private/final-snapshot.json`, and `exportedAt` is at or after `drainedAt`. Per-table counts and checksums are recorded.                                                                                                                                                                       |
+| 7   | `source-witness`   | yes (temporary branch)              | The witness branch LSN equals the snapshot LSN, the source is still fenced, and the witness has been deleted.                                                                                                                                                                                                                                                                                                                                                                                        |
+| 8   | `import`           | yes                                 | Preview, then write into the empty target. The write verified itself, its write count equals the preview's, and it pinned the exported SHA-256.                                                                                                                                                                                                                                                                                                                                                      |
+| 9   | `verify-import`    | no                                  | A separate verify-mode job matches record count, document writes, per-collection counts, and bundle checksum.                                                                                                                                                                                                                                                                                                                                                                                        |
+| 10  | `assets`           | yes (create-only copies)            | The asset audit shows no digest or size mismatch. The recovery resolver has nothing left to copy, and all 12 recovered objects are live with their recovery SHA-256. Every present referenced object is copied create-only to the backup prefix and restored to a separate prefix with identical SHA-256. No missing object falls outside the recovery manifest. The 5 unresolved references are listed as `owner-accepted-loss-required`.                                                           |
+| 11  | `firestore-backup` | yes                                 | Managed backup of the target (document count equals imported writes) is restored into the isolated `assistant-restore-*` database with equal document count and canonical hash. The isolated database is then deleted.                                                                                                                                                                                                                                                                               |
+| 12  | `activate`         | yes                                 | Runs only while zero dispatchers are running. Runs `workspace:import --activate` with the Neon fence ID, `drainedAt`, and the pinned snapshot, and checks that the bundle checksum matches.                                                                                                                                                                                                                                                                                                          |
+| 13  | `switch-services`  | yes                                 | Each service runs the configured image and the Firestore env, with every database env name and secret reference removed and 100% of traffic on the new revision. The previous revision is recorded for rollback.                                                                                                                                                                                                                                                                                     |
+| 14  | `dispatcher`       | yes                                 | Enabled Scheduler jobs, running queues, and push subscriptions are exactly the configured sets, and each targets a switched service. It refuses to resume a queue that holds legacy tasks unless `acceptLegacyTaskBacklog` is set.                                                                                                                                                                                                                                                                   |
+| 15  | `live-verify`      | no                                  | Each service reports the release SHA (`/api/health`), and Firestore readiness where configured (`/ready` with `database: firestore`). Templates have no database env or secret. No other serving service references the database, and jobs that still do are listed. The Neon source is still fenced, so no PostgreSQL connection is possible.                                                                                                                                                       |
 
 The order differs slightly from the checklist wording: `activate` flips the Firestore marker while **no** dispatcher runs, the services are switched, and only then does `dispatcher` resume the single Firestore dispatch path. At no point do PostgreSQL and Firestore dispatchers run together.
 
@@ -149,11 +174,21 @@ The decisions file is written by the owner and never generated:
 ```json
 {
   "acceptedLosses": [
-    { "sourceRecordId": "<record id from the assets evidence>", "decision": "accepted-loss",
-      "decidedBy": "<owner>", "decidedAt": "2026-10-01T10:00:00Z", "reason": "<why the bytes cannot be recovered>" }
+    {
+      "sourceRecordId": "<record id from the assets evidence>",
+      "decision": "accepted-loss",
+      "decidedBy": "<owner>",
+      "decidedAt": "2026-10-01T10:00:00Z",
+      "reason": "<why the bytes cannot be recovered>"
+    }
   ],
-  "postgresArchive": { "uri": "gs://...", "generation": "...", "sha256": "...",
-    "restoreTestedAt": "2026-10-01T09:00:00Z", "retainedUntil": "2027-10-01T00:00:00Z" }
+  "postgresArchive": {
+    "uri": "gs://...",
+    "generation": "...",
+    "sha256": "...",
+    "restoreTestedAt": "2026-10-01T09:00:00Z",
+    "retainedUntil": "2027-10-01T00:00:00Z"
+  }
 }
 ```
 
@@ -164,12 +199,12 @@ The release path is split by persistence driver, so the static scan passes for t
 
 These files still reference the database. They are reported as `postgres-only`, and remain so only while the proof holds:
 
-| File | Why it cannot run on the Firestore path |
-| --- | --- |
-| `infra/gcp/release-postgres.sh` | The original release, renamed without edits. `release.sh` runs it only when the live services use `PERSISTENCE_DRIVER=postgres`. |
-| `infra/gcp/release-diagnostics.sh` | Migration diagnostics, sourced only by `release-postgres.sh`. |
-| `infra/gcp/deploy.sh` | The PostgreSQL provisioner. It refuses to run once `assistant-agent` uses Firestore, because it would reattach the `database-url` secret. |
-| `infra/docker/backup.sh`, `infra/docker/database-admin.sh` | The `pg_dump` backup image. Only `release-postgres.sh` runs it, and a Firestore deploy does not build it. |
+| File                                                       | Why it cannot run on the Firestore path                                                                                                   |
+| ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `infra/gcp/release-postgres.sh`                            | The original release, renamed without edits. `release.sh` runs it only when the live services use `PERSISTENCE_DRIVER=postgres`.          |
+| `infra/gcp/release-diagnostics.sh`                         | Migration diagnostics, sourced only by `release-postgres.sh`.                                                                             |
+| `infra/gcp/deploy.sh`                                      | The PostgreSQL provisioner. It refuses to run once `assistant-agent` uses Firestore, because it would reattach the `database-url` secret. |
+| `infra/docker/backup.sh`, `infra/docker/database-admin.sh` | The `pg_dump` backup image. Only `release-postgres.sh` runs it, and a Firestore deploy does not build it.                                 |
 
 Delete these files together with the database. After a READY report, the report lists the retirement actions in order:
 

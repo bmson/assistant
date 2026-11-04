@@ -133,27 +133,27 @@ back into context automatically, summarized, without the owner having to search 
 
 - Not a literal forever-context — we never hand the model an ever-growing message list (see below).
 - Not a topic router that files each message into a hidden per-topic conversation. We considered it
-  and rejected it (see *Rejected: hidden threads + router*).
+  and rejected it (see _Rejected: hidden threads + router_).
 - Not a change to how untrusted (email/SMS-from-strangers) tasks build context — recall is
   owner-privileged only.
 
 ## The bad version we are explicitly avoiding
 
-A single ever-growing prompt fails three ways: unbounded cost, unbounded latency, and *context rot*
+A single ever-growing prompt fails three ways: unbounded cost, unbounded latency, and _context rot_
 — models get **worse** with very long, low-signal context, not better. The whole point of this
 design is bounded live context + retrieval, never "just keep appending."
 
 ## What already exists (this design mostly wires it together)
 
-| Capability | Where | Reused as |
-| --- | --- | --- |
-| Bounded live window | `apps/web/app/api/chat/route.ts` (`MODEL_HISTORY_LIMIT = 40`, `boundedModelHistory`); executor `.slice(-20)` at `packages/core/src/workflow/executor.ts:487` | The live context. Unchanged. |
-| Per-message embeddings + HNSW index | `packages/db/src/schema.ts:133-155` (`messages.embedding vector(1536)`, async backfill index) | The recall store. |
-| Semantic search over past chats | `conversations.search`, `packages/tools/src/builtin/index.ts:428-468` | The retrieval query, promoted from a model-invoked tool to automatic injection. |
-| Durable-fact recall + owner card | `memory.recall` (`builtin/index.ts:105-160`), `getOwnerCard`, consolidation in `packages/core/src/memory/` | Complementary; recall of *episodes* is what this adds. |
-| Trust gating of private context | `executor.ts:1057-1058,1072` (`privilegedTask && !state.untrustedContext`) | The gate recall must copy. |
+| Capability                          | Where                                                                                                                                                        | Reused as                                                                       |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------- |
+| Bounded live window                 | `apps/web/app/api/chat/route.ts` (`MODEL_HISTORY_LIMIT = 40`, `boundedModelHistory`); executor `.slice(-20)` at `packages/core/src/workflow/executor.ts:487` | The live context. Unchanged.                                                    |
+| Per-message embeddings + HNSW index | `packages/db/src/schema.ts:133-155` (`messages.embedding vector(1536)`, async backfill index)                                                                | The recall store.                                                               |
+| Semantic search over past chats     | `conversations.search`, `packages/tools/src/builtin/index.ts:428-468`                                                                                        | The retrieval query, promoted from a model-invoked tool to automatic injection. |
+| Durable-fact recall + owner card    | `memory.recall` (`builtin/index.ts:105-160`), `getOwnerCard`, consolidation in `packages/core/src/memory/`                                                   | Complementary; recall of _episodes_ is what this adds.                          |
+| Trust gating of private context     | `executor.ts:1057-1058,1072` (`privilegedTask && !state.untrustedContext`)                                                                                   | The gate recall must copy.                                                      |
 
-The materials are in place. The gap is: (1) `conversations.search` only fires if the *model chooses*
+The materials are in place. The gap is: (1) `conversations.search` only fires if the _model chooses_
 to call it — we want relevant history injected automatically; and (2) the retrieval unit (isolated
 messages) is too noisy to inject blindly.
 
@@ -172,11 +172,11 @@ Injecting individual matched messages is noisy: `"yes, do that"` embeds poorly a
 of context. Two tiers:
 
 - **Tier 1 (ship first, no schema change).** Match the incoming message against existing
-  `messages.embedding`. For each hit, expand to its *neighborhood* (the matched message ± a few
+  `messages.embedding`. For each hit, expand to its _neighborhood_ (the matched message ± a few
   adjacent messages in the same conversation) and dedupe overlapping neighborhoods. Inject the
   neighborhood, not the lone line.
 - **Tier 2 (durable answer).** A `conversation_segments` table holds a rolling summary + one
-  embedding per segment. Recall matches *segment-summary* embeddings and injects the summary
+  embedding per segment. Recall matches _segment-summary_ embeddings and injects the summary
   (optionally plus 1–2 verbatim key lines). Summaries retrieve far better than raw turns and are
   cheaper to inject.
 
@@ -257,19 +257,19 @@ safe to re-run.
 
 ## Failure modes & mitigations
 
-| Risk | Mitigation |
-| --- | --- |
-| Recall miss feels like amnesia | Keep `conversations.search` available as an explicit tool; Tier-2 summaries lift recall over raw-message matching. |
-| Irrelevant history injected (distraction) | τ threshold + hard K/byte caps; inject nothing when nothing clears τ. |
-| Re-injecting recent context | Window-exclusion by `createdAt`/segment non-overlap. |
-| Leaking private context into untrusted tasks | Gate on `privilegedTask && !untrustedContext`. |
-| Embedding lag on new messages | Recall only needs *older* messages, which are already backfilled; recent turns are in the live window regardless. |
-| Wrong segment boundaries | Soft degradation only — never misfiles the live thread (the router failure mode we avoided). |
+| Risk                                         | Mitigation                                                                                                         |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| Recall miss feels like amnesia               | Keep `conversations.search` available as an explicit tool; Tier-2 summaries lift recall over raw-message matching. |
+| Irrelevant history injected (distraction)    | τ threshold + hard K/byte caps; inject nothing when nothing clears τ.                                              |
+| Re-injecting recent context                  | Window-exclusion by `createdAt`/segment non-overlap.                                                               |
+| Leaking private context into untrusted tasks | Gate on `privilegedTask && !untrustedContext`.                                                                     |
+| Embedding lag on new messages                | Recall only needs _older_ messages, which are already backfilled; recent turns are in the live window regardless.  |
+| Wrong segment boundaries                     | Soft degradation only — never misfiles the live thread (the router failure mode we avoided).                       |
 
 ## UX (phase 3 — implemented)
 
 `/chat` opens one canonical **primary** thread by default: it redirects to `/chat/{primaryId}`,
-resolved by `getOrCreatePrimaryConversation()` (`packages/core/src/chat.ts`), which is *sticky* — the
+resolved by `getOrCreatePrimaryConversation()` (`packages/core/src/chat.ts`), which is _sticky_ — the
 primary is un-archived and returned if it exists, else the most recent non-goal chat is promoted,
 else a fresh thread is created. The flag lives on `conversations.is_primary` with a partial unique
 index (one primary per agent). The full list of threads stays reachable at `/chat/all` (a new
@@ -293,7 +293,7 @@ runs on tasks keeps working unchanged:
 
 **Seam — autonomous work runs in its own threads today.** A goal creates a separate conversation
 titled `"Work: {goal.title}"` with `metadata.goalId` (`apps/web/app/goals/actions.ts:112-121`); a
-mission reports progress into *that* conversation (`packages/core/src/workflow/missions.ts:240-251`),
+mission reports progress into _that_ conversation (`packages/core/src/workflow/missions.ts:240-251`),
 not the primary chat. Two ways to reconcile with "one discussion":
 
 - **A (default).** Keep work threads separate but reachable. The primary thread's auto-recall spans
@@ -308,14 +308,14 @@ not the primary chat. Two ways to reconcile with "one discussion":
   the goal create/edit forms. Off by default so a noisy mission never spams uninvited.
 
 Identity is already unified independent of this — one agent, one owner card (`chat.ts:73-79`), one
-voice profile — so it already *talks* like one person. Single-thread + recall adds the continuous
-*memory* to match.
+voice profile — so it already _talks_ like one person. Single-thread + recall adds the continuous
+_memory_ to match.
 
 ## Rejected: hidden threads + router
 
 Auto-creating a conversation row per topic behind one UI, with a classifier routing each incoming
 message, was considered and rejected. A misrouting classifier fragments one topic across threads or
-merges two unrelated ones — and it does so on the *live* conversation where the mistake is visible
+merges two unrelated ones — and it does so on the _live_ conversation where the mistake is visible
 and hard to undo. It adds a stateful failure mode for the same user-visible outcome that retrieval
 already delivers. Retrieval, not physical thread-splitting, is what makes an old discussion resurface.
 
@@ -323,7 +323,7 @@ already delivers. Retrieval, not physical thread-splitting, is what makes an old
 
 One embed call per owner turn (already metered through the cost ledger, `cost_events` source
 `embedding`). Tier 2 adds periodic summary generation in the offline pass. Injected recall is capped,
-so per-turn model cost stays bounded — this design *reduces* worst-case cost versus any
+so per-turn model cost stays bounded — this design _reduces_ worst-case cost versus any
 grow-the-prompt approach.
 
 ## Rollout

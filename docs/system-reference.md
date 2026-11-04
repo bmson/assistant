@@ -32,37 +32,37 @@ This diagram shows responsibility and data flow, not a claim that every legacy f
 
 ### Processes
 
-| Process | Responsibility | Durable authority |
-| --- | --- | --- |
-| Web service | Owner authentication, pages, server actions, streaming chat, versioned mobile API | Application commands and selected persistence adapters |
-| Agent service | Integration ingress, module installation, task execution, scheduler/sweep work, callbacks, realtime call bridge | Task and tool state, leases, approval records, event deduplication |
-| Browser worker | Bounded browser plan execution and artifacts | Job result reconciled by the agent |
-| Code worker | Bounded code execution and workspace artifacts | Job result reconciled by the agent |
-| Document worker | Heavy extraction and OCR | Document processing state and accepted callback |
-| Migration/backup jobs | Schema reconciliation, exports, imports, backup and restore | Explicit migration and recovery ledgers |
-| Repair environment | Isolated investigation, reproduction, tests, and proposed patches | Repair issue state and independently checked GitHub PR |
-| iOS application | Native interaction, speech, location opt-in, polling, notifications, Live Activities | Server response and state; local device preferences are exceptions |
+| Process               | Responsibility                                                                                                  | Durable authority                                                  |
+| --------------------- | --------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| Web service           | Owner authentication, pages, server actions, streaming chat, versioned mobile API                               | Application commands and selected persistence adapters             |
+| Agent service         | Integration ingress, module installation, task execution, scheduler/sweep work, callbacks, realtime call bridge | Task and tool state, leases, approval records, event deduplication |
+| Browser worker        | Bounded browser plan execution and artifacts                                                                    | Job result reconciled by the agent                                 |
+| Code worker           | Bounded code execution and workspace artifacts                                                                  | Job result reconciled by the agent                                 |
+| Document worker       | Heavy extraction and OCR                                                                                        | Document processing state and accepted callback                    |
+| Migration/backup jobs | Schema reconciliation, exports, imports, backup and restore                                                     | Explicit migration and recovery ledgers                            |
+| Repair environment    | Isolated investigation, reproduction, tests, and proposed patches                                               | Repair issue state and independently checked GitHub PR             |
+| iOS application       | Native interaction, speech, location opt-in, polling, notifications, Live Activities                            | Server response and state; local device preferences are exceptions |
 
 The current browser proxy exposes only owner administration and read-only audit pages; retained chat/workspace pages are dormant. Mobile APIs remain the everyday client boundary. The phone does not run the durable agent loop. Closing a browser or phone screen does not cancel server work. A server task, its conversation, and its currently visible client row are different objects.
 
 ## Package responsibilities and dependency direction
 
-| Package or directory | Owns | Boundary |
-| --- | --- | --- |
-| `packages/config` | Typed environment schema, defaults, module names, readiness validation | No workspace dependencies |
-| `packages/persistence` | SDK-independent record shapes and repository/command contracts | No database SDK; contracts and shared validation/helpers |
-| `packages/db` | PostgreSQL schema, Drizzle migrations, seed, repositories | Storage adapter; does not depend on core/tools/apps |
-| `packages/firestore` | Firestore repositories, index contract, encoding, migration/import and validation helpers | Storage adapter using persistence contracts |
-| `packages/core` | Task lifecycle, workflow policy, approvals, memory, routing, schedules, costs, situations | Does not import provider tool or presentation packages; concrete SQL compatibility remains |
-| `packages/application` | UI-facing commands/queries and serializable views | Clients request use cases rather than assemble business rules; some SQL compatibility remains |
-| `packages/tools` | Tool declarations, registry, risk dispatch, provider and workspace adapters | Depends on core contracts and persistence; does not own deployment composition |
-| `packages/modules` | Optional capability metadata, installation, route/hook/channel declarations | Sibling modules communicate through platform ports |
-| `packages/setup` | Installation planning and resumable setup state | Uses shared configuration/module metadata |
-| `apps/agent` | Runtime composition, HTTP ingress, poller/sweep, integration callback mounting | Creates adapters and installs selected modules |
-| `apps/web` | Next.js pages, UI, routes/actions, web composition | UI consumes application views; server composition owns infrastructure |
-| `apps/ios` | SwiftUI client and Apple system integration | Consumes authenticated `/api/mobile/v1`; no direct database access |
-| `workers/*` | Credential-minimized isolated jobs | No main app, database, or model-provider credential dependency |
-| `infra/*`, `scripts/*` | Provisioning, release, tests, migration, diagnostic operations | Explicit operational entry points |
+| Package or directory   | Owns                                                                                      | Boundary                                                                                      |
+| ---------------------- | ----------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `packages/config`      | Typed environment schema, defaults, module names, readiness validation                    | No workspace dependencies                                                                     |
+| `packages/persistence` | SDK-independent record shapes and repository/command contracts                            | No database SDK; contracts and shared validation/helpers                                      |
+| `packages/db`          | PostgreSQL schema, Drizzle migrations, seed, repositories                                 | Storage adapter; does not depend on core/tools/apps                                           |
+| `packages/firestore`   | Firestore repositories, index contract, encoding, migration/import and validation helpers | Storage adapter using persistence contracts                                                   |
+| `packages/core`        | Task lifecycle, workflow policy, approvals, memory, routing, schedules, costs, situations | Does not import provider tool or presentation packages; concrete SQL compatibility remains    |
+| `packages/application` | UI-facing commands/queries and serializable views                                         | Clients request use cases rather than assemble business rules; some SQL compatibility remains |
+| `packages/tools`       | Tool declarations, registry, risk dispatch, provider and workspace adapters               | Depends on core contracts and persistence; does not own deployment composition                |
+| `packages/modules`     | Optional capability metadata, installation, route/hook/channel declarations               | Sibling modules communicate through platform ports                                            |
+| `packages/setup`       | Installation planning and resumable setup state                                           | Uses shared configuration/module metadata                                                     |
+| `apps/agent`           | Runtime composition, HTTP ingress, poller/sweep, integration callback mounting            | Creates adapters and installs selected modules                                                |
+| `apps/web`             | Next.js pages, UI, routes/actions, web composition                                        | UI consumes application views; server composition owns infrastructure                         |
+| `apps/ios`             | SwiftUI client and Apple system integration                                               | Consumes authenticated `/api/mobile/v1`; no direct database access                            |
+| `workers/*`            | Credential-minimized isolated jobs                                                        | No main app, database, or model-provider credential dependency                                |
+| `infra/*`, `scripts/*` | Provisioning, release, tests, migration, diagnostic operations                            | Explicit operational entry points                                                             |
 
 `pnpm check:boundaries` enforces dependency and presentation rules and is included in lint/CI. The existing [architecture document](architecture.md) describes these rules and module extension steps. Treat the checker and current migration baseline as the concrete enforcement contract; do not infer that the whole codebase is already a purely database-independent domain model.
 
@@ -78,16 +78,16 @@ A module can be built in, selected, and still not ready. Missing credentials kee
 
 The typed configuration distinguishes independent axes:
 
-| Setting | Choice | Effect |
-| --- | --- | --- |
-| `PERSISTENCE_DRIVER` | `postgres` or opt-in `firestore` | Durable record adapters, subject to port coverage |
-| `LLM_PROVIDER` | Default `openrouter` or explicit `vertex` | Environment fallback provider; saved model connections can coexist |
-| `QUEUE_DRIVER` | `local` or `cloudtasks` | How runnable tasks receive delivery/wake attempts |
-| `FILES_DRIVER` | `local` or `gcs` | Workspace bytes and artifacts |
-| `OWNER_AUTH_MODE` | `google` or `passkey` | Owner login and device-access flow |
-| `INTERNAL_AUTH_MODE` | `oidc` or local shared secret | Internal ingress authentication |
-| `CHAT_RECALL_ENABLED` | Boolean, default false | Automatic historical context injection |
-| `GRAPH_RAG_ENABLED` | Boolean, default false | Graph-assisted recall, additionally gated by chat recall |
+| Setting               | Choice                                    | Effect                                                             |
+| --------------------- | ----------------------------------------- | ------------------------------------------------------------------ |
+| `PERSISTENCE_DRIVER`  | `postgres` or opt-in `firestore`          | Durable record adapters, subject to port coverage                  |
+| `LLM_PROVIDER`        | Default `openrouter` or explicit `vertex` | Environment fallback provider; saved model connections can coexist |
+| `QUEUE_DRIVER`        | `local` or `cloudtasks`                   | How runnable tasks receive delivery/wake attempts                  |
+| `FILES_DRIVER`        | `local` or `gcs`                          | Workspace bytes and artifacts                                      |
+| `OWNER_AUTH_MODE`     | `google` or `passkey`                     | Owner login and device-access flow                                 |
+| `INTERNAL_AUTH_MODE`  | `oidc` or local shared secret             | Internal ingress authentication                                    |
+| `CHAT_RECALL_ENABLED` | Boolean, default false                    | Automatic historical context injection                             |
+| `GRAPH_RAG_ENABLED`   | Boolean, default false                    | Graph-assisted recall, additionally gated by chat recall           |
 
 Secrets and non-secret settings share the same schema names locally and in cloud deployment. Local `.env` values are not repository documentation or safe source material to copy. Google Secret Manager supplies cloud secrets. Configuration loads and validates at process boundaries; optional-provider diagnostics and production fatal requirements have different purposes.
 
@@ -115,20 +115,20 @@ The client does not issue database joins or call model providers with server cre
 actions and native API mutations reach the same business meaning even where compatibility adapters
 still differ by backend.
 
-| Transport family | Principal paths | Responsibility |
-| --- | --- | --- |
-| Conversational turns | `/api/chat`, `/api/chat/status`; mobile `/api/mobile/v1/chat` and `/chat/status` | Streaming and durable-task handoff/status |
-| Native initial/read state | Mobile `/bootstrap`, `/overview`, `/workspace`, `/activity/foreground` | Pairing/bootstrap, screen projections and current work |
-| Conversation management | Mobile `/chats`, `/chats/[id]`, `/chats/[id]/messages/[messageId]` | Lists, archive/model/read state, message curation |
-| Work and decisions | Mobile `/activity`, `/activity/[id]`, `/goals`, `/goals/[id]`, `/approvals/[id]`, `/suggestions/[id]` | Work views and authenticated decisions |
-| Memory and people | Mobile `/memory/*`, `/knowledge/*`, `/people/*` | Fact/profile/library/graph/commitment/occasion queries and edits |
-| Cards and planning | Mobile `/cards`, `/cards/[id]`, `/packs`; web `/api/live/scoreboard` | Grounded saved objects, refreshes, planning and supported live projections |
-| Files and ingestion | `/api/documents/upload`, `/api/import/upload`, `/api/files`; mobile `/documents/*`, `/imports` | Upload boundaries, processing state, private artifact reads |
-| Connections and settings | Mobile `/providers/*`, `/mcp/*`, `/settings/*`, `/devices`, `/location` | Provider/tool connections, preferences, device registration and context |
-| Calls and improvement | Mobile `/calls/*`, `/skills/*`, `/costs`, `/anomalies/*`, `/improvements/*`, `/repairs/*` | Operational/native work areas |
-| Owner access | `/api/owner/*`, `/api/auth/[...nextauth]` | Mode-specific claim/login/recovery/passkeys/devices/sessions |
-| Privacy and diagnosis | `/api/profile-export`, `/api/audit/[id]` | Authorized export and diagnostic evidence |
-| Liveness/readiness | `/api/health`, `/api/ready`; agent health/readiness routes | Release identity and configured service health |
+| Transport family          | Principal paths                                                                                       | Responsibility                                                             |
+| ------------------------- | ----------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| Conversational turns      | `/api/chat`, `/api/chat/status`; mobile `/api/mobile/v1/chat` and `/chat/status`                      | Streaming and durable-task handoff/status                                  |
+| Native initial/read state | Mobile `/bootstrap`, `/overview`, `/workspace`, `/activity/foreground`                                | Pairing/bootstrap, screen projections and current work                     |
+| Conversation management   | Mobile `/chats`, `/chats/[id]`, `/chats/[id]/messages/[messageId]`                                    | Lists, archive/model/read state, message curation                          |
+| Work and decisions        | Mobile `/activity`, `/activity/[id]`, `/goals`, `/goals/[id]`, `/approvals/[id]`, `/suggestions/[id]` | Work views and authenticated decisions                                     |
+| Memory and people         | Mobile `/memory/*`, `/knowledge/*`, `/people/*`                                                       | Fact/profile/library/graph/commitment/occasion queries and edits           |
+| Cards and planning        | Mobile `/cards`, `/cards/[id]`, `/packs`; web `/api/live/scoreboard`                                  | Grounded saved objects, refreshes, planning and supported live projections |
+| Files and ingestion       | `/api/documents/upload`, `/api/import/upload`, `/api/files`; mobile `/documents/*`, `/imports`        | Upload boundaries, processing state, private artifact reads                |
+| Connections and settings  | Mobile `/providers/*`, `/mcp/*`, `/settings/*`, `/devices`, `/location`                               | Provider/tool connections, preferences, device registration and context    |
+| Calls and improvement     | Mobile `/calls/*`, `/skills/*`, `/costs`, `/anomalies/*`, `/improvements/*`, `/repairs/*`             | Operational/native work areas                                              |
+| Owner access              | `/api/owner/*`, `/api/auth/[...nextauth]`                                                             | Mode-specific claim/login/recovery/passkeys/devices/sessions               |
+| Privacy and diagnosis     | `/api/profile-export`, `/api/audit/[id]`                                                              | Authorized export and diagnostic evidence                                  |
+| Liveness/readiness        | `/api/health`, `/api/ready`; agent health/readiness routes                                            | Release identity and configured service health                             |
 
 Unless written in full, mobile suffixes in this table are relative to `/api/mobile/v1`. Wildcards
 summarize a route family; they are not endpoints accepting arbitrary suffixes. Exact methods and
@@ -177,18 +177,18 @@ External calls do not run inside retryable database transaction callbacks. Trans
 
 ### State meanings
 
-| Stored status | Meaning | Usual next transition |
-| --- | --- | --- |
-| `pending` | Runnable work waiting to be claimed | Running |
-| `running` | A leased executor is working | Continue/checkpoint, park, or settle |
-| `waiting_approval` | A concrete decision is pending | Approved/denied/expired resolution |
-| `waiting_event` | An external result or response is required | Callback or manual resolution |
-| `sleeping` | Not runnable before a future time | Scheduled wake |
-| `waiting_budget` | Money allowance, not time or permission, is blocking work | Budget decision or permitted retry |
-| `needs_attention` | Automatic progress cannot continue usefully | Owner intervention/eligible retry |
-| `done` | The workflow settled successfully | History/archival |
-| `failed` | A recorded failure settled the task | Eligible retry or investigation |
-| `cancelled` | Work was explicitly stopped | History/archival |
+| Stored status      | Meaning                                                   | Usual next transition                |
+| ------------------ | --------------------------------------------------------- | ------------------------------------ |
+| `pending`          | Runnable work waiting to be claimed                       | Running                              |
+| `running`          | A leased executor is working                              | Continue/checkpoint, park, or settle |
+| `waiting_approval` | A concrete decision is pending                            | Approved/denied/expired resolution   |
+| `waiting_event`    | An external result or response is required                | Callback or manual resolution        |
+| `sleeping`         | Not runnable before a future time                         | Scheduled wake                       |
+| `waiting_budget`   | Money allowance, not time or permission, is blocking work | Budget decision or permitted retry   |
+| `needs_attention`  | Automatic progress cannot continue usefully               | Owner intervention/eligible retry    |
+| `done`             | The workflow settled successfully                         | History/archival                     |
+| `failed`           | A recorded failure settled the task                       | Eligible retry or investigation      |
+| `cancelled`        | Work was explicitly stopped                               | History/archival                     |
 
 Bounded retries and exponential backoff prevent an ordinary failure from churning forever. Reclaimed leases without progress are counted so a killed or stuck worker cannot be reclaimed indefinitely. Sweep work recovers overdue tasks, lost queue wakes, stale job state, and missing attention notices. These defenses provide practical at-least-once resilience, not a universal exactly-once guarantee for every external API.
 
@@ -224,20 +224,20 @@ Sources: [tool contracts](../packages/tools/src/types.ts), [risk dispatcher](../
 
 ### Data layers
 
-| Layer | Stores | Used for |
-| --- | --- | --- |
-| Messages | Original turns and structured parts | Transcript, recent context, explicit history search |
-| Conversation segments | Summary, message range, dates, embedding | Retrieval of meaningful historical discussions |
-| Durable memories | Facts/preferences/episodes/experience, source/trust, confidence, importance, validity and expiry | Deeper personal recall and learning |
-| Compiled owner card | Selected owner facts and important people | Small private context supplied before deeper search |
-| Contacts and occasions | Identity, relationships, important dates | People management and timely context |
-| Graph entities/relations/sources/aliases | Canonical entities, direct evidence-backed relationships, reconciliation state | Explainable relationship retrieval and review |
-| Documents/chunks | File metadata and extracted searchable passages | Grounded document question answering |
-| Commitments | Open decisions, questions, promises, waiting-on items | Follow-through and proactive context |
-| Situation decisions | Explicit choices/reasons and confirmed lasting preferences | Situation planning and bounded decision recall |
-| Writing samples/profile | Suitable owner writing and distilled style | Drafting in the owner's writing voice |
-| Skills | Advisory procedures, preconditions, gotchas and outcome counts | Reusing successful working methods |
-| Ambient context | Fresh position/time/weather snapshot | Current owner context, without durable location history |
+| Layer                                    | Stores                                                                                           | Used for                                                |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------- |
+| Messages                                 | Original turns and structured parts                                                              | Transcript, recent context, explicit history search     |
+| Conversation segments                    | Summary, message range, dates, embedding                                                         | Retrieval of meaningful historical discussions          |
+| Durable memories                         | Facts/preferences/episodes/experience, source/trust, confidence, importance, validity and expiry | Deeper personal recall and learning                     |
+| Compiled owner card                      | Selected owner facts and important people                                                        | Small private context supplied before deeper search     |
+| Contacts and occasions                   | Identity, relationships, important dates                                                         | People management and timely context                    |
+| Graph entities/relations/sources/aliases | Canonical entities, direct evidence-backed relationships, reconciliation state                   | Explainable relationship retrieval and review           |
+| Documents/chunks                         | File metadata and extracted searchable passages                                                  | Grounded document question answering                    |
+| Commitments                              | Open decisions, questions, promises, waiting-on items                                            | Follow-through and proactive context                    |
+| Situation decisions                      | Explicit choices/reasons and confirmed lasting preferences                                       | Situation planning and bounded decision recall          |
+| Writing samples/profile                  | Suitable owner writing and distilled style                                                       | Drafting in the owner's writing voice                   |
+| Skills                                   | Advisory procedures, preconditions, gotchas and outcome counts                                   | Reusing successful working methods                      |
+| Ambient context                          | Fresh position/time/weather snapshot                                                             | Current owner context, without durable location history |
 
 ### Historical conversation recall
 
@@ -283,28 +283,28 @@ Suggestions have accept, dismiss, and snooze states and stable source identities
 
 These are checked-in PostgreSQL seed definitions, not a claim about every installation's enabled schedule. Times use the applicable schedule timezone; owners can pause work, and seed-owned definitions have reconciliation rules. Firestore seeding/composition has its own delivery status.
 
-| Seeded job | Default cadence | Purpose |
-| --- | --- | --- |
-| Chat segmentation | Daily 21:00 | Historical discussion summaries and embeddings |
-| Memory extraction | Daily 22:00 | Candidate durable facts and commitments |
-| Open-loop sweep | Every six hours at minute 35 | Retire untouched/overdue commitments without a model |
-| Email extraction | Every four hours at minute 20 | Bounded memory extraction from mail ingest |
-| Daily briefing | Daily 07:45 | Structured news/conflicts/actionable changes; quiet if no news |
-| Pulse | Every 20 minutes | Timely, paced notice or suggestion evaluation |
-| Tomorrow check | Daily 19:30 | Look ahead to meaningful next-day issues |
-| Memory consolidation | Daily 22:30 | Deduplicate, resolve and compile the profile |
-| Knowledge graph sync | Twice hourly at minutes 15 and 45 | Backfill/reconcile source-backed relationships |
-| Graph curiosity | Daily 12:15 | A bounded question about a meaningful knowledge gap |
-| Graph date backfill | Daily 03:05 | Deterministic date normalization without model calls |
-| Approval anomaly scan | Daily 23:00 | Policy-activity outliers |
-| Skill reflection | Daily 23:30 | Advisory procedural learning |
-| Self improvement | Daily 00:00 | Evidence-based improvement proposals |
-| Ambient refresh | Every 30 minutes | Fresh owner context and weather |
-| Dream/reflection | Daily 00:30 | Bounded hypotheses and anticipations, distinct from confirmed facts |
-| Self maintenance | Daily 01:00 | Bounded improvement backlog/diagnosis |
-| Self repair | Every 15 minutes | Configured repair investigation and reconciliation |
-| Health monitor | Daily 01:15 | Persistent indexing/recall/response-quality issues |
-| Document processing backstop | Every 15 minutes | Recover eligible missed/stale processing jobs |
+| Seeded job                   | Default cadence                   | Purpose                                                             |
+| ---------------------------- | --------------------------------- | ------------------------------------------------------------------- |
+| Chat segmentation            | Daily 21:00                       | Historical discussion summaries and embeddings                      |
+| Memory extraction            | Daily 22:00                       | Candidate durable facts and commitments                             |
+| Open-loop sweep              | Every six hours at minute 35      | Retire untouched/overdue commitments without a model                |
+| Email extraction             | Every four hours at minute 20     | Bounded memory extraction from mail ingest                          |
+| Daily briefing               | Daily 07:45                       | Structured news/conflicts/actionable changes; quiet if no news      |
+| Pulse                        | Every 20 minutes                  | Timely, paced notice or suggestion evaluation                       |
+| Tomorrow check               | Daily 19:30                       | Look ahead to meaningful next-day issues                            |
+| Memory consolidation         | Daily 22:30                       | Deduplicate, resolve and compile the profile                        |
+| Knowledge graph sync         | Twice hourly at minutes 15 and 45 | Backfill/reconcile source-backed relationships                      |
+| Graph curiosity              | Daily 12:15                       | A bounded question about a meaningful knowledge gap                 |
+| Graph date backfill          | Daily 03:05                       | Deterministic date normalization without model calls                |
+| Approval anomaly scan        | Daily 23:00                       | Policy-activity outliers                                            |
+| Skill reflection             | Daily 23:30                       | Advisory procedural learning                                        |
+| Self improvement             | Daily 00:00                       | Evidence-based improvement proposals                                |
+| Ambient refresh              | Every 30 minutes                  | Fresh owner context and weather                                     |
+| Dream/reflection             | Daily 00:30                       | Bounded hypotheses and anticipations, distinct from confirmed facts |
+| Self maintenance             | Daily 01:00                       | Bounded improvement backlog/diagnosis                               |
+| Self repair                  | Every 15 minutes                  | Configured repair investigation and reconciliation                  |
+| Health monitor               | Daily 01:15                       | Persistent indexing/recall/response-quality issues                  |
+| Document processing backstop | Every 15 minutes                  | Recover eligible missed/stale processing jobs                       |
 
 Watches support bounded fire counts and expiry. Current public-web watches use deterministic `change`, `contains`, and `absent` matching in a sweep step. They do not implement the entire generic frozen-action watcher design. Specific application-confirmation workflows implement a narrower approved-bundle discipline.
 
@@ -338,18 +338,18 @@ Sources: [provider adapters](../packages/core/src/model-router/provider.ts), [ro
 
 The SQL schema has separate record families so that presentation, retrieval, execution, permissions, and billing do not collapse into a single chat-log table. Exact field definitions and checks are in [the schema](../packages/db/src/schema.ts); SDK-independent record types and migration coverage are in [persistence contracts](../packages/persistence/src/index.ts).
 
-| Family | Principal records |
-| --- | --- |
-| Identity and conversation | Agents, conversations, channel bindings, messages, segments |
-| Work | Goals, tasks, schedules, tool calls, application confirmations |
-| Decisions and governance | Approvals, policies, suggestions, anomalies, health alerts |
-| Calls and integrations | Call sessions, MCP connections, Gmail sync state, email ingest, watches/fires |
-| Memory | Memories, tombstones, owner card, contacts, graph entities/aliases/sources/relations, occasions, commitments |
-| Planning and learning | Situation packs/previews, skills, writing samples/profile, dream notes |
-| Documents and assets | Files, documents, chunks, import sources; bytes in workspace storage |
-| Models and finance | Model connections/catalog/roles/calls/audit, cost events/reservations/rates/budgets |
-| Context and notifications | Location pings, ambient snapshots, notification preferences, proactive pings/moments, calendar snapshots, device tokens |
-| Operations | Maintenance cursors, tool cache, rate limits, canary runs, response checks, recall metrics/feedback, self-maintenance and repair issues |
+| Family                    | Principal records                                                                                                                       |
+| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| Identity and conversation | Agents, conversations, channel bindings, messages, segments                                                                             |
+| Work                      | Goals, tasks, schedules, tool calls, application confirmations                                                                          |
+| Decisions and governance  | Approvals, policies, suggestions, anomalies, health alerts                                                                              |
+| Calls and integrations    | Call sessions, MCP connections, Gmail sync state, email ingest, watches/fires                                                           |
+| Memory                    | Memories, tombstones, owner card, contacts, graph entities/aliases/sources/relations, occasions, commitments                            |
+| Planning and learning     | Situation packs/previews, skills, writing samples/profile, dream notes                                                                  |
+| Documents and assets      | Files, documents, chunks, import sources; bytes in workspace storage                                                                    |
+| Models and finance        | Model connections/catalog/roles/calls/audit, cost events/reservations/rates/budgets                                                     |
+| Context and notifications | Location pings, ambient snapshots, notification preferences, proactive pings/moments, calendar snapshots, device tokens                 |
+| Operations                | Maintenance cursors, tool cache, rate limits, canary runs, response checks, recall metrics/feedback, self-maintenance and repair issues |
 
 Owner access records for passkeys, sessions, recovery, and devices are managed through the auth services and selected adapters. They are not tool approvals. Migration inventory covers the declared source tables and derived Firestore records; a field shape being represented does not establish that every writer/read path is portable.
 
@@ -399,102 +399,102 @@ Sources: [self hosting](self-hosting.md), [operations](operations.md), [recovery
 
 Versions below are **declared dependency ranges/pins in the reviewed source**, not claims about the newest public releases or every deployed binary. The lockfile supplies resolved JavaScript dependencies; Dockerfiles can add separately pinned runtime dependencies. A complete direct-dependency inventory appears in the [capability reference](capability-reference.md).
 
-| Technology | Role and reason visible in the implementation | Declaration or source |
-| --- | --- | --- |
-| Node.js | Server/worker JavaScript runtime; cloud images target Node 22 | Root engine `>=22`; Docker `mirror.gcr.io/library/node:22-slim` (Google's Docker Hub cache) |
-| TypeScript | Shared typed domain, application and provider code | Root `^7.0.2`; web `^5.9.3` |
-| pnpm workspaces | Shared packages and deterministic dependency installation | Root `pnpm@10.34.5` |
-| Turborepo | Workspace build/typecheck/dev orchestration | Root `^2.11.4` |
-| Next.js | Web pages, server actions, HTTP/mobile routes | Web `^16.3.6`, explicit webpack scripts |
-| React and React DOM | Web rendering and client interaction | Web `^19.3.0` |
-| Tailwind CSS/PostCSS | Web style system | Web `^4.3.2` |
-| Hono and Node server adapter | Agent HTTP ingress | Agent `^4.13.9`, adapter `^2.1.1` |
-| Vercel AI SDK | Text streaming/generation and provider abstraction | `ai ^7.0.116`, React integration `^4.0.119` |
-| OpenRouter/OpenAI/Vertex/compatible AI SDK adapters | Configured text and embedding providers | Core manifest and provider adapter |
-| Google GenAI SDK and WebSockets | Gemini/OpenAI live call bridge | Core `2.24.0`; `ws 8.22.0` |
-| PostgreSQL and pgvector | Relational operational state plus semantic vector indexes | Compose `pgvector/pgvector:pg17` |
-| Drizzle ORM and Drizzle Kit | SQL schema/query/migration layer | ORM `^0.45.3`, kit `^0.31.11` |
-| postgres.js | PostgreSQL transport | DB `^3.4.9` |
-| Google Cloud Firestore SDK | Opt-in persistent document/transaction/vector adapter | Firestore `^9.2.0` |
-| Google auth library | ADC and authenticated cloud operations | `^10.9.1` in applicable manifests |
-| Zod | Input, configuration, tool, and contract validation | `^4.6.5` |
-| Croner | Cron/timezone schedule calculation | Core `^10.0.1` |
-| dotenv | Local configuration loading | Config `^18.0.4` |
-| Auth.js/NextAuth | Existing Google owner-auth flow | Web `5.0.0-beta.32` |
-| SimpleWebAuthn | Browser/server passkey ceremony | Web browser `^14.0.0`, server `^14.0.3` |
-| jose | Signed/token-based protocol handling | Agent `^6.2.11` |
-| OpenTelemetry and OTLP | Server tracing and diagnostic correlation | Agent/core manifests and `otel.ts` |
-| react-markdown, remark-gfm, remark-math, rehype-katex, KaTeX | Markdown, tables, and math presentation | Web manifest |
-| Mermaid | Constrained diagram presentation in replies | Web `^12.0.0` and native diagram view |
-| DOMPurify | Sanitize supported generated/rendered markup | Web `^3.4.16` |
-| Lucide React | Web icons | Web `^1.48.0` |
-| Playwright and Chromium | Browser jobs and browser verification | `^1.63.0`; browser Dockerfile |
-| unpdf | Direct text-bearing PDF extraction | Core manifest; agent Dockerfile has its own runtime pin |
-| Mammoth, ExcelJS, JSZip | Office/spreadsheet/archive extraction | Document worker manifest |
-| Tesseract OCR and Poppler | Scan OCR and PDF rasterization | Document worker Dockerfile |
-| Python, NumPy, pandas, Matplotlib and openpyxl | Bounded data analysis, charts and spreadsheet outputs in the code worker | Docker pins: NumPy 2.1.3, pandas 2.2.3, Matplotlib 3.9.2, openpyxl 3.1.5 |
-| Swift, SwiftUI, UIKit | Native layout, interaction, text controls, rendering | iOS source; no third-party iOS dependencies |
-| AVFoundation and Speech | On-device speech synthesis and transcription | SpeechPlayer/SpeechListener; iOS 26 |
-| Core Location | Opt-in position and significant-change updates | Native location manager |
-| UserNotifications/APNs, ActivityKit/WidgetKit | Phone alerts, badge, Live Activity/Dynamic Island | Native system/widget code and push module |
-| Keychain and device preferences | Mobile secrets and local appearance/speech intent | Native connection/settings code |
-| MapKit/Apple Maps Server API | Grounded directions and route-map presentation | Maps core/tool and route components |
-| Docker and Compose | Reproducible local/cloud process isolation | `infra/docker`, Compose file |
-| Terraform and Google Cloud CLI | Customer foundation and existing deployment orchestration | Consumer Terraform and GCP scripts |
-| Cloud Run, Tasks, Scheduler, Pub/Sub, Storage, Secret Manager, IAM | Hosted execution, delivery, bytes, secrets, and identity | GCP infrastructure and module plans |
-| BigQuery Billing export | Actual exported cloud billing, separately from operation estimates | Provider-billing application use case |
-| Gmail/Calendar/Drive/Docs/Sheets/Slides APIs | Connected Workspace tools | Google module and tool adapters |
-| Twilio | SMS, dialing, signed ingress, call media | SMS/calls modules and adapters |
-| APNs HTTP provider | Remote owner alerts | Push tool/module |
-| Streamable HTTP MCP | Owner-added remote tool servers | MCP adapter and settings flow |
-| Open-Meteo and ESPN data adapters | Grounded weather and supported sports lookups | Ambient/weather and sports core |
-| GitHub Actions and GitHub API | CI, releases, repair publication/reconciliation | Workflows and repair adapters |
-| OpenAI-hosted repair environment | Optional isolated coding/investigation backend | Hosted repair adapter; requires separate setup |
-| Vitest, xcodebuild, Firestore emulator | Unit/integration, native and portable persistence checks | Test scripts, workflows, iOS tests |
-| Biome, tsx, esbuild, sharp | Formatting/lint, TS execution, agent bundling, brand/image build utilities | Root/agent manifests |
+| Technology                                                         | Role and reason visible in the implementation                              | Declaration or source                                                                       |
+| ------------------------------------------------------------------ | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| Node.js                                                            | Server/worker JavaScript runtime; cloud images target Node 22              | Root engine `>=22`; Docker `mirror.gcr.io/library/node:22-slim` (Google's Docker Hub cache) |
+| TypeScript                                                         | Shared typed domain, application and provider code                         | Root `^7.0.2`; web `^5.9.3`                                                                 |
+| pnpm workspaces                                                    | Shared packages and deterministic dependency installation                  | Root `pnpm@10.34.5`                                                                         |
+| Turborepo                                                          | Workspace build/typecheck/dev orchestration                                | Root `^2.11.4`                                                                              |
+| Next.js                                                            | Web pages, server actions, HTTP/mobile routes                              | Web `^16.3.6`, explicit webpack scripts                                                     |
+| React and React DOM                                                | Web rendering and client interaction                                       | Web `^19.3.0`                                                                               |
+| Tailwind CSS/PostCSS                                               | Web style system                                                           | Web `^4.3.2`                                                                                |
+| Hono and Node server adapter                                       | Agent HTTP ingress                                                         | Agent `^4.13.9`, adapter `^2.1.1`                                                           |
+| Vercel AI SDK                                                      | Text streaming/generation and provider abstraction                         | `ai ^7.0.116`, React integration `^4.0.119`                                                 |
+| OpenRouter/OpenAI/Vertex/compatible AI SDK adapters                | Configured text and embedding providers                                    | Core manifest and provider adapter                                                          |
+| Google GenAI SDK and WebSockets                                    | Gemini/OpenAI live call bridge                                             | Core `2.24.0`; `ws 8.22.0`                                                                  |
+| PostgreSQL and pgvector                                            | Relational operational state plus semantic vector indexes                  | Compose `pgvector/pgvector:pg17`                                                            |
+| Drizzle ORM and Drizzle Kit                                        | SQL schema/query/migration layer                                           | ORM `^0.45.3`, kit `^0.31.11`                                                               |
+| postgres.js                                                        | PostgreSQL transport                                                       | DB `^3.4.9`                                                                                 |
+| Google Cloud Firestore SDK                                         | Opt-in persistent document/transaction/vector adapter                      | Firestore `^9.2.0`                                                                          |
+| Google auth library                                                | ADC and authenticated cloud operations                                     | `^10.9.1` in applicable manifests                                                           |
+| Zod                                                                | Input, configuration, tool, and contract validation                        | `^4.6.5`                                                                                    |
+| Croner                                                             | Cron/timezone schedule calculation                                         | Core `^10.0.1`                                                                              |
+| dotenv                                                             | Local configuration loading                                                | Config `^18.0.4`                                                                            |
+| Auth.js/NextAuth                                                   | Existing Google owner-auth flow                                            | Web `5.0.0-beta.32`                                                                         |
+| SimpleWebAuthn                                                     | Browser/server passkey ceremony                                            | Web browser `^14.0.0`, server `^14.0.3`                                                     |
+| jose                                                               | Signed/token-based protocol handling                                       | Agent `^6.2.11`                                                                             |
+| OpenTelemetry and OTLP                                             | Server tracing and diagnostic correlation                                  | Agent/core manifests and `otel.ts`                                                          |
+| react-markdown, remark-gfm, remark-math, rehype-katex, KaTeX       | Markdown, tables, and math presentation                                    | Web manifest                                                                                |
+| Mermaid                                                            | Constrained diagram presentation in replies                                | Web `^12.0.0` and native diagram view                                                       |
+| DOMPurify                                                          | Sanitize supported generated/rendered markup                               | Web `^3.4.16`                                                                               |
+| Lucide React                                                       | Web icons                                                                  | Web `^1.48.0`                                                                               |
+| Playwright and Chromium                                            | Browser jobs and browser verification                                      | `^1.63.0`; browser Dockerfile                                                               |
+| unpdf                                                              | Direct text-bearing PDF extraction                                         | Core manifest; agent Dockerfile has its own runtime pin                                     |
+| Mammoth, ExcelJS, JSZip                                            | Office/spreadsheet/archive extraction                                      | Document worker manifest                                                                    |
+| Tesseract OCR and Poppler                                          | Scan OCR and PDF rasterization                                             | Document worker Dockerfile                                                                  |
+| Python, NumPy, pandas, Matplotlib and openpyxl                     | Bounded data analysis, charts and spreadsheet outputs in the code worker   | Docker pins: NumPy 2.1.3, pandas 2.2.3, Matplotlib 3.9.2, openpyxl 3.1.5                    |
+| Swift, SwiftUI, UIKit                                              | Native layout, interaction, text controls, rendering                       | iOS source; no third-party iOS dependencies                                                 |
+| AVFoundation and Speech                                            | On-device speech synthesis and transcription                               | SpeechPlayer/SpeechListener; iOS 26                                                         |
+| Core Location                                                      | Opt-in position and significant-change updates                             | Native location manager                                                                     |
+| UserNotifications/APNs, ActivityKit/WidgetKit                      | Phone alerts, badge, Live Activity/Dynamic Island                          | Native system/widget code and push module                                                   |
+| Keychain and device preferences                                    | Mobile secrets and local appearance/speech intent                          | Native connection/settings code                                                             |
+| MapKit/Apple Maps Server API                                       | Grounded directions and route-map presentation                             | Maps core/tool and route components                                                         |
+| Docker and Compose                                                 | Reproducible local/cloud process isolation                                 | `infra/docker`, Compose file                                                                |
+| Terraform and Google Cloud CLI                                     | Customer foundation and existing deployment orchestration                  | Consumer Terraform and GCP scripts                                                          |
+| Cloud Run, Tasks, Scheduler, Pub/Sub, Storage, Secret Manager, IAM | Hosted execution, delivery, bytes, secrets, and identity                   | GCP infrastructure and module plans                                                         |
+| BigQuery Billing export                                            | Actual exported cloud billing, separately from operation estimates         | Provider-billing application use case                                                       |
+| Gmail/Calendar/Drive/Docs/Sheets/Slides APIs                       | Connected Workspace tools                                                  | Google module and tool adapters                                                             |
+| Twilio                                                             | SMS, dialing, signed ingress, call media                                   | SMS/calls modules and adapters                                                              |
+| APNs HTTP provider                                                 | Remote owner alerts                                                        | Push tool/module                                                                            |
+| Streamable HTTP MCP                                                | Owner-added remote tool servers                                            | MCP adapter and settings flow                                                               |
+| Open-Meteo and ESPN data adapters                                  | Grounded weather and supported sports lookups                              | Ambient/weather and sports core                                                             |
+| GitHub Actions and GitHub API                                      | CI, releases, repair publication/reconciliation                            | Workflows and repair adapters                                                               |
+| OpenAI-hosted repair environment                                   | Optional isolated coding/investigation backend                             | Hosted repair adapter; requires separate setup                                              |
+| Vitest, xcodebuild, Firestore emulator                             | Unit/integration, native and portable persistence checks                   | Test scripts, workflows, iOS tests                                                          |
+| Biome, tsx, esbuild, sharp                                         | Formatting/lint, TS execution, agent bundling, brand/image build utilities | Root/agent manifests                                                                        |
 
 ## Architecture decision register
 
 This register records major current decisions. **Documented** means the choice/rationale is stated in source comments or a design note. **Inferred** means the rationale below is an engineering interpretation of the current structure, not a recovered historical ADR or owner approval. Historical deliberations not recorded in the repository cannot be exhaustively reconstructed.
 
-| Decision | Rationale and consequence | Evidence status and reference |
-| --- | --- | --- |
-| One primary chat with visible side chats | Preserve a stable relationship while keeping detailed goal work discoverable | Documented: [long-running chat](long-running-chat-memory.md) |
-| Bounded live history plus retrieval | Control latency/cost and avoid low-signal context growth | Documented: [chat turn](../packages/application/src/chat-turn.ts), [recall](../packages/core/src/memory/recall.ts) |
-| Soft offline segmentation instead of hidden topic routing | Bad boundaries affect retrieval without misfiling live discussion | Documented: [segmentation design](long-running-chat-memory.md) |
-| Separate episodic, fact, graph, document, and profile layers | Each representation has a different evidence and lifecycle contract | Documented structure; combined rationale inferred: memory source files |
-| GraphRAG complements vector recall | Relationships add explainable context while preserving original evidence/fallback | Documented: [graph recall](../packages/core/src/memory/graph-recall.ts) |
-| Only direct source-backed graph edges | Prevent traversal from promoting hypotheses into stored facts | Documented: [graph extraction](../packages/core/src/memory/knowledge-graph.ts) |
-| Deterministic compact profile | Keep stable owner context cheap and inspectable, with deeper facts retrieved on demand | Documented: [compilation](../packages/core/src/memory/consolidation.ts) |
-| Owner confirmation, temporal validity and tombstones | Correct personal knowledge and avoid immediate relearning after erasure | Documented: [supersession](memory-supersession.md), [validity](temporal-validity.md) |
-| Model prose is subordinate to execution evidence | Prevent convincing but false completion/read claims | Documented: [response contract](../packages/core/src/workflow/response-contract.ts) |
-| A delivered failure explanation does not complete an unverified effect | Preserve unfinished responsibility in Activity; retain separately verified partial effects and cards | Documented: [behavior review](behavior-review-2026-10-03.md), [finalization](../packages/core/src/workflow/executor/finalize.ts) |
-| No-tool answer boundaries also govern recovery | Fictional approval prose or provider-ignored tool choice cannot turn an explanation/read answer into unrelated work | Documented: [executor loop](../packages/core/src/workflow/executor/step-loop.ts), [scenario corpus](../packages/tools/src/question-regression/scenario-corpus.ts) |
-| Deterministic enforcement around bounded model review | Best-effort reflection must not weaken the evidence contract | Documented: [output verification](../packages/core/src/workflow/output-verification.ts) |
-| Durable tasks with checkpoint/lease/fence | Recover work after crashes and reject stale executors | Documented: [machine](../packages/core/src/workflow/machine.ts), persistence adapters |
-| Approval, budget and execution are separate gates | Permission to act is not permission to overspend or proof of effect | Documented: [dispatcher](../packages/tools/src/dispatcher.ts) |
-| Structural taint and private-context gating | External content can inform work without authoring instructions or receiving private history | Documented: dispatcher, [suggestions](../packages/core/src/workflow/suggestions.ts) |
-| Bounded owner-armed autonomy with a hard floor | Reduce routine friction without granting every tool unrestricted authority | Documented: [autonomy](../packages/core/src/workflow/autonomy.ts) |
-| Suggestions separate from frozen approvals | An idea has no queued effect; an approval concerns concrete work | Documented: [anticipation](anticipation-layer.md) |
-| Shared nudge policy across producers | Independent proactive jobs must not collectively over-interrupt | Documented: [nudge policy](../packages/core/src/proactive/nudge-policy.ts) |
-| Quiet primary conversation, separate background log | Preserve readable conversation while retaining operational evidence | Documented: [chat voice](chat-voice.md), executor notices |
-| Goals launch bounded sessions | Pursue long outcomes without an unbounded model call | Documented: [missions](../packages/core/src/workflow/missions.ts) |
-| Advisory skills instead of executable permissions | Learn methods without bypassing policy | Documented: [Skills page](../apps/web/app/skills/page.tsx) |
-| Revisioned declarative cards compiled on the server | Ground facts consistently across clients and constrain generated UI | Documented: [generative UI](generative-ui.md) |
-| Packs are planning state, separate from real effects | Rehearsal/corrections must not silently change bookings or messages | Documented: [Situation Packs](situation-packs.md) |
-| Isolated credential-minimized workers | Limit consequences of generated browser/code/document work | Documented: [architecture](architecture.md), worker contracts |
-| Metadata-driven optional modules | Derive readiness, tools, routes, infrastructure and billing from one capability declaration | Documented: [modules](modules.md) |
-| Shared use cases with web and native transports | Avoid separate client business rules and support consistent decision state | Documented: [architecture](architecture.md), mobile transport |
-| Native text interaction and separate speech projection | Preserve familiar editing and make structured replies usable by ear | Documented: [on-device speech](on-device-speech.md), native composer |
-| Phone brief isolation and mandatory disclosure/approval | Bound what a realtime model may share/agree to during third-party interaction | Documented: [phone calls](phone-calls.md) |
-| Transient location instead of automatic movement memory | Supply current context without building unrequested location history | Documented: [location](../packages/core/src/memory/location.ts) |
-| Multi-provider routing with embedding-space stability | Allow model choice while preventing invalid similarity across embedding spaces | Documented: [model routing](model-routing.md), provider contract |
-| Provider billing separate from the operation ledger | Preserve attribution without double-counting or claiming to cap invoices | Documented: [cost tracking](cost-tracking.md) |
-| PostgreSQL-to-Firestore migration through repository contracts | Change storage incrementally with parity and explicit cutover gates | Documented: [migration status](firestore-implementation-status.md) |
-| Customer-owned deployment without a required vendor control plane | Put ongoing ownership and bills with the installation owner | Documented target: [consumer install plan](firestore-consumer-install-plan.md) |
-| Repair proposes tested PRs with human merge | Improve the repository without unrestricted live self-modification | Documented: [self repair](self-repair.md) |
-| Atomic owner-scoped improvement decisions with explicit outcomes | Routing and settlement share a transaction; repeat/racing decisions preserve one outcome; acknowledgment does not imply mutation | Documented: [self-improvement flow](self-improvement-flow.md), shared receipts and both persistence adapters |
-| Repair stages retain distinct proof requirements | A request, tested patch, reviewed PR, merge, deployment ancestry, and owner confirmation prove different things | Documented: [self-improvement flow](self-improvement-flow.md), worker and monitoring contracts |
+| Decision                                                               | Rationale and consequence                                                                                                        | Evidence status and reference                                                                                                                                     |
+| ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| One primary chat with visible side chats                               | Preserve a stable relationship while keeping detailed goal work discoverable                                                     | Documented: [long-running chat](long-running-chat-memory.md)                                                                                                      |
+| Bounded live history plus retrieval                                    | Control latency/cost and avoid low-signal context growth                                                                         | Documented: [chat turn](../packages/application/src/chat-turn.ts), [recall](../packages/core/src/memory/recall.ts)                                                |
+| Soft offline segmentation instead of hidden topic routing              | Bad boundaries affect retrieval without misfiling live discussion                                                                | Documented: [segmentation design](long-running-chat-memory.md)                                                                                                    |
+| Separate episodic, fact, graph, document, and profile layers           | Each representation has a different evidence and lifecycle contract                                                              | Documented structure; combined rationale inferred: memory source files                                                                                            |
+| GraphRAG complements vector recall                                     | Relationships add explainable context while preserving original evidence/fallback                                                | Documented: [graph recall](../packages/core/src/memory/graph-recall.ts)                                                                                           |
+| Only direct source-backed graph edges                                  | Prevent traversal from promoting hypotheses into stored facts                                                                    | Documented: [graph extraction](../packages/core/src/memory/knowledge-graph.ts)                                                                                    |
+| Deterministic compact profile                                          | Keep stable owner context cheap and inspectable, with deeper facts retrieved on demand                                           | Documented: [compilation](../packages/core/src/memory/consolidation.ts)                                                                                           |
+| Owner confirmation, temporal validity and tombstones                   | Correct personal knowledge and avoid immediate relearning after erasure                                                          | Documented: [supersession](memory-supersession.md), [validity](temporal-validity.md)                                                                              |
+| Model prose is subordinate to execution evidence                       | Prevent convincing but false completion/read claims                                                                              | Documented: [response contract](../packages/core/src/workflow/response-contract.ts)                                                                               |
+| A delivered failure explanation does not complete an unverified effect | Preserve unfinished responsibility in Activity; retain separately verified partial effects and cards                             | Documented: [behavior review](behavior-review-2026-10-03.md), [finalization](../packages/core/src/workflow/executor/finalize.ts)                                  |
+| No-tool answer boundaries also govern recovery                         | Fictional approval prose or provider-ignored tool choice cannot turn an explanation/read answer into unrelated work              | Documented: [executor loop](../packages/core/src/workflow/executor/step-loop.ts), [scenario corpus](../packages/tools/src/question-regression/scenario-corpus.ts) |
+| Deterministic enforcement around bounded model review                  | Best-effort reflection must not weaken the evidence contract                                                                     | Documented: [output verification](../packages/core/src/workflow/output-verification.ts)                                                                           |
+| Durable tasks with checkpoint/lease/fence                              | Recover work after crashes and reject stale executors                                                                            | Documented: [machine](../packages/core/src/workflow/machine.ts), persistence adapters                                                                             |
+| Approval, budget and execution are separate gates                      | Permission to act is not permission to overspend or proof of effect                                                              | Documented: [dispatcher](../packages/tools/src/dispatcher.ts)                                                                                                     |
+| Structural taint and private-context gating                            | External content can inform work without authoring instructions or receiving private history                                     | Documented: dispatcher, [suggestions](../packages/core/src/workflow/suggestions.ts)                                                                               |
+| Bounded owner-armed autonomy with a hard floor                         | Reduce routine friction without granting every tool unrestricted authority                                                       | Documented: [autonomy](../packages/core/src/workflow/autonomy.ts)                                                                                                 |
+| Suggestions separate from frozen approvals                             | An idea has no queued effect; an approval concerns concrete work                                                                 | Documented: [anticipation](anticipation-layer.md)                                                                                                                 |
+| Shared nudge policy across producers                                   | Independent proactive jobs must not collectively over-interrupt                                                                  | Documented: [nudge policy](../packages/core/src/proactive/nudge-policy.ts)                                                                                        |
+| Quiet primary conversation, separate background log                    | Preserve readable conversation while retaining operational evidence                                                              | Documented: [chat voice](chat-voice.md), executor notices                                                                                                         |
+| Goals launch bounded sessions                                          | Pursue long outcomes without an unbounded model call                                                                             | Documented: [missions](../packages/core/src/workflow/missions.ts)                                                                                                 |
+| Advisory skills instead of executable permissions                      | Learn methods without bypassing policy                                                                                           | Documented: [Skills page](../apps/web/app/skills/page.tsx)                                                                                                        |
+| Revisioned declarative cards compiled on the server                    | Ground facts consistently across clients and constrain generated UI                                                              | Documented: [generative UI](generative-ui.md)                                                                                                                     |
+| Packs are planning state, separate from real effects                   | Rehearsal/corrections must not silently change bookings or messages                                                              | Documented: [Situation Packs](situation-packs.md)                                                                                                                 |
+| Isolated credential-minimized workers                                  | Limit consequences of generated browser/code/document work                                                                       | Documented: [architecture](architecture.md), worker contracts                                                                                                     |
+| Metadata-driven optional modules                                       | Derive readiness, tools, routes, infrastructure and billing from one capability declaration                                      | Documented: [modules](modules.md)                                                                                                                                 |
+| Shared use cases with web and native transports                        | Avoid separate client business rules and support consistent decision state                                                       | Documented: [architecture](architecture.md), mobile transport                                                                                                     |
+| Native text interaction and separate speech projection                 | Preserve familiar editing and make structured replies usable by ear                                                              | Documented: [on-device speech](on-device-speech.md), native composer                                                                                              |
+| Phone brief isolation and mandatory disclosure/approval                | Bound what a realtime model may share/agree to during third-party interaction                                                    | Documented: [phone calls](phone-calls.md)                                                                                                                         |
+| Transient location instead of automatic movement memory                | Supply current context without building unrequested location history                                                             | Documented: [location](../packages/core/src/memory/location.ts)                                                                                                   |
+| Multi-provider routing with embedding-space stability                  | Allow model choice while preventing invalid similarity across embedding spaces                                                   | Documented: [model routing](model-routing.md), provider contract                                                                                                  |
+| Provider billing separate from the operation ledger                    | Preserve attribution without double-counting or claiming to cap invoices                                                         | Documented: [cost tracking](cost-tracking.md)                                                                                                                     |
+| PostgreSQL-to-Firestore migration through repository contracts         | Change storage incrementally with parity and explicit cutover gates                                                              | Documented: [migration status](firestore-implementation-status.md)                                                                                                |
+| Customer-owned deployment without a required vendor control plane      | Put ongoing ownership and bills with the installation owner                                                                      | Documented target: [consumer install plan](firestore-consumer-install-plan.md)                                                                                    |
+| Repair proposes tested PRs with human merge                            | Improve the repository without unrestricted live self-modification                                                               | Documented: [self repair](self-repair.md)                                                                                                                         |
+| Atomic owner-scoped improvement decisions with explicit outcomes       | Routing and settlement share a transaction; repeat/racing decisions preserve one outcome; acknowledgment does not imply mutation | Documented: [self-improvement flow](self-improvement-flow.md), shared receipts and both persistence adapters                                                      |
+| Repair stages retain distinct proof requirements                       | A request, tested patch, reviewed PR, merge, deployment ancestry, and owner confirmation prove different things                  | Documented: [self-improvement flow](self-improvement-flow.md), worker and monitoring contracts                                                                    |
 
 ## Verification and ongoing documentation
 

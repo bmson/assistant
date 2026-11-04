@@ -42,7 +42,7 @@ jobs:
           scan-ref: .
           scanners: secret,misconfig
           severity: HIGH,CRITICAL
-          exit-code: '1'
+          exit-code: "1"
       - run: pnpm lint
       - name: Verify current deployment cleanup protection
         run: |
@@ -156,10 +156,10 @@ jobs:
       - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
-          java-version: '21'
+          java-version: "21"
       - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
         with:
-          version: '576.0.0'
+          version: "576.0.0"
           install_components: cloud-firestore-emulator
       - run: pnpm install --frozen-lockfile
       # No cloud authentication, project creation, or billable API calls.
@@ -230,7 +230,7 @@ jobs:
           ASSISTANT_MODULES: minimal
           PERSISTENCE_DRIVER: postgres
           OPENROUTER_API_KEY: ci-smoke-only
-          PORT: '8787'
+          PORT: "8787"
         run: |
           node apps/agent/dist/index.mjs > "$RUNNER_TEMP/assistant-agent.log" 2>&1 &
           assistant_agent_pid=$!
@@ -254,12 +254,12 @@ jobs:
       # path — and it now also exercises the request-level loopback guard.
       - name: Exercise mobile administration in a real browser
         env:
-          AUTH_LOCALHOST_BYPASS: 'true'
+          AUTH_LOCALHOST_BYPASS: "true"
           AUTH_URL: http://127.0.0.1:3000
           QUEUE_DRIVER: local
           SMOKE_BASE_URL: http://127.0.0.1:3000
           SMOKE_BROWSER_CHANNEL: chrome
-          PORT: '3000'
+          PORT: "3000"
           HOSTNAME: 127.0.0.1
         run: |
           # The standalone output carries the server, not the static assets.
@@ -285,23 +285,23 @@ jobs:
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.run_attempt == 1
         timeout-minutes: 8
         env:
-          ASSISTANT_RUN_BASIC5_CI_ACCEPTANCE: '1'
+          ASSISTANT_RUN_BASIC5_CI_ACCEPTANCE: "1"
         run: pnpm exec tsx scripts/basic5-ci-acceptance.ts
       # The mounted chat UI is intentionally available only through the
       # loopback development preview. Keep that preview separate from the
       # shipping standalone/mobile smoke above; no provider key is supplied.
       - name: Verify WEB-17 in the loopback development preview
         env:
-          AUTH_DEV_BYPASS: 'false'
-          AUTH_LOCALHOST_BYPASS: 'true'
+          AUTH_DEV_BYPASS: "false"
+          AUTH_LOCALHOST_BYPASS: "true"
           AUTH_URL: http://127.0.0.1:3001
           PERSISTENCE_DRIVER: postgres
           QUEUE_DRIVER: local
-          WEB_APP_PREVIEW_ENABLED: 'true'
+          WEB_APP_PREVIEW_ENABLED: "true"
           SMOKE_BASE_URL: http://127.0.0.1:3001
           SMOKE_BROWSER_CHANNEL: chrome
           HOSTNAME: 127.0.0.1
-          PORT: '3001'
+          PORT: "3001"
         shell: bash
         run: |
           set -euo pipefail

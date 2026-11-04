@@ -43,31 +43,31 @@ local memory projections so queued work cannot recreate erased content.
 
 ## Surface inventory
 
-| Surface | Local feedback and read behavior |
-| --- | --- |
-| Assistant settings | Optimistic timezone, locale and signature; sheet closes on acceptance |
-| Spending limits | Optimistic limits; sheet closes on acceptance |
-| Skills | Optimistic creation, editing, deprecation and deletion |
-| Goals | Optimistic creation, field edits, status/autonomy, archive and restore |
-| People | Warm directory; optimistic creation, editing and deletion; cached profiles update together |
-| Occasions | Optimistic creation, editing and deletion; profile and directory reconcile |
-| Memory home | Optimistic corrections, creation, approval, rejection, forget and prominence |
-| Memory library | Cached filter/page results; corrections and row actions update the shared cache |
-| Writing voice | Cached editor load; optimistic save |
-| Open loops | Cached list shared with editor; optimistic correction and row actions |
-| Saved cards | Cached list; optimistic dismissal; source refresh remains a pending server operation |
-| Documents | Cached overview; optimistic removal; uploads retain explicit in-flight feedback |
-| Settings schedules, reminders, standing approvals | Optimistic enable/disable and removal |
-| Default AI/voice models | Optimistic selection; cached provider list remains usable during refresh |
-| AI-provider credentials, discovery and tests | Server-verified results; successful writes release before follow-up reload |
-| MCP connections | Server-verified discovery and credential changes |
-| Relationship map | Reuses the last loaded map immediately while refreshing; existing provisional layout and gesture rules retained |
-| Knowledge corrections and merges | Ordered server confirmations retained for dependent writes and merge outcomes |
-| Situation packs | Cached opening; revision-bound commands retain confirmed server outcomes |
-| Calls | Cached list; call/check-in outcomes remain server-confirmed |
-| Approvals | Existing optimistic inbox/message patches and rollback retained |
-| Activity, work start/stop, improvements, repairs | Explicit pending action feedback; server outcomes remain authoritative |
-| Chat, card forms, account pairing, privacy export/erasure | Existing admission/recovery and confirmation protocols retained |
+| Surface                                                   | Local feedback and read behavior                                                                                |
+| --------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Assistant settings                                        | Optimistic timezone, locale and signature; sheet closes on acceptance                                           |
+| Spending limits                                           | Optimistic limits; sheet closes on acceptance                                                                   |
+| Skills                                                    | Optimistic creation, editing, deprecation and deletion                                                          |
+| Goals                                                     | Optimistic creation, field edits, status/autonomy, archive and restore                                          |
+| People                                                    | Warm directory; optimistic creation, editing and deletion; cached profiles update together                      |
+| Occasions                                                 | Optimistic creation, editing and deletion; profile and directory reconcile                                      |
+| Memory home                                               | Optimistic corrections, creation, approval, rejection, forget and prominence                                    |
+| Memory library                                            | Cached filter/page results; corrections and row actions update the shared cache                                 |
+| Writing voice                                             | Cached editor load; optimistic save                                                                             |
+| Open loops                                                | Cached list shared with editor; optimistic correction and row actions                                           |
+| Saved cards                                               | Cached list; optimistic dismissal; source refresh remains a pending server operation                            |
+| Documents                                                 | Cached overview; optimistic removal; uploads retain explicit in-flight feedback                                 |
+| Settings schedules, reminders, standing approvals         | Optimistic enable/disable and removal                                                                           |
+| Default AI/voice models                                   | Optimistic selection; cached provider list remains usable during refresh                                        |
+| AI-provider credentials, discovery and tests              | Server-verified results; successful writes release before follow-up reload                                      |
+| MCP connections                                           | Server-verified discovery and credential changes                                                                |
+| Relationship map                                          | Reuses the last loaded map immediately while refreshing; existing provisional layout and gesture rules retained |
+| Knowledge corrections and merges                          | Ordered server confirmations retained for dependent writes and merge outcomes                                   |
+| Situation packs                                           | Cached opening; revision-bound commands retain confirmed server outcomes                                        |
+| Calls                                                     | Cached list; call/check-in outcomes remain server-confirmed                                                     |
+| Approvals                                                 | Existing optimistic inbox/message patches and rollback retained                                                 |
+| Activity, work start/stop, improvements, repairs          | Explicit pending action feedback; server outcomes remain authoritative                                          |
+| Chat, card forms, account pairing, privacy export/erasure | Existing admission/recovery and confirmation protocols retained                                                 |
 
 Server-verified operations must display a pending state immediately. A provider
 test, call hang-up, merge, or erasure must not be labelled completed merely

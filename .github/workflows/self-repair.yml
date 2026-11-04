@@ -95,7 +95,7 @@ jobs:
           openai-api-key: ${{ secrets.SELF_REPAIR_OPENAI_API_KEY }}
           model: gpt-6.1-sol
           effort: medium
-          permission-profile: ':workspace'
+          permission-profile: ":workspace"
           safety-strategy: drop-sudo
           codex-args: '["--ephemeral"]'
           output-file: ${{ runner.temp }}/repair-result.json
@@ -128,7 +128,7 @@ jobs:
           REPAIR_PATCH: ${{ runner.temp }}/repair.patch
           REPAIR_RESULT: ${{ runner.temp }}/repair-result.json
           REPAIR_ALLOW_EXECUTOR: ${{ inputs.allow_executor }}
-          REPAIR_ALLOW_NO_CHANGE: 'true'
+          REPAIR_ALLOW_NO_CHANGE: "true"
         run: node "$RUNNER_TEMP/repair-patch.mjs"
       - name: Restore trusted action for post-job cleanup
         if: always()
@@ -136,7 +136,7 @@ jobs:
           if [ ! -e .repair-action ]; then
             ln -s "$RUNNER_TEMP/trusted-codex-action" .repair-action
           fi
-      - name: 'No code change: ${{ steps.patch.outputs.summary }}'
+      - name: "No code change: ${{ steps.patch.outputs.summary }}"
         if: steps.patch.outputs.outcome == 'no_defect'
         run: echo 'Investigation completed; no PR will be created.'
       - name: Preserve investigation result
@@ -166,7 +166,7 @@ jobs:
           POSTGRES_USER: assistant
           POSTGRES_PASSWORD: assistant
           POSTGRES_DB: assistant
-        ports: ['5432:5432']
+        ports: ["5432:5432"]
         options: >-
           --health-cmd "pg_isready -U assistant"
           --health-interval 5s --health-timeout 3s --health-retries 10
@@ -209,7 +209,7 @@ jobs:
           java-version: 21
       - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
         with:
-          version: '576.0.0'
+          version: "576.0.0"
           install_components: cloud-firestore-emulator
       - name: Verify Firestore persistence
         env:

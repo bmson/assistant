@@ -10,11 +10,11 @@ equivalence. Strict `sameTraffic` remains unchanged and continues to reject it.
 
 ## Exact operation proposed for a separate future review
 
-| View | Current revision `01087-dup` | Old revision `01080-hel` |
-|---|---|---|
-| Required before desired | one untagged100 row plus `resume-40403696377-1`0 | `resume-40350727924-1`0 |
-| Required before observed | `resume-40403696377-1`100 | `resume-40350727924-1`0 |
-| Proposed after desired and required observed | `resume-40403696377-1`100 | `resume-40350727924-1`0 |
+| View                                         | Current revision `01087-dup`                     | Old revision `01080-hel` |
+| -------------------------------------------- | ------------------------------------------------ | ------------------------ |
+| Required before desired                      | one untagged100 row plus `resume-40403696377-1`0 | `resume-40350727924-1`0  |
+| Required before observed                     | `resume-40403696377-1`100                        | `resume-40350727924-1`0  |
+| Proposed after desired and required observed | `resume-40403696377-1`100                        | `resume-40350727924-1`0  |
 
 Every row must explicitly allocate by `REVISION`. Only the exact reviewed3/2
 multiset is accepted. Omitted proto3 percentages mean zero; malformed values,

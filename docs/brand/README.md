@@ -6,13 +6,13 @@ A short foot and visible upper stem distinguish it from a Q. The slight optical
 offset balances the loop against the stem. It uses the native
 app's existing green palette:
 
-| Role | Color |
-| --- | --- |
-| Standard background | `#217A4B` |
-| Standard mark | `#F4FAF5` |
-| Dark background | System-provided; preview uses `#101712` |
-| Dark mark | `#6FCB9C` |
-| Tinted background / mark | `#000000` / `#EEEEEE` |
+| Role                     | Color                                   |
+| ------------------------ | --------------------------------------- |
+| Standard background      | `#217A4B`                               |
+| Standard mark            | `#F4FAF5`                               |
+| Dark background          | System-provided; preview uses `#101712` |
+| Dark mark                | `#6FCB9C`                               |
+| Tinted background / mark | `#000000` / `#EEEEEE`                   |
 
 ![Standard, dark, and tinted icons at several sizes](preview.png)
 

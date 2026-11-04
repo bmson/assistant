@@ -23,8 +23,8 @@ book a table, ask opening hours, chase an order — then report back in chat.
   **Every call needs your approval**; no policy or autonomy grant skips it.
   Emergency, short-code, premium-rate and out-of-country numbers are refused
   before an approval is even shown.
-- When answered, the phone network first plays a fixed line: *"Hi, this is an
-  AI assistant calling on behalf of …. This call is transcribed."* The model
+- When answered, the phone network first plays a fixed line: _"Hi, this is an
+  AI assistant calling on behalf of …. This call is transcribed."_ The model
   cannot skip or reword it.
 - If an unknown-caller screener answers, the assistant gives its name and
   reason for calling, then stays on the line for a person. It repeats the AI
@@ -45,11 +45,11 @@ book a table, ask opening hours, chase an order — then report back in chat.
 
 ## Limits and costs
 
-| Setting | Default | Meaning |
-| --- | --- | --- |
-| `CALL_MAX_MINUTES` | 15 | Hard ceiling on one call; Twilio also enforces it |
-| `CALL_DAILY_LIMIT` | 10 | Calls per rolling 24 hours |
-| `CALL_ALLOWED_COUNTRY_CODES` | `1` | Country codes that may be dialed |
+| Setting                      | Default | Meaning                                           |
+| ---------------------------- | ------- | ------------------------------------------------- |
+| `CALL_MAX_MINUTES`           | 15      | Hard ceiling on one call; Twilio also enforces it |
+| `CALL_DAILY_LIMIT`           | 10      | Calls per rolling 24 hours                        |
+| `CALL_ALLOWED_COUNTRY_CODES` | `1`     | Country codes that may be dialed                  |
 
 One call at a time. Before dialing, the worst case (every allowed minute of
 line time plus live model) is held against your budget; at the end it is

@@ -40,18 +40,18 @@ Use the same concepts across clients without copying platform geometry. For exam
 
 Use semantic tokens from [web globals](../apps/web/app/globals.css) and [AssistantTheme](../apps/ios/Assistant/Design/AssistantTheme.swift). Never choose a light-mode color in a component and try to repair dark mode later. A surface and its foreground travel together.
 
-| Role | Web light / dark | iOS light / dark | Use |
-| --- | --- | --- | --- |
-| Canvas | `#EEF5F0` / `#121A15` | `#EEF5F0` / `#101712` | Page background |
-| Raised | `#FFFFFF` / `#19241D` | `#FFFFFF` / `#1B2820` | Content on a page |
-| Sunken | `#E3EDE6` / `#243129` | `#E3EDE6` / `#152019` | Nested well, receipt, subdued input |
-| Strong ink | `#15201A` / `#EEF5EF` | `#15201A` / `#EDF6F0` | Primary reading |
-| Muted ink | `#5A6D62` / `#9CB0A2` | `#5A6D62` / `#A9BAAF` | Secondary explanation and metadata |
-| Accent | `#217A4B` / `#6FCB9C` | `#217A4B` / `#6FCB9C` | Primary action, selected state, links |
-| Conversation stage | `#2B8253` / `#1B3626` | `#2B8253` / `#1B3626` | Conversation canvas |
-| Conversation well | `#1E613E` / `#193424` | `#1E613E` / `#193424` | Owner message, composer and active stage controls |
+| Role                  | Web light / dark                       | iOS light / dark                       | Use                                                                      |
+| --------------------- | -------------------------------------- | -------------------------------------- | ------------------------------------------------------------------------ |
+| Canvas                | `#EEF5F0` / `#121A15`                  | `#EEF5F0` / `#101712`                  | Page background                                                          |
+| Raised                | `#FFFFFF` / `#19241D`                  | `#FFFFFF` / `#1B2820`                  | Content on a page                                                        |
+| Sunken                | `#E3EDE6` / `#243129`                  | `#E3EDE6` / `#152019`                  | Nested well, receipt, subdued input                                      |
+| Strong ink            | `#15201A` / `#EEF5EF`                  | `#15201A` / `#EDF6F0`                  | Primary reading                                                          |
+| Muted ink             | `#5A6D62` / `#9CB0A2`                  | `#5A6D62` / `#A9BAAF`                  | Secondary explanation and metadata                                       |
+| Accent                | `#217A4B` / `#6FCB9C`                  | `#217A4B` / `#6FCB9C`                  | Primary action, selected state, links                                    |
+| Conversation stage    | `#2B8253` / `#1B3626`                  | `#2B8253` / `#1B3626`                  | Conversation canvas                                                      |
+| Conversation well     | `#1E613E` / `#193424`                  | `#1E613E` / `#193424`                  | Owner message, composer and active stage controls                        |
 | Conversation well ink | `#F4FAF5` strong, `#C6DDCF` supporting | `#F4FAF5` strong, `#C6DDCF` supporting | Opaque reading ink on the well; never attenuate required text by opacity |
-| Reply material | Fixed white paper in retained web chat | `#F5FAF6` / `#293D31` | Assistant reply surface |
+| Reply material        | Fixed white paper in retained web chat | `#F5FAF6` / `#293D31`                  | Assistant reply surface                                                  |
 
 The dark surfaces differ intentionally by platform, while their semantic role and green family match. Pixel equality is not the consistency contract. Web accent foreground changes from white to deep ink in dark mode; light accent fills cannot carry white text reliably. Native warning/error surface and ink pairs already exist and should be used together.
 
@@ -67,14 +67,14 @@ The light brand stage has limited contrast headroom. Retained web bare-stage tex
 
 Use system faces. Web uses SF on Apple platforms and Segoe/system elsewhere; display aliases the same family. Native uses Dynamic Type styles. Use monospaced text for identifiers, code, payloads, and diagnostic keys. Ordinary labels, navigation, explanations, and buttons use sentence case and the interface face.
 
-| Purpose | Web working scale | Native guidance |
-| --- | --- | --- |
-| Page title | 24 px on phones, 30 px on larger screens, strong | Native navigation title or large title |
-| Content title | 24 px | Title/Title2, appropriate to sheet hierarchy |
-| Section title | 16 px, semibold | Headline |
-| Reading and conversation | 16 px or comfortable reading size | Body, scales with owner text settings |
-| Controls and secondary text | 14 px | Subheadline/Callout |
-| Metadata | 12 px minimum in ordinary browser layouts | Caption, never required to understand an action |
+| Purpose                     | Web working scale                                | Native guidance                                 |
+| --------------------------- | ------------------------------------------------ | ----------------------------------------------- |
+| Page title                  | 24 px on phones, 30 px on larger screens, strong | Native navigation title or large title          |
+| Content title               | 24 px                                            | Title/Title2, appropriate to sheet hierarchy    |
+| Section title               | 16 px, semibold                                  | Headline                                        |
+| Reading and conversation    | 16 px or comfortable reading size                | Body, scales with owner text settings           |
+| Controls and secondary text | 14 px                                            | Subheadline/Callout                             |
+| Metadata                    | 12 px minimum in ordinary browser layouts        | Caption, never required to understand an action |
 
 Hierarchy comes from size, weight, space, and material. Do not put every section title in a large colored badge. Keep conversational prose in readable columns; long audit identifiers may wrap or scroll within their own region without making the page overflow. Owner-facing scheduling should use the owner's local date interpretation. Diagnostic timestamps may use explicit UTC, as Audit does; device-key dates currently use browser locale. Exact timestamps/timezones belong in supporting evidence when ambiguity matters.
 
@@ -82,16 +82,16 @@ Hierarchy comes from size, weight, space, and material. Do not put every section
 
 ## Geometry and spacing
 
-| Role | Web | iOS |
-| --- | --- | --- |
-| Main reply/hero geometry | Retained chat shell uses 16 px corners | Conversation/hero 27 pt |
-| Utility card | 16 px | 22 pt |
-| Nested panel | Smaller than its parent | 18 pt |
-| Control | 8 px where appropriate | 12 pt |
-| Page gutter | Responsive, derived from shared page shell | 16 pt compact gutter |
-| Card stack/content gaps | Consistent shared spacing utilities | 12 pt |
-| Action gap | Shared compact spacing | 8 pt |
-| Touch action | Shared buttons and fields at least 44 px | At least 44 pt |
+| Role                     | Web                                        | iOS                     |
+| ------------------------ | ------------------------------------------ | ----------------------- |
+| Main reply/hero geometry | Retained chat shell uses 16 px corners     | Conversation/hero 27 pt |
+| Utility card             | 16 px                                      | 22 pt                   |
+| Nested panel             | Smaller than its parent                    | 18 pt                   |
+| Control                  | 8 px where appropriate                     | 12 pt                   |
+| Page gutter              | Responsive, derived from shared page shell | 16 pt compact gutter    |
+| Card stack/content gaps  | Consistent shared spacing utilities        | 12 pt                   |
+| Action gap               | Shared compact spacing                     | 8 pt                    |
+| Touch action             | Shared buttons and fields at least 44 px   | At least 44 pt          |
 
 Use platform spacing deliberately, rather than forcing the web corner radius onto iPhone. A utility card holds one meaningful object or decision. A list of records should use rows, not a nested stack of elevated cards inside another card. Borders and tonal wells create separation; shadows are reserved for actual raised or overlay material.
 
@@ -103,18 +103,18 @@ Own safe areas once. The composer and transcript must move as one surface when t
 
 The server stores detailed workflow states; the interface translates them consistently. This table is the design vocabulary, not a replacement for the workflow state machine.
 
-| State | Owner-facing meaning | Required presentation |
-| --- | --- | --- |
-| Queued | Work is accepted and waiting to start | Brief next step; no implication that tools ran |
-| Working | A bounded work session is active | Useful progress, cancel where supported |
-| Needs your decision | A concrete choice or approval blocks work | Exact subject and next action |
-| Waiting until… | Time/event dependency | Local time or named dependency |
-| Needs more budget | Allowed work exceeded its grant | Amount and scope; route to budget decision |
-| Needs attention | Work cannot proceed reliably | Cause, evidence, useful recovery action |
-| Completed | The requested outcome is supported by execution evidence | Result or artifact, not only a green tick |
-| Cancelled | Work was stopped | Distinguish known effects from anything still being reconciled |
-| Failed | The operation did not finish | Honest failure; no fabricated completion message |
-| Stale data | Last good information is visible but could not refresh | Freshness, retry; disable unsafe decisions against stale detail |
+| State               | Owner-facing meaning                                     | Required presentation                                           |
+| ------------------- | -------------------------------------------------------- | --------------------------------------------------------------- |
+| Queued              | Work is accepted and waiting to start                    | Brief next step; no implication that tools ran                  |
+| Working             | A bounded work session is active                         | Useful progress, cancel where supported                         |
+| Needs your decision | A concrete choice or approval blocks work                | Exact subject and next action                                   |
+| Waiting until…      | Time/event dependency                                    | Local time or named dependency                                  |
+| Needs more budget   | Allowed work exceeded its grant                          | Amount and scope; route to budget decision                      |
+| Needs attention     | Work cannot proceed reliably                             | Cause, evidence, useful recovery action                         |
+| Completed           | The requested outcome is supported by execution evidence | Result or artifact, not only a green tick                       |
+| Cancelled           | Work was stopped                                         | Distinguish known effects from anything still being reconciled  |
+| Failed              | The operation did not finish                             | Honest failure; no fabricated completion message                |
+| Stale data          | Last good information is visible but could not refresh   | Freshness, retry; disable unsafe decisions against stale detail |
 
 Do not reuse “Done” for an archived task, a stale memory, a dismissed notice, and an executed request. Archive changes visibility. Snooze changes timing. Forget removes retained information. These verbs have different consequences.
 
@@ -186,38 +186,38 @@ Stop listening while a real approval or budget decision requires review. Spoken 
 
 ## Page-specific design standards
 
-| Page or area | Main question it answers | Dominant design responsibility |
-| --- | --- | --- |
-| Chat | What are we discussing, and what happens next? | Reading, editable composer, continuity, grounded cards/decisions |
-| Activity | What work is underway or blocked? | Status groups, useful progress, inline evidence, cancel/recover |
-| Goals | What outcomes are we moving toward? | Deadline, next action, actual progress, blocked-on-owner state |
-| Approvals | Which concrete decisions need me? | Exact action scope and one authoritative resolution |
-| Chats | Where did this work/discussion happen? | Primary vs work/notification chats, stable titles, archive clarity |
-| Memory home | What do you know, and what needs review? | Trust, useful entry points, modest graph preview |
-| Memory library/detail | Is this fact current and accurate? | Source, correction, confirmation, pin/forget, bounded search |
-| Knowledge map | How are people, places and events related? | Focused relationships and accessible list alternatives |
-| Open loops | What remains unresolved? | Promise/question/decision/waiting-on semantics, next step, snooze |
-| Profile summary | What personal context do you use? | Inspectable compact context and pinning criteria |
-| Writing voice | How do drafts sound like me? | Owner-authored evidence, editable profile, sample deletion scope |
-| Tidy up | Which memory issues need action? | Source-backed trust/currentness/projection review |
-| Your data | How can I inspect and remove retention? | Export scope and precise forgetting consequences |
-| Cards | Where is the useful record? | Scan ticket/booking/order content, currentness and source |
-| Situation Packs | What is the plan around this situation? | Timeline, linked evidence, decisions, versioned rehearsal |
-| People/detail | Who is this and what matters about them? | Identity/aliases, verified communication targets, occasions |
-| More | How does my assistant work for me? | Coherent preference, connection, workspace, diagnostic groups |
-| Settings (web) | How do I connect the phone? | Focused pairing and links to security |
-| Security (web) | Who can access the installation? | Passkeys/devices/sessions/recovery, explicit revoke scope |
-| AI providers | Which connection/model is used? | Credential presence without exposure, model vs role vs voice |
-| MCP | Which tools can be used? | Connection health, available abilities, capability limits |
-| Calls/detail | What is happening on the call? | Foreground live state, transcript, clear missing/stale recovery |
-| Capabilities | What is enabled and ready? | Configured vs working distinction and useful setup guidance |
-| Documents/import | What was processed and retained? | Progress, source provenance, failures, delete scope |
-| Skills | What procedures can be followed? | Inspect/edit instructions, provenance, advisory scope |
-| Costs | What did this work cost? | Actual vs estimated/unavailable, overlap, enforceable budgets |
-| Anomalies | Which evidence needs investigation? | Specific unusual behavior and actionable evidence |
-| Improvements | What change is proposed, tested or released? | Separate proposal, evaluation, PR, check, merge, deploy states |
-| Audit/detail | What actually happened? | Readable evidence hierarchy, filters, limited diagnostic fetching |
-| Setup/sign in/connection | How do I get into my own assistant? | Clear prerequisites, recovery, consumer language |
+| Page or area             | Main question it answers                       | Dominant design responsibility                                     |
+| ------------------------ | ---------------------------------------------- | ------------------------------------------------------------------ |
+| Chat                     | What are we discussing, and what happens next? | Reading, editable composer, continuity, grounded cards/decisions   |
+| Activity                 | What work is underway or blocked?              | Status groups, useful progress, inline evidence, cancel/recover    |
+| Goals                    | What outcomes are we moving toward?            | Deadline, next action, actual progress, blocked-on-owner state     |
+| Approvals                | Which concrete decisions need me?              | Exact action scope and one authoritative resolution                |
+| Chats                    | Where did this work/discussion happen?         | Primary vs work/notification chats, stable titles, archive clarity |
+| Memory home              | What do you know, and what needs review?       | Trust, useful entry points, modest graph preview                   |
+| Memory library/detail    | Is this fact current and accurate?             | Source, correction, confirmation, pin/forget, bounded search       |
+| Knowledge map            | How are people, places and events related?     | Focused relationships and accessible list alternatives             |
+| Open loops               | What remains unresolved?                       | Promise/question/decision/waiting-on semantics, next step, snooze  |
+| Profile summary          | What personal context do you use?              | Inspectable compact context and pinning criteria                   |
+| Writing voice            | How do drafts sound like me?                   | Owner-authored evidence, editable profile, sample deletion scope   |
+| Tidy up                  | Which memory issues need action?               | Source-backed trust/currentness/projection review                  |
+| Your data                | How can I inspect and remove retention?        | Export scope and precise forgetting consequences                   |
+| Cards                    | Where is the useful record?                    | Scan ticket/booking/order content, currentness and source          |
+| Situation Packs          | What is the plan around this situation?        | Timeline, linked evidence, decisions, versioned rehearsal          |
+| People/detail            | Who is this and what matters about them?       | Identity/aliases, verified communication targets, occasions        |
+| More                     | How does my assistant work for me?             | Coherent preference, connection, workspace, diagnostic groups      |
+| Settings (web)           | How do I connect the phone?                    | Focused pairing and links to security                              |
+| Security (web)           | Who can access the installation?               | Passkeys/devices/sessions/recovery, explicit revoke scope          |
+| AI providers             | Which connection/model is used?                | Credential presence without exposure, model vs role vs voice       |
+| MCP                      | Which tools can be used?                       | Connection health, available abilities, capability limits          |
+| Calls/detail             | What is happening on the call?                 | Foreground live state, transcript, clear missing/stale recovery    |
+| Capabilities             | What is enabled and ready?                     | Configured vs working distinction and useful setup guidance        |
+| Documents/import         | What was processed and retained?               | Progress, source provenance, failures, delete scope                |
+| Skills                   | What procedures can be followed?               | Inspect/edit instructions, provenance, advisory scope              |
+| Costs                    | What did this work cost?                       | Actual vs estimated/unavailable, overlap, enforceable budgets      |
+| Anomalies                | Which evidence needs investigation?            | Specific unusual behavior and actionable evidence                  |
+| Improvements             | What change is proposed, tested or released?   | Separate proposal, evaluation, PR, check, merge, deploy states     |
+| Audit/detail             | What actually happened?                        | Readable evidence hierarchy, filters, limited diagnostic fetching  |
+| Setup/sign in/connection | How do I get into my own assistant?            | Clear prerequisites, recovery, consumer language                   |
 
 ## Performance is part of design
 
