@@ -217,6 +217,8 @@ actor NativeMemoryCorrectionRecoveryStore {
         serverIdentity: String,
         target: NativeMemoryCorrectionRecoveryRecord.Target
     ) throws -> NativeMemoryCorrectionRecoveryRecord? {
+        Self.mutationLock.lock()
+        defer { Self.mutationLock.unlock() }
         let partition = try Self.partition(serverIdentity: serverIdentity, target: target)
         try keyVault.assertOpen(partition: partition)
         let url = pendingURL(partition: partition)
