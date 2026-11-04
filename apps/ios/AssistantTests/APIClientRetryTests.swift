@@ -4223,6 +4223,54 @@ extension APIClientRetryTests {
 }
 
 @MainActor
+private final class AppModelCardFormSessionIdentityStore: CardFormSessionIdentityStore {
+    private(set) var readRequests: [(serverIdentity: String, ownerId: String)] = []
+    private(set) var rotationRequests: [(serverIdentity: String, ownerId: String, expectedSessionId: String)] = []
+    private var sessionId: String
+
+    init(sessionId: String) { self.sessionId = sessionId }
+
+    func readOrCreate(serverIdentity: String, ownerId: String) throws -> String {
+        readRequests.append((serverIdentity, ownerId))
+        return sessionId
+    }
+
+    func rotate(serverIdentity: String, ownerId: String, expected: String) throws {
+        guard sessionId == expected else { throw CardFormMobileSessionError.sessionChanged }
+        rotationRequests.append((serverIdentity, ownerId, expected))
+        sessionId = UUID().uuidString.lowercased()
+    }
+}
+
+private actor AppModelCardFormDraftMemoryStorage: CardFormDraftStorage {
+    struct Partition: Equatable, Sendable {
+        let ownerId: String
+        let sessionId: String
+    }
+
+    private var rows: [CardFormScope: CardFormDraft] = [:]
+    private var listRequests: [Partition] = []
+    private var clearRequests: [Partition] = []
+
+    func load(scope: CardFormScope) async throws -> CardFormDraft? { rows[scope] }
+    func save(_ draft: CardFormDraft) async throws { rows[draft.scope] = draft }
+
+    func listScopes(ownerId: String, sessionId: String) async throws -> [CardFormScope] {
+        listRequests.append(Partition(ownerId: ownerId, sessionId: sessionId))
+        return rows.keys.filter { $0.ownerId == ownerId && $0.sessionId == sessionId }
+    }
+
+    func clear(ownerId: String, sessionId: String) async throws {
+        clearRequests.append(Partition(ownerId: ownerId, sessionId: sessionId))
+        rows = rows.filter { $0.key.ownerId != ownerId || $0.key.sessionId != sessionId }
+    }
+
+    func listedPartitions() -> [Partition] { listRequests }
+    func clearedPartitions() -> [Partition] { clearRequests }
+    func scopes() -> [CardFormScope] { Array(rows.keys) }
+}
+
+@MainActor
 private final class PhoneCalendarSharingMemoryRecordStore: PhoneCalendarSharingRecordStore {
     private(set) var records: [String: PhoneCalendarSharingLocalRecord] = [:]
     var failNextSave = false
@@ -5423,6 +5471,9 @@ extension APIClientRetryTests {
         enqueueAutomaticSpeech: ((ChatMessage) -> Void)? = nil,
         scheduleLocalNotification: LocalNotificationScheduler? = nil,
         isolatedDefaults: UserDefaults? = nil,
+        cardFormMobileSessionFactory: @escaping CardFormMobileSessionFactory = { server, owner in
+            try CardFormMobileSession(serverIdentity: server, ownerId: owner)
+        },
         systemSurfaces suppliedSystemSurfaces: RecordingAppSystemSurfaces? = nil
     ) async throws -> AppModel {
         let systemSurfaces = suppliedSystemSurfaces ?? RecordingAppSystemSurfaces()
@@ -5434,24 +5485,28 @@ extension APIClientRetryTests {
                 apiClient: makeClient(), defaults: isolatedDefaults, storeConnectionToken: { _ in },
                 enqueueAutomaticSpeech: enqueueAutomaticSpeech,
                 scheduleLocalNotification: notificationScheduler,
-                systemSurfaces: systemSurfaces
+                systemSurfaces: systemSurfaces,
+                cardFormMobileSessionFactory: cardFormMobileSessionFactory
             )
         } else if let isolatedDefaults {
             model = AppModel(
                 apiClient: makeClient(), defaults: isolatedDefaults, storeConnectionToken: { _ in },
                 scheduleLocalNotification: notificationScheduler,
-                systemSurfaces: systemSurfaces
+                systemSurfaces: systemSurfaces,
+                cardFormMobileSessionFactory: cardFormMobileSessionFactory
             )
         } else if let enqueueAutomaticSpeech {
             model = AppModel(
                 apiClient: makeClient(),
                 enqueueAutomaticSpeech: enqueueAutomaticSpeech,
                 scheduleLocalNotification: notificationScheduler,
-                systemSurfaces: systemSurfaces
+                systemSurfaces: systemSurfaces,
+                cardFormMobileSessionFactory: cardFormMobileSessionFactory
             )
         } else {
             model = AppModel(apiClient: makeClient(), scheduleLocalNotification: notificationScheduler,
-                             systemSurfaces: systemSurfaces)
+                             systemSurfaces: systemSurfaces,
+                             cardFormMobileSessionFactory: cardFormMobileSessionFactory)
         }
         model.scenePhaseDidChange(.background)
         StubURLProtocol.primeBootstrap(try notificationBootstrap())
@@ -5720,6 +5775,10 @@ extension APIClientRetryTests {
             requestCount(path) >= 1 && !model.toolActivity.isEmpty
         }
         try requireReplyPollFixtureStage(firstProgress, "First turn did not expose progress. \(diagnostics())")
+        let firstUserMessage = try XCTUnwrap(
+            model.messages.first { $0.role == .user && $0.text == "Fixture turn 0" },
+            "The first send must have one observable optimistic USER message. \(diagnostics())"
+        )
         let firstFinalHeld = try await waitForReplyPollFixture(seconds: 1) {
             requestCount(path) >= 2 && StubURLProtocol.isHoldingResponse(path: path)
         }
@@ -5758,8 +5817,14 @@ extension APIClientRetryTests {
         let secondPostAndTask = try await waitForReplyPollFixture {
             requestCount(chatPath) == 2 && hasTaskPoll(taskIDs[1]) && StubURLProtocol.isHoldingResponse(path: path)
         }
-        XCTAssertTrue(secondPostAndTask,
-                      "The second POST and its task-id poll must arrive before its held progress response. \(diagnostics())")
+        try requireReplyPollFixtureStage(
+            secondPostAndTask,
+            "The second POST and its task-id poll must arrive before its held progress response. \(diagnostics())"
+        )
+        let secondUserMessage = try XCTUnwrap(
+            model.messages.first { $0.role == .user && $0.text == "Fixture turn 1" },
+            "The admitted second send must have one observable optimistic USER message. \(diagnostics())"
+        )
         XCTAssertEqual(requestCount(chatPath), 2, "The admitted second send must happen exactly once. \(diagnostics())")
         XCTAssertTrue(model.isSending, diagnostics())
         XCTAssertFalse(model.canAdmitOrdinarySend, diagnostics())
@@ -5770,7 +5835,22 @@ extension APIClientRetryTests {
             return try? JSONSerialization.jsonObject(with: body) as? [String: Any]
         }
         XCTAssertEqual(sends.count, 2, diagnostics())
-        XCTAssertEqual(sends.map { $0["text"] as? String }, ["Fixture turn 0", "Fixture turn 1"], diagnostics())
+        XCTAssertNotEqual(firstUserMessage.id, secondUserMessage.id, "Each admitted turn needs its own USER-message identity.")
+        func submittedUserText(_ body: [String: Any], messageID: String) -> String? {
+            guard let messages = body["messages"] as? [[String: Any]] else { return nil }
+            let matches = messages.filter {
+                $0["id"] as? String == messageID && $0["role"] as? String == "user"
+            }
+            guard matches.count == 1,
+                  let parts = matches[0]["parts"] as? [[String: Any]],
+                  parts.count == 1,
+                  parts[0]["type"] as? String == "text" else { return nil }
+            return parts[0]["text"] as? String
+        }
+        XCTAssertEqual(submittedUserText(sends[0], messageID: firstUserMessage.id), "Fixture turn 0",
+                       "First POST must include its exact USER-message identity/text. \(diagnostics())")
+        XCTAssertEqual(submittedUserText(sends[1], messageID: secondUserMessage.id), "Fixture turn 1",
+                       "Second POST must include its exact USER-message identity/text. \(diagnostics())")
 
         StubURLProtocol.releaseHeldResponse(path: path)
         let secondProgressAndFinalHeld = try await waitForReplyPollFixture(seconds: 1) {
@@ -5963,7 +6043,21 @@ extension APIClientRetryTests {
         defer { defaults.removePersistentDomain(forName: suite) }
         defaults.set(true, forKey: "assistant.push-prompted")
         let surfaces = RecordingAppSystemSurfaces()
-        let model = try await notificationModel(isolatedDefaults: defaults, systemSurfaces: surfaces)
+        let fixtureStorage = AppModelCardFormDraftMemoryStorage()
+        let fixtureIdentity = AppModelCardFormSessionIdentityStore(sessionId: "fffffff1-1111-4111-8111-111111111111")
+        let sessionFactory: CardFormMobileSessionFactory = { serverIdentity, ownerId in
+            try CardFormMobileSession(
+                serverIdentity: serverIdentity,
+                ownerId: ownerId,
+                identityStore: fixtureIdentity,
+                draftStorage: fixtureStorage
+            )
+        }
+        let model = try await notificationModel(
+            isolatedDefaults: defaults,
+            cardFormMobileSessionFactory: sessionFactory,
+            systemSurfaces: surfaces
+        )
         surfaces.armFinishHolding()
         let taskID = UUID().uuidString.lowercased()
         let messageID = UUID().uuidString.lowercased()
@@ -5994,6 +6088,20 @@ extension APIClientRetryTests {
         defer { surfaces.releaseAllFinishes() }
 
         let (scope, _) = try await model.openCardForm(form)
+        XCTAssertEqual(scope.ownerId, "notification-owner")
+        XCTAssertEqual(scope.sessionId, "fffffff1-1111-4111-8111-111111111111")
+        let identityRequests = fixtureIdentity.readRequests
+        XCTAssertFalse(identityRequests.isEmpty)
+        XCTAssertTrue(identityRequests.allSatisfy {
+            $0.serverIdentity == "https://assistant.test" && $0.ownerId == "notification-owner"
+        })
+        let listedPartitions = await fixtureStorage.listedPartitions()
+        XCTAssertFalse(listedPartitions.isEmpty)
+        XCTAssertTrue(listedPartitions.allSatisfy {
+            $0.ownerId == "notification-owner" && $0.sessionId == "fffffff1-1111-4111-8111-111111111111"
+        })
+        let persistedScopes = await fixtureStorage.scopes()
+        XCTAssertEqual(persistedScopes, [scope], "Draft persistence must stay inside the scoped owner/session partition.")
         _ = try await model.setCardFormValue(
             scope: scope, form: form, fieldId: "answer", value: .text("Reviewed value")
         )
@@ -6004,6 +6112,13 @@ extension APIClientRetryTests {
             surfaces.finishCount == 1
         }
         try requireReplyPollFixtureStage(settlementHeld, "The accepted card-form poll did not reach held settlement.")
+        XCTAssertEqual(StubURLProtocol.urls.filter { $0.path == "/api/mobile/v1/chat/forms" }.count, 1,
+                       "The actual AppModel form flow must accept exactly one 202 submission.")
+        let formObserverSettled = try await waitForReplyPollFixture {
+            model.cardFormTaskStatus(taskID) == "done"
+        }
+        try requireReplyPollFixtureStage(formObserverSettled,
+                                         "The accepted form's nil-token observer must publish its terminal task status.")
         XCTAssertTrue(model.isSettlingOrdinaryTurn,
                       "Card-form polling has no ordinary-turn token but still owns composer settlement.")
         XCTAssertFalse(model.canAdmitOrdinarySend)
@@ -6019,6 +6134,30 @@ extension APIClientRetryTests {
         surfaces.releaseFinish()
         let ready = try await waitForReplyPollFixture { model.canAdmitOrdinarySend }
         try requireReplyPollFixtureStage(ready, "Releasing tokenless settlement should restore composer readiness.")
+    }
+
+    @MainActor
+    func testInjectedCardFormSessionRotatesOnlyItsOwnerAndSessionPartition() async throws {
+        let storage = AppModelCardFormDraftMemoryStorage()
+        let identity = AppModelCardFormSessionIdentityStore(sessionId: "fffffff2-2222-4222-8222-222222222222")
+        let session = try CardFormMobileSession(
+            serverIdentity: "https://assistant.test",
+            ownerId: "owner-a",
+            identityStore: identity,
+            draftStorage: storage
+        )
+
+        try await session.closeAndRotate()
+
+        let rotations = identity.rotationRequests
+        XCTAssertEqual(rotations.count, 1)
+        XCTAssertEqual(rotations.first?.serverIdentity, "https://assistant.test")
+        XCTAssertEqual(rotations.first?.ownerId, "owner-a")
+        XCTAssertEqual(rotations.first?.expectedSessionId, "fffffff2-2222-4222-8222-222222222222")
+        let cleared = await storage.clearedPartitions()
+        XCTAssertEqual(cleared.count, 1)
+        XCTAssertEqual(cleared.first?.ownerId, "owner-a")
+        XCTAssertEqual(cleared.first?.sessionId, "fffffff2-2222-4222-8222-222222222222")
     }
 
     @MainActor

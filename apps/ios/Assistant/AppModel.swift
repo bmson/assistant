@@ -149,6 +149,9 @@ typealias RetryAction = @MainActor @Sendable () async -> Void
 typealias LocalNotificationScheduler = @MainActor (
     String, String, AssistantRoute?, String?, String?, String?
 ) async -> Bool
+/// AppModel's default factory stays on the Keychain/encrypted-draft production path.
+/// Explicit factories allow deterministic storage fixtures to exercise AppModel's full form flow.
+typealias CardFormMobileSessionFactory = @MainActor (String, String) throws -> CardFormMobileSession
 
 /// View-scoped loads are routinely cancelled when a navigation destination is
 /// replaced. Cancellation is control flow, not a failed request, so it must
@@ -413,6 +416,7 @@ final class AppModel {
 
     private(set) var serverURL: String
     @ObservationIgnored private var client: APIClient?
+    private let cardFormMobileSessionFactory: CardFormMobileSessionFactory
     private(set) var cardFormSession: CardFormMobileSession?
     private var cardFormSessionInitializationFailure: Error?
     private(set) var cardFormComposerBinding: CardFormComposerBinding?
@@ -541,11 +545,15 @@ final class AppModel {
         phoneCalendarSharing: PhoneCalendarSharingCoordinator? = nil,
         captureCurrentPlace: @escaping @MainActor () async -> (location: CLLocation, label: String)? = {
             await LocationManager.shared.captureCurrentPlace()
+        },
+        cardFormMobileSessionFactory: @escaping CardFormMobileSessionFactory = { serverIdentity, ownerId in
+            try CardFormMobileSession(serverIdentity: serverIdentity, ownerId: ownerId)
         }
     ) {
         self.defaults = defaults
         self.systemSurfaces = systemSurfaces ?? ProductionAppSystemSurfaces()
         self.phoneCalendarSharing = phoneCalendarSharing ?? PhoneCalendarSharingCoordinator()
+        self.cardFormMobileSessionFactory = cardFormMobileSessionFactory
         self.storeConnectionToken = storeConnectionToken
         self.enqueueAutomaticSpeech = enqueueAutomaticSpeech
         self.scheduleLocalNotification = scheduleLocalNotification ?? { title, body, route, approvalId, agentID, conversationID in
@@ -1254,7 +1262,7 @@ final class AppModel {
         }
 
         do {
-            let candidateSession = try CardFormMobileSession(serverIdentity: serverIdentity, ownerId: ownerId)
+            let candidateSession = try cardFormMobileSessionFactory(serverIdentity, ownerId)
             let unsettled = try await candidateSession.restoreUnsettled()
             guard attemptIsCurrent() else { return }
             cardFormSession = candidateSession
