@@ -2,9 +2,10 @@ import type { OwnerEditorStorage } from '@/lib/owner-editor-client';
 
 /**
  * Scope a person-note marker to the verified owner/server/session partition,
- * while retaining the shared unscoped marker as an operation-wide lock for
- * existing editor controls. A marker from another partition blocks new work;
- * it is never read as authority or removed from here.
+ * while retaining the shared marker as an operation-wide lock for existing
+ * editor controls. If a generic control already cleared that shared lock, the
+ * original scoped marker may still be checked by its exact operation; only the
+ * operation controller's qualified terminal-receipt path can remove it.
  */
 export function personNoteRecoveryStorage(
   base: OwnerEditorStorage,
@@ -15,7 +16,7 @@ export function personNoteRecoveryStorage(
     getItem(key) {
       const scoped = base.getItem(scopedKey(key));
       const shared = base.getItem(key);
-      if (scoped !== null && shared === scoped) return scoped;
+      if (scoped !== null && (shared === scoped || shared === null)) return scoped;
       if (scoped !== null || shared !== null)
         throw new Error('A save belongs to a different recovery partition.');
       return null;
@@ -39,6 +40,10 @@ export function personNoteRecoveryStorage(
       if (scoped !== null && shared === scoped) {
         base.removeItem(scopedKey(key));
         base.removeItem(key);
+      } else if (scoped !== null && shared === null) {
+        // The caller reaches removeItem only after validating the exact same-op
+        // terminal reply. A missing shared lock alone never clears this marker.
+        base.removeItem(scopedKey(key));
       }
     },
   };
