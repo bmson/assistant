@@ -8,6 +8,12 @@ import {
 import { evaluateCalendarDiagnostic } from './calendar-diagnostic-grader.js';
 import type { QuestionResult } from './harness.js';
 
+function object(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
 function caseById(id: string) {
   const fixture = CALENDAR_DIAGNOSTIC_CASES.find((candidate) => candidate.id === id);
   if (!fixture) throw new Error(`Missing fixture ${id}`);
@@ -37,9 +43,8 @@ function resultFromCalendarProducer(id: string): QuestionResult {
     includeCalendarOverlapSummary: true,
     timeZone: fixture.timeZone,
     timeWindow: {
-      label: 'tomorrow',
-      timeMin: '2026-10-23T07:00:00.000Z',
-      timeMax: '2026-10-24T07:00:00.000Z',
+      label: fixture.id === 'calendar-d6' ? 'November 1' : 'tomorrow',
+      ...expectedWindow(fixture.id),
     },
   };
   const events = calendarResponseCards(evidence, request, { includeUnresolvedDates: true });
@@ -48,7 +53,15 @@ function resultFromCalendarProducer(id: string): QuestionResult {
   return result(id, {
     answer: 'The checked agenda identifies the source entries and overlap evidence.',
     sections,
+    toolResult: outcome.result,
+    args: expectedWindow(fixture.id),
   });
+}
+
+function expectedWindow(id: string) {
+  return id === 'calendar-d6'
+    ? { timeMin: '2026-11-01T07:00:00.000Z', timeMax: '2026-11-02T08:00:00.000Z' }
+    : { timeMin: '2026-10-23T07:00:00.000Z', timeMax: '2026-10-24T07:00:00.000Z' };
 }
 
 function result(
@@ -63,14 +76,89 @@ function result(
     extraParts?: unknown[];
     extraToolCalls?: QuestionResult['toolCalls'];
     diagnostic?: QuestionResult['diagnostic'];
+    toolResult?: unknown;
+    sourceBacked?: boolean;
   } = {},
 ): QuestionResult {
   const answer = options.answer ?? 'Tomorrow has the checked events shown in the agenda.';
-  const sectionItems = options.sections ?? [];
+  const toolResult = options.toolResult ?? caseById(id).localTools?.[0]?.outcomes[0];
+  const readResult =
+    toolResult && typeof toolResult === 'object' && 'result' in toolResult
+      ? toolResult.result
+      : toolResult;
+  const window = expectedWindow(id);
+  const request = {
+    kind: 'calendar' as const,
+    queryTerms: [],
+    requiresThreadRead: false,
+    firstToolName: 'calendar.list_events' as const,
+    includeCalendarBriefing: true,
+    includeCalendarOverlapSummary: true,
+    timeZone: caseById(id).timeZone,
+    timeWindow: { label: id === 'calendar-d6' ? 'November 1' : 'tomorrow', ...window },
+  };
+  const sourceEvidence = [
+    { toolName: 'calendar.list_events', status: 'succeeded', args: window, result: readResult },
+  ];
+  const sourceEvents = calendarResponseCards(sourceEvidence, request, {
+    includeUnresolvedDates: true,
+  });
+  const sourceCards = calendarAgendaCards({
+    evidence: sourceEvidence,
+    events: sourceEvents,
+    request,
+  });
+  const sourceItems = sourceCards.flatMap((sourceCard) => {
+    const data = object(sourceCard);
+    const sections = Array.isArray(data.sections) ? data.sections.map(object) : [];
+    return sections
+      .filter((section) => section.type === 'agenda')
+      .flatMap((section) => (Array.isArray(section.items) ? section.items.map(object) : []));
+  });
+  const sectionItems = (options.sections ?? []).map((section) => {
+    const row = object(section);
+    if (row.type !== 'agenda' || !Array.isArray(row.items)) return section;
+    return {
+      ...row,
+      items: row.items.map((candidate) => {
+        const item = object(candidate);
+        if (!options.sourceBacked) return candidate;
+        const expected = sourceItems.find((sourceItem) => sourceItem.title === item.title);
+        if (!expected) return candidate;
+        const expectedSources = Array.isArray(expected.sourceVariants)
+          ? expected.sourceVariants.map(object)
+          : [];
+        return {
+          ...item,
+          day: expected.day,
+          time: expected.time,
+          sourceVariants: expectedSources.map((source) =>
+            Object.fromEntries(
+              [
+                'calendarId',
+                'calendar',
+                'eventId',
+                'iCalUID',
+                'recurringEventId',
+                'originalStartTime',
+                'start',
+                'end',
+                'summary',
+              ]
+                .filter((key) => source[key] !== undefined)
+                .map((key) => [key, source[key]]),
+            ),
+          ),
+        };
+      }),
+    };
+  });
   const card = {
     kind: 'briefing',
     presentation: 'calendar-agenda',
-    complete: options.complete ?? true,
+    complete:
+      options.complete ??
+      (typeof object(readResult).complete === 'boolean' ? object(readResult).complete : true),
     sections: sectionItems,
   };
   return {
@@ -84,11 +172,12 @@ function result(
       {
         name: 'calendar.list_events',
         status: 'succeeded',
-        args: options.args ?? {
-          timeMin: '2026-10-23T07:00:00.000Z',
-          timeMax: '2026-10-24T07:00:00.000Z',
-        },
-        result: { complete: options.complete ?? true },
+        args: options.args ?? expectedWindow(id),
+        result:
+          options.toolResult ??
+          (toolResult && typeof toolResult === 'object' && 'result' in toolResult
+            ? toolResult.result
+            : { complete: true }),
       },
       ...(options.writes
         ? [
@@ -115,11 +204,15 @@ function result(
 }
 
 describe('synthetic production-routed calendar diagnostic corpus', () => {
-  it('accepts D4 and D5 cards generated from their fixture tool outcomes', () => {
-    for (const id of ['calendar-d4', 'calendar-d5']) {
+  it('accepts source-derived cards from every fixture tool outcome', () => {
+    for (const id of ['calendar-d1', 'calendar-d2', 'calendar-d3', 'calendar-d4', 'calendar-d5']) {
       const produced = resultFromCalendarProducer(id);
       expect(evaluateCalendarDiagnostic(caseById(id), produced), id).toEqual([]);
     }
+    const dst = resultFromCalendarProducer('calendar-d6');
+    expect(evaluateCalendarDiagnostic(caseById('calendar-d6'), dst)).toEqual([
+      'privacy: private context or event-description instruction leaked',
+    ]);
   });
 
   it('keeps the six diagnostics synthetic, unplanned, and independent-reviewable', () => {
@@ -260,6 +353,7 @@ describe('synthetic production-routed calendar diagnostic corpus', () => {
     const fixture = caseById('calendar-d1');
     const actual = result(fixture.id, {
       sections: [{ type: 'agenda', items: [{ title: 'Team review' }, { title: 'School pickup' }] }],
+      sourceBacked: true,
     });
     expect(evaluateCalendarDiagnostic(fixture, actual)).toEqual([]);
     expect(
@@ -270,6 +364,7 @@ describe('synthetic production-routed calendar diagnostic corpus', () => {
           sections: [
             { type: 'agenda', items: [{ title: 'Team review' }, { title: 'School pickup' }] },
           ],
+          sourceBacked: true,
         }),
       ),
     ).toEqual([]);
@@ -286,6 +381,7 @@ describe('synthetic production-routed calendar diagnostic corpus', () => {
               overlaps: [{ title: 'Team review and School pickup' }],
             },
           ],
+          sourceBacked: true,
         }),
       ),
     ).toContain('conflict: non-overlapping source rows described as an overlap');
@@ -305,6 +401,7 @@ describe('synthetic production-routed calendar diagnostic corpus', () => {
           items: [{ title: 'Reference (iPhone)', detail: 'Calendar permission was revoked.' }],
         },
       ],
+      sourceBacked: true,
     });
     expect(evaluateCalendarDiagnostic(fixture, partial)).toEqual([]);
     const partialCardWithFalseClearProse = result(fixture.id, {
@@ -318,6 +415,7 @@ describe('synthetic production-routed calendar diagnostic corpus', () => {
           items: [{ title: 'Reference (iPhone)' }],
         },
       ],
+      sourceBacked: true,
     });
     expect(evaluateCalendarDiagnostic(fixture, partialCardWithFalseClearProse)).toContain(
       'coverage: prose overstates partial phone-calendar coverage',
@@ -329,12 +427,213 @@ describe('synthetic production-routed calendar diagnostic corpus', () => {
       sections: [
         { type: 'agenda', items: [{ title: 'Design review' }, { title: 'Family dinner' }] },
       ],
+      sourceBacked: true,
     });
     expect(evaluateCalendarDiagnostic(fixture, actual)).toEqual(
       expect.arrayContaining([
         'coverage: partial phone result presented as complete',
         'coverage: permission-denied phone source not disclosed',
       ]),
+    );
+  });
+
+  it('does not accept agenda claims without matching events in the successful current read result', () => {
+    const fixture = caseById('calendar-d2');
+    const forged = result(fixture.id, {
+      complete: false,
+      answer:
+        'Design review and Family dinner are shown. The Reference iPhone calendar could not be checked because permission was revoked.',
+      sections: [
+        { type: 'agenda', items: [{ title: 'Design review' }, { title: 'Family dinner' }] },
+        {
+          type: 'attention',
+          title: 'Calendars not checked',
+          items: [{ title: 'Reference (iPhone)', detail: 'Calendar permission was revoked.' }],
+        },
+      ],
+      toolResult: {
+        events: [],
+        complete: false,
+        calendarsResolved: [],
+        unavailable: [],
+      },
+    });
+
+    expect(evaluateCalendarDiagnostic(fixture, forged)).toContain(
+      'evidence: agenda sources do not match the successful current calendar read',
+    );
+
+    const sourceProduced = resultFromCalendarProducer(fixture.id);
+    const selectedRead = sourceProduced.toolCalls[0];
+    if (!selectedRead) throw new Error('Missing D2 event read');
+    const unrelatedRead = {
+      ...selectedRead,
+      args: { timeMin: '2026-10-22T07:00:00.000Z', timeMax: '2026-10-23T07:00:00.000Z' },
+      result: { events: [], complete: true, unavailable: [] },
+    };
+    expect(
+      evaluateCalendarDiagnostic(fixture, {
+        ...sourceProduced,
+        toolCalls: [unrelatedRead, ...sourceProduced.toolCalls],
+      }),
+    ).toEqual([]);
+    expect(
+      evaluateCalendarDiagnostic(fixture, {
+        ...sourceProduced,
+        toolCalls: [...sourceProduced.toolCalls, selectedRead],
+      }),
+    ).toContain(
+      'evidence: multiple successful event reads match the requested window; source mapping is ambiguous',
+    );
+
+    const renderedCard = object(object(sourceProduced.parts[0]).data);
+    const renderedSections = (renderedCard.sections as unknown[]).map((section) => {
+      const sectionRow = object(section);
+      if (sectionRow.type !== 'agenda' || !Array.isArray(sectionRow.items)) return section;
+      let changed = false;
+      return {
+        ...sectionRow,
+        items: sectionRow.items.map((candidate) => {
+          if (changed) return candidate;
+          changed = true;
+          return { ...object(candidate), time: '3:00 AM – 4:00 AM' };
+        }),
+      };
+    });
+    expect(
+      evaluateCalendarDiagnostic(fixture, {
+        ...sourceProduced,
+        parts: [
+          {
+            type: 'data-card',
+            data: { ...renderedCard, sections: renderedSections },
+          },
+        ],
+      }),
+    ).toContain('evidence: agenda sources do not match the successful current calendar read');
+
+    const originalRead = caseById('calendar-d2').localTools?.[0]?.outcomes[0];
+    if (!originalRead || !('result' in originalRead)) throw new Error('Missing D2 read fixture');
+    const original = object(originalRead.result);
+    const sourceEvents = original.events as Array<Record<string, unknown>>;
+    const wrongSourceResult = {
+      ...original,
+      events: sourceEvents.map((event, index) =>
+        index === 0 ? { ...event, eventId: 'different-event' } : event,
+      ),
+    };
+    const matchingCard = result(fixture.id, {
+      complete: false,
+      answer: 'Design review and Family dinner are shown. Reference (iPhone) could not be checked.',
+      sections: [
+        {
+          type: 'agenda',
+          items: [
+            {
+              title: 'Design review',
+              sourceVariants: [
+                {
+                  calendarId: 'google-work',
+                  eventId: 'google-design-review',
+                  start: '2026-10-23T17:00:00.000Z',
+                  end: '2026-10-23T18:00:00.000Z',
+                },
+              ],
+            },
+            {
+              title: 'Family dinner',
+              sourceVariants: [
+                {
+                  calendarId: 'iphone:family',
+                  eventId: 'phone-family-dinner',
+                  start: '2026-10-24T01:00:00.000Z',
+                  end: '2026-10-24T02:00:00.000Z',
+                },
+              ],
+            },
+          ],
+        },
+        {
+          type: 'attention',
+          title: 'Calendars not checked',
+          items: [{ title: 'Reference (iPhone)', detail: 'Calendar permission was revoked.' }],
+        },
+      ],
+      toolResult: wrongSourceResult,
+    });
+    expect(evaluateCalendarDiagnostic(fixture, matchingCard)).toContain(
+      'evidence: agenda sources do not match the successful current calendar read',
+    );
+
+    const wrongTimeSourceResult = {
+      ...original,
+      events: sourceEvents.map((event, index) =>
+        index === 0 ? { ...event, start: '2026-10-23T17:30:00.000Z' } : event,
+      ),
+    };
+    expect(
+      evaluateCalendarDiagnostic(
+        fixture,
+        result(fixture.id, {
+          complete: false,
+          sections: matchingCard.parts.flatMap((part) => {
+            const data = object(object(part).data);
+            return Array.isArray(data.sections) ? data.sections : [];
+          }),
+          toolResult: wrongTimeSourceResult,
+        }),
+      ),
+    ).toContain('evidence: agenda sources do not match the successful current calendar read');
+
+    const wrongWindow = result(fixture.id, {
+      complete: false,
+      sections: [],
+      args: { timeMin: '2026-10-22T07:00:00.000Z', timeMax: '2026-10-23T07:00:00.000Z' },
+    });
+    expect(evaluateCalendarDiagnostic(fixture, wrongWindow)).toContain(
+      'evidence: successful current event read does not cover the requested window',
+    );
+
+    const metadataOnlyRead = result(fixture.id, {
+      complete: false,
+      sections: [],
+      toolResult: { calendarsResolved: [{ id: 'iphone:family' }], complete: false },
+    });
+    expect(evaluateCalendarDiagnostic(fixture, metadataOnlyRead)).toContain(
+      'evidence: no successful current event-read result is available for verification',
+    );
+
+    const originalResultWithoutCompleteness = { ...original, complete: undefined };
+    const unverifiedCoverage = result(fixture.id, {
+      complete: true,
+      sections: [
+        { type: 'agenda', items: [{ title: 'Design review' }, { title: 'Family dinner' }] },
+        {
+          type: 'attention',
+          title: 'Calendars not checked',
+          items: [{ title: 'Reference (iPhone)', detail: 'Calendar permission was revoked.' }],
+        },
+      ],
+      sourceBacked: true,
+      toolResult: originalResultWithoutCompleteness,
+    });
+    expect(evaluateCalendarDiagnostic(fixture, unverifiedCoverage)).toContain(
+      'coverage: read completeness is unverified because the successful event result has no Boolean completeness value',
+    );
+
+    const unsupportedDisclosure = result(fixture.id, {
+      complete: false,
+      answer: 'The agenda is shown. Atlantis Calendar could not be checked.',
+      sections: [
+        {
+          type: 'attention',
+          title: 'Calendars not checked',
+          items: [{ title: 'Atlantis Calendar', detail: 'Permission denied.' }],
+        },
+      ],
+    });
+    expect(evaluateCalendarDiagnostic(fixture, unsupportedDisclosure)).toContain(
+      'coverage: unavailable-source disclosure does not match the successful current calendar read',
     );
   });
 
@@ -351,6 +650,7 @@ describe('synthetic production-routed calendar diagnostic corpus', () => {
           items: [{ title: 'Google Calendar' }],
         },
       ],
+      sourceBacked: true,
     });
     expect(evaluateCalendarDiagnostic(fixture, actual)).toEqual([]);
     const partialCardWithFalseNoEvents = result(fixture.id, {
@@ -365,6 +665,7 @@ describe('synthetic production-routed calendar diagnostic corpus', () => {
           items: [{ title: 'Google Calendar' }],
         },
       ],
+      sourceBacked: true,
     });
     expect(evaluateCalendarDiagnostic(fixture, partialCardWithFalseNoEvents)).toContain(
       'coverage: prose overstates partial Google-calendar coverage',
@@ -434,6 +735,7 @@ describe('synthetic production-routed calendar diagnostic corpus', () => {
           ],
         },
       ],
+      sourceBacked: true,
     });
     expect(evaluateCalendarDiagnostic(fixture, good)).toEqual([]);
 
@@ -708,18 +1010,21 @@ describe('synthetic production-routed calendar diagnostic corpus', () => {
       answer:
         'The Planning session overlaps a reference hold; attendance on the hold is unconfirmed.',
       sections: [timedAgenda, confirmedUnknownOverlap],
+      sourceBacked: true,
     });
     expect(evaluateCalendarDiagnostic(fixture, good)).toEqual([]);
+    const backedSections = object(object(good.parts[0]).data).sections as unknown[];
+    const backedAgenda = backedSections.find((section) => object(section).type === 'agenda');
     const emptyOverlap = result(fixture.id, {
       answer: 'No overlap verified; attendance unknown.',
-      sections: [timedAgenda, { type: 'attention', title: 'No overlap verified', overlaps: [] }],
+      sections: [backedAgenda, { type: 'attention', title: 'No overlap verified', overlaps: [] }],
     });
     expect(evaluateCalendarDiagnostic(fixture, emptyOverlap)).toContain(
       'conflict: overlapping pair omitted or not tied to source rows',
     );
     const unrelatedOverlap = result(fixture.id, {
       sections: [
-        timedAgenda,
+        backedAgenda,
         {
           type: 'attention',
           title: 'Overlap with attendance unconfirmed',
@@ -738,7 +1043,7 @@ describe('synthetic production-routed calendar diagnostic corpus', () => {
     );
     const unrelatedHoldOverlap = result(fixture.id, {
       sections: [
-        timedAgenda,
+        backedAgenda,
         {
           type: 'attention',
           title: 'Overlap with attendance unconfirmed',
@@ -757,7 +1062,7 @@ describe('synthetic production-routed calendar diagnostic corpus', () => {
     );
     const contradictoryProseWithCorrectCard = result(fixture.id, {
       answer: 'You accepted both events.',
-      sections: [timedAgenda, confirmedUnknownOverlap],
+      sections: [backedAgenda, confirmedUnknownOverlap],
     });
     expect(evaluateCalendarDiagnostic(fixture, contradictoryProseWithCorrectCard)).toContain(
       'conflict: prose overstates unverified attendance as accepted',
@@ -778,6 +1083,7 @@ describe('synthetic production-routed calendar diagnostic corpus', () => {
               overlaps: [{ classification: 'personal_commitment_conflict' }],
             },
           ],
+          sourceBacked: true,
         }),
       ),
     ).toContain('conflict: prose overstates unverified attendance as accepted');
@@ -789,6 +1095,7 @@ describe('synthetic production-routed calendar diagnostic corpus', () => {
       args: { timeMin: '2026-11-01T07:00:00.000Z', timeMax: '2026-11-02T08:00:00.000Z' },
       answer: 'DST review and DST follow-up are on November 1.',
       sections: [{ type: 'agenda', items: [{ title: 'DST review' }, { title: 'DST follow-up' }] }],
+      sourceBacked: true,
     });
     expect(evaluateCalendarDiagnostic(fixture, actual)).toEqual([]);
     expect(
@@ -800,6 +1107,7 @@ describe('synthetic production-routed calendar diagnostic corpus', () => {
           sections: [
             { type: 'agenda', items: [{ title: 'DST review' }, { title: 'DST follow-up' }] },
           ],
+          sourceBacked: true,
         }),
       ),
     ).toContain('time: prose gives a contradictory November 1 local event time');

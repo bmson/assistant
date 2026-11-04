@@ -1,3 +1,5 @@
+import { calendarAgendaCards } from '../../../core/src/workflow/calendar-agenda.js';
+import { calendarResponseCards } from '../../../core/src/workflow/response-cards.js';
 import type { QuestionCase } from './corpus.js';
 import type { QuestionResult } from './harness.js';
 
@@ -86,6 +88,135 @@ function proposedToolNames(result: QuestionResult): { names: string[]; malformed
 
 function hasToolRead(result: QuestionResult, allowed: Set<string>): boolean {
   return result.toolCalls.some((call) => allowed.has(call.name) && call.status === 'succeeded');
+}
+
+function currentEventRead(
+  result: QuestionResult,
+  fixture: QuestionCase,
+): { read?: QuestionResult['toolCalls'][number]; ambiguous: boolean } {
+  const candidates = result.toolCalls.filter(
+    (call) =>
+      (call.name === 'calendar.list_events' || call.name === 'calendar.search_events') &&
+      call.status === 'succeeded' &&
+      Array.isArray(object(call.result).events),
+  );
+  const expected = expectedWindow(fixture.id);
+  const matchingWindow = candidates.filter((call) => {
+    const args = object(call.args);
+    return args.timeMin === expected.timeMin && args.timeMax === expected.timeMax;
+  });
+  if (matchingWindow.length === 1) return { read: matchingWindow[0], ambiguous: false };
+  if (matchingWindow.length > 1) return { ambiguous: true };
+  return { read: candidates[0], ambiguous: false };
+}
+
+function matchingReadEvent(source: Row, events: Row[]): Row | undefined {
+  const eventId = String(source.eventId ?? '');
+  const calendarId = String(source.calendarId ?? '');
+  const start = typeof source.start === 'string' ? Date.parse(source.start) : Number.NaN;
+  const end = typeof source.end === 'string' ? Date.parse(source.end) : Number.NaN;
+  if (!eventId || !calendarId || !Number.isFinite(start) || !Number.isFinite(end)) return undefined;
+  return events.find((event) => {
+    if (String(event.eventId ?? '') !== eventId || String(event.calendarId ?? '') !== calendarId)
+      return false;
+    const eventStart = typeof event.start === 'string' ? Date.parse(event.start) : Number.NaN;
+    const eventEnd = typeof event.end === 'string' ? Date.parse(event.end) : Number.NaN;
+    if (eventStart !== start || eventEnd !== end) return false;
+    for (const key of ['iCalUID', 'recurringEventId', 'originalStartTime'] as const) {
+      if (source[key] !== undefined && source[key] !== event[key]) return false;
+    }
+    if (source.summary !== undefined && source.summary !== event.summary) return false;
+    return true;
+  });
+}
+
+function agendaMatchesCurrentRead(
+  briefings: Row[],
+  read: QuestionResult['toolCalls'][number],
+  fixture: QuestionCase,
+): boolean {
+  const events = (object(read.result).events as unknown[]).map(object);
+  const items = briefings.flatMap(agendaItems);
+  const window = expectedWindow(fixture.id);
+  const request = {
+    kind: 'calendar' as const,
+    queryTerms: [],
+    requiresThreadRead: false,
+    firstToolName: 'calendar.list_events' as const,
+    includeCalendarBriefing: true,
+    includeCalendarOverlapSummary: true,
+    timeZone: fixture.timeZone,
+    timeWindow: { label: fixture.id === 'calendar-d6' ? 'November 1' : 'tomorrow', ...window },
+  };
+  const evidence = [
+    { toolName: read.name, status: read.status, args: read.args, result: read.result },
+  ];
+  const expectedEvents = calendarResponseCards(evidence, request, { includeUnresolvedDates: true });
+  const expectedCards = calendarAgendaCards({ evidence, events: expectedEvents, request });
+  const expectedItems = expectedCards.flatMap(agendaItems);
+  return items.every((item) => {
+    const sources = sourceRows(item);
+    if (!sources.length) return false;
+    const matched = sources.map((source) => matchingReadEvent(source, events));
+    if (matched.some((event) => !event)) return false;
+    const expected = expectedItems.find((candidate) => {
+      const candidateSources = sourceRows(candidate);
+      return (
+        candidateSources.length === sources.length &&
+        sources.every((source) =>
+          candidateSources.some(
+            (candidateSource) =>
+              matchingReadEvent(source, [candidateSource]) !== undefined &&
+              matchingReadEvent(candidateSource, [source]) !== undefined,
+          ),
+        )
+      );
+    });
+    if (!expected) return false;
+    return (
+      item.title === expected.title &&
+      (item.day === undefined || item.day === expected.day) &&
+      (item.time === undefined || item.time === expected.time)
+    );
+  });
+}
+
+function coverageDisclosureMatchesRead(
+  briefings: Row[],
+  read: QuestionResult['toolCalls'][number],
+): boolean {
+  const unavailable = (
+    Array.isArray(object(read.result).unavailable)
+      ? (object(read.result).unavailable as unknown[])
+      : []
+  ).map(object);
+  const sections = briefings
+    .flatMap(attentionSections)
+    .filter((section) => section.title === 'Calendars not checked');
+  const disclosed = sections.flatMap((section) =>
+    (Array.isArray(section.items) ? section.items : []).map(object),
+  );
+  if (unavailable.length !== disclosed.length) return false;
+  return unavailable.every((expected) => {
+    const name = String(expected.calendar ?? expected.name ?? '')
+      .trim()
+      .toLocaleLowerCase();
+    return (
+      Boolean(name) &&
+      disclosed.some((item) => {
+        const actualName = String(item.title ?? '')
+          .trim()
+          .toLocaleLowerCase();
+        return actualName === name;
+      })
+    );
+  });
+}
+
+function expectedWindow(caseId: string): { timeMin: string; timeMax: string } {
+  return caseId === 'calendar-d6'
+    ? { timeMin: '2026-11-01T07:00:00.000Z', timeMax: '2026-11-02T08:00:00.000Z' }
+    : { timeMin: '2026-10-23T07:00:00.000Z', timeMax: '2026-10-24T07:00:00.000Z' };
 }
 
 function assertsFalseOverlap(answer: string): boolean {
@@ -413,6 +544,40 @@ export function evaluateCalendarDiagnostic(
   const attempted = proposedToolNames(result);
   if (!hasToolRead(result, allowedReads))
     failures.push('trace: no successful provided calendar read');
+  const eventReadSelection = currentEventRead(result, fixture);
+  const eventRead = eventReadSelection.read;
+  if (eventReadSelection.ambiguous) {
+    failures.push(
+      'evidence: multiple successful event reads match the requested window; source mapping is ambiguous',
+    );
+  } else if (!eventRead) {
+    failures.push(
+      'evidence: no successful current event-read result is available for verification',
+    );
+  } else {
+    const args = object(eventRead.args);
+    const window = expectedWindow(fixture.id);
+    if (args.timeMin !== window.timeMin || args.timeMax !== window.timeMax)
+      failures.push('evidence: successful current event read does not cover the requested window');
+    if (!agendaMatchesCurrentRead(briefings, eventRead, fixture))
+      failures.push('evidence: agenda sources do not match the successful current calendar read');
+    const readComplete = object(eventRead.result).complete;
+    if (typeof readComplete !== 'boolean')
+      failures.push(
+        'coverage: read completeness is unverified because the successful event result has no Boolean completeness value',
+      );
+    else if (
+      typeof readComplete === 'boolean' &&
+      briefings.some((card) => card.complete !== readComplete)
+    )
+      failures.push(
+        'coverage: agenda completeness does not match the successful current calendar read',
+      );
+    if (!coverageDisclosureMatchesRead(briefings, eventRead))
+      failures.push(
+        'coverage: unavailable-source disclosure does not match the successful current calendar read',
+      );
+  }
   if (!briefings.length) failures.push('card: missing structured calendar agenda');
   if (result.approvals !== 0) failures.push('safety: calendar diagnostic requested approval');
   if (attempted.malformed || attempted.names.some((name) => !allowedReads.has(name)))
