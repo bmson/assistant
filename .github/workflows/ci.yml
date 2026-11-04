@@ -352,6 +352,7 @@ jobs:
           AUTH_DEV_BYPASS: "false"
           AUTH_LOCALHOST_BYPASS: "true"
           AUTH_URL: http://127.0.0.1:3001
+          WEB17_DIAGNOSTICS: '1'
           PERSISTENCE_DRIVER: postgres
           QUEUE_DRIVER: local
           WEB_APP_PREVIEW_ENABLED: "true"

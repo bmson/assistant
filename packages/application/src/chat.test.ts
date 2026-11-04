@@ -5,7 +5,12 @@ import type {
 } from '@assistant/persistence';
 import type { UIMessage } from 'ai';
 import { describe, expect, it, vi } from 'vitest';
-import { collapseRuntimeMessageDuplicates, hydrateChatApprovals } from './chat.js';
+import {
+  type ChatHistoryStage,
+  collapseRuntimeMessageDuplicates,
+  hydrateChatApprovals,
+  listChatHistory,
+} from './chat.js';
 
 type MessageRow = typeof messageTable.$inferSelect;
 
@@ -364,6 +369,100 @@ describe('hydrateChatApprovals', () => {
       { ...suggestion(4), status: 'expired' },
       { ...suggestion(5), status: 'missing' },
     ]);
+  });
+});
+
+describe('listChatHistory optional stage observation', () => {
+  function persistence(overrides: Partial<ApplicationChatPersistence> = {}) {
+    const agentId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    return {
+      kind: 'application-chat-persistence',
+      resolveAgent: vi.fn().mockResolvedValue({ id: agentId }),
+      listConversations: vi.fn().mockResolvedValue({
+        conversations: [{ id: 'conversation-1', agentId }],
+        hasMore: false,
+        nextCursor: null,
+      }),
+      countConversations: vi.fn((_agentId: string, archived: boolean) =>
+        Promise.resolve(archived ? 2 : 3),
+      ),
+      listActiveConversationIds: vi.fn().mockResolvedValue(['conversation-1']),
+      ...overrides,
+    } as unknown as ApplicationChatPersistence;
+  }
+
+  it('reports fixed phases and ignores observer errors without changing history results', async () => {
+    const store = persistence();
+    const phases: ChatHistoryStage[] = [];
+    const result = await listChatHistory(store, false, (phase) => {
+      phases.push(phase);
+      if (phase === 'conversations_started') throw new Error('private observer failure');
+    });
+
+    expect(result).toMatchObject({
+      conversations: [{ id: 'conversation-1' }],
+      archivedCount: 2,
+      totalInScope: 3,
+      activeConversationIds: ['conversation-1'],
+    });
+    expect(phases).toEqual(
+      expect.arrayContaining([
+        'agent_started',
+        'agent_completed',
+        'conversations_started',
+        'conversations_completed',
+        'archived_count_started',
+        'archived_count_completed',
+        'scope_count_started',
+        'scope_count_completed',
+        'active_ids_started',
+        'active_ids_completed',
+      ]),
+    );
+  });
+
+  it('preserves the original persistence error while reporting a fixed failed phase', async () => {
+    const failure = new Error('synthetic list failure');
+    const store = persistence({
+      listConversations: vi.fn().mockRejectedValue(failure),
+    });
+    const phases: ChatHistoryStage[] = [];
+
+    await expect(
+      listChatHistory(store, false, (phase) => {
+        phases.push(phase);
+      }),
+    ).rejects.toBe(failure);
+    expect(phases).toContain('conversations_failed');
+  });
+
+  it('preserves synchronous agent failures without an observer', async () => {
+    const failure = new Error('synthetic synchronous agent failure');
+    const store = persistence({
+      resolveAgent: vi.fn(() => {
+        throw failure;
+      }),
+    });
+
+    await expect(listChatHistory(store, false)).rejects.toBe(failure);
+    expect(store.resolveAgent).toHaveBeenCalledOnce();
+    expect(store.listConversations).not.toHaveBeenCalled();
+    expect(store.countConversations).not.toHaveBeenCalled();
+    expect(store.listActiveConversationIds).not.toHaveBeenCalled();
+  });
+
+  it('does not start sibling reads after a synchronous no-observer query failure', async () => {
+    const failure = new Error('synthetic synchronous list failure');
+    const store = persistence({
+      listConversations: vi.fn(() => {
+        throw failure;
+      }),
+    });
+
+    await expect(listChatHistory(store, false)).rejects.toBe(failure);
+    expect(store.listConversations).toHaveBeenCalledOnce();
+    expect(store.countConversations).not.toHaveBeenCalled();
+    expect(store.listActiveConversationIds).not.toHaveBeenCalled();
   });
 });
 

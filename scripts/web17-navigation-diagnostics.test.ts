@@ -176,6 +176,59 @@ describe('bounded WEB-17 navigation diagnostics', () => {
     });
   });
 
+  it('records a post-click-attempt non-prefetch temporal candidate by opaque nonce', () => {
+    const diagnostics = createWeb17NavigationDiagnostics(origin);
+    diagnostics.setFixtureChatPath(fixturePath);
+    diagnostics.setObserverAvailable(true);
+    const prefetchNonce = 'Abcdef0123456789_-pref0';
+    const clickNonce = 'Abcdef0123456789_-click';
+    expect(diagnostics.recordRscAttemptStarted(prefetchNonce, true)).toBe(true);
+    diagnostics.markClickAttempted();
+    expect(diagnostics.recordRscAttemptStarted(clickNonce, false)).toBe(true);
+    diagnostics.recordRscAttemptResponse(clickNonce, 200);
+
+    const snapshot = diagnostics.snapshot();
+    expect(snapshot.correlatedRscAttempts).toEqual([
+      {
+        nonce: prefetchNonce,
+        prefetch: true,
+        startedAfterClickAttempt: false,
+        finished: false,
+        failed: false,
+        responseStatus: null,
+      },
+      {
+        nonce: clickNonce,
+        prefetch: false,
+        startedAfterClickAttempt: true,
+        finished: false,
+        failed: false,
+        responseStatus: 'success',
+      },
+    ]);
+    expect(snapshot.selectedPostClickNonPrefetchCandidateNonce).toBe(clickNonce);
+    expect(projectWeb17NavigationDiagnostics(snapshot)).toEqual(snapshot);
+    expect(JSON.stringify(snapshot)).not.toContain('/chat/all');
+    expect(JSON.stringify(snapshot)).not.toContain('private-query');
+  });
+
+  it('bounds correlated RSC attempts and rejects malformed nonces', () => {
+    const diagnostics = createWeb17NavigationDiagnostics(origin);
+    diagnostics.setObserverAvailable(true);
+    expect(diagnostics.recordRscAttemptStarted('private-owner-id', false)).toBe(false);
+    for (let index = 0; index <= WEB17_NAVIGATION_DIAGNOSTIC_CAP; index++) {
+      const nonce = `Abcdef0123456789_-${String(index).padStart(4, '0')}`;
+      expect(diagnostics.recordRscAttemptStarted(nonce, index === 0)).toBe(
+        index < WEB17_NAVIGATION_DIAGNOSTIC_CAP,
+      );
+    }
+    const snapshot = diagnostics.snapshot();
+    expect(snapshot.correlatedRscAttempts).toHaveLength(WEB17_NAVIGATION_DIAGNOSTIC_CAP);
+    expect(snapshot.overflow).toBe(true);
+    expect(JSON.stringify(snapshot)).not.toContain('private-owner-id');
+    expect(projectWeb17NavigationDiagnostics(snapshot)).toEqual(snapshot);
+  });
+
   it('downgrades a previously observed commit to unknown if observer health is later lost', () => {
     const diagnostics = createWeb17NavigationDiagnostics(origin);
     diagnostics.setObserverAvailable(true);
@@ -250,7 +303,7 @@ describe('bounded WEB-17 navigation diagnostics', () => {
       },
       { ...snapshot, allChatsLinkCount: 0, allChatsLinkTargetMatches: true },
       { ...snapshot, observerAvailable: false },
-      { ...snapshot, eventCountsAreUncorrelatedObservations: false },
+      { ...snapshot, aggregateEventCountsAreUncorrelatedObservations: false },
     ];
     for (const candidate of invalid)
       expect(projectWeb17NavigationDiagnostics(candidate)).toBeNull();
