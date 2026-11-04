@@ -162,6 +162,10 @@ async function runFlightContinuation(
     modelFinalText?: string;
     compoundTripReadBatch?: boolean;
     priorTripToolFailures?: number;
+    partialReadMissingGmail?: boolean;
+    partialReadMissingCalendar?: boolean;
+    requestChecklist?: TaskState['requestChecklist'];
+    completedDraftChecklistControl?: boolean;
   } = {},
 ) {
   const rows: Array<Record<string, unknown>> = Array.from(
@@ -177,6 +181,19 @@ async function runFlightContinuation(
       fromCurrentTask: true,
     }),
   );
+  if (options.completedDraftChecklistControl)
+    rows.push({
+      id: 'completed-draft-evidence',
+      toolName: 'gmail.create_draft',
+      status: 'succeeded',
+      args: { threadId: 'completed-control-thread' },
+      result: {
+        draftId: 'completed-control-draft',
+        content: 'Completed checklist control',
+      },
+      step: 0,
+      fromCurrentTask: true,
+    });
   const checkpointReadBatchSizes: number[] = [];
   const checkpointReadBatchAfterDispatchCounts: number[] = [];
   const router = {
@@ -369,6 +386,25 @@ async function runFlightContinuation(
           calendarRosterComplete: options.missingCalendarRosterFlag ? undefined : true,
           unavailable: [],
           calendarsSearched: ['primary'],
+        };
+      } else if (toolName === 'calendar.search_events' && options.partialReadMissingGmail) {
+        result = {
+          events: [
+            {
+              eventId: 'synthetic-zendesk-meeting',
+              calendarId: 'work',
+              calendar: 'Work',
+              summary: 'Zendesk meeting',
+              start: '2026-10-10T17:00:00.000Z',
+              end: '2026-10-10T17:30:00.000Z',
+            },
+          ],
+          complete: true,
+          calendarRosterComplete: true,
+          calendarsSearched: ['Work'],
+          calendarsResolved: [{ id: 'work', name: 'Work' }],
+          calendarsSearchedIds: ['work'],
+          unavailable: [],
         };
       } else if (toolName === 'calendar.search_events') {
         result = {
@@ -661,11 +697,19 @@ async function runFlightContinuation(
     },
   );
   const toolDefs = vi.fn(() => [
-    { name: 'calendar.availability', description: 'fixture availability', inputSchema: {} },
-    { name: 'calendar.list_events', description: 'fixture calendar', inputSchema: {} },
-    { name: 'calendar.search_events', description: 'fixture calendar', inputSchema: {} },
-    { name: 'gmail.search', description: 'fixture Gmail search', inputSchema: {} },
-    { name: 'gmail.read_thread', description: 'fixture Gmail thread', inputSchema: {} },
+    ...(!options.partialReadMissingCalendar
+      ? [
+          { name: 'calendar.availability', description: 'fixture availability', inputSchema: {} },
+          { name: 'calendar.list_events', description: 'fixture calendar', inputSchema: {} },
+          { name: 'calendar.search_events', description: 'fixture calendar', inputSchema: {} },
+        ]
+      : []),
+    ...(!options.partialReadMissingGmail
+      ? [
+          { name: 'gmail.search', description: 'fixture Gmail search', inputSchema: {} },
+          { name: 'gmail.read_thread', description: 'fixture Gmail thread', inputSchema: {} },
+        ]
+      : []),
   ]);
   const deps = {
     db,
@@ -680,7 +724,11 @@ async function runFlightContinuation(
     untrustedContext: true,
     requestTimeZone: 'America/Los_Angeles',
     contextWindow: window,
-    ...(options.withRequestChecklist ? { requestChecklist: buildRequestChecklist(request) } : {}),
+    ...(options.requestChecklist !== undefined
+      ? { requestChecklist: options.requestChecklist }
+      : options.withRequestChecklist
+        ? { requestChecklist: buildRequestChecklist(request) }
+        : {}),
   });
   const task = {
     id: 'synthetic-flight-task',
@@ -735,6 +783,121 @@ async function runFlightContinuation(
 }
 
 describe('unsupported temporal requests through the actual executor step loop', () => {
+  it('preserves a checked calendar fact when the next requested source tool is unavailable', async () => {
+    const request =
+      'What time is the Zendesk meeting tomorrow on my calendar, and did I receive the invitation email?';
+    const { result, state, dispatch, router } = await runFlightContinuation(
+      [{ role: 'assistant', content: 'An earlier answer said the meeting starts at 3:00 PM.' }],
+      request,
+      {
+        partialReadMissingGmail: true,
+        completedDraftChecklistControl: true,
+        requestChecklist: {
+          version: 1,
+          request,
+          items: [
+            {
+              id: 'calendar-read',
+              label: 'Check the Zendesk meeting on my calendar',
+              kind: 'lookup',
+              targetTerms: ['zendesk', 'meeting'],
+              status: 'pending',
+              evidence: [],
+            },
+            {
+              id: 'invitation-email',
+              label: 'Check the invitation email',
+              kind: 'lookup',
+              targetTerms: ['invitation'],
+              status: 'pending',
+              evidence: [],
+            },
+            {
+              id: 'unrelated-draft',
+              label: 'Draft a reply to the invitation',
+              kind: 'draft',
+              targetTerms: ['reply'],
+              status: 'pending',
+              evidence: [],
+            },
+            {
+              id: 'completed-action',
+              label: 'Completed checklist control',
+              kind: 'draft',
+              targetTerms: ['completed', 'checklist', 'control'],
+              status: 'pending',
+              evidence: [],
+            },
+          ],
+          savedCards: [],
+        },
+      },
+    );
+
+    expect(result.outcome).toBe('needs_attention');
+    const answer = state.pendingFinal?.text ?? '';
+    const primaryAgenda = state.pendingFinal?.responseCards?.find(
+      (card) => card.kind === 'briefing' && card.presentation === 'calendar-agenda',
+    );
+    if (primaryAgenda) {
+      const attentionSections = (
+        Array.isArray(primaryAgenda.sections) ? primaryAgenda.sections : []
+      ).filter((section) => section && typeof section === 'object' && section.type === 'attention');
+      expect(JSON.stringify(attentionSections)).toMatch(
+        /email.*(?:not available|not checked|couldn't check)/i,
+      );
+    }
+    expect(answer).toMatch(/Zendesk meeting/i);
+    expect(answer).toMatch(/\*\*10:00–10:30\*\*/i);
+    expect(answer).toMatch(/email|Gmail/i);
+    expect(answer).toMatch(/unavailable|not checked|could not check|isn't available/i);
+    expect(answer).toMatch(
+      /haven't completed the other requested work: Draft a reply to the invitation/i,
+    );
+    expect(answer).not.toMatch(/Completed checklist control/i);
+    expect(answer).not.toMatch(/3:00 PM/i);
+    expect(answer).not.toMatch(/nothing real to tell|ask me again|re-run/i);
+    expect(answer).not.toMatch(/gmail\.search|calendar\.search_events/i);
+    expect(result.outcome).toBe('needs_attention');
+    expect(dispatch.mock.calls.map(([call]) => call.toolName)).toEqual(['calendar.search_events']);
+    expect(router.step).not.toHaveBeenCalled();
+    expect(state.requestChecklist?.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: 'lookup', status: 'completed' }),
+        expect.objectContaining({ id: 'invitation-email', kind: 'lookup', status: 'pending' }),
+        expect.objectContaining({ id: 'unrelated-draft', kind: 'draft', status: 'pending' }),
+        expect.objectContaining({ id: 'completed-action', kind: 'draft', status: 'completed' }),
+      ]),
+    );
+  });
+
+  it('does not invent source facts when the first required source is unavailable', async () => {
+    const request =
+      'What time is the Zendesk meeting tomorrow on my calendar, and did I receive the invitation email?';
+    const { result, state, dispatch, router } = await runFlightContinuation([], request, {
+      partialReadMissingCalendar: true,
+    });
+
+    const answer = state.pendingFinal?.text ?? '';
+    expect(result.outcome).toBe('needs_attention');
+    expect(answer).toMatch(/calendar/i);
+    expect(answer).toMatch(/isn't available/i);
+    expect(answer).not.toMatch(/Zendesk meeting|\b10:00\b/i);
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(router.step).not.toHaveBeenCalled();
+  });
+
+  it('keeps an explicit email opt-out outside the missing-mail path', async () => {
+    const request = 'Do not search my email. What meetings do I have on my calendar tomorrow?';
+    const { result, state, dispatch } = await runFlightContinuation([], request, {
+      partialReadMissingGmail: true,
+    });
+
+    expect(['done', 'needs_attention']).toContain(result.outcome);
+    expect(dispatch.mock.calls.map(([call]) => call.toolName)).toEqual(['calendar.list_events']);
+    expect(state.pendingFinal?.text).not.toMatch(/couldn't check your email/i);
+  });
+
   it('keeps a bounded review-only focus plan on calendar evidence when mail contains an unrelated alert', async () => {
     const request =
       'Review the next three working days for two 60-minute focus blocks with 15-minute buffers around meetings. Present the review only; do not change anything.';

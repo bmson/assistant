@@ -480,20 +480,51 @@ function personalReadNeedsAttention(
   );
 }
 
-function readRoutingFailure(request: PersonalReadRequest, toolName: string): string {
-  const source =
-    request.kind === 'drive'
-      ? 'Drive'
-      : request.kind === 'memory'
-        ? 'durable memory'
-        : request.kind === 'knowledge_graph'
-          ? 'the knowledge graph'
-          : request.kind === 'calendar'
-            ? 'the calendar'
-            : request.kind === 'email'
-              ? 'Gmail'
-              : 'the calendar and Gmail';
-  return `I couldn't get into ${source} just now — ${toolName} didn't come back, so I have nothing real to tell you yet. Ask me again in a minute and I'll re-run it.`;
+function readSourceLabel(toolName: string): string {
+  if (toolName.startsWith('calendar.')) return 'your calendar';
+  if (toolName.startsWith('gmail.')) return 'your email';
+  if (toolName.startsWith('conversations.')) return 'your earlier conversations';
+  if (toolName.startsWith('memory.')) return 'your saved memory';
+  if (toolName.startsWith('drive.')) return 'Drive';
+  return 'that source';
+}
+
+function unfinishedNonReadChecklistItems(state: TaskState): string[] {
+  return (state.requestChecklist?.items ?? [])
+    .filter(
+      (item) =>
+        item.kind !== 'lookup' &&
+        (item.status === 'pending' ||
+          item.status === 'blocked' ||
+          item.status === 'awaiting_approval'),
+    )
+    .map((item) => item.label);
+}
+
+function readRoutingLimitationResponse(
+  request: PersonalReadRequest,
+  toolName: string,
+  evidence: ReadToolEvidence[],
+  limitation: 'unavailable' | 'unresolved-input',
+  otherUnfinishedWork: string[],
+) {
+  const checked = enforcePersonalReadResponse(
+    request,
+    evidence.map((row) => ({ ...row, result: row.result })),
+  );
+  const source = readSourceLabel(toolName);
+  const note =
+    limitation === 'unavailable'
+      ? `I couldn't check ${source} because that lookup isn't available in this session.`
+      : `I couldn't start a search in ${source} because the needed search details weren't available for this request.`;
+  const otherWork = otherUnfinishedWork.length
+    ? `I haven't completed the other requested work: ${otherUnfinishedWork.join('; ')}.`
+    : '';
+  return {
+    ...checked,
+    text: [checked.text.trim(), note, otherWork].filter(Boolean).join('\n\n'),
+    blocked: true,
+  };
 }
 
 /** Preserve the model's progress note when its turn also contains tool calls. */
@@ -3283,13 +3314,23 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       });
     }
     if (boundedForcedReadTool && !toolDefs.some((tool) => tool.name === boundedForcedReadTool)) {
-      const text = readRoutingFailure(readRequest as PersonalReadRequest, boundedForcedReadTool);
-      rc.window.push({ role: 'assistant', content: text } as ModelMessage);
-      return stageFinalResponse(deps, lease, state, rc.window, {
-        text,
-        progress: text.slice(0, 200),
-        terminalStatus: 'failed',
-        outcome: 'failed',
+      const checked = readRoutingLimitationResponse(
+        readRequest as PersonalReadRequest,
+        boundedForcedReadTool,
+        readToolEvidence,
+        'unavailable',
+        unfinishedNonReadChecklistItems(state),
+      );
+      rc.window.push({ role: 'assistant', content: checked.text } as ModelMessage);
+      return stageReadFinal({
+        text: checked.text,
+        progress: checked.text.slice(0, 200),
+        terminalStatus: 'needs_attention',
+        outcome: 'needs_attention',
+        contractBlocked: true,
+        contractUnsupportedCount: checked.unsupported.length,
+        contractNotice: true,
+        preserveCheckedReadResponse: true,
       });
     }
     if (
@@ -3431,13 +3472,23 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     } else if (boundedForcedReadTool && readRequest) {
       const input = buildReadToolInput(readRequest, boundedForcedReadTool, readToolEvidence);
       if (!input) {
-        const text = readRoutingFailure(readRequest, boundedForcedReadTool);
-        rc.window.push({ role: 'assistant', content: text } as ModelMessage);
-        return stageFinalResponse(deps, lease, state, rc.window, {
-          text,
-          progress: text.slice(0, 200),
-          terminalStatus: 'failed',
-          outcome: 'failed',
+        const checked = readRoutingLimitationResponse(
+          readRequest,
+          boundedForcedReadTool,
+          readToolEvidence,
+          'unresolved-input',
+          unfinishedNonReadChecklistItems(state),
+        );
+        rc.window.push({ role: 'assistant', content: checked.text } as ModelMessage);
+        return stageReadFinal({
+          text: checked.text,
+          progress: checked.text.slice(0, 200),
+          terminalStatus: 'needs_attention',
+          outcome: 'needs_attention',
+          contractBlocked: true,
+          contractUnsupportedCount: checked.unsupported.length,
+          contractNotice: true,
+          preserveCheckedReadResponse: true,
         });
       }
       const readInputs =
