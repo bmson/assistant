@@ -4268,6 +4268,7 @@ private actor AppModelCardFormDraftMemoryStorage: CardFormDraftStorage {
     func listedPartitions() -> [Partition] { listRequests }
     func clearedPartitions() -> [Partition] { clearRequests }
     func scopes() -> [CardFormScope] { Array(rows.keys) }
+    func draft(scope: CardFormScope) -> CardFormDraft? { rows[scope] }
 }
 
 @MainActor
@@ -5830,27 +5831,47 @@ extension APIClientRetryTests {
         XCTAssertFalse(model.canAdmitOrdinarySend, diagnostics())
         XCTAssertTrue(model.toolActivity.isEmpty,
                       "The second poll has not been released, so it must not inherit first-turn progress. \(diagnostics())")
-        let sends = StubURLProtocol.bodies.enumerated().compactMap { index, body -> [String: Any]? in
-            guard StubURLProtocol.urls[index].path == chatPath else { return nil }
-            return try? JSONSerialization.jsonObject(with: body) as? [String: Any]
+        let chatRequests = StubURLProtocol.requests.filter {
+            $0.0 == "POST" && $0.1.path == chatPath
+        }
+        XCTAssertEqual(chatRequests.count, 2, diagnostics())
+        let sends: [[String: Any]] = try chatRequests.map { request in
+            try XCTUnwrap(JSONSerialization.jsonObject(with: request.3) as? [String: Any],
+                          "Each captured chat POST must decode as an object. \(diagnostics())")
         }
         XCTAssertEqual(sends.count, 2, diagnostics())
-        XCTAssertNotEqual(firstUserMessage.id, secondUserMessage.id, "Each admitted turn needs its own USER-message identity.")
-        func submittedUserText(_ body: [String: Any], messageID: String) -> String? {
-            guard let messages = body["messages"] as? [[String: Any]] else { return nil }
-            let matches = messages.filter {
-                $0["id"] as? String == messageID && $0["role"] as? String == "user"
-            }
-            guard matches.count == 1,
-                  let parts = matches[0]["parts"] as? [[String: Any]],
-                  parts.count == 1,
-                  parts[0]["type"] as? String == "text" else { return nil }
-            return parts[0]["text"] as? String
+        XCTAssertNotEqual(firstUserMessage.id, secondUserMessage.id, "Each admitted turn needs its own optimistic USER row.")
+
+        func submittedUserMessage(_ body: [String: Any]) throws -> (id: String, text: String) {
+            let messages = try XCTUnwrap(body["messages"] as? [[String: Any]],
+                                         "The captured request must retain its messages array. \(diagnostics())")
+            XCTAssertEqual(messages.count, 1,
+                           "Each chat POST must encode exactly its own turn, without flattening or dropping history implicitly.")
+            let message = try XCTUnwrap(messages.first, "Expected one encoded message. \(diagnostics())")
+            let messageID = try XCTUnwrap(message["id"] as? String, "Wire message ID must be present.")
+            XCTAssertNotNil(UUID(uuidString: messageID), "Wire message ID must be a UUID.")
+            XCTAssertEqual(message["role"] as? String, "user")
+            let parts = try XCTUnwrap(message["parts"] as? [[String: Any]], "Wire message parts must be present.")
+            XCTAssertEqual(parts.count, 1, "Each fixture turn is one exact text part.")
+            let part = try XCTUnwrap(parts.first, "Expected one text part.")
+            XCTAssertEqual(part["type"] as? String, "text")
+            let text = try XCTUnwrap(part["text"] as? String, "Wire text must be present.")
+            return (messageID, text)
         }
-        XCTAssertEqual(submittedUserText(sends[0], messageID: firstUserMessage.id), "Fixture turn 0",
-                       "First POST must include its exact USER-message identity/text. \(diagnostics())")
-        XCTAssertEqual(submittedUserText(sends[1], messageID: secondUserMessage.id), "Fixture turn 1",
-                       "Second POST must include its exact USER-message identity/text. \(diagnostics())")
+        let firstWireMessage = try submittedUserMessage(sends[0])
+        let secondWireMessage = try submittedUserMessage(sends[1])
+        XCTAssertNotEqual(firstWireMessage.id, secondWireMessage.id,
+                          "Each admitted POST needs its own actual client wire-message UUID.")
+        XCTAssertEqual(firstWireMessage.text, "Fixture turn 0", "First POST must preserve its exact turn text. \(diagnostics())")
+        XCTAssertEqual(secondWireMessage.text, "Fixture turn 1", "Second POST must preserve its exact turn text. \(diagnostics())")
+        let firstOperationID = try XCTUnwrap(sends[0]["clientOperationId"] as? String)
+        let secondOperationID = try XCTUnwrap(sends[1]["clientOperationId"] as? String)
+        XCTAssertNotEqual(firstOperationID, secondOperationID,
+                          "Each admitted turn must retain a distinct operation identity. \(diagnostics())")
+        let conversationID = try XCTUnwrap(sends[0]["conversationId"] as? String)
+        XCTAssertEqual(sends[1]["conversationId"] as? String, conversationID,
+                       "Both ordered turns must remain in the same captured conversation. \(diagnostics())")
+        XCTAssertEqual(conversationID, model.conversationId, "Wire conversation must match the active model scope. \(diagnostics())")
 
         StubURLProtocol.releaseHeldResponse(path: path)
         let secondProgressAndFinalHeld = try await waitForReplyPollFixture(seconds: 1) {
@@ -6072,7 +6093,7 @@ extension APIClientRetryTests {
         )
         StubURLProtocol.prime([], paths: [
             "/api/mobile/v1/chat/forms": [
-                .success(status: 202, body: Data("{\"ok\":true,\"taskId\":\"\(taskID)\",\"messageId\":\"\(messageID)\",\"status\":\"working\",\"messageCursor\":\"form-cursor\",\"queueGeneration\":1}".utf8)),
+                .success(status: 202, body: Data("{\"ok\":true,\"taskId\":\"\(taskID)\",\"messageId\":\"\(messageID)\",\"status\":\"running\",\"messageCursor\":\"form-cursor\",\"queueGeneration\":1}".utf8)),
             ],
             "/api/mobile/v1/chat/status": [
                 .success(status: 200, body: try replyProgressFixture()),
@@ -6107,6 +6128,32 @@ extension APIClientRetryTests {
         )
         model.attachCardFormToComposer(scope: scope, form: form)
         model.sendCardForm("Reviewed form answer", onFrozen: {})
+
+        let admissionDeadline = ContinuousClock.now.advanced(by: .seconds(3))
+        var persistedAdmission = await fixtureStorage.draft(scope: scope)
+        while persistedAdmission?.phase != .accepted(CardFormAdmissionReceipt(
+            taskId: taskID, messageId: messageID, taskStatus: "running", queueGeneration: 1,
+            created: false, dispatch: nil
+        )), ContinuousClock.now < admissionDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+            persistedAdmission = await fixtureStorage.draft(scope: scope)
+        }
+        try requireReplyPollFixtureStage(
+            persistedAdmission?.phase == .accepted(CardFormAdmissionReceipt(
+                taskId: taskID, messageId: messageID, taskStatus: "running", queueGeneration: 1,
+                created: false, dispatch: nil
+            )),
+            "The 202 response must be a recognized accepted receipt persisted before poll settlement."
+        )
+        let frozenSubmission = try XCTUnwrap(persistedAdmission?.frozenSubmission,
+                                             "Accepted form receipt must be tied to its frozen operation.")
+        XCTAssertNotNil(UUID(uuidString: frozenSubmission.operationId), "Frozen form operation ID must be valid.")
+        XCTAssertEqual(frozenSubmission.ownerMessageText, "Reviewed form answer")
+        let formPosts = StubURLProtocol.requests.filter { $0.0 == "POST" && $0.1.path == "/api/mobile/v1/chat/forms" }
+        XCTAssertEqual(formPosts.count, 1, "The accepted form operation must send exactly one POST before polling.")
+        let formPost = try XCTUnwrap(formPosts.first, "Expected the one captured form POST.")
+        let postedSubmission = try JSONDecoder().decode(CardFormSubmission.self, from: formPost.3)
+        XCTAssertEqual(postedSubmission, frozenSubmission, "The single form POST must match the persisted frozen operation.")
 
         let settlementHeld = try await waitForReplyPollFixture {
             surfaces.finishCount == 1
