@@ -7,11 +7,13 @@ final class NativeMemoryCorrectionRecoveryTests: XCTestCase {
     func testEncryptedRoundTripUsesFullServerPathAndExactOperationTuple() async throws {
         let files = RecoveryMemoryFiles()
         let vault = RecoveryMemoryVault()
-        let store = try makeStore(files: files, vault: vault)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try makeStore(files: files, vault: vault, root: root)
         let record = fixture()
         try await store.saveBeforeDispatch(record)
 
-        let reopened = try makeStore(files: files, vault: vault)
+        let reopened = try makeStore(files: files, vault: vault, root: root)
         let recovered = try await reopened.load(serverIdentity: record.serverIdentity,
                                                 target: record.target,
                                                 operationID: record.operation.operationID)
