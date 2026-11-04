@@ -4,6 +4,13 @@ import { repoRoot } from '@assistant/config';
 import { describe, expect, it } from 'vitest';
 import { assistantModuleMetas } from './registry.js';
 
+function parseModuleRows(text: string) {
+  return [...text.matchAll(/^\|[ \t]*`([a-z]+)`[ \t]*\|([^\r\n]+?)\|[ \t]*$/gm)].map((match) => ({
+    name: match[1] as string,
+    cells: (match[2] as string).split('|').map((cell) => cell.trim()),
+  }));
+}
+
 /**
  * docs/modules.md carries a hand-maintained module table. Full generation is
  * blocked (the "Required settings" column reflects each readiness predicate,
@@ -15,10 +22,30 @@ import { assistantModuleMetas } from './registry.js';
 describe('docs/modules.md parity', () => {
   const doc = readFileSync(path.join(repoRoot, 'docs/modules.md'), 'utf8');
   // Table rows look like: | `google` | ... | `KEY_A`, `KEY_B` | ... |
-  const rows = [...doc.matchAll(/^\| `([a-z]+)` \|(.+)\|$/gm)].map((match) => ({
-    name: match[1] as string,
-    cells: (match[2] as string).split('|').map((cell) => cell.trim()),
-  }));
+  const rows = parseModuleRows(doc);
+
+  it('parses compact and horizontally padded rows without joining incomplete lines', () => {
+    expect(
+      parseModuleRows(
+        [
+          '|`browser`| Planned web interaction | `PROFILE_ENC_KEY` | local |',
+          '| `calendar`   | Read-only calendar | `GOOGLE_TOKEN` | none |',
+          '| `split`',
+          '  | must not be joined across lines | `IGNORED_KEY` | none |',
+          '| `truncated` | missing final separator',
+        ].join('\n'),
+      ),
+    ).toEqual([
+      {
+        name: 'browser',
+        cells: ['Planned web interaction', '`PROFILE_ENC_KEY`', 'local'],
+      },
+      {
+        name: 'calendar',
+        cells: ['Read-only calendar', '`GOOGLE_TOKEN`', 'none'],
+      },
+    ]);
+  });
 
   it('has exactly one row per module, in registry order', () => {
     expect(rows.map((row) => row.name)).toEqual(assistantModuleMetas.map((meta) => meta.name));
