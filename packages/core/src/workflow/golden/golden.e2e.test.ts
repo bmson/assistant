@@ -2360,10 +2360,14 @@ describe('golden tasks', () => {
     });
     createdTaskIds.push(result.taskId);
 
-    expect(result.status, result.finalText).toBe('failed');
-    expect(result.finalText).toContain('Not completed: Find my hotel reservation');
+    expect(result.status, result.finalText).toBe('needs_attention');
+    expect(result.finalText).toMatch(
+      /couldn't check your calendar.*lookup isn't available in this session/i,
+    );
     expect(result.finalText).not.toContain('found the hotel reservation');
     expect(result.finalText).not.toContain('reminder was created');
+    expect(result.finalText).not.toMatch(/nothing real to tell|ask me again|re-run/i);
+    expect(result.finalText).not.toMatch(/calendar\.search_events|gmail\.search/i);
     expect(reminderExecutions).toBe(0);
     expect(result.toolNames).not.toContain('calendar.search_events');
   });
