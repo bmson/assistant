@@ -94,6 +94,76 @@
 		B13A99000000000000000003 /* MemoryCorrectionPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C13A99000000000000000003 /* MemoryCorrectionPresentationTests.swift */; };
 		B13A99000000000000000004 /* Models/NativeMemoryCorrectionRecovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = C13A99000000000000000004 /* Models/NativeMemoryCorrectionRecovery.swift */; };
 		B13A99000000000000000005 /* NativeMemoryCorrectionRecoveryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C13A99000000000000000005 /* NativeMemoryCorrectionRecoveryTests.swift */; };
+		B10000000000000000000001 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000002 /* AppModel.swift */; };
+		B10000000000000000000002 /* Views/PhoneCalendarsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000B4 /* Views/PhoneCalendarsView.swift */; };
+		B10000000000000000000003 /* System/PhoneCalendarStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000B3 /* System/PhoneCalendarStore.swift */; };
+		B10000000000000000000004 /* System/PhoneCalendarSharingCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000C3 /* System/PhoneCalendarSharingCoordinator.swift */; };
+		B10000000000000000000005 /* Design/AssistantTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000003 /* Design/AssistantTheme.swift */; };
+		B10000000000000000000006 /* Models/APIModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000004 /* Models/APIModels.swift */; };
+		B10000000000000000000007 /* Models/PhoneCalendarSharing.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000C2 /* Models/PhoneCalendarSharing.swift */; };
+		B10000000000000000000008 /* OptimisticEdits.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000BC /* OptimisticEdits.swift */; };
+		B10000000000000000000009 /* Models/PollingPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000055 /* Models/PollingPolicy.swift */; };
+		B1000000000000000000000A /* Models/ConversationDrafts.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000A1 /* Models/ConversationDrafts.swift */; };
+		B1000000000000000000000B /* CardFormDrafts.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000A5 /* CardFormDrafts.swift */; };
+		B1000000000000000000000C /* EncryptedCardFormDraftStorage.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000A4 /* EncryptedCardFormDraftStorage.swift */; };
+		B1000000000000000000000D /* CardFormMobileSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000A8 /* CardFormMobileSession.swift */; };
+		B1000000000000000000000E /* NativeCardFormParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000A9 /* NativeCardFormParser.swift */; };
+		B1000000000000000000000F /* NativeCardFormView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000B1 /* NativeCardFormView.swift */; };
+		B10000000000000000000010 /* SecurityReviewSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000B2 /* SecurityReviewSection.swift */; };
+		B10000000000000000000011 /* Components/MermaidDiagramView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000056 /* Components/MermaidDiagramView.swift */; };
+		B10000000000000000000012 /* Networking/KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000005 /* Networking/KeychainStore.swift */; };
+		B10000000000000000000013 /* Networking/APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000006 /* Networking/APIClient.swift */; };
+		B10000000000000000000014 /* Components/CardActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000095 /* Components/CardActions.swift */; };
+		B10000000000000000000015 /* System/AssistantActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000014 /* System/AssistantActivityAttributes.swift */; };
+		B10000000000000000000016 /* System/LiveActivityManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000015 /* System/LiveActivityManager.swift */; };
+		B10000000000000000000017 /* System/NotificationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000016 /* System/NotificationManager.swift */; };
+		B10000000000000000000018 /* System/LocationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000051 /* System/LocationManager.swift */; };
+		B10000000000000000000019 /* System/RenderMemo.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000086 /* System/RenderMemo.swift */; };
+		B1000000000000000000001A /* Components/ActivityCrown.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000022 /* Components/ActivityCrown.swift */; };
+		B1000000000000000000001B /* Components/ChatDashboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000024 /* Components/ChatDashboard.swift */; };
+		B1000000000000000000001C /* Components/StatusPill.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000008 /* Components/StatusPill.swift */; };
+		B1000000000000000000001D /* Components/MessageBubble.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000009 /* Components/MessageBubble.swift */; };
+		B1000000000000000000001E /* Views/RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000000A /* Views/RootView.swift */; };
+		B1000000000000000000001F /* Views/SituationPacksView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000070 /* Views/SituationPacksView.swift */; };
+		B10000000000000000000020 /* Views/ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000000B /* Views/ChatView.swift */; };
+		B10000000000000000000021 /* Views/ActivityView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000000C /* Views/ActivityView.swift */; };
+		B10000000000000000000022 /* Views/GoalsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000000D /* Views/GoalsView.swift */; };
+		B10000000000000000000023 /* Views/ApprovalsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000000E /* Views/ApprovalsView.swift */; };
+		B10000000000000000000024 /* Views/MoreView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000000F /* Views/MoreView.swift */; };
+		B10000000000000000000025 /* Views/ConnectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000010 /* Views/ConnectionView.swift */; };
+		B10000000000000000000026 /* Views/WorkspaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000023 /* Views/WorkspaceView.swift */; };
+		B10000000000000000000027 /* Views/MemoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000025 /* Views/MemoryView.swift */; };
+		B10000000000000000000028 /* Views/MemoryCorrectionReview.swift in Sources */ = {isa = PBXBuildFile; fileRef = C13A99000000000000000002 /* Views/MemoryCorrectionReview.swift */; };
+		B10000000000000000000029 /* Models/MemoryCorrectionPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = C13A99000000000000000001 /* Models/MemoryCorrectionPresentation.swift */; };
+		B1000000000000000000002A /* Models/NativeMemoryCorrectionRecovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = C13A99000000000000000004 /* Models/NativeMemoryCorrectionRecovery.swift */; };
+		B1000000000000000000002B /* Views/MemoryDataView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000076 /* Views/MemoryDataView.swift */; };
+		B1000000000000000000002C /* Views/CommitmentsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000078 /* Views/CommitmentsView.swift */; };
+		B1000000000000000000002D /* Views/MemoryLibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000077 /* Views/MemoryLibraryView.swift */; };
+		B1000000000000000000002E /* Views/KnowledgeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000054 /* Views/KnowledgeView.swift */; };
+		B1000000000000000000002F /* Views/PeopleConnectionsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000072 /* Views/PeopleConnectionsView.swift */; };
+		B10000000000000000000030 /* Views/RelationshipGraphScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000075 /* Views/RelationshipGraphScreen.swift */; };
+		B10000000000000000000031 /* Views/RelationshipGraphCanvas.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000074 /* Views/RelationshipGraphCanvas.swift */; };
+		B10000000000000000000032 /* Models/RelationshipGraph.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000073 /* Models/RelationshipGraph.swift */; };
+		B10000000000000000000033 /* Views/PeopleView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000059 /* Views/PeopleView.swift */; };
+		B10000000000000000000034 /* Views/TalkView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000084 /* Views/TalkView.swift */; };
+		B10000000000000000000035 /* Views/AIProvidersView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000008C /* Views/AIProvidersView.swift */; };
+		B10000000000000000000036 /* Views/CallsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000008D /* Views/CallsView.swift */; };
+		B10000000000000000000037 /* System/SpeechListener.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000083 /* System/SpeechListener.swift */; };
+		B10000000000000000000038 /* System/SpeechPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000081 /* System/SpeechPlayer.swift */; };
+		B10000000000000000000039 /* Components/SpeakableText.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000080 /* Components/SpeakableText.swift */; };
+		B1000000000000000000003A /* Components/ParagraphReflow.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000088 /* Components/ParagraphReflow.swift */; };
+		B1000000000000000000003B /* Components/BriefingCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000089 /* Components/BriefingCardView.swift */; };
+		B1000000000000000000003C /* Components/ScoreboardCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000008A /* Components/ScoreboardCardView.swift */; };
+		B1000000000000000000003D /* Components/GeneratedCardBlocks.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000008E /* Components/GeneratedCardBlocks.swift */; };
+		B1000000000000000000003E /* Components/ApprovalRequestHeader.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000AB /* Components/ApprovalRequestHeader.swift */; };
+		B1000000000000000000003F /* Components/GeneratedCardCapabilityManifest.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000AA /* Components/GeneratedCardCapabilityManifest.swift */; };
+		B10000000000000000000040 /* Components/RouteCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0000000000000000000008B /* Components/RouteCardView.swift */; };
+		B10000000000000000000041 /* FixtureApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10000000000000000000001 /* FixtureApp.swift */; };
+		B10000000000000000000042 /* FixtureTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10000000000000000000002 /* FixtureTransport.swift */; };
+		B10000000000000000000043 /* MobileControlsUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10000000000000000000003 /* MobileControlsUITests.swift */; };
+		B10000000000000000000044 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000011 /* Assets.xcassets */; };
+		B10000000000000000000045 /* Resources/mermaid.min.js in Resources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000057 /* Resources/mermaid.min.js */; };
+		B10000000000000000000046 /* Resources/mermaid-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000058 /* Resources/mermaid-LICENSE.txt */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -110,6 +180,13 @@
 			proxyType = 1;
 			remoteGlobalIDString = A00000000000000000000030;
 			remoteInfo = AssistantActivityExtension;
+		};
+		F10000000000000000000001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A00000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A10000000000000000000010;
+			remoteInfo = AssistantUITestHost;
 		};
 /* End PBXContainerItemProxy section */
 
@@ -219,6 +296,11 @@
 		C13A99000000000000000003 /* MemoryCorrectionPresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryCorrectionPresentationTests.swift; sourceTree = "<group>"; };
 		C13A99000000000000000004 /* Models/NativeMemoryCorrectionRecovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models/NativeMemoryCorrectionRecovery.swift; sourceTree = "<group>"; };
 		C13A99000000000000000005 /* NativeMemoryCorrectionRecoveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeMemoryCorrectionRecoveryTests.swift; sourceTree = "<group>"; };
+		C10000000000000000000001 /* FixtureApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FixtureApp.swift; sourceTree = "<group>"; };
+		C10000000000000000000002 /* FixtureTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FixtureTransport.swift; sourceTree = "<group>"; };
+		C10000000000000000000003 /* MobileControlsUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileControlsUITests.swift; sourceTree = "<group>"; };
+		C10000000000000000000013 /* AssistantUITestHost.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AssistantUITestHost.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		C10000000000000000000021 /* AssistantUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AssistantUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -243,6 +325,20 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A10000000000000000000013 /* AssistantUITestHost Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A10000000000000000000023 /* AssistantUITests Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -252,6 +348,8 @@
 				D00000000000000000000001 /* Assistant */,
 				D00000000000000000000002 /* AssistantTests */,
 				D00000000000000000000003 /* AssistantActivityExtension */,
+				D10000000000000000000001 /* AssistantUITestHost */,
+				D10000000000000000000002 /* AssistantUITests */,
 				A00000000000000000000003 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -262,6 +360,8 @@
 				C00000000000000000000013 /* Assistant.app */,
 				C00000000000000000000019 /* AssistantActivityExtension.appex */,
 				C00000000000000000000021 /* AssistantTests.xctest */,
+				C10000000000000000000013 /* AssistantUITestHost.app */,
+				C10000000000000000000021 /* AssistantUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -375,6 +475,23 @@
 			path = AssistantActivityExtension;
 			sourceTree = "<group>";
 		};
+		D10000000000000000000001 /* AssistantUITestHost */ = {
+			isa = PBXGroup;
+			children = (
+				C10000000000000000000001 /* FixtureApp.swift */,
+				C10000000000000000000002 /* FixtureTransport.swift */,
+			);
+			path = AssistantUITestHost;
+			sourceTree = "<group>";
+		};
+		D10000000000000000000002 /* AssistantUITests */ = {
+			isa = PBXGroup;
+			children = (
+				C10000000000000000000003 /* MobileControlsUITests.swift */,
+			);
+			path = AssistantUITests;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -432,6 +549,40 @@
 			productReference = C00000000000000000000019 /* AssistantActivityExtension.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
+		A10000000000000000000010 /* AssistantUITestHost */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = EA1000000000000000000010 /* Build configuration list for PBXNativeTarget "AssistantUITestHost" */;
+			buildPhases = (
+				A10000000000000000000012 /* Sources */,
+				A10000000000000000000013 /* Frameworks */,
+				A10000000000000000000014 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = AssistantUITestHost;
+			productName = AssistantUITestHost;
+			productReference = C10000000000000000000013 /* AssistantUITestHost.app */;
+			productType = "com.apple.product-type.application";
+		};
+		A10000000000000000000020 /* AssistantUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = EA1000000000000000000020 /* Build configuration list for PBXNativeTarget "AssistantUITests" */;
+			buildPhases = (
+				A10000000000000000000022 /* Sources */,
+				A10000000000000000000023 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				F10000000000000000000002 /* PBXTargetDependency */,
+			);
+			name = AssistantUITests;
+			productName = AssistantUITests;
+			productReference = C10000000000000000000021 /* AssistantUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -452,6 +603,13 @@
 					A00000000000000000000030 = {
 						CreatedOnToolsVersion = 26.0;
 					};
+					A10000000000000000000010 = {
+						CreatedOnToolsVersion = 26.0;
+					};
+					A10000000000000000000020 = {
+						CreatedOnToolsVersion = 26.0;
+						TestTargetID = A10000000000000000000010;
+					};
 				};
 			};
 			buildConfigurationList = EA00000000000000000000001 /* Build configuration list for PBXProject "Assistant" */;
@@ -470,6 +628,8 @@
 				A00000000000000000000010 /* Assistant */,
 				A00000000000000000000030 /* AssistantActivityExtension */,
 				A00000000000000000000020 /* AssistantTests */,
+				A10000000000000000000010 /* AssistantUITestHost */,
+				A10000000000000000000020 /* AssistantUITests */,
 			);
 		};
 /* End PBXProject section */
@@ -496,6 +656,16 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A10000000000000000000014 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B10000000000000000000044 /* Assets.xcassets in Resources */,
+				B10000000000000000000045 /* Resources/mermaid.min.js in Resources */,
+				B10000000000000000000046 /* Resources/mermaid-LICENSE.txt in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -606,6 +776,87 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A10000000000000000000012 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B10000000000000000000001 /* AppModel.swift in Sources */,
+				B10000000000000000000002 /* Views/PhoneCalendarsView.swift in Sources */,
+				B10000000000000000000003 /* System/PhoneCalendarStore.swift in Sources */,
+				B10000000000000000000004 /* System/PhoneCalendarSharingCoordinator.swift in Sources */,
+				B10000000000000000000005 /* Design/AssistantTheme.swift in Sources */,
+				B10000000000000000000006 /* Models/APIModels.swift in Sources */,
+				B10000000000000000000007 /* Models/PhoneCalendarSharing.swift in Sources */,
+				B10000000000000000000008 /* OptimisticEdits.swift in Sources */,
+				B10000000000000000000009 /* Models/PollingPolicy.swift in Sources */,
+				B1000000000000000000000A /* Models/ConversationDrafts.swift in Sources */,
+				B1000000000000000000000B /* CardFormDrafts.swift in Sources */,
+				B1000000000000000000000C /* EncryptedCardFormDraftStorage.swift in Sources */,
+				B1000000000000000000000D /* CardFormMobileSession.swift in Sources */,
+				B1000000000000000000000E /* NativeCardFormParser.swift in Sources */,
+				B1000000000000000000000F /* NativeCardFormView.swift in Sources */,
+				B10000000000000000000010 /* SecurityReviewSection.swift in Sources */,
+				B10000000000000000000011 /* Components/MermaidDiagramView.swift in Sources */,
+				B10000000000000000000012 /* Networking/KeychainStore.swift in Sources */,
+				B10000000000000000000013 /* Networking/APIClient.swift in Sources */,
+				B10000000000000000000014 /* Components/CardActions.swift in Sources */,
+				B10000000000000000000015 /* System/AssistantActivityAttributes.swift in Sources */,
+				B10000000000000000000016 /* System/LiveActivityManager.swift in Sources */,
+				B10000000000000000000017 /* System/NotificationManager.swift in Sources */,
+				B10000000000000000000018 /* System/LocationManager.swift in Sources */,
+				B10000000000000000000019 /* System/RenderMemo.swift in Sources */,
+				B1000000000000000000001A /* Components/ActivityCrown.swift in Sources */,
+				B1000000000000000000001B /* Components/ChatDashboard.swift in Sources */,
+				B1000000000000000000001C /* Components/StatusPill.swift in Sources */,
+				B1000000000000000000001D /* Components/MessageBubble.swift in Sources */,
+				B1000000000000000000001E /* Views/RootView.swift in Sources */,
+				B1000000000000000000001F /* Views/SituationPacksView.swift in Sources */,
+				B10000000000000000000020 /* Views/ChatView.swift in Sources */,
+				B10000000000000000000021 /* Views/ActivityView.swift in Sources */,
+				B10000000000000000000022 /* Views/GoalsView.swift in Sources */,
+				B10000000000000000000023 /* Views/ApprovalsView.swift in Sources */,
+				B10000000000000000000024 /* Views/MoreView.swift in Sources */,
+				B10000000000000000000025 /* Views/ConnectionView.swift in Sources */,
+				B10000000000000000000026 /* Views/WorkspaceView.swift in Sources */,
+				B10000000000000000000027 /* Views/MemoryView.swift in Sources */,
+				B10000000000000000000028 /* Views/MemoryCorrectionReview.swift in Sources */,
+				B10000000000000000000029 /* Models/MemoryCorrectionPresentation.swift in Sources */,
+				B1000000000000000000002A /* Models/NativeMemoryCorrectionRecovery.swift in Sources */,
+				B1000000000000000000002B /* Views/MemoryDataView.swift in Sources */,
+				B1000000000000000000002C /* Views/CommitmentsView.swift in Sources */,
+				B1000000000000000000002D /* Views/MemoryLibraryView.swift in Sources */,
+				B1000000000000000000002E /* Views/KnowledgeView.swift in Sources */,
+				B1000000000000000000002F /* Views/PeopleConnectionsView.swift in Sources */,
+				B10000000000000000000030 /* Views/RelationshipGraphScreen.swift in Sources */,
+				B10000000000000000000031 /* Views/RelationshipGraphCanvas.swift in Sources */,
+				B10000000000000000000032 /* Models/RelationshipGraph.swift in Sources */,
+				B10000000000000000000033 /* Views/PeopleView.swift in Sources */,
+				B10000000000000000000034 /* Views/TalkView.swift in Sources */,
+				B10000000000000000000035 /* Views/AIProvidersView.swift in Sources */,
+				B10000000000000000000036 /* Views/CallsView.swift in Sources */,
+				B10000000000000000000037 /* System/SpeechListener.swift in Sources */,
+				B10000000000000000000038 /* System/SpeechPlayer.swift in Sources */,
+				B10000000000000000000039 /* Components/SpeakableText.swift in Sources */,
+				B1000000000000000000003A /* Components/ParagraphReflow.swift in Sources */,
+				B1000000000000000000003B /* Components/BriefingCardView.swift in Sources */,
+				B1000000000000000000003C /* Components/ScoreboardCardView.swift in Sources */,
+				B1000000000000000000003D /* Components/GeneratedCardBlocks.swift in Sources */,
+				B1000000000000000000003E /* Components/ApprovalRequestHeader.swift in Sources */,
+				B1000000000000000000003F /* Components/GeneratedCardCapabilityManifest.swift in Sources */,
+				B10000000000000000000040 /* Components/RouteCardView.swift in Sources */,
+				B10000000000000000000041 /* FixtureApp.swift in Sources */,
+				B10000000000000000000042 /* FixtureTransport.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A10000000000000000000022 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B10000000000000000000043 /* MobileControlsUITests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -618,6 +869,11 @@
 			isa = PBXTargetDependency;
 			target = A00000000000000000000030 /* AssistantActivityExtension */;
 			targetProxy = F00000000000000000000003 /* PBXContainerItemProxy */;
+		};
+		F10000000000000000000002 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A10000000000000000000010 /* AssistantUITestHost */;
+			targetProxy = F10000000000000000000001 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -791,6 +1047,73 @@
 			};
 			name = Release;
 		};
+		E10000000000000000000011 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {
+				ASSETCATALOG_COMPILER_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "Assistant UI Fixtures";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.baldvinsmarason.assistant.uitesthost;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG ASSISTANT_UI_TEST_FIXTURES $(inherited)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			}; name = Debug; };
+		E10000000000000000000012 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {
+				ASSETCATALOG_COMPILER_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "Assistant UI Fixtures";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.baldvinsmarason.assistant.uitesthost;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			}; name = Release; };
+		E10000000000000000000021 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.baldvinsmarason.assistant.uitesthost.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = AssistantUITestHost;
+			}; name = Debug; };
+		E10000000000000000000022 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.baldvinsmarason.assistant.uitesthost.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = AssistantUITestHost;
+			}; name = Release; };
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -830,6 +1153,8 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
+		EA1000000000000000000010 /* Build configuration list for PBXNativeTarget "AssistantUITestHost" */ = {isa = XCConfigurationList; buildConfigurations = (E10000000000000000000011 /* Debug */, E10000000000000000000012 /* Release */, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		EA1000000000000000000020 /* Build configuration list for PBXNativeTarget "AssistantUITests" */ = {isa = XCConfigurationList; buildConfigurations = (E10000000000000000000021 /* Debug */, E10000000000000000000022 /* Release */, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
 /* End XCConfigurationList section */
 	};
 	rootObject = A00000000000000000000001 /* Project object */;
