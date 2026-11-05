@@ -68,8 +68,9 @@ jobs:
               return not group_exists(pid)
           def run(name, args, seconds, on_output=None):
               global log_bytes
+              started = time.monotonic()
               process = subprocess.Popen(args, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
-              record = {'pid':process.pid, 'args':args, 'closed':False}
+              record = {'pid':process.pid, 'args':args, 'closed':False, 'declaredBudgetSeconds':seconds}
               save('active-command.json', record)
               deadline = min(time.monotonic() + seconds, main_deadline)
               selector = selectors.DefaultSelector(); selector.register(process.stdout, selectors.EVENT_READ)
@@ -91,12 +92,13 @@ jobs:
                   except BaseException as error: problem = repr(error)
                   finally:
                       selector.close(); process.stdout.close()
+                      command_elapsed = time.monotonic()-started
                       process.poll()
                       normal_residue = problem is None and group_exists(process.pid)
                       clean = drain(process)
                       try: process.wait(timeout=3)
                       except subprocess.TimeoutExpired: clean = False
-                      record.update(exit=process.returncode, closed=clean, problem=problem, normalExitResidue=normal_residue)
+                      record.update(exit=process.returncode, closed=clean, problem=problem, normalExitResidue=normal_residue, commandElapsedSeconds=round(command_elapsed,3), totalElapsedSeconds=round(time.monotonic()-started,3))
                       save('active-command.json', record); save(name + '-process.json', record)
               if problem or normal_residue or not clean or process.returncode != 0:
                   raise RuntimeError(name + ' failed: ' + str(record))
@@ -116,7 +118,7 @@ jobs:
               save('toolchain.json', {'developerDir':env['DEVELOPER_DIR']})
               run('xcode-version', ['xcodebuild','-version'], 10)
               run('sdks', ['xcodebuild','-showsdks'], 10)
-              devices = json.loads(run('available-devices', ['xcrun','simctl','list','devices','--json'], 10))
+              devices = json.loads(run('available-devices', ['xcrun','simctl','list','devices','--json'], 45))
               candidates = [(version(rt), d['name'], rt, d) for rt, ds in devices['devices'].items() if 'SimRuntime.iOS-' in rt for d in ds if d.get('isAvailable') and d['name'].startswith('iPhone') and version(rt) >= (26,)]
               if not candidates: raise RuntimeError('No available iOS >=26 iPhone template')
               _, _, runtime, template = max(candidates, key=lambda c:(c[0], c[1]))
