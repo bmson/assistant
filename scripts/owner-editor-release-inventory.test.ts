@@ -1,7 +1,9 @@
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   allowedUrl,
@@ -15,6 +17,7 @@ import {
   requiresBasicEditorPreflight,
   serviceFacts,
   verifyManifest,
+  verifyPrerequisitesBinding,
   verifyWifEnvironment,
 } from './owner-editor-release-inventory.js';
 
@@ -52,6 +55,221 @@ const credential = {
   token_url: 'https://sts.googleapis.com/v1/token',
   service_account_impersonation_url: `https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${env.GCP_DEPLOY_SERVICE_ACCOUNT}:generateAccessToken`,
 };
+const fingerprint = (value: string) => createHash('sha256').update(value).digest('hex');
+const prerequisiteEnv: NodeJS.ProcessEnv = {
+  ...env,
+  GITHUB_EVENT_NAME: 'workflow_dispatch',
+  GITHUB_WORKFLOW_REF:
+    'bmson/assistant/.github/workflows/owner-editor-release-inventory.yml@refs/heads/main',
+  GITHUB_WORKFLOW_SHA: env.GITHUB_SHA,
+  OWNER_EDITOR_CHECKOUT_SHA: env.GITHUB_SHA,
+  OWNER_EDITOR_APPROVED_SOURCE_SHA: env.GITHUB_SHA,
+  OWNER_EDITOR_APPROVED_PROJECT_SHA256: fingerprint(env.GCP_PROJECT),
+  OWNER_EDITOR_APPROVED_SERVICE_ACCOUNT_SHA256: fingerprint(env.GCP_DEPLOY_SERVICE_ACCOUNT),
+  OWNER_EDITOR_APPROVED_WIF_PROVIDER_SHA256: fingerprint(env.GCP_WORKLOAD_IDENTITY_PROVIDER),
+};
+const bindingFailures: Array<[string, NodeJS.ProcessEnv]> = [];
+for (const key of [
+  'OWNER_EDITOR_APPROVED_SOURCE_SHA',
+  'GITHUB_SHA',
+  'GITHUB_WORKFLOW_SHA',
+  'OWNER_EDITOR_CHECKOUT_SHA',
+  'OWNER_EDITOR_APPROVED_PROJECT_SHA256',
+  'OWNER_EDITOR_APPROVED_SERVICE_ACCOUNT_SHA256',
+  'OWNER_EDITOR_APPROVED_WIF_PROVIDER_SHA256',
+  'GCP_PROJECT',
+  'GCP_DEPLOY_SERVICE_ACCOUNT',
+  'GCP_WORKLOAD_IDENTITY_PROVIDER',
+]) {
+  bindingFailures.push([`missing ${key}`, { [key]: undefined }]);
+  bindingFailures.push([`empty ${key}`, { [key]: '' }]);
+}
+for (const key of [
+  'GITHUB_SHA',
+  'GITHUB_WORKFLOW_SHA',
+  'OWNER_EDITOR_CHECKOUT_SHA',
+  'OWNER_EDITOR_APPROVED_SOURCE_SHA',
+])
+  for (const value of ['b'.repeat(40), 'A'.repeat(40), `${'a'.repeat(40)}\n`, 'a'.repeat(39)])
+    bindingFailures.push([`source ${key} ${JSON.stringify(value)}`, { [key]: value }]);
+for (const key of [
+  'OWNER_EDITOR_APPROVED_PROJECT_SHA256',
+  'OWNER_EDITOR_APPROVED_SERVICE_ACCOUNT_SHA256',
+  'OWNER_EDITOR_APPROVED_WIF_PROVIDER_SHA256',
+])
+  for (const value of ['b'.repeat(64), 'A'.repeat(64), `${'a'.repeat(64)}\n`, ` ${'a'.repeat(64)}`])
+    bindingFailures.push([`digest ${key} ${JSON.stringify(value)}`, { [key]: value }]);
+bindingFailures.push(
+  ['different project', { GCP_PROJECT: 'other-project' }],
+  [
+    'different account',
+    { GCP_DEPLOY_SERVICE_ACCOUNT: 'other@bmson-assistant.iam.gserviceaccount.com' },
+  ],
+  [
+    'different provider',
+    { GCP_WORKLOAD_IDENTITY_PROVIDER: `${env.GCP_WORKLOAD_IDENTITY_PROVIDER}2` },
+  ],
+  ['account whitespace', { GCP_DEPLOY_SERVICE_ACCOUNT: `${env.GCP_DEPLOY_SERVICE_ACCOUNT}\n` }],
+  [
+    'provider whitespace',
+    { GCP_WORKLOAD_IDENTITY_PROVIDER: `${env.GCP_WORKLOAD_IDENTITY_PROVIDER}\n` },
+  ],
+  ['wrong event', { GITHUB_EVENT_NAME: 'push' }],
+  ['missing event', { GITHUB_EVENT_NAME: undefined }],
+  [
+    'wrong workflow',
+    { GITHUB_WORKFLOW_REF: 'bmson/assistant/.github/workflows/deploy.yml@refs/heads/main' },
+  ],
+  ['missing workflow', { GITHUB_WORKFLOW_REF: undefined }],
+  ['wrong repository', { GITHUB_REPOSITORY: 'other/assistant' }],
+  ['wrong branch', { GITHUB_REF: 'refs/heads/topic' }],
+  ['second attempt', { GITHUB_RUN_ATTEMPT: '2' }],
+);
+
+describe('prerequisites pre-auth source and configuration binding', () => {
+  it('accepts exact synthetic bindings without reading credentials', () => {
+    const input = { ...prerequisiteEnv };
+    Object.defineProperty(input, 'CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE', {
+      get() {
+        throw new Error('credential access forbidden');
+      },
+    });
+    expect(() => verifyPrerequisitesBinding(input)).not.toThrow();
+  });
+  it.each(bindingFailures)('fails closed: %s', (_name, change) => {
+    expect(() => verifyPrerequisitesBinding({ ...prerequisiteEnv, ...change })).toThrow(
+      'prerequisites binding mismatch',
+    );
+  });
+  it('rejects a trailing newline even when all four source values match', () => {
+    const source = `${env.GITHUB_SHA}\n`;
+    expect(() =>
+      verifyPrerequisitesBinding({
+        ...prerequisiteEnv,
+        GITHUB_SHA: source,
+        GITHUB_WORKFLOW_SHA: source,
+        OWNER_EDITOR_CHECKOUT_SHA: source,
+        OWNER_EDITOR_APPROVED_SOURCE_SHA: source,
+      }),
+    ).toThrow('prerequisites binding mismatch');
+  });
+  it.each([
+    ['valid', {}],
+    ['missing approval', { OWNER_EDITOR_APPROVED_SOURCE_SHA: undefined }],
+    ['wrong workflow SHA', { GITHUB_WORKFLOW_SHA: 'b'.repeat(40) }],
+    ['wrong checkout', { OWNER_EDITOR_CHECKOUT_SHA: 'b'.repeat(40) }],
+    ['wrong project hash', { OWNER_EDITOR_APPROVED_PROJECT_SHA256: 'b'.repeat(64) }],
+    ['wrong account hash', { OWNER_EDITOR_APPROVED_SERVICE_ACCOUNT_SHA256: 'b'.repeat(64) }],
+    ['wrong provider hash', { OWNER_EDITOR_APPROVED_WIF_PROVIDER_SHA256: 'b'.repeat(64) }],
+    ['private input', { GCP_WORKLOAD_IDENTITY_PROVIDER: 'PRIVATE_INPUT_MUST_NOT_APPEAR' }],
+  ] as Array<[string, NodeJS.ProcessEnv]>)('real --verify-source fixture: %s', (name, change) => {
+    const dir = mkdtempSync(join(tmpdir(), 'prerequisites-binding-'));
+    const sentinel = 'PRIVATE_INPUT_MUST_NOT_APPEAR';
+    try {
+      const manifestPath = join(dir, '.approved-index-source/infra/gcp/firestore');
+      mkdirSync(manifestPath, { recursive: true });
+      writeFileSync(join(manifestPath, 'firestore.indexes.json'), manifest);
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      for (const tool of ['gcloud', 'auth', 'curl'])
+        writeFileSync(
+          join(bin, tool),
+          `#!/bin/sh\nprintf invoked > '${dir}/unexpected-call'\nexit 99\n`,
+          { mode: 0o700 },
+        );
+      // No inherited credentials, database URL, cloud configuration or provider keys.
+      const result = spawnSync(
+        process.execPath,
+        [
+          fileURLToPath(new URL('../node_modules/tsx/dist/cli.mjs', import.meta.url)),
+          fileURLToPath(new URL('./owner-editor-release-inventory.ts', import.meta.url)),
+          '--verify-source',
+        ],
+        {
+          cwd: dir,
+          encoding: 'utf8',
+          timeout: 5000,
+          maxBuffer: 65536,
+          env: {
+            ...prerequisiteEnv,
+            ...change,
+            PATH: `${bin}:${process.env.PATH}`,
+            GITHUB_WORKSPACE: dir,
+            RUNNER_TEMP: dir,
+            CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: join(dir, sentinel),
+            GOOGLE_APPLICATION_CREDENTIALS: join(dir, sentinel),
+          },
+        },
+      );
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(name === 'valid' ? 0 : 1);
+      const output = result.stdout + result.stderr;
+      for (const privateValue of [
+        sentinel,
+        env.GCP_DEPLOY_SERVICE_ACCOUNT,
+        env.GCP_WORKLOAD_IDENTITY_PROVIDER,
+      ])
+        expect(output).not.toContain(privateValue);
+      if (name === 'valid') expect(output).toBe('');
+      else
+        expect(JSON.parse(result.stderr)).toMatchObject({
+          outcome: 'inventory_failed',
+          stage: 'protected_context',
+          authorityEstablished: false,
+          mutationAuthorized: false,
+        });
+      expect(existsSync(join(dir, 'unexpected-call'))).toBe(false);
+      expect(existsSync(join(dir, 'owner-editor-release-inventory.json'))).toBe(false);
+      expect(existsSync(join(dir, sentinel))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  it('binds only the prerequisites job before normal-success auth and preserves recovery', () => {
+    const workflow = readFileSync(
+      new URL('../.github/workflows/owner-editor-release-inventory.yml', import.meta.url),
+      'utf8',
+    );
+    const recovery = workflow.slice(workflow.indexOf('  recovery-pair:\n'));
+    expect(fingerprint(recovery)).toBe(
+      '3777df478f8a3c56fbf4bde98aace57a44d1406a3d678c19a7714ca9080e9dea',
+    );
+    const observe = workflow.split('  observe:\n')[1]?.split('  recovery-pair:\n')[0];
+    if (!observe) throw new Error('observe job missing');
+    for (const input of [
+      'source_sha',
+      'project_sha256',
+      'service_account_sha256',
+      'wif_provider_sha256',
+    ]) {
+      // Input blocks remain optional for the separate recovery-pair dispatch contract.
+      const block = workflow
+        .split(/(?=^ {6}[a-z0-9_]+:\n)/m)
+        .find((part) => part.startsWith(`      prerequisites_${input}:\n`));
+      if (!block) throw new Error('prerequisites input missing');
+      expect(block).toContain('type: string');
+      expect(block).toContain('required: false');
+      expect(observe).toContain(`inputs.prerequisites_${input}`);
+      expect(recovery).not.toContain(`inputs.prerequisites_${input}`);
+    }
+    const verify = observe.indexOf('OWNER_EDITOR_CHECKOUT_SHA="$(git rev-parse HEAD)"');
+    const auth = observe.indexOf(
+      'uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093',
+    );
+    const setup = observe.indexOf(
+      'uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db',
+    );
+    expect(verify).toBeGreaterThan(0);
+    expect(verify).toBeLessThan(auth);
+    expect(auth).toBeLessThan(setup);
+    const beforeCollect = observe.slice(0, observe.indexOf('      - name: Read bounded'));
+    expect(beforeCollect).not.toContain('continue-on-error:');
+    expect(beforeCollect).not.toContain('always()');
+    expect(observe).toContain(' --verify-source');
+    expect(observe).toContain(' --collect');
+  });
+});
+
 function service(target?: { workspaceId: string; ownerId: string }) {
   const values = {
     PERSISTENCE_DRIVER: 'firestore',
