@@ -2,16 +2,29 @@ import { getAgent } from '@assistant/core/chat';
 import { type CostTotals, costTotals } from '@assistant/core/cost';
 import { budgets, costEvents, costReservations, type Db, modelCalls, tasks } from '@assistant/db';
 import {
+  addMicros,
   type BudgetCapsRepository,
+  type CostBasis,
   type CostEvidence,
   type CostEvidenceTotal,
   costBasis,
+  microsToUsd,
   normalizeBudgetCaps,
+  usdDecimalToMicros,
 } from '@assistant/persistence';
-import { count, desc, eq, gte, sql, sum } from 'drizzle-orm';
+import { and, count, desc, eq, gte, lt, sql, sum } from 'drizzle-orm';
+
+export interface ModelCostEvidenceTotal {
+  provider: string | null;
+  model: string | null;
+  basis: CostBasis;
+  usd: string;
+  count: number;
+}
 
 export interface CostsDashboard {
   byEvidence: CostEvidenceTotal[];
+  byModelEvidence: ModelCostEvidenceTotal[];
   dispatchingAttempts: UnknownCostAttemptSummary;
   unknownAttempts: UnknownCostAttemptSummary;
   timezone: string;
@@ -47,10 +60,54 @@ export interface UnknownCostAttemptSummary {
   estimateComplete: boolean;
 }
 
+function evidenceDimension(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : null;
+}
+
+function compareEvidenceDimension(left: string | null, right: string | null): number {
+  const a = left ?? '';
+  const b = right ?? '';
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function modelEvidenceRows(
+  rows: Array<{
+    provider: string | null;
+    model: string | null;
+    basis: string | null;
+    usd: string | null;
+    count: number;
+  }>,
+): ModelCostEvidenceTotal[] {
+  const groups = new Map<string, ModelCostEvidenceTotal & { micros: number }>();
+  for (const row of rows) {
+    const provider = evidenceDimension(row.provider);
+    const model = evidenceDimension(row.model);
+    const basis = costBasis({ basis: row.basis } as CostEvidence);
+    const key = JSON.stringify([provider, model, basis]);
+    const group = groups.get(key) ?? { provider, model, basis, usd: '', count: 0, micros: 0 };
+    group.micros = addMicros(group.micros, usdDecimalToMicros(row.usd ?? '0'));
+    group.count += row.count;
+    groups.set(key, group);
+  }
+  return [...groups.values()]
+    .sort((a, b) => {
+      if (a.micros !== b.micros) return a.micros > b.micros ? -1 : 1;
+      const providerOrder = compareEvidenceDimension(a.provider, b.provider);
+      if (providerOrder !== 0) return providerOrder;
+      const modelOrder = compareEvidenceDimension(a.model, b.model);
+      return modelOrder || (a.basis < b.basis ? -1 : a.basis > b.basis ? 1 : 0);
+    })
+    .map(({ micros, ...row }) => ({ ...row, usd: microsToUsd(micros).toFixed(6) }));
+}
+
 /** Load the cost-governance dashboard as a stable presentation contract. */
 export async function getCostsDashboard(db: Db): Promise<CostsDashboard> {
   const agent = await getAgent(db);
-  const monthStart = sql`date_trunc('month', now())`;
+  const monthStart = sql`date_trunc('month', timezone('UTC', now())) AT TIME ZONE 'UTC'`;
+  const monthEnd = sql`${monthStart} + interval '1 month'`;
   const [totals, bySource, byModel, topTasks, held, recent, [parkedCount], [taskDefault]] =
     await Promise.all([
       costTotals(db),
@@ -61,7 +118,7 @@ export async function getCostsDashboard(db: Db): Promise<CostsDashboard> {
           count: sql<number>`count(*)`,
         })
         .from(costEvents)
-        .where(gte(costEvents.createdAt, monthStart))
+        .where(and(gte(costEvents.createdAt, monthStart), lt(costEvents.createdAt, monthEnd)))
         .groupBy(costEvents.source)
         .orderBy(desc(sum(costEvents.usd))),
       db
@@ -71,7 +128,7 @@ export async function getCostsDashboard(db: Db): Promise<CostsDashboard> {
           count: sql<number>`count(*)`,
         })
         .from(modelCalls)
-        .where(gte(modelCalls.createdAt, monthStart))
+        .where(and(gte(modelCalls.createdAt, monthStart), lt(modelCalls.createdAt, monthEnd)))
         .groupBy(modelCalls.model)
         .orderBy(desc(sum(modelCalls.costUsd))),
       db
@@ -83,7 +140,7 @@ export async function getCostsDashboard(db: Db): Promise<CostsDashboard> {
         })
         .from(costEvents)
         .innerJoin(tasks, eq(tasks.id, costEvents.taskId))
-        .where(gte(costEvents.createdAt, monthStart))
+        .where(and(gte(costEvents.createdAt, monthStart), lt(costEvents.createdAt, monthEnd)))
         .groupBy(costEvents.taskId, tasks.type, tasks.progress)
         .orderBy(desc(sum(costEvents.usd)))
         .limit(10),
@@ -119,25 +176,46 @@ export async function getCostsDashboard(db: Db): Promise<CostsDashboard> {
         .where(eq(budgets.scope, 'task_default')),
     ]);
 
-  const [evidenceRows, [dispatchingReservations], [unknownReservations]] = await Promise.all([
-    db
-      .select({
-        basis: sql<string>`${costEvents.evidence}->>'basis'`,
-        usd: sum(costEvents.usd),
-        count: sql<number>`count(*)`,
-      })
-      .from(costEvents)
-      .where(gte(costEvents.createdAt, monthStart))
-      .groupBy(sql`${costEvents.evidence}->>'basis'`),
-    db
-      .select({ count: count(), estimatedUsd: sum(costReservations.estimatedUsd) })
-      .from(costReservations)
-      .where(eq(costReservations.status, 'dispatching')),
-    db
-      .select({ count: count(), estimatedUsd: sum(costReservations.estimatedUsd) })
-      .from(costReservations)
-      .where(eq(costReservations.status, 'unknown')),
-  ]);
+  const providerExpression = sql<string | null>`nullif(${costEvents.evidence}->>'provider', '')`;
+  const modelExpression = sql<string | null>`nullif(${costEvents.evidence}->>'model', '')`;
+  const basisExpression = sql<string | null>`${costEvents.evidence}->>'basis'`;
+  const [evidenceRows, modelEvidenceRawRows, [dispatchingReservations], [unknownReservations]] =
+    await Promise.all([
+      db
+        .select({
+          basis: sql<string>`${costEvents.evidence}->>'basis'`,
+          usd: sum(costEvents.usd),
+          count: sql<number>`count(*)`,
+        })
+        .from(costEvents)
+        .where(and(gte(costEvents.createdAt, monthStart), lt(costEvents.createdAt, monthEnd)))
+        .groupBy(sql`${costEvents.evidence}->>'basis'`),
+      db
+        .select({
+          provider: providerExpression,
+          model: modelExpression,
+          basis: basisExpression,
+          usd: sum(costEvents.usd),
+          count: sql<number>`count(*)`,
+        })
+        .from(costEvents)
+        .where(
+          and(
+            eq(costEvents.source, 'model'),
+            gte(costEvents.createdAt, monthStart),
+            lt(costEvents.createdAt, monthEnd),
+          ),
+        )
+        .groupBy(providerExpression, modelExpression, basisExpression),
+      db
+        .select({ count: count(), estimatedUsd: sum(costReservations.estimatedUsd) })
+        .from(costReservations)
+        .where(eq(costReservations.status, 'dispatching')),
+      db
+        .select({ count: count(), estimatedUsd: sum(costReservations.estimatedUsd) })
+        .from(costReservations)
+        .where(eq(costReservations.status, 'unknown')),
+    ]);
 
   return {
     byEvidence: evidenceRows.map((row) => ({
@@ -145,6 +223,7 @@ export async function getCostsDashboard(db: Db): Promise<CostsDashboard> {
       usd: row.usd ?? '0',
       count: Number(row.count),
     })),
+    byModelEvidence: modelEvidenceRows(modelEvidenceRawRows),
     dispatchingAttempts: {
       count: Number(dispatchingReservations?.count ?? 0),
       countComplete: true,
