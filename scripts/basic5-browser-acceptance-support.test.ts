@@ -335,8 +335,8 @@ describe('task-specific BASIC5 control and presentation request budgets', () => 
 
   it('pins separate control, presentation, and total caps', () => {
     expect(BASIC5_BROWSER_CONTROL_REQUEST_LIMIT).toBe(64);
-    expect(BASIC5_BROWSER_PRESENTATION_REQUEST_LIMIT).toBe(256);
-    expect(BASIC5_BROWSER_TOTAL_REQUEST_LIMIT).toBe(320);
+    expect(BASIC5_BROWSER_PRESENTATION_REQUEST_LIMIT).toBe(768);
+    expect(BASIC5_BROWSER_TOTAL_REQUEST_LIMIT).toBe(832);
   });
 
   it('pins the 16 semantic navigation stages for the four-save journey', () => {
@@ -550,24 +550,24 @@ describe('task-specific BASIC5 control and presentation request budgets', () => 
     });
   });
 
-  it('counts and blocks presentation GET 257 in the actual route adapter', async () => {
+  it('counts and blocks presentation GET 769 in the actual route adapter', async () => {
     const budget = createBasic5BrowserRequestBudget(baseUrl);
-    for (let count = 1; count <= 257; count++) {
+    for (let count = 1; count <= 769; count++) {
       const events: string[] = [];
       const route = fakeRoute(`${baseUrl}/people/person`, 'GET', events, 'document');
       await routeBasic5BrowserRequest(budget, route, (allowed) => {
-        expect(allowed).toBe(count <= 256);
+        expect(allowed).toBe(count <= 768);
       });
-      expect(events).toEqual(count <= 256 ? ['continue'] : ['abort:blockedbyclient']);
+      expect(events).toEqual(count <= 768 ? ['continue'] : ['abort:blockedbyclient']);
     }
     expect(checkTotals(budget)).toEqual({
-      browserHttpRequests: 257,
+      browserHttpRequests: 769,
       browserControlHttpRequests: 0,
-      browserPresentationHttpRequests: 257,
+      browserPresentationHttpRequests: 769,
       browserBudgetExceeded: true,
     });
     expect(budget.snapshot().browserPresentationDiagnostics?.totals).toEqual({
-      document: 257,
+      document: 769,
       next_static_asset: 0,
       public_asset: 0,
       rsc_or_prefetch: 0,
@@ -575,23 +575,23 @@ describe('task-specific BASIC5 control and presentation request budgets', () => 
     });
   });
 
-  it('admits 320 total requests within both caps, then counts and blocks request 321', () => {
+  it('admits 832 total requests within both caps, then counts and blocks request 833', () => {
     const budget = createBasic5BrowserRequestBudget(baseUrl);
     for (let count = 0; count < 64; count++)
       expect(budget.observe(`${baseUrl}/api`, 'GET')).toBe(true);
-    for (let count = 0; count < 256; count++)
+    for (let count = 0; count < 768; count++)
       expect(budget.observe(`${baseUrl}/people`, 'GET')).toBe(true);
     expect(checkTotals(budget)).toEqual({
-      browserHttpRequests: 320,
+      browserHttpRequests: 832,
       browserControlHttpRequests: 64,
-      browserPresentationHttpRequests: 256,
+      browserPresentationHttpRequests: 768,
       browserBudgetExceeded: false,
     });
     expect(budget.observe(`${baseUrl}/api`, 'GET')).toBe(false);
     expect(checkTotals(budget)).toEqual({
-      browserHttpRequests: 321,
+      browserHttpRequests: 833,
       browserControlHttpRequests: 65,
-      browserPresentationHttpRequests: 256,
+      browserPresentationHttpRequests: 768,
       browserBudgetExceeded: true,
     });
   });
