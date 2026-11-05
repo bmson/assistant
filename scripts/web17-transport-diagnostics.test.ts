@@ -6,6 +6,7 @@ import {
 } from './web17-navigation-diagnostics.js';
 import {
   createWeb17TransportDiagnostics,
+  emitWeb17Safely,
   observeWeb17Safely,
   projectWeb17BrowserError,
   selectWeb17TransportCandidate,
@@ -245,5 +246,66 @@ describe('WEB17 diagnostic origins and privacy', () => {
       source.indexOf('browserErrorObserverInstalled = true', source.indexOf('const onPageError')),
     );
     expect(errors).not.toMatch(/\.args\(|jsonValue\(|\.location\(/);
+  });
+});
+
+describe('WEB17 best effort emission', () => {
+  it.each(['seal', 'snapshot', 'serialization', 'console', 'artifact', 'fallback'])(
+    'preserves the original failure when %s emission fails',
+    async (stage) => {
+      const primary = new Error('original browser failure');
+      const emissionFailure = new Error('synthetic diagnostic failure');
+      const visited: string[] = [];
+      const observe = (name: string) => {
+        visited.push(name);
+        if (stage === name) throw emissionFailure;
+      };
+      let caught: unknown;
+      try {
+        await emitWeb17Safely(async () => {
+          observe('seal');
+          observe('snapshot');
+          observe('serialization');
+          observe('console');
+          try {
+            visited.push('artifact');
+            if (stage === 'artifact' || stage === 'fallback') await Promise.reject(emissionFailure);
+          } catch {
+            observe('fallback');
+          }
+        });
+        throw primary;
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBe(primary);
+      expect(visited).toContain(stage);
+    },
+  );
+  it('resolves an immediately throwing callback and a rejected callback', async () => {
+    await expect(
+      emitWeb17Safely(() => {
+        throw new Error('sync');
+      }),
+    ).resolves.toBeUndefined();
+    await expect(
+      emitWeb17Safely(() => Promise.reject(new Error('async'))),
+    ).resolves.toBeUndefined();
+  });
+  it('preserves sealing and failure outcome when artifact emission rejects', async () => {
+    const trace = createWeb17TransportDiagnostics(() => 0);
+    trace.selectNonce(nonce);
+    await emitWeb17Safely(async () => {
+      trace.seal('failed');
+      JSON.stringify(trace.snapshot());
+      await Promise.reject(new Error('artifact'));
+    });
+    trace.seal('passed');
+    trace.record(nonce, 'request_finished');
+    expect(trace.snapshot()).toMatchObject({
+      result: 'failed',
+      remountAssertions: 'NOT_RUN',
+      events: [],
+    });
   });
 });

@@ -28,6 +28,7 @@ import {
 } from './web17-navigation-diagnostics.js';
 import {
   createWeb17TransportDiagnostics,
+  emitWeb17Safely,
   observeWeb17Safely,
   selectWeb17TransportCandidate,
 } from './web17-transport-diagnostics.js';
@@ -741,20 +742,21 @@ async function verifyUnmountedPollDoesNotPublishAfterRemount(): Promise<void> {
   const transportDiagnostics = createWeb17TransportDiagnostics();
   const requestNonces = new WeakMap<PlaywrightRequest, string>();
   const requestStarts = new WeakMap<PlaywrightRequest, number>();
-  const emitTransport = async (result: 'passed' | 'failed') => {
-    if (!web17PreviewDiagnosticsEnabled) return;
-    transportDiagnostics.seal(result);
-    const serialized = JSON.stringify(transportDiagnostics.snapshot());
-    console.error(`[WEB-17-TRANSPORT] ${serialized}`);
-    const path = process.env.WEB17_TRANSPORT_ARTIFACT_PATH;
-    if (path) {
-      try {
-        await writeFile(path, serialized + '\n', { flag: 'wx', mode: 0o600 });
-      } catch {
-        console.error('[WEB-17-TRANSPORT] {"artifactWritten":false,"reason":"artifact_io"}');
+  const emitTransport = (result: 'passed' | 'failed') =>
+    emitWeb17Safely(async () => {
+      if (!web17PreviewDiagnosticsEnabled) return;
+      transportDiagnostics.seal(result);
+      const serialized = JSON.stringify(transportDiagnostics.snapshot());
+      console.error(`[WEB-17-TRANSPORT] ${serialized}`);
+      const path = process.env.WEB17_TRANSPORT_ARTIFACT_PATH;
+      if (path) {
+        try {
+          await writeFile(path, serialized + '\n', { flag: 'wx', mode: 0o600 });
+        } catch {
+          console.error('[WEB-17-TRANSPORT] {"artifactWritten":false,"reason":"artifact_io"}');
+        }
       }
-    }
-  };
+    });
   let browserErrorObserverInstalled = false;
   let web17DiagnosticStage = 'setup';
   let stopNavigationObservers: (() => void) | undefined;

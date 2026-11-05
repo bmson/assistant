@@ -35,6 +35,13 @@ export function observeWeb17Safely(observe: () => void): void {
   } catch {}
 }
 
+/** Covers synchronous setup/logging and asynchronous artifact failures alike. */
+export async function emitWeb17Safely(emit: () => Promise<void>): Promise<void> {
+  try {
+    await emit();
+  } catch {}
+}
+
 const errorClasses = ['TypeError', 'ReferenceError', 'SyntaxError', 'RangeError', 'Error'] as const;
 /** Discards input text; outputs fixed categories and numeric coordinates only. */
 export function projectWeb17BrowserError(source: 'pageerror' | 'console', text: string) {
