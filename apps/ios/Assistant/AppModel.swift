@@ -24,6 +24,16 @@ struct ChatSendDisplayState: Equatable {
     let phase: ChatSendDisplayPhase
 }
 
+/// Registration is injectable so isolated component hosts can retain the real
+/// decision checks without initializing system notification services.
+@MainActor
+struct AppNotificationHandlers {
+    let approvalDecision: @MainActor (String, String, String) async -> Bool
+    let deviceToken: @MainActor (String, String) async throws -> Void
+}
+
+typealias AppNotificationHandlerRegistrar = @MainActor (AppNotificationHandlers) -> Void
+
 /// Per-model system presentation keeps routing tests independent of OS surface
 /// work. Production forwards each operation with the same await semantics.
 @MainActor
@@ -541,6 +551,10 @@ final class AppModel {
             SpeechPlayer.shared.enqueue(SpeakableText.passages(for: message), for: message.id)
         },
         scheduleLocalNotification: LocalNotificationScheduler? = nil,
+        registerNotificationHandlers: @escaping AppNotificationHandlerRegistrar = { handlers in
+            NotificationManager.shared.approvalDecisionHandler = handlers.approvalDecision
+            NotificationManager.shared.deviceTokenHandler = handlers.deviceToken
+        },
         systemSurfaces: (any AppSystemSurfaces)? = nil,
         phoneCalendarSharing: PhoneCalendarSharingCoordinator? = nil,
         captureCurrentPlace: @escaping @MainActor () async -> (location: CLLocation, label: String)? = {
@@ -584,19 +598,22 @@ final class AppModel {
         // Approve/Deny straight from a notification. The handler goes through
         // the same client call as the in-app buttons, then refreshes so the
         // badge and the Approvals sheet agree with the server.
-        NotificationManager.shared.approvalDecisionHandler = { [weak self] approvalId, decision, ownerID in
+        let approvalDecisionHandler: @MainActor (String, String, String) async -> Bool = { [weak self] approvalId, decision, ownerID in
             guard let self, self.bootstrap?.identity.id == ownerID,
                   self.overview?.approvals.pending.contains(where: { $0.id == approvalId }) == true else { return false }
             return await self.decideApproval(id: approvalId, decision: decision)
         }
         // APNs token upload for proactive pushes. A rotation re-fires this;
         // a failure is retried on the next launch's registration callback.
-        NotificationManager.shared.deviceTokenHandler = { [weak self] token, scope in
+        let deviceTokenHandler: @MainActor (String, String) async throws -> Void = { [weak self] token, scope in
             guard let self, self.pushRegistrationScope == scope,
                   let apnsEnvironment = self.apnsEnvironment,
                   let client = self.client else { throw APIError.invalidResponse }
             try await client.postDeviceToken(DeviceTokenBody(token: token, environment: apnsEnvironment))
         }
+        registerNotificationHandlers(AppNotificationHandlers(
+            approvalDecision: approvalDecisionHandler, deviceToken: deviceTokenHandler
+        ))
         phoneCalendarEventStoreObserver = NotificationCenter.default.addObserver(
             forName: .EKEventStoreChanged, object: nil, queue: .main
         ) { [weak self] _ in
