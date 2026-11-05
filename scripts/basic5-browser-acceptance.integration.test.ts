@@ -1275,9 +1275,7 @@ browserTest(
       };
       const findConnectionTarget = async (relationId: string, personName: string) => {
         expect(
-          await page
-            .getByRole('textbox', { name: 'Search items by name', exact: true })
-            .inputValue(),
+          await page.getByRole('textbox', { name: 'Search connections', exact: true }).inputValue(),
         ).toBe(personName);
         const connectionId = relationId.toLowerCase();
         const link = page
