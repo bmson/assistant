@@ -4,7 +4,7 @@ import { FieldValue } from '@google-cloud/firestore';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { embeddingSpaceKey, FirestoreMemoryRepository, memoryDocument } from './memory.js';
 import { createFirestoreGenericMemoryWriteWitness } from './memory-write-witness.js';
-import type { InstallationStore } from './store.js';
+import { decodeRecord, type InstallationStore } from './store.js';
 import { disposeStore, emulatorStore } from './test-store.js';
 
 const space: EmbeddingSpace = { provider: 'test', model: 'unit', dimensions: 3, revision: '1' };
@@ -124,7 +124,17 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore vector feasibil
     await disposeStore(store);
   });
   it('retrieves matching vectors with provenance and excludes private/stale/other-agent records', async () => {
-    await repo.save(memory('relevant'));
+    const relevant = memory('relevant');
+    await repo.save(relevant);
+    const persisted = decodeRecord<Records['memories']>(
+      (await store.doc('memories', relevant.id).get()).data(),
+    );
+    expect(persisted.memoryWriteWitness).toMatchObject({
+      version: 1,
+      contentHash: relevant.contentHash,
+      attribution: null,
+    });
+    expect(persisted.memoryWriteWitness?.writeVersion).toEqual(expect.any(String));
     await repo.save(memory('unrelated', { embedding: [0, 1, 0] }));
     await repo.save(memory('quarantined', { quarantined: true }));
     await repo.save(memory('expired', { expiresAt: new Date(0) }));

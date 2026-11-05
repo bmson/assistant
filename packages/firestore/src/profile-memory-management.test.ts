@@ -493,7 +493,8 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         status: 'not-found',
       });
       const snapshot = await store.doc('memories', saved.memory.id).get();
-      expect(decodeRecord<Records['memories']>(snapshot.data())).toMatchObject({
+      const created = decodeRecord<Records['memories']>(snapshot.data());
+      expect(created).toMatchObject({
         id: saved.memory.id,
         agentId,
         subjectContactId: contactId,
@@ -509,11 +510,67 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         importance: 5,
         pinned: true,
       });
+      expect(created.memoryWriteWitness).toMatchObject({
+        version: 1,
+        contentHash: input.contentHash,
+        attribution: null,
+      });
+      expect(created.memoryWriteWitness?.writeVersion).toEqual(expect.any(String));
       expect(snapshot.get('embedding').toArray()).toEqual(vector);
       expect(snapshot.get('embeddingSpace')).toBe(embeddingSpaceKey(space));
       expect(
         (await store.doc('memoryContentHashes', input.contentHash).get()).get('memoryId'),
       ).toBe(saved.memory.id);
+      expect((await store.doc('memoryTombstones', input.contentHash).get()).exists).toBe(false);
+
+      const correctedContent = 'A manually corrected fact';
+      const correctedHash = hash(correctedContent);
+      expect(
+        await repository.correct({
+          memoryId: saved.memory.id,
+          expectedContentHash: input.contentHash,
+          content: correctedContent,
+          contentHash: correctedHash,
+          embedding: vector,
+          ...embeddingIdentity,
+        }),
+      ).toEqual({
+        status: 'updated',
+        memory: { id: saved.memory.id, agentId, contentHash: correctedHash },
+      });
+      const correctedSnapshot = await store.doc('memories', saved.memory.id).get();
+      const corrected = decodeRecord<Records['memories']>(correctedSnapshot.data());
+      expect(corrected).toMatchObject({
+        id: saved.memory.id,
+        agentId,
+        subjectContactId: contactId,
+        content: correctedContent,
+        contentHash: correctedHash,
+        source: 'manual',
+        sourceTaskId: null,
+        ownerConfirmed: true,
+        originTrust: 'owner',
+      });
+      expect(corrected.memoryWriteWitness).toMatchObject({
+        version: 1,
+        contentHash: correctedHash,
+        attribution: null,
+      });
+      expect(corrected.memoryWriteWitness?.writeVersion).toEqual(expect.any(String));
+      expect(corrected.memoryWriteWitness?.writeVersion).not.toBe(
+        created.memoryWriteWitness?.writeVersion,
+      );
+      expect(correctedSnapshot.get('embedding').toArray()).toEqual(vector);
+      expect(correctedSnapshot.get('embeddingSpace')).toBe(embeddingSpaceKey(space));
+      expect((await store.doc('memoryTombstones', input.contentHash).get()).data()).toMatchObject({
+        contentHash: input.contentHash,
+        reason: 'owner_correct',
+      });
+      expect((await store.doc('memoryTombstones', correctedHash).get()).exists).toBe(false);
+      expect((await store.doc('memoryContentHashes', input.contentHash).get()).exists).toBe(false);
+      expect((await store.doc('memoryContentHashes', correctedHash).get()).get('memoryId')).toBe(
+        saved.memory.id,
+      );
     });
   },
 );
