@@ -14,6 +14,7 @@ export * from './autonomy-grant.js';
 export * from './briefing.js';
 export * from './budget-caps.js';
 export * from './builtin-tools.js';
+export * from './calendar-household-day.js';
 export {
   type CalendarOccurrenceClassification,
   type CalendarOccurrenceIdentity,

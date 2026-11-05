@@ -1,4 +1,9 @@
-import type { CalendarOccurrenceSource, CalendarOwnerParticipation } from '@assistant/persistence';
+import type {
+  CalendarHouseholdDayV1,
+  CalendarHouseholdItemV1,
+  CalendarOccurrenceSource,
+  CalendarOwnerParticipation,
+} from '@assistant/persistence';
 import type { ResolvedReadIntent } from './active-read-intent.js';
 import { calendarAgendaCards, calendarAgendaScopedEvidence } from './calendar-agenda.js';
 import { calendarSourceDateLabel, calendarWindowMembership } from './calendar-read-window.js';
@@ -53,6 +58,9 @@ export interface ResponseCard {
     | 'route'
     | 'generated-card';
   id: string;
+  householdDay?: CalendarHouseholdDayV1;
+  householdDetails?: CalendarHouseholdItemV1;
+  comparison?: { version: 1; leftEventId: string; rightEventId: string };
   [key: string]: unknown;
 }
 

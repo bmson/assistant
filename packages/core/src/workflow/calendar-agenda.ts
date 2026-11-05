@@ -1,5 +1,13 @@
 import { createHash } from 'node:crypto';
-import { classifyCalendarOccurrence } from '@assistant/persistence';
+import {
+  type CalendarHouseholdComparisonV1,
+  type CalendarHouseholdItemV1,
+  type CalendarHouseholdRSVP,
+  calendarHouseholdItemHasAcceptedRSVP,
+  classifyCalendarOccurrence,
+  parseCalendarHouseholdDay,
+  parseCalendarHouseholdItem,
+} from '@assistant/persistence';
 import type { BriefingCalendarEvent } from './briefing.js';
 import {
   calendarArrivalLead,
@@ -9,6 +17,7 @@ import {
   parseCalendarOwnerParticipation,
   possibleCalendarIdentityDisagreement,
   verifiedOwnerParticipation,
+  verifiedPersonalCommitment,
 } from './calendar-relationship.js';
 import { ownerCalendarToolName } from './calendar-scope.js';
 import type { PersonalReadRequest } from './read-intent.js';
@@ -173,6 +182,25 @@ export function wantsCalendarAgenda(request?: PersonalReadRequest | null, ownerT
       /\b(?:calendar|agenda|schedule)\b/i.test(ownerText) &&
       !/\b(?:email|mail|flight|trip|availability)\b/i.test(ownerText))
   );
+}
+
+function asksAboutDriving(ownerText: string): boolean {
+  if (!ownerText || /[“”]/.test(ownerText)) return false;
+  const clauses = ownerText.split(/(?<=[.!?])\s+/);
+  return clauses.some((clause) => {
+    if (
+      !clause.includes('?') ||
+      /\b(?:don't|do not|not|never|no need|shouldn't|should not|can't|cannot)\b/i.test(clause) ||
+      /\b(?:said|says|asked|asks|wrote|writes|quoted|reported|reports|wondered)\b/i.test(clause) ||
+      /(?:'[^']*(?:driv(?:e|ing)|driving coverage)[^']*'|‘[^’]*(?:driv(?:e|ing)|driving coverage)[^’]*’)/i.test(
+        clause,
+      )
+    )
+      return false;
+    return /\bwho(?:'s|’s|\s+(?:is|will))\s+(?:be\s+)?driving\b|\bwho\s+will\s+drive\b|\bdo\s+i\s+need\s+to\s+drive\b|\bshould\s+i\s+drive\b|\bdriving\s+coverage\b/i.test(
+      clause,
+    );
+  });
 }
 
 function validZone(value: unknown): string | undefined {
@@ -606,6 +634,103 @@ function coverageDetails(rows: ActionEvidence[]): Array<{ title: string; detail?
   return items;
 }
 
+function householdCoverageSummary(rows: ActionEvidence[], complete: boolean): string {
+  const gaps: string[] = [];
+  for (const row of rows) {
+    const result = record(row.result);
+    const resolved = list(result.calendarsResolved).map(record).filter(Boolean);
+    for (const item of list(result.unavailable).map(record).filter(Boolean)) {
+      const id = text(item.calendarId) || text(item.id);
+      const name =
+        text(item.calendar) ||
+        text(item.name) ||
+        text(resolved.find((entry) => text(entry?.id) === id)?.name) ||
+        'Calendar source';
+      const reason = text(item.reason) || 'could not be checked';
+      gaps.push(`${name}: ${reason}`);
+    }
+    if (result.calendarRosterComplete === false) gaps.push('Readable calendar list is incomplete');
+    const phone = record(result.phoneCalendarCoverage);
+    const phoneSources = list(phone.sources).map(record).filter(Boolean);
+    for (const source of phoneSources) {
+      const id = text(source.calendarId);
+      const resolvedId = id ? `iphone:${id}` : '';
+      const name =
+        text(source.calendar) ||
+        text(source.name) ||
+        text(resolved.find((entry) => text(entry?.id) === resolvedId)?.name) ||
+        'Phone calendar source';
+      const status = text(source.status);
+      if (status === 'missing') gaps.push(`${name}: source missing`);
+      else if (status === 'permission-denied') gaps.push(`${name}: permission denied`);
+      else if (status !== 'available') gaps.push(`${name}: source status not reported`);
+      else if (source.complete === false) gaps.push(`${name}: source coverage incomplete`);
+      else if (source.complete !== true) gaps.push(`${name}: source completeness not reported`);
+    }
+    if (phone.complete === false && phoneSources.length === 0)
+      gaps.push('Phone calendar coverage is incomplete');
+    else if (Object.keys(phone).length > 0 && phone.complete !== true && phoneSources.length === 0)
+      gaps.push('Phone calendar coverage status not reported');
+    if (!successful(row)) {
+      const reason = text(result.error) || text(result.message);
+      gaps.push(
+        reason
+          ? `Calendar read ${text(row.status) || 'not completed'}: ${reason}`
+          : `Calendar read ${text(row.status) || 'not completed'}`,
+      );
+    } else if (result.complete === false && !text(result.nextPageToken)) {
+      gaps.push('A requested calendar read or page is incomplete');
+    }
+  }
+  const unique = [...new Set(gaps)];
+  if (complete && !unique.length) {
+    const checked = [
+      ...new Set(
+        rows.flatMap((row) => list(record(row.result).calendarsSearched).map(text)).filter(Boolean),
+      ),
+    ];
+    return checked.length
+      ? `Coverage complete for ${checked.join(', ')} in the pages reported by this read.`
+      : 'Coverage complete for the sources reported by this read.';
+  }
+  if (!unique.length)
+    return 'Coverage incomplete: some requested calendar sources or pages could not be verified.';
+  const shown = unique.slice(0, 2).join('; ');
+  const remainder = unique.length > 2 ? `; ${unique.length - 2} additional coverage gaps` : '';
+  return `Coverage incomplete: ${shown}${remainder}.`;
+}
+
+function householdFreshnessSummary(rows: ActionEvidence[]): string {
+  const reported: string[] = [];
+  let phoneCoverageSeen = false;
+  let otherCalendarSeen = false;
+  for (const row of rows) {
+    const result = record(row.result);
+    const phone = record(result.phoneCalendarCoverage);
+    if (Object.keys(phone).length) {
+      phoneCoverageSeen = true;
+      const capturedAt = text(phone.capturedAt);
+      const receivedAt = text(phone.receivedAt);
+      if (capturedAt && Number.isFinite(Date.parse(capturedAt)) && Date.parse(capturedAt) !== 0)
+        reported.push(`Phone capture ${capturedAt}`);
+      if (receivedAt && Number.isFinite(Date.parse(receivedAt)) && Date.parse(receivedAt) !== 0)
+        reported.push(`Assistant received phone snapshot ${receivedAt}`);
+      else if (receivedAt && Date.parse(receivedAt) === 0)
+        reported.push('Phone snapshot has not uploaded; receive time unavailable');
+    }
+    const ids = list(result.calendarsSearchedIds).map(text);
+    otherCalendarSeen ||=
+      ids.some((id) => !id.startsWith('iphone:')) ||
+      (!ids.length && list(result.calendarsSearched).length > 0);
+  }
+  const unique = [...new Set(reported)];
+  if (!unique.length && !phoneCoverageSeen)
+    return 'No source freshness timestamp was reported by this read.';
+  if (!unique.length) unique.push('Phone capture/receive timestamp not reported');
+  if (otherCalendarSeen) unique.push('Fetch time unavailable for other checked calendar sources');
+  return unique.join('; ');
+}
+
 type CalendarPairAttention = {
   conflicts: Array<{
     title: string;
@@ -615,13 +740,26 @@ type CalendarPairAttention = {
       | 'commitments_policy_overlap'
       | 'attendance_unconfirmed';
   }>;
-  sourceIdentityDisagreements: Array<{ title: string; detail: string }>;
-  duplicateListings: Array<{ title: string; detail: string }>;
+  sourceIdentityDisagreements: Array<{
+    title: string;
+    detail: string;
+    comparison?: CalendarHouseholdComparisonV1;
+  }>;
+  duplicateListings: Array<{
+    title: string;
+    detail: string;
+    comparison?: CalendarHouseholdComparisonV1;
+  }>;
   arrivalGuidance: Array<{ title: string; detail: string }>;
   conflictCount: number;
   sourceIdentityDisagreementCount: number;
   duplicateCount: number;
   arrivalCount: number;
+  personalConflictQuestion?: {
+    eventIds: [string, string];
+    titles: [string, string];
+    startMs: number;
+  };
 };
 
 const emptyPairAttention = (): CalendarPairAttention => ({
@@ -635,11 +773,68 @@ const emptyPairAttention = (): CalendarPairAttention => ({
   arrivalCount: 0,
 });
 
+function comparisonFor(
+  left: ResponseCard,
+  right: ResponseCard,
+): CalendarHouseholdComparisonV1 | undefined {
+  const leftEventId = text(left.id);
+  const rightEventId = text(right.id);
+  return leftEventId && rightEventId && leftEventId !== rightEventId
+    ? { version: 1, leftEventId, rightEventId }
+    : undefined;
+}
+
+function householdItemDetails(event: ResponseCard): CalendarHouseholdItemV1 | undefined {
+  const sourceVariants = list(event.sourceVariants);
+  const hasSourceVariants = sourceVariants.length > 0;
+  const sourceRecords = eventSources(event);
+  if (hasSourceVariants && sourceRecords.length !== sourceVariants.length) return undefined;
+  const sources = sourceRecords.map((source) => {
+    const participation = parseCalendarOwnerParticipation(source.ownerParticipation);
+    const verified =
+      participation?.identityVerified === true && participation.basis === 'attendee-email';
+    const rsvp: CalendarHouseholdRSVP = verified ? participation.status : 'not_verified';
+    const start = hasSourceVariants ? text(source.start) : text(event.start);
+    const title = hasSourceVariants ? text(source.summary) : text(event.title);
+    const allDay = hasSourceVariants
+      ? typeof source.allDay === 'boolean'
+        ? source.allDay
+        : undefined
+      : typeof event.allDay === 'boolean'
+        ? event.allDay
+        : undefined;
+    if (!start || !title || allDay === undefined) return undefined;
+    const calendars = hasSourceVariants
+      ? text(source.calendar)
+      : text(event.calendar) ||
+        (list(event.calendars).length === 1 ? text(list(event.calendars)[0]) : '');
+    const end = hasSourceVariants ? text(source.end) : text(event.end);
+    return {
+      calendar: calendars || 'Calendar source name unavailable',
+      title,
+      start,
+      ...(end ? { end } : {}),
+      ...(text(source.calendarTimeZone) ? { timeZone: text(source.calendarTimeZone) } : {}),
+      allDay,
+      rsvp,
+    };
+  });
+  if (!sources.length || sources.some((source) => !source)) return undefined;
+  return {
+    version: 1,
+    sources: sources as NonNullable<(typeof sources)[number]>[],
+    eventFor: 'not_stated',
+    driving: 'not_stated',
+  };
+}
+
 /** Analyze pairs once globally; cap only formatted details, never the counts or agenda rows. */
 function calendarPairAttentionByDay(
   events: ResponseCard[],
   zone: string | undefined,
   include: boolean,
+  asksAboutDriving: boolean,
+  householdDetailsByEvent: ReadonlyMap<ResponseCard, CalendarHouseholdItemV1 | undefined>,
 ): Map<string, CalendarPairAttention> {
   const byDay = new Map<string, CalendarPairAttention>();
   if (!include || !zone) return byDay;
@@ -651,17 +846,26 @@ function calendarPairAttentionByDay(
     const startMs = Date.parse(text(event.start));
     const endMs = Date.parse(text(event.end));
     const sources = eventSources(event);
+    const ownerParticipation = verifiedOwnerParticipation(event);
+    const personalCommitment = verifiedPersonalCommitment(event);
+    const householdDetails = householdDetailsByEvent.get(event);
     return {
       event,
+      eventId: text(event.id),
+      agendaDay: event.windowMembership === 'source-date-only' ? 'unverified' : dayKey(event, zone),
       startMs,
       endMs,
       sources,
+      ownerParticipation,
+      personalCommitment,
+      householdDetails,
+      allSourceRsvpsAccepted: calendarHouseholdItemHasAcceptedRSVP(householdDetails),
       hasPhoneSource: sources.some((source) => text(source.calendarId).startsWith('iphone:')),
       eligible:
         !event.allDay &&
         event.blocksTime !== false &&
         event.status !== 'cancelled' &&
-        verifiedOwnerParticipation(event) !== 'declined' &&
+        ownerParticipation !== 'declined' &&
         Number.isFinite(startMs) &&
         Number.isFinite(endMs) &&
         INSTANT.test(text(event.start)) &&
@@ -724,6 +928,9 @@ function calendarPairAttentionByDay(
             title: `Possible copies with different times: ${text(left.event.title)} (${sourceNames(left.sources).join(', ')}) · ${text(right.event.title)} (${sourceNames(right.sources).join(', ')})`,
             detail:
               'Assistant cannot confirm whether these are the same event or which time is current. Both entries stay visible; check each invitation.',
+            ...(comparisonFor(left.event, right.event)
+              ? { comparison: comparisonFor(left.event, right.event) }
+              : {}),
           });
         }
         continue;
@@ -744,11 +951,51 @@ function calendarPairAttentionByDay(
             title: `Possible copies: ${text(left.event.title)} (${sourceNames(left.sources).join(', ')}) · ${text(right.event.title)} (${sourceNames(right.sources).join(', ')})`,
             detail:
               'These listings may be copies of one event. Both remain visible; check the invitation to confirm whether they are copies.',
+            ...(comparisonFor(left.event, right.event)
+              ? { comparison: comparisonFor(left.event, right.event) }
+              : {}),
           });
         }
         continue;
       }
       attention.conflictCount += 1;
+      const acceptedPersonalPair =
+        asksAboutDriving &&
+        day !== 'unverified' &&
+        left.agendaDay === day &&
+        right.agendaDay === day &&
+        left.ownerParticipation === 'accepted' &&
+        right.ownerParticipation === 'accepted' &&
+        left.allSourceRsvpsAccepted &&
+        right.allSourceRsvpsAccepted &&
+        left.personalCommitment &&
+        right.personalCommitment &&
+        Boolean(left.eventId && right.eventId && left.eventId !== right.eventId);
+      if (acceptedPersonalPair) {
+        const firstIsLeft = left.eventId.localeCompare(right.eventId) < 0;
+        const firstId = firstIsLeft ? left.eventId : right.eventId;
+        const secondId = firstIsLeft ? right.eventId : left.eventId;
+        const current = attention.personalConflictQuestion;
+        const isEarlier =
+          !current ||
+          from < current.startMs ||
+          (from === current.startMs &&
+            (firstId.localeCompare(current.eventIds[0]) < 0 ||
+              (firstId === current.eventIds[0] &&
+                secondId.localeCompare(current.eventIds[1]) < 0)));
+        if (isEarlier) {
+          const firstEvent = firstIsLeft ? left.event : right.event;
+          const secondEvent = firstIsLeft ? right.event : left.event;
+          attention.personalConflictQuestion = {
+            eventIds: [firstId, secondId],
+            titles: [
+              text(firstEvent.title) || 'first commitment',
+              text(secondEvent.title) || 'second commitment',
+            ],
+            startMs: from,
+          };
+        }
+      }
       if (formattedDetails < MAX_PAIR_DETAILS) {
         formattedDetails += 1;
         const endIso = new Date(to).toISOString();
@@ -841,11 +1088,19 @@ export function calendarAgendaCards(input: {
         : 'unverified';
     groups.set(day, []);
   }
+  const householdDetailsByEvent = new Map(
+    input.events.map((event) => [event, householdItemDetails(event)] as const),
+  );
   const pairAttention = calendarPairAttentionByDay(
     input.events,
     zone,
     input.request?.includeCalendarOverlapSummary !== false,
+    asksAboutDriving(input.requestText ?? ''),
+    householdDetailsByEvent,
   );
+  const readCoverage = coverageDetails(rows);
+  const coverageSummary = householdCoverageSummary(rows, complete);
+  const freshnessSummary = householdFreshnessSummary(rows);
   return [...groups.entries()]
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([day, events]) => {
@@ -869,7 +1124,7 @@ export function calendarAgendaCards(input: {
       const emptyLead = unresolvedScope
         ? `Couldn’t resolve ${ownerCalendarToolName(input.request?.calendarScope ?? { name: 'the requested calendar' })} in the checked calendars. Which calendar should I use?`
         : complete
-          ? `No events on ${scope} for ${dateLabel(day).split(' · ')[0]}.`
+          ? `No events returned from ${scope} for ${dateLabel(day).split(' · ')[0]}.`
           : usable.length
             ? `No matching events were verified in the checked subset. ${warning}`
             : `Couldn’t load ${scope}. Please retry the calendar lookup.`;
@@ -881,6 +1136,7 @@ export function calendarAgendaCards(input: {
         : emptyLead;
       const items = events.map((event) => {
         const differences = sourceDifferences(event, zone);
+        const householdDetails = householdDetailsByEvent.get(event);
         const status = text(event.status).toLowerCase();
         const note = [
           ownerRSVPNote(event),
@@ -913,6 +1169,7 @@ export function calendarAgendaCards(input: {
           ...(note ? { note } : {}),
           calendars: list(event.calendars),
           sourceVariants: eventSources(event),
+          ...(householdDetails ? { householdDetails } : {}),
           calendarLinks: list(event.calendarLinks),
           ...(event.meetingLink ? { meetingLink: event.meetingLink } : {}),
         };
@@ -956,7 +1213,6 @@ export function calendarAgendaCards(input: {
       ];
       if (unavailable.length)
         sections.push({ type: 'attention', title: 'Calendars not checked', items: unavailable });
-      const readCoverage = coverageDetails(rows);
       if (readCoverage.length)
         sections.push({ type: 'attention', title: 'Calendar read coverage', items: readCoverage });
       if (day === 'unverified' && items.length)
@@ -977,6 +1233,7 @@ export function calendarAgendaCards(input: {
         duplicateCount,
         arrivalCount,
       } = pairAttention.get(day) ?? emptyPairAttention();
+      const pairSummary = pairAttention.get(day) ?? emptyPairAttention();
       if (conflictCount) {
         const truncated = conflictCount > conflicts.length;
         let summary: string;
@@ -1069,6 +1326,24 @@ export function calendarAgendaCards(input: {
           itemCount: arrivalCount,
           itemsTruncated: arrivalCount > arrivalGuidance.length,
         });
+      const agendaEventIds = new Map<string, number>();
+      for (const event of events) {
+        const eventId = text(event.id);
+        if (eventId) agendaEventIds.set(eventId, (agendaEventIds.get(eventId) ?? 0) + 1);
+      }
+      const candidateQuestion = pairSummary.personalConflictQuestion;
+      const firstQuestion =
+        candidateQuestion &&
+        agendaEventIds.get(candidateQuestion.eventIds[0]) === 1 &&
+        agendaEventIds.get(candidateQuestion.eventIds[1]) === 1
+          ? candidateQuestion
+          : undefined;
+      const householdCoverageComplete =
+        groupComplete && !coverageSummary.startsWith('Coverage incomplete:');
+      const householdCoverageText =
+        groupComplete || !complete
+          ? coverageSummary
+          : `Coverage for this day is unverified. ${coverageSummary}`;
       return {
         kind: 'briefing',
         id: `calendar-agenda-${createHash('sha256')
@@ -1082,6 +1357,36 @@ export function calendarAgendaCards(input: {
         lead,
         sections,
         complete: groupComplete,
+        householdDay: {
+          version: 1,
+          coverage: {
+            complete: householdCoverageComplete,
+            summary: householdCoverageText,
+            freshnessSummary,
+            details: readCoverage.flatMap((item) =>
+              item.detail ? [{ title: item.title, detail: item.detail }] : [],
+            ),
+          },
+          ...(firstQuestion
+            ? {
+                nextQuestion: {
+                  basis: 'verified_owner_accepted_overlap' as const,
+                  id: `driving-overlap-${firstQuestion.eventIds.join('-')}`,
+                  question: `Do you need to account for driving between ${firstQuestion.titles[0]} and ${firstQuestion.titles[1]}?`,
+                  detail: 'These accepted commitments overlap. Driving is not stated.',
+                  eventIds: firstQuestion.eventIds,
+                  remainingIssueCount: Math.max(
+                    0,
+                    conflictCount +
+                      sourceIdentityDisagreementCount +
+                      duplicateCount +
+                      arrivalCount -
+                      1,
+                  ),
+                },
+              }
+            : {}),
+        },
       };
     });
 }
@@ -1104,18 +1409,53 @@ export function calendarAgendaSummary(
         text(card.lead),
       ].filter(Boolean);
       const sections = list(card.sections).map(record).filter(Boolean);
+      const agendaRows = sections
+        .filter((section) => section.type === 'agenda')
+        .flatMap((section) => list(section.items).map(record).filter(Boolean));
+      const agendaIdCounts = new Map<string, number>();
+      const agendaItemsById = new Map<string, Record<string, unknown>>();
+      for (const item of agendaRows) {
+        const id = text(item.id);
+        if (id) {
+          agendaIdCounts.set(id, (agendaIdCounts.get(id) ?? 0) + 1);
+          agendaItemsById.set(id, item);
+        }
+      }
+      const householdDay = parseCalendarHouseholdDay(card.householdDay);
+      const householdCoverage = householdDay?.coverage;
+      if (householdCoverage) {
+        blocks.push(householdCoverage.summary, householdCoverage.freshnessSummary);
+        for (const item of householdCoverage.details) blocks.push(`${item.title} — ${item.detail}`);
+      }
+      const nextQuestion = householdDay?.nextQuestion;
+      if (
+        nextQuestion &&
+        agendaIdCounts.get(nextQuestion.eventIds[0]) === 1 &&
+        agendaIdCounts.get(nextQuestion.eventIds[1]) === 1 &&
+        calendarHouseholdItemHasAcceptedRSVP(
+          agendaItemsById.get(nextQuestion.eventIds[0])?.householdDetails,
+        ) &&
+        calendarHouseholdItemHasAcceptedRSVP(
+          agendaItemsById.get(nextQuestion.eventIds[1])?.householdDetails,
+        )
+      )
+        blocks.push(`Next question: ${nextQuestion.question} ${nextQuestion.detail}`);
       for (const section of sections) {
         const title = text(section.title);
         if (section.type === 'agenda') {
           const rows = list(section.items).map(record).filter(Boolean);
           const displayed = rows.slice(0, maxAgendaRows).map((item) => {
             const sourceNames = list(item.calendars).map(text).filter(Boolean);
-            return [
+            const base = [
               `- **${text(item.time) || 'Time unavailable'}** — ${text(item.title) || 'Untitled event'}`,
               text(item.location) ? ` — ${text(item.location)}` : '',
               sourceNames.length ? ` · Calendars: ${[...new Set(sourceNames)].join(', ')}` : '',
               text(item.note) ? ` · ${text(item.note)}` : '',
             ].join('');
+            const household = parseCalendarHouseholdItem(item.householdDetails);
+            const sourceRsvps =
+              household?.sources.map((source) => `${source.calendar}: ${source.rsvp}`) ?? [];
+            return `${base}${sourceRsvps.length ? `\n  RSVP by source: ${sourceRsvps.join('; ')}. Event for: not stated. Driving: not stated.` : ''}`;
           });
           if (title && displayed.length) blocks.push(`**${title}**\n${displayed.join('\n')}`);
           const omitted = rows.length - displayed.length;
