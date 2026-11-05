@@ -46,7 +46,7 @@ describe('synthetic model outcome report', () => {
     expect(() => buildModelOutcomeReport(source)).toThrow('Conflicting receipt rows');
   });
 
-  it('keeps known currencies separate and refuses a combined successful-outcome cost', () => {
+  it('keeps the supported currency total and preserves an unsupported raw currency', () => {
     const source = fixture({
       attempts: [
         {
@@ -73,14 +73,69 @@ describe('synthetic model outcome report', () => {
     });
     const report = buildModelOutcomeReport(source);
     expect(report.amountsByCurrency.map((row) => [row.currency, row.knownAmount])).toEqual([
-      ['EUR', '0.02'],
       ['USD', '0.01'],
     ]);
+    expect(report.attempts.map((attempt) => attempt.currency)).toEqual(['USD', 'EUR']);
+    expect(report.unsupportedCurrencyCount).toBe(1);
+    expect(report.unsupportedCurrencies).toEqual(['EUR']);
     expect(report.modelCostPerSuccessfulOutcome).toEqual({
       eligible: false,
-      reason: 'mixed_currencies',
+      reason: 'unsupported_currency',
       amount: null,
       currency: null,
+    });
+  });
+
+  it('preserves an unrecognized currency code but never treats its amount as supported', () => {
+    const source = fixture({
+      attempts: SYNTHETIC_MODEL_OUTCOME_FIXTURE.attempts.map((attempt) => ({
+        ...attempt,
+        cost: { ...attempt.cost, currency: 'ZZZ' },
+      })),
+    });
+    const report = buildModelOutcomeReport(source);
+    expect(report.attempts.every((attempt) => attempt.currency === 'ZZZ')).toBe(true);
+    expect(report.amountsByCurrency).toEqual([]);
+    expect(report.unsupportedCurrencyCount).toBe(2);
+    expect(report.unsupportedCurrencies).toEqual(['ZZZ']);
+    expect(report.modelCostPerSuccessfulOutcome).toEqual({
+      eligible: false,
+      reason: 'unsupported_currency',
+      amount: null,
+      currency: null,
+    });
+  });
+
+  it('rejects a missing raw currency and keeps malformed currency strings ineligible', () => {
+    const withNullCurrency = fixture();
+    const nullAttempts = withNullCurrency.attempts as Array<Record<string, unknown>>;
+    nullAttempts[0] = {
+      ...nullAttempts[0],
+      cost: { known: true, basis: 'provider_reported', amount: '0.01', currency: null },
+    };
+    expect(modelOutcomeFixtureSchema.safeParse(withNullCurrency).success).toBe(false);
+
+    const withMalformedCurrency = fixture({
+      attempts: [
+        {
+          callId: 'call:malformed-currency',
+          model: 'fixture-model',
+          provider: 'fixture-provider',
+          role: 'plan',
+          status: 'passed',
+          startedAt: '2026-11-03T10:00:00.000Z',
+          finishedAt: '2026-11-03T10:00:01.000Z',
+          cost: { known: true, basis: 'provider_reported', amount: '0.01', currency: 'usd' },
+        },
+      ],
+    });
+    const report = buildModelOutcomeReport(withMalformedCurrency);
+    expect(report.attempts[0]?.currency).toBe('usd');
+    expect(report.amountsByCurrency).toEqual([]);
+    expect(report.unsupportedCurrencies).toEqual(['usd']);
+    expect(report.modelCostPerSuccessfulOutcome).toMatchObject({
+      eligible: false,
+      reason: 'unsupported_currency',
     });
   });
 
@@ -266,6 +321,74 @@ describe('synthetic model outcome report', () => {
       reason: 'occurrence_not_terminal',
       amount: null,
       currency: null,
+    });
+  });
+
+  it('rejects attempts that begin before or after their occurrence or finish beyond it', () => {
+    const beforeOccurrence = fixture({
+      startedAt: '2026-11-04T10:00:00.000Z',
+      finishedAt: '2026-11-04T10:00:02.400Z',
+    });
+    expect(() => buildModelOutcomeReport(beforeOccurrence)).toThrow(
+      'Attempt starts before its occurrence',
+    );
+
+    const startsAfterOccurrence = fixture({
+      finishedAt: '2026-11-03T10:00:00.000Z',
+      attempts: [
+        {
+          callId: 'call:late-start',
+          model: 'fixture-model',
+          provider: 'fixture-provider',
+          role: 'plan',
+          status: 'passed',
+          startedAt: '2026-11-03T10:00:00.001Z',
+          finishedAt: '2026-11-03T10:00:00.001Z',
+          cost: { known: true, basis: 'provider_reported', amount: '0.01', currency: 'USD' },
+        },
+      ],
+    });
+    expect(() => buildModelOutcomeReport(startsAfterOccurrence)).toThrow(
+      'Attempt starts after its occurrence finished',
+    );
+
+    const finishesAfterOccurrence = fixture({
+      attempts: [
+        {
+          callId: 'call:late-finish',
+          model: 'fixture-model',
+          provider: 'fixture-provider',
+          role: 'plan',
+          status: 'passed',
+          startedAt: '2026-11-03T10:00:02.000Z',
+          finishedAt: '2026-11-03T10:00:02.401Z',
+          cost: { known: true, basis: 'provider_reported', amount: '0.01', currency: 'USD' },
+        },
+      ],
+    });
+    expect(() => buildModelOutcomeReport(finishesAfterOccurrence)).toThrow(
+      'Attempt finishes after its occurrence',
+    );
+  });
+
+  it('accepts inclusive occurrence boundaries and overlapping parallel attempts', () => {
+    const source = fixture({
+      attempts: ['call:parallel-a', 'call:parallel-b'].map((callId) => ({
+        callId,
+        model: 'fixture-model',
+        provider: 'fixture-provider',
+        role: 'plan',
+        status: 'passed',
+        startedAt: '2026-11-03T10:00:00.000Z',
+        finishedAt: '2026-11-03T10:00:02.400Z',
+        cost: { known: true, basis: 'provider_reported', amount: '0.01', currency: 'USD' },
+      })),
+    });
+    const report = buildModelOutcomeReport(source);
+    expect(report.modelCostPerSuccessfulOutcome).toEqual({
+      eligible: true,
+      amount: '0.02',
+      currency: 'USD',
     });
   });
 

@@ -14,6 +14,10 @@ const evaluationStatuses = [
 ] as const satisfies readonly EvaluationStatus[];
 
 const costBases = Object.keys(COST_BASIS_LABELS) as [CostBasis, ...CostBasis[]];
+// Existing cost totals expose USD only (`CostEvidenceTotal.usd` / ledgerUsdToMicros).
+const supportedCurrencies = ['USD'] as const;
+type SupportedCurrency = (typeof supportedCurrencies)[number];
+const supportedCurrencySet = new Set<string>(supportedCurrencies);
 
 const amountSchema = z
   .string()
@@ -28,7 +32,7 @@ const costSchema = z.discriminatedUnion('known', [
       known: z.literal(true),
       basis: z.enum(costBases),
       amount: amountSchema,
-      currency: z.string().regex(/^[A-Z]{3}$/),
+      currency: z.string().min(1).max(16),
     })
     .strict()
     .superRefine((cost, ctx) => {
@@ -123,6 +127,33 @@ export const modelOutcomeFixtureSchema = z
         message: 'Passed outcome requires a passing attempt fact',
       });
     }
+    const occurrenceStart = Date.parse(fixture.startedAt);
+    const occurrenceFinish = fixture.finishedAt === null ? null : Date.parse(fixture.finishedAt);
+    for (const [index, attempt] of fixture.attempts.entries()) {
+      const attemptStart = Date.parse(attempt.startedAt);
+      const attemptFinish = attempt.finishedAt === null ? null : Date.parse(attempt.finishedAt);
+      if (attemptStart < occurrenceStart) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['attempts', index, 'startedAt'],
+          message: 'Attempt starts before its occurrence',
+        });
+      }
+      if (occurrenceFinish !== null && attemptStart > occurrenceFinish) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['attempts', index, 'startedAt'],
+          message: 'Attempt starts after its occurrence finished',
+        });
+      }
+      if (attemptFinish !== null && occurrenceFinish !== null && attemptFinish > occurrenceFinish) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['attempts', index, 'finishedAt'],
+          message: 'Attempt finishes after its occurrence',
+        });
+      }
+    }
   });
 
 export type ModelOutcomeFixture = z.infer<typeof modelOutcomeFixtureSchema>;
@@ -158,6 +189,8 @@ export interface ModelOutcomeReport {
   interruptedAttemptCount: number;
   notRunAttemptCount: number;
   unknownCostCount: number;
+  unsupportedCurrencyCount: number;
+  unsupportedCurrencies: string[];
   amountsByCurrency: Array<{
     currency: string;
     knownAmount: string;
@@ -174,7 +207,7 @@ export interface ModelOutcomeReport {
           | 'occurrence_not_terminal'
           | 'attempts_not_terminal'
           | 'unknown_cost'
-          | 'mixed_currencies'
+          | 'unsupported_currency'
           | 'no_cost';
         amount: null;
         currency: null;
@@ -242,16 +275,24 @@ export function buildModelOutcomeReport(input: unknown): ModelOutcomeReport {
   }
 
   const currencies = new Map<
-    string,
+    SupportedCurrency,
     { amount: bigint; attemptCount: number; byBasis: Map<CostBasis, bigint> }
   >();
   let unknownCostCount = 0;
+  let unsupportedCurrencyCount = 0;
+  const unsupportedCurrencies = new Set<string>();
   for (const attempt of attempts) {
     if (!attempt.cost.known) {
       unknownCostCount += 1;
       continue;
     }
-    const row = currencies.get(attempt.cost.currency) ?? {
+    if (!supportedCurrencySet.has(attempt.cost.currency)) {
+      unsupportedCurrencyCount += 1;
+      unsupportedCurrencies.add(attempt.cost.currency);
+      continue;
+    }
+    const currency = attempt.cost.currency as SupportedCurrency;
+    const row = currencies.get(currency) ?? {
       amount: 0n,
       attemptCount: 0,
       byBasis: new Map<CostBasis, bigint>(),
@@ -260,7 +301,7 @@ export function buildModelOutcomeReport(input: unknown): ModelOutcomeReport {
     row.amount += amount;
     row.attemptCount += 1;
     row.byBasis.set(attempt.cost.basis, (row.byBasis.get(attempt.cost.basis) ?? 0n) + amount);
-    currencies.set(attempt.cost.currency, row);
+    currencies.set(currency, row);
   }
 
   let modelCostPerSuccessfulOutcome: ModelOutcomeReport['modelCostPerSuccessfulOutcome'];
@@ -299,10 +340,10 @@ export function buildModelOutcomeReport(input: unknown): ModelOutcomeReport {
       amount: null,
       currency: null,
     };
-  } else if (currencies.size > 1) {
+  } else if (unsupportedCurrencyCount > 0) {
     modelCostPerSuccessfulOutcome = {
       eligible: false,
-      reason: 'mixed_currencies',
+      reason: 'unsupported_currency',
       amount: null,
       currency: null,
     };
@@ -361,6 +402,8 @@ export function buildModelOutcomeReport(input: unknown): ModelOutcomeReport {
       .length,
     notRunAttemptCount: attempts.filter((attempt) => attempt.status === 'not_run').length,
     unknownCostCount,
+    unsupportedCurrencyCount,
+    unsupportedCurrencies: [...unsupportedCurrencies].sort((a, b) => a.localeCompare(b)),
     amountsByCurrency: [...currencies.entries()]
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([currency, row]) => ({
