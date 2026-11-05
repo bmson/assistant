@@ -28,6 +28,8 @@ import {
 } from './web17-navigation-diagnostics.js';
 import {
   createWeb17TransportDiagnostics,
+  emitWeb17Safely,
+  observeWeb17Safely,
   selectWeb17TransportCandidate,
 } from './web17-transport-diagnostics.js';
 
@@ -626,6 +628,7 @@ function observeAllChatsNavigation(
   diagnostics: ReturnType<typeof createWeb17NavigationDiagnostics>,
   transport: ReturnType<typeof createWeb17TransportDiagnostics>,
   nonces: WeakMap<PlaywrightRequest, string>,
+  requestStarts: WeakMap<PlaywrightRequest, number>,
 ): () => void {
   // Request.headers() need not reflect the headers overridden by route.continue.
   const nonceFor = (request: PlaywrightRequest) =>
@@ -643,6 +646,8 @@ function observeAllChatsNavigation(
     });
   const onRequest = (request: PlaywrightRequest) =>
     safely(() => {
+      if (web17PreviewDiagnosticsEnabled)
+        observeWeb17Safely(() => requestStarts.set(request, performance.now()));
       diagnostics.recordRequestStarted(
         request.url(),
         request.resourceType(),
@@ -736,20 +741,22 @@ async function verifyUnmountedPollDoesNotPublishAfterRemount(): Promise<void> {
   const navigationDiagnostics = createWeb17NavigationDiagnostics(origin.origin);
   const transportDiagnostics = createWeb17TransportDiagnostics();
   const requestNonces = new WeakMap<PlaywrightRequest, string>();
-  const emitTransport = async (result: 'passed' | 'failed') => {
-    if (!web17PreviewDiagnosticsEnabled) return;
-    transportDiagnostics.seal(result);
-    const serialized = JSON.stringify(transportDiagnostics.snapshot());
-    console.error(`[WEB-17-TRANSPORT] ${serialized}`);
-    const path = process.env.WEB17_TRANSPORT_ARTIFACT_PATH;
-    if (path) {
-      try {
-        await writeFile(path, serialized + '\n', { flag: 'wx', mode: 0o600 });
-      } catch {
-        console.error('[WEB-17-TRANSPORT] {"artifactWritten":false,"reason":"artifact_io"}');
+  const requestStarts = new WeakMap<PlaywrightRequest, number>();
+  const emitTransport = (result: 'passed' | 'failed') =>
+    emitWeb17Safely(async () => {
+      if (!web17PreviewDiagnosticsEnabled) return;
+      transportDiagnostics.seal(result);
+      const serialized = JSON.stringify(transportDiagnostics.snapshot());
+      console.error(`[WEB-17-TRANSPORT] ${serialized}`);
+      const path = process.env.WEB17_TRANSPORT_ARTIFACT_PATH;
+      if (path) {
+        try {
+          await writeFile(path, serialized + '\n', { flag: 'wx', mode: 0o600 });
+        } catch {
+          console.error('[WEB-17-TRANSPORT] {"artifactWritten":false,"reason":"artifact_io"}');
+        }
       }
-    }
-  };
+    });
   let browserErrorObserverInstalled = false;
   let web17DiagnosticStage = 'setup';
   let stopNavigationObservers: (() => void) | undefined;
@@ -809,7 +816,22 @@ async function verifyUnmountedPollDoesNotPublishAfterRemount(): Promise<void> {
   };
 
   const pollTokenPrefix = randomUUID();
-  page.on('pageerror', (error) => browserErrors.push(error.message));
+  const onPageError = (error: Error) => {
+    browserErrors.push(error.message);
+    if (web17PreviewDiagnosticsEnabled)
+      observeWeb17Safely(() =>
+        transportDiagnostics.recordBrowserError('pageerror', `${error.name}\n${error.stack ?? ''}`),
+      );
+  };
+  const onConsoleError = (message: import('playwright').ConsoleMessage) => {
+    if (web17PreviewDiagnosticsEnabled)
+      observeWeb17Safely(() => {
+        if (message.type() === 'error')
+          transportDiagnostics.recordBrowserError('console', message.text());
+      });
+  };
+  page.on('pageerror', onPageError);
+  if (web17PreviewDiagnosticsEnabled) observeWeb17Safely(() => page.on('console', onConsoleError));
   browserErrorObserverInstalled = true;
   await page.addInitScript(
     ({ expectedTaskId, tokenPrefix }: { expectedTaskId: string; tokenPrefix: string }) => {
@@ -951,6 +973,9 @@ async function verifyUnmountedPollDoesNotPublishAfterRemount(): Promise<void> {
         prefetch: Boolean(requestHeaders['next-router-prefetch']),
         clickAttempted: navigationDiagnostics.snapshot().clickAttempted,
       });
+      observeWeb17Safely(() =>
+        transportDiagnostics.recordRequestStart(nonce, requestStarts.get(request)),
+      );
       transportDiagnostics.record(nonce, 'headers_started');
       try {
         const allHeaders = await request.allHeaders();
@@ -991,6 +1016,7 @@ async function verifyUnmountedPollDoesNotPublishAfterRemount(): Promise<void> {
     navigationDiagnostics,
     transportDiagnostics,
     requestNonces,
+    requestStarts,
   );
 
   try {
@@ -1030,6 +1056,8 @@ async function verifyUnmountedPollDoesNotPublishAfterRemount(): Promise<void> {
       navigationDiagnostics.setAllChatsLinkObservation(null, null);
     }
     navigationDiagnostics.markClickAttempted();
+    if (web17PreviewDiagnosticsEnabled)
+      observeWeb17Safely(() => transportDiagnostics.markClickAttempted());
     try {
       await allChatsLink.click();
       navigationDiagnostics.setClickCompleted(true);
@@ -1038,6 +1066,8 @@ async function verifyUnmountedPollDoesNotPublishAfterRemount(): Promise<void> {
       throw error;
     }
     await page.waitForURL((url) => url.pathname === '/chat/all', { timeout: 20_000 });
+    if (web17PreviewDiagnosticsEnabled)
+      observeWeb17Safely(() => transportDiagnostics.markRemountAssertionsStarted());
     web17DiagnosticStage = 'composer-detach';
     await composer.waitFor({ state: 'detached', timeout: 10_000 });
     web17DiagnosticStage = 'old-poll-abort';
@@ -1147,6 +1177,8 @@ async function verifyUnmountedPollDoesNotPublishAfterRemount(): Promise<void> {
       if (freshRouteEntered) await waitFor(freshSettled, 'Fresh task A route did not drain', 5_000);
     } finally {
       await page.unroute(isChatSafetyRoute, routeHandler).catch(() => {});
+      observeWeb17Safely(() => page.off('pageerror', onPageError));
+      observeWeb17Safely(() => page.off('console', onConsoleError));
       await page.close();
     }
   }
