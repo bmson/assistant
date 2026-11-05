@@ -507,6 +507,43 @@ export function verifyPreAuthEnvironment(env: NodeJS.ProcessEnv) {
   text(env.GITHUB_SHA, /^[a-f0-9]{40}$/);
   text(env.GITHUB_RUN_ID, /^[1-9][0-9]{0,19}$/);
 }
+/** Prerequisites dispatch data binds source/configuration, not human approval provenance. */
+export function verifyPrerequisitesBinding(env: NodeJS.ProcessEnv): void {
+  try {
+    verifyPreAuthEnvironment(env);
+    const approved = env.OWNER_EDITOR_APPROVED_SOURCE_SHA;
+    if (
+      env.GITHUB_EVENT_NAME !== 'workflow_dispatch' ||
+      env.GITHUB_WORKFLOW_REF !==
+        'bmson/assistant/.github/workflows/owner-editor-release-inventory.yml@refs/heads/main' ||
+      typeof approved !== 'string' ||
+      approved.length !== 40 ||
+      !/^[a-f0-9]{40}$/.test(approved) ||
+      [env.GITHUB_SHA, env.GITHUB_WORKFLOW_SHA, env.OWNER_EDITOR_CHECKOUT_SHA].some(
+        (source) => source !== approved,
+      )
+    )
+      throw new Error('prerequisites binding mismatch');
+    for (const [actual, expected] of [
+      [env.GCP_PROJECT, env.OWNER_EDITOR_APPROVED_PROJECT_SHA256],
+      [env.GCP_DEPLOY_SERVICE_ACCOUNT, env.OWNER_EDITOR_APPROVED_SERVICE_ACCOUNT_SHA256],
+      [env.GCP_WORKLOAD_IDENTITY_PROVIDER, env.OWNER_EDITOR_APPROVED_WIF_PROVIDER_SHA256],
+    ]) {
+      if (
+        typeof actual !== 'string' ||
+        !actual ||
+        typeof expected !== 'string' ||
+        expected.length !== 64 ||
+        !/^[a-f0-9]{64}$/.test(expected) ||
+        hash(actual) !== expected
+      )
+        throw new Error('prerequisites binding mismatch');
+    }
+  } catch {
+    // Do not expose configured values, fingerprints or caller-supplied input in errors.
+    throw new Error('prerequisites binding mismatch');
+  }
+}
 /** Reject local/default credentials. Only the explicit protected WIF action file is accepted. */
 export function verifyWifEnvironment(env: NodeJS.ProcessEnv, load: (path: string) => unknown) {
   verifyPreAuthEnvironment(env);
@@ -614,7 +651,10 @@ async function main(mark: InventoryStageMarker) {
   mark('protected_context');
   verifyPreAuthEnvironment(process.env);
   const diagnosticRecipient = verifyFailureRecipient(process.env);
-  if (mode === '--verify-source') return;
+  if (mode === '--verify-source') {
+    verifyPrerequisitesBinding(process.env);
+    return;
+  }
   const started = Date.now();
   mark('credential_file');
   const identity = verifyWifEnvironment(process.env, (file) => {
