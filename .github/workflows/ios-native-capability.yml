@@ -1,0 +1,366 @@
+name: Native controls one-off capability
+on:
+  pull_request:
+    paths:
+      - apps/ios/AssistantUITestHost/**
+      - apps/ios/AssistantUITests/**
+      - apps/ios/Assistant.xcodeproj/project.pbxproj
+      - apps/ios/Assistant.xcodeproj/xcshareddata/xcschemes/AssistantUIFixtures.xcscheme
+      - apps/ios/Assistant/AppModel.swift
+      - .github/workflows/ios-native-capability.yml
+permissions:
+  contents: read
+concurrency:
+  group: native-controls-capability-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+jobs:
+  capability:
+    # One-off mechanism qualification; not an ongoing full component gate.
+    name: One native controls capability
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - name: Record the fixed job budget
+        timeout-minutes: 1
+        run: python3 -c 'import os,time,pathlib; pathlib.Path(os.environ["RUNNER_TEMP"],"native-controls-start").write_text(str(time.time()))'
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        timeout-minutes: 1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Build and run exactly one synthetic capability
+        timeout-minutes: 12
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 - <<'PY'
+          import os, sys, json, re, time, signal, selectors, subprocess, hashlib
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP']) / 'native-controls-evidence'
+          root.mkdir(mode=0o700, exist_ok=False)
+          build = Path(os.environ['RUNNER_TEMP']) / 'native-controls-build'
+          env = {k:v for k,v in os.environ.items() if k in {'HOME','USER','LOGNAME','SHELL','TMPDIR','LANG','LC_ALL'}}
+          env['PATH'] = '/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin'
+          log_bytes = 0
+          elapsed = time.time() - float((Path(os.environ['RUNNER_TEMP'])/'native-controls-start').read_text())
+          if not 0 <= elapsed < 720: raise RuntimeError('Job budget unavailable')
+          main_deadline = time.monotonic() + 720 - elapsed
+          def save(name, value):
+              (root / name).write_text(json.dumps(value, indent=2) + '\n')
+          def observe_group(pid, timeout_seconds):
+              try:
+                  listed = subprocess.run(['/bin/ps','-axo','pgid='], env=env, capture_output=True, text=True, timeout=timeout_seconds, check=True)
+                  return str(pid) in listed.stdout.split(), None
+              except Exception as error:
+                  return None, repr(error)[:320]
+          def drain(process, secondary, normal_exit, drain_deadline):
+              signals = []
+              def note(error):
+                  if len(secondary)<8: secondary.append(str(error)[:400])
+              def remaining():return drain_deadline-time.monotonic()
+              def observe():
+                  rest=remaining()
+                  if rest<=0:note('Group drain deadline exhausted');return None
+                  try:state,error=observe_group(process.pid,min(2,rest))
+                  except Exception as probe_error:state,error=None,repr(probe_error)
+                  if error:note('group observation: '+str(error))
+                  if state is not True and state is not False and state is not None:
+                      note('Invalid group observation');state=None
+                  return state
+              def live():
+                  try:return process.poll() is None
+                  except Exception as error:note('Leader observation: '+repr(error));return None
+              live()
+              state=observe();residue=normal_exit and state is True
+              for sig in (signal.SIGTERM,signal.SIGKILL):
+                  if state is False:break
+                  if remaining()<=0:note('Group drain deadline exhausted');state=None;break
+                  leader_live=live() is True
+                  # Unknown membership cannot authorize a signal after leader exit.
+                  if state is None and not leader_live:
+                      note('Exited leader with unknown group; no unbound signal');break
+                  try:os.killpg(process.pid,sig);signals.append(int(sig))
+                  except ProcessLookupError:state=False;break
+                  except Exception as error:note('Owned group signal: '+repr(error))
+                  until=min(time.monotonic()+1,drain_deadline)
+                  while live() is True:
+                      rest=min(until-time.monotonic(),remaining())
+                      if rest<=0:break
+                      time.sleep(min(.05,rest))
+                  state=observe()
+              live()
+              return {'closed':state is False,'normalExitResidue':residue,'signals':signals}
+          def run(name, args, seconds, on_output=None):
+              global log_bytes
+              started=time.monotonic(); started_epoch=time.time(); process=None; selector=None; log=None
+              problem=None; secondary=[]; closure={'closed':False,'normalExitResidue':False,'signals':[]}
+              record={'pid':None,'args':args,'closed':False,'declaredBudgetSeconds':seconds,'startedEpochSeconds':started_epoch}
+              def note(error):
+                  if len(secondary)<8: secondary.append(str(error)[:400])
+              try:
+                  process=subprocess.Popen(args,env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,start_new_session=True)
+                  record['pid']=process.pid
+                  save('active-command.json',record)
+                  # Leave the existing main envelope room for its own drain.
+                  deadline=min(time.monotonic()+seconds,main_deadline-8)
+                  selector=selectors.DefaultSelector();selector.register(process.stdout,selectors.EVENT_READ)
+                  log=(root/(name+'.log')).open('wb')
+                  while selector.get_map():
+                      if time.monotonic()>=deadline: raise TimeoutError(name+' deadline')
+                      if name=='test' and sum(p.stat().st_size for p in root.rglob('*') if p.is_file())>128*1024*1024: raise RuntimeError('Total evidence cap exceeded')
+                      for key,_ in selector.select(.2):
+                          chunk=os.read(key.fd,65536)
+                          if not chunk: selector.unregister(key.fileobj);continue
+                          remaining=64*1024*1024-log_bytes
+                          log.write(chunk[:max(0,remaining)]);log_bytes+=min(len(chunk),max(0,remaining))
+                          if len(chunk)>remaining: raise RuntimeError('Total raw log cap exceeded')
+                  log.flush()
+                  if on_output:on_output((root/(name+'.log')).read_text())
+                  rest=deadline-time.monotonic()
+                  if rest<=0:raise TimeoutError(name+' deadline')
+                  process.wait(timeout=rest)
+              except BaseException as error: problem=repr(error)
+              finally:
+                  command_elapsed=time.monotonic()-started
+                  drain_deadline=min(time.monotonic()+8,main_deadline)
+                  if process is not None:
+                      try: closure=drain(process,secondary,problem is None and process.poll() is not None,drain_deadline)
+                      except BaseException as error:
+                          # Preserve the primary failure and make one bounded
+                          # known-live-only kill attempt if the observer itself broke.
+                          note('Drain failed: '+repr(error))
+                          try: known_live=process.poll() is None
+                          except Exception as poll_error:note(repr(poll_error));known_live=False
+                          if known_live:
+                              for sig in (signal.SIGTERM,signal.SIGKILL):
+                                  rest=drain_deadline-time.monotonic()
+                                  if rest<=0:note('Fallback drain deadline exhausted');break
+                                  try:os.killpg(process.pid,sig)
+                                  except Exception as signal_error:note(repr(signal_error))
+                                  rest=drain_deadline-time.monotonic()
+                                  if rest>0:
+                                      try:process.wait(timeout=min(.5,rest))
+                                      except subprocess.TimeoutExpired:pass
+                                      except Exception as wait_error:note('Fallback wait: '+repr(wait_error))
+                                  try: exited=process.poll() is not None
+                                  except Exception as poll_error:note(repr(poll_error));exited=True
+                                  if exited:break
+                          closure={'closed':False,'normalExitResidue':False,'signals':[]}
+                  else:closure['closed']=True
+                  for resource in (selector,log,process.stdout if process is not None else None):
+                      if resource is not None:
+                          try:resource.close()
+                          except Exception as error:note('Receipt stream close: '+repr(error))
+                  try:exit_code=process.poll() if process is not None else None
+                  except Exception as poll_error:note(repr(poll_error));exit_code=None
+                  record.update(closure,exit=exit_code,problem=problem,secondaryErrors=secondary,commandElapsedSeconds=round(command_elapsed,3),totalElapsedSeconds=round(time.monotonic()-started,3))
+                  for filename in ('active-command.json',name+'-process.json'):
+                      try:save(filename,record)
+                      except Exception as error:note('Receipt write '+filename+': '+repr(error))
+                  if secondary:
+                      try:print('CAPABILITY_COMMAND_RECEIPT '+json.dumps(record)[:16000],file=sys.stderr,flush=True)
+                      except Exception:pass
+              if problem or secondary or closure['normalExitResidue'] or not closure['closed'] or record['exit']!=0:
+                  raise RuntimeError(name+' failed: '+str(record))
+              return (root/(name+'.log')).read_text(errors='replace')
+          try:
+              if os.environ['GITHUB_RUN_ATTEMPT'] != '1': raise RuntimeError('No rerun authority')
+              head = run('source-head', ['git','rev-parse','HEAD'], 10).strip()
+              if head != os.environ['EXPECTED_HEAD']: raise RuntimeError('Checkout pin mismatch')
+              paths = sorted(set(Path('apps/ios').rglob('*.swift')) | {Path('apps/ios/Assistant.xcodeproj/project.pbxproj'), Path('.github/workflows/ios-native-capability.yml'), Path('apps/ios/Assistant.xcodeproj/xcshareddata/xcschemes/AssistantUIFixtures.xcscheme')})
+              pins = {str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
+              save('source.json', {'head':head,'pins':pins,'contractSHA256':'fc972018d21107f15a398fd3d83b5e6a04b33186d74d690ebd98f6f20e6f728e','scope':'synthetic one-off capability only'})
+              xcodes = list(Path('/Applications').glob('Xcode*.app'))
+              version = lambda s: tuple(int(v) for v in re.findall(r'\d+', str(s)))
+              if not xcodes: raise RuntimeError('No installed Xcode')
+              chosen = max(xcodes, key=lambda p: version(p.name))
+              env['DEVELOPER_DIR'] = str(chosen / 'Contents/Developer')
+              save('toolchain.json', {'developerDir':env['DEVELOPER_DIR']})
+              run('xcode-version', ['xcodebuild','-version'], 10)
+              run('sdks', ['xcodebuild','-showsdks'], 10)
+              devices = json.loads(run('available-devices', ['xcrun','simctl','list','devices','--json'], 45))
+              candidates = [(version(rt), d['name'], rt, d) for rt, ds in devices['devices'].items() if 'SimRuntime.iOS-' in rt for d in ds if d.get('isAvailable') and d['name'].startswith('iPhone') and version(rt) >= (26,)]
+              if not candidates: raise RuntimeError('No available iOS >=26 iPhone template')
+              _, _, runtime, template = max(candidates, key=lambda c:(c[0], c[1]))
+              name = 'Assistant-Capability-' + os.environ['GITHUB_RUN_ID'] + '-' + os.environ['GITHUB_RUN_ATTEMPT']
+              preexisting = [d for ds in devices['devices'].values() for d in ds]
+              if any(d['name']==name for d in preexisting): raise RuntimeError('Lease name already exists')
+              if main_deadline-time.monotonic()<650: raise RuntimeError('Insufficient admitted build/test/cleanup reserve')
+              lease = {'nameAbsentPreflight':True,'preexistingIDs':[d['udid'] for d in preexisting],'udid':None,'name':name,'runtime':runtime,'template':template,'createdByRun':os.environ['GITHUB_RUN_ID']}
+              save('lease.json', lease) # Durable intent precedes resource creation.
+              def bind_lease(text):
+                  udid = text.strip()
+                  if not re.fullmatch(r'[A-Fa-f0-9]{8}(?:-[A-Fa-f0-9]{4}){3}-[A-Fa-f0-9]{12}', udid): raise RuntimeError('Invalid created simulator UUID')
+                  if udid in lease['preexistingIDs']: raise RuntimeError('Created UUID was preexisting')
+                  lease['udid'] = udid; save('lease.json', lease)
+              udid = run('create-simulator', ['xcrun','simctl','create',name,template['deviceTypeIdentifier'],runtime], 10, bind_lease).strip()
+              run('boot-owned-simulator', ['xcrun','simctl','bootstatus',udid,'-b'], 90)
+              run('build', ['xcodebuild','-project','apps/ios/Assistant.xcodeproj','-scheme','AssistantUIFixtures','-configuration','Debug','-destination','id='+udid,'-derivedDataPath',str(build),'CODE_SIGNING_ALLOWED=NO','CODE_SIGNING_REQUIRED=NO','CODE_SIGN_IDENTITY=','build-for-testing'], 330)
+              products = build / 'Build/Products'
+              runs = list(products.glob('*.xctestrun'))
+              if len(runs) != 1: raise RuntimeError('Expected exactly one built xctestrun')
+              binaries = {}
+              for bundle in ['AssistantUITestHost.app','AssistantUITests-Runner.app']:
+                  folder = products / 'Debug-iphonesimulator' / bundle
+                  if not folder.is_dir(): raise RuntimeError('Missing built bundle '+bundle)
+                  binaries[bundle] = {str(p.relative_to(folder)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(folder.rglob('*')) if p.is_file() and not p.is_symlink()}
+              save('binary-pins.json', {'xctestrunSHA':hashlib.sha256(runs[0].read_bytes()).hexdigest(),'bundles':binaries})
+              if any(hashlib.sha256(Path(p).read_bytes()).hexdigest()!=h for p,h in pins.items()): raise RuntimeError('Source drift')
+              result = root / 'capability.xcresult'
+              output = run('test', ['xcodebuild','test-without-building','-xctestrun',str(runs[0]),'-destination','id='+udid,'-destination-timeout','30','-parallel-testing-enabled','NO','-maximum-concurrent-test-simulator-destinations','1','-test-timeouts-enabled','YES','-default-test-execution-time-allowance','60','-maximum-test-execution-time-allowance','60','-only-testing:AssistantUITests/MobileControlsUITests/testNativeControlsCapability','-resultBundlePath',str(result)], 180)
+              summary = json.loads(run('summary', ['xcrun','xcresulttool','get','test-results','summary','--path',str(result)], 10))
+              tests = json.loads(run('named-tests', ['xcrun','xcresulttool','get','test-results','tests','--path',str(result)], 10))
+              named = re.search(r'MobileControlsUITests[^\n]{0,160}testNativeControlsCapability[^\n]{0,80}\bpassed\b', output, re.I)
+              cases = []
+              def visit(node, bundle=False):
+                  bundle = bundle or (node.get('nodeType')=='UI test bundle' and node.get('name','').removesuffix('.xctest')=='AssistantUITests')
+                  if node.get('nodeType')=='Test Case': cases.append((node,bundle))
+                  for child in node.get('children',[]): visit(child,bundle)
+              for node in tests.get('testNodes',[]): visit(node)
+              expected = {'MobileControlsUITests/testNativeControlsCapability','AssistantUITests/MobileControlsUITests/testNativeControlsCapability'}
+              structured = len(cases)==1 and cases[0][1] and cases[0][0].get('nodeIdentifier','').removesuffix('()') in expected and cases[0][0].get('result')=='Passed'
+              if not structured or not named or [summary.get(k) for k in ['totalTestCount','passedTests','failedTests','skippedTests']] != [1,1,0,0]: raise RuntimeError('Missing exact named single PASS/zero-skip evidence')
+              save('outcome.json', {'result':'PASS','namedTest':'AssistantUITests/MobileControlsUITests/testNativeControlsCapability','summary':summary,'sourceHead':head,'qualification':'synthetic capability only; no full matrix, VoiceOver, rotation or persistence acceptance'})
+          except BaseException as error:
+              save('failure.json', {'result':'HOLD','error':repr(error)})
+              raise
+          PY
+      - name: Close only the leased simulator and bound evidence
+        id: cleanup
+        if: always()
+        timeout-minutes: 1
+        run: |
+          python3 - <<'PY'
+          import os, json, subprocess, signal, time
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP']) / 'native-controls-evidence'
+          root.mkdir(mode=0o700, exist_ok=True)
+          errors = []; receipt = {'attempted':True,'commands':[]}
+          deadline=time.monotonic()+48
+          env={k:v for k,v in os.environ.items() if k in {'HOME','USER','LOGNAME','SHELL','TMPDIR','LANG','LC_ALL'}}
+          env['PATH']='/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin'
+          def present(pid):
+              rest=deadline-time.monotonic()
+              if rest<=0:return None
+              try:
+                  p=subprocess.run(['/bin/ps','-axo','pgid='],env=env,capture_output=True,text=True,timeout=min(1,rest),check=True)
+                  return str(pid) in p.stdout.split()
+              except Exception: return None
+          def call(args):
+              remaining=deadline-time.monotonic()
+              if remaining<=2:return 124,'Insufficient cleanup command/drain reserve'
+              try: p=subprocess.Popen(args,env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,start_new_session=True)
+              except Exception as error:
+                  receipt['commands'].append({'args':args,'pid':None,'exit':1,'closed':True,'problem':repr(error)})
+                  return 1,repr(error)
+              problem=None; output=b''
+              try:
+                  rest=deadline-time.monotonic()-2
+                  if rest<=0:raise subprocess.TimeoutExpired(args,0)
+                  output,_=p.communicate(timeout=min(4,rest))
+              except subprocess.TimeoutExpired: problem='Cleanup command timeout'
+              except Exception as error: problem=repr(error)
+              finally:
+                  p.poll(); residue=present(p.pid)
+                  if residue is not False:
+                      if problem is None: problem='Cleanup process-group residue/unknown'
+                      for sig in (signal.SIGTERM,signal.SIGKILL):
+                          if deadline-time.monotonic()<=0:break
+                          try: os.killpg(p.pid,sig)
+                          except ProcessLookupError: pass
+                          except PermissionError: pass
+                          rest=deadline-time.monotonic()
+                          if rest>0:
+                              try:output,_=p.communicate(timeout=min(.5,rest))
+                              except subprocess.TimeoutExpired:pass
+                          if present(p.pid) is False: break
+                  p.poll(); closed=present(p.pid) is False
+                  if not closed: errors.append('Cleanup group not closed: '+str(p.pid))
+                  p.stdout.close()
+              if len(output)>1024*1024: problem='Cleanup response exceeds1MiB';output=output[:1024*1024]
+              code=p.returncode if p.returncode is not None else 124
+              if problem or not closed: code=code or 1
+              text=output.decode(errors='replace')
+              receipt['commands'].append({'args':args,'pid':p.pid,'exit':code,'closed':closed,'problem':problem,'detail':text[-2000:]})
+              return code,text
+          try:
+              lease=root/'lease.json'
+              toolchain=root/'toolchain.json'
+              if toolchain.exists():
+                  chosen=Path(json.loads(toolchain.read_text())['developerDir'])
+                  if not chosen.is_dir() or chosen.parent.parent.parent!=Path('/Applications') or not chosen.parent.parent.name.startswith('Xcode') or chosen.parent.parent.suffix!='.app' or chosen.parent.name!='Contents' or chosen.name!='Developer':
+                      raise RuntimeError('Invalid retained Xcode selection')
+                  env['DEVELOPER_DIR']=str(chosen)
+              elif lease.exists(): raise RuntimeError('Owned lease has no validated toolchain; no fallback')
+              active=root/'active-command.json'
+              if active.exists():
+                  record=json.loads(active.read_text())
+                  observed=present(record['pid']) if record['pid'] is not None else False
+                  if not record['closed'] and observed is not False:
+                      for sig in (signal.SIGTERM,signal.SIGKILL):
+                          # Rebind a live leader before EACH signal. Never kill
+                          # an exited/unknown PID merely because a journal exists.
+                          code,command=call(['ps','-p',str(record['pid']),'-o','pgid=,command='])
+                          fields=command.strip().split(maxsplit=1)
+                          owned_live=code==0 and len(fields)==2 and fields[0]==str(record['pid']) and 'xcodebuild' in fields[1] and 'native-controls-build' in fields[1]
+                          if not owned_live: break
+                          try: os.killpg(record['pid'],sig)
+                          except ProcessLookupError: pass
+                          except PermissionError: errors.append('Cannot close retained group')
+                          rest=deadline-time.monotonic()
+                          if rest>0:time.sleep(min(.2,rest))
+                          if present(record['pid']) is False:break
+                  final_group=present(record['pid']) if record['pid'] is not None else False
+                  receipt['retainedProcessGroup']={'pid':record['pid'],'observation':'absent' if final_group is False else 'present' if final_group is True else 'unknown','closed':final_group is False}
+                  if final_group is not False: errors.append('Retained group presence/closure unknown')
+              if lease.exists():
+                  owned=json.loads(lease.read_text());udid=owned['udid']
+                  if owned['createdByRun']!=os.environ['GITHUB_RUN_ID']: raise RuntimeError('Lease owner mismatch')
+                  code,text=call(['xcrun','simctl','list','devices','--json'])
+                  if code: raise RuntimeError('Cannot inventory owned simulator')
+                  devices={d['udid']:dict(d,runtime=rt) for rt,ds in json.loads(text)['devices'].items() for d in ds}
+                  if udid is None:
+                      matches=[d for d in devices.values() if d['name']==owned['name'] and d['runtime']==owned['runtime'] and d.get('deviceTypeIdentifier')==owned['template']['deviceTypeIdentifier'] and d['udid'] not in owned['preexistingIDs']]
+                      if not owned['nameAbsentPreflight'] or len(matches)>1: raise RuntimeError('Unbound create intent')
+                      if not matches and any(d['name']==owned['name'] for d in devices.values()): raise RuntimeError('Create intent has unexpected device identity')
+                      if matches: udid=matches[0]['udid'];owned['udid']=udid;lease.write_text(json.dumps(owned,indent=2)+'\n')
+                  device=devices.get(udid)
+                  if device and (device['name']!=owned['name'] or device['runtime']!=owned['runtime'] or device.get('deviceTypeIdentifier')!=owned['template']['deviceTypeIdentifier'] or udid in owned['preexistingIDs']): raise RuntimeError('Owned lease identity mismatch')
+                  if device and device['state']=='Booted':
+                      code,running=call(['xcrun','simctl','spawn',udid,'launchctl','list'])
+                      if code: errors.append('Cannot inspect fixture app processes')
+                      else:
+                          for bundle in ['com.baldvinsmarason.assistant.uitesthost','com.baldvinsmarason.assistant.uitesthost.tests.xctrunner']:
+                              if bundle in running:
+                                  code,detail=call(['xcrun','simctl','terminate',udid,bundle])
+                                  if code: errors.append('Terminate failed: '+detail[-300:])
+                      # Continue owned closure even when a terminate command failed/timed out.
+                      code,detail=call(['xcrun','simctl','shutdown',udid])
+                      if code: errors.append('Shutdown failed: '+detail[-300:])
+                  if device:
+                      code,detail=call(['xcrun','simctl','delete',udid])
+                      if code: errors.append('Delete failed: '+detail[-300:])
+                  code,text=call(['xcrun','simctl','list','devices','--json'])
+                  if code or any(d['udid']==udid for ds in json.loads(text)['devices'].values() for d in ds): errors.append('Owned simulator absence unverified')
+                  receipt['ownedUUID']=udid
+          except BaseException as error: errors.append(repr(error))
+          finally:
+              receipt['errors']=errors;receipt['deadlineExceeded']=time.monotonic()>deadline
+              (root/'cleanup.json').write_text(json.dumps(receipt,indent=2)+'\n')
+              total=sum(p.stat().st_size for p in root.rglob('*') if p.is_file());upload=root
+              if total>128*1024*1024:
+                  errors.append('Total evidence exceeds128MiB including automatic XCTest attachments')
+                  upload=Path(os.environ['RUNNER_TEMP'])/'native-controls-oversize';upload.mkdir(exist_ok=True)
+                  (upload/'failure-manifest.json').write_text(json.dumps({'result':'HOLD','totalBytes':total,'errors':errors,'boundary':'Oversize evidence omitted; never accepted as PASS'},indent=2)+'\n')
+              with open(os.environ['GITHUB_OUTPUT'],'a') as out: out.write('upload='+str(upload)+'\n')
+          if errors or receipt['deadlineExceeded']: raise SystemExit('Owned closure/evidence bound failed: '+str(errors))
+          PY
+      - name: Preserve synthetic capability evidence
+        if: always()
+        timeout-minutes: 1
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
+        with:
+          name: native-controls-capability-${{ github.event.pull_request.head.sha }}
+          path: ${{ steps.cleanup.outputs.upload }}
+          retention-days: 14
+          if-no-files-found: error
