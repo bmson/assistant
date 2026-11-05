@@ -413,7 +413,7 @@ describe.skipIf(!PG_ENABLED)('native PostgreSQL manual owner-memory evidence col
       workspacePrefix: `manual-evidence/${ownerId}`,
     });
     ownerEpoch = await rotatePostgresOwnerEditorEpoch(childDb, ownerId, true);
-  }, 100_000);
+  }, 90_000);
 
   afterAll(async () => {
     const failures: unknown[] = [];
@@ -461,7 +461,7 @@ describe.skipIf(!PG_ENABLED)('native PostgreSQL manual owner-memory evidence col
     if (failures.length === 1) throw failures[0];
     if (failures.length > 1)
       throw new AggregateError(failures, 'Manual evidence PostgreSQL cleanup failed');
-  }, 25_000);
+  }, 20_000);
 
   it('captures independent hash tombstones and bounded empty lineage from the actual transaction', async () => {
     const item = await fixture();
@@ -512,28 +512,31 @@ describe.skipIf(!PG_ENABLED)('native PostgreSQL manual owner-memory evidence col
     expect(trace.rawStatements.every((statement) => /^\s*select\b/i.test(statement))).toBe(true);
   }, 25_000);
 
+  it('collects from an actual serializable PostgreSQL transaction', async () => {
+    const item = await fixture();
+    if (!childDb) throw new Error('Owned PostgreSQL fixture database is unavailable');
+    const trace = newTrace();
+    const scope = makeScope(item.memoryId);
+    const result = await childDb.transaction(
+      async (tx) => {
+        const value = await collectPostgresManualOwnerMemoryEvidence(
+          traceTransaction(tx, trace),
+          ownerId,
+          { scope, memoryId: item.memoryId, replacementContent: item.replacementContent },
+        );
+        const isolation = await tx.execute<{ value: string }>(
+          sql`SELECT current_setting('transaction_isolation') AS value`,
+        );
+        return { value, isolation: isolation[0]?.value };
+      },
+      { isolationLevel: 'serializable' },
+    );
+    expect(result.isolation).toBe('serializable');
+    expect(observedResult(result.value).projection).not.toBeNull();
+    expect(trace.mutations).toEqual([]);
+  }, 20_000);
+
   it('binds each contact value and exact native microsecond version without a subject read when absent', async () => {
-    const item = await fixture(true);
-    if (!childDb || !item.contactId) throw new Error('Contact fixture was not created');
-    await childDb.execute(sql`
-      UPDATE contacts SET updated_at = ${'2026-11-05T12:13:14.123456Z'}::timestamptz
-      WHERE id = ${item.contactId}`);
-
-    const base = await capture(item);
-    const baseObserved = observedResult(base.value);
-    expect(baseObserved.projection).not.toBeNull();
-    expect(baseObserved.manifest.subjectContact?.value).toEqual({
-      id: item.contactId,
-      name: 'Synthetic contact',
-      aliases: ['Synthetic alias'],
-      trust: 'known',
-      identityAuthority: null,
-    });
-    expect(baseObserved.manifest.subjectContact?.nativeVersion).toEqual({
-      kind: 'postgres_timestamp',
-      value: '2026-11-05T12:13:14.123456Z',
-    });
-
     const sameVersionChanges: Array<Record<string, unknown>> = [
       { name: 'Synthetic renamed contact' },
       { aliases: ['Synthetic changed alias'] },
@@ -541,13 +544,35 @@ describe.skipIf(!PG_ENABLED)('native PostgreSQL manual owner-memory evidence col
       { identityAuthority: 'owner' },
     ];
     for (const change of sameVersionChanges) {
+      const item = await fixture(true);
+      if (!childDb || !item.contactId) throw new Error('Contact fixture was not created');
+      await childDb.execute(sql`
+        UPDATE contacts SET updated_at = ${'2026-11-05T12:13:14.123456Z'}::timestamptz
+        WHERE id = ${item.contactId}`);
+      const baseObserved = observedResult((await capture(item)).value);
+      expect(baseObserved.projection).not.toBeNull();
+      expect(baseObserved.manifest.subjectContact?.value).toEqual({
+        id: item.contactId,
+        name: 'Synthetic contact',
+        aliases: ['Synthetic alias'],
+        trust: 'known',
+        identityAuthority: null,
+      });
+      expect(baseObserved.manifest.subjectContact?.nativeVersion).toEqual({
+        kind: 'postgres_timestamp',
+        value: '2026-11-05T12:13:14.123456Z',
+      });
+
       await childDb.update(contacts).set(change).where(eq(contacts.id, item.contactId));
-      const changed = await capture(item);
-      const changedObserved = observedResult(changed.value);
+      const changedObserved = observedResult((await capture(item)).value);
       expect(changedObserved.projection).not.toBeNull();
       expect(changedObserved.manifest.subjectContact?.nativeVersion).toEqual(
         baseObserved.manifest.subjectContact?.nativeVersion,
       );
+      expect(changedObserved.manifest.subjectContact?.value).toEqual({
+        ...(baseObserved.manifest.subjectContact?.value ?? {}),
+        ...change,
+      });
       expect(changedObserved.projection?.prewriteFingerprint).not.toBe(
         baseObserved.projection?.prewriteFingerprint,
       );
@@ -556,20 +581,69 @@ describe.skipIf(!PG_ENABLED)('native PostgreSQL manual owner-memory evidence col
       );
     }
 
-    await childDb.execute(sql`
-      UPDATE contacts SET updated_at = ${'2026-11-05T12:13:14.123457Z'}::timestamptz
-      WHERE id = ${item.contactId}`);
-    const newerVersion = await capture(item);
-    const newerObserved = observedResult(newerVersion.value);
-    expect(newerObserved.manifest.subjectContact?.nativeVersion).toEqual({
-      kind: 'postgres_timestamp',
-      value: '2026-11-05T12:13:14.123457Z',
+    const versionOnlyItem = await fixture(true);
+    if (!childDb || !versionOnlyItem.contactId)
+      throw new Error('Version-only contact fixture was not created');
+    const db = childDb;
+    const contactId = versionOnlyItem.contactId;
+    const fixedIdentityAt = '2026-11-05T12:13:14.123456Z';
+    const changedIdentityAt = '2026-11-05T12:13:14.123457Z';
+    await db.execute(sql`
+      UPDATE contacts SET updated_at = ${fixedIdentityAt}::timestamptz
+      WHERE id = ${contactId}`);
+    const readContact = async () => {
+      const rows = await db
+        .select({
+          id: contacts.id,
+          name: contacts.name,
+          aliases: contacts.aliases,
+          trust: contacts.trust,
+          identityAuthority: contacts.identityAuthority,
+          nativeVersion: sql<string>`to_char(${contacts.updatedAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
+        })
+        .from(contacts)
+        .where(eq(contacts.id, contactId));
+      if (rows.length !== 1 || !rows[0]) throw new Error('Contact SQL readback was incomplete');
+      return rows[0];
+    };
+    const beforeSql = await readContact();
+    expect(beforeSql.nativeVersion).toBe(fixedIdentityAt);
+    const beforeVersion = observedResult((await capture(versionOnlyItem)).value);
+    expect(beforeVersion.manifest.subjectContact?.value).toEqual({
+      id: beforeSql.id,
+      name: beforeSql.name,
+      aliases: beforeSql.aliases,
+      trust: beforeSql.trust,
+      identityAuthority: beforeSql.identityAuthority,
     });
-    expect(newerObserved.projection?.prewriteFingerprint).not.toBe(
-      baseObserved.projection?.prewriteFingerprint,
+    expect(beforeVersion.manifest.subjectContact?.nativeVersion).toEqual({
+      kind: 'postgres_timestamp',
+      value: beforeSql.nativeVersion,
+    });
+
+    await db.execute(sql`
+      UPDATE contacts SET updated_at = ${changedIdentityAt}::timestamptz
+      WHERE id = ${contactId}`);
+    const afterSql = await readContact();
+    expect({ ...afterSql, nativeVersion: beforeSql.nativeVersion }).toEqual(beforeSql);
+    const afterVersion = observedResult((await capture(versionOnlyItem)).value);
+    expect(afterVersion.manifest.subjectContact?.value).toEqual({
+      id: afterSql.id,
+      name: afterSql.name,
+      aliases: afterSql.aliases,
+      trust: afterSql.trust,
+      identityAuthority: afterSql.identityAuthority,
+    });
+    expect(afterVersion.manifest.subjectContact?.nativeVersion).toEqual({
+      kind: 'postgres_timestamp',
+      value: afterSql.nativeVersion,
+    });
+    expect(afterSql.nativeVersion).toBe(changedIdentityAt);
+    expect(afterVersion.projection?.prewriteFingerprint).not.toBe(
+      beforeVersion.projection?.prewriteFingerprint,
     );
-    expect(newerObserved.projection?.expectedCurrentFingerprint).not.toBe(
-      baseObserved.projection?.expectedCurrentFingerprint,
+    expect(afterVersion.projection?.expectedCurrentFingerprint).not.toBe(
+      beforeVersion.projection?.expectedCurrentFingerprint,
     );
 
     const noSubject = await fixture(false);
@@ -654,7 +728,7 @@ describe.skipIf(!PG_ENABLED)('native PostgreSQL manual owner-memory evidence col
       .where(sql`${importSources.source} IN (${sources[0]}, ${sources[1]})`);
     const fresh = await capture(item);
     expect(observedResult(fresh.value).projection).not.toBeNull();
-  }, 30_000);
+  }, 20_000);
 
   it('preserves a coded native transaction failure for the owner retry boundary', async () => {
     const item = await fixture();
