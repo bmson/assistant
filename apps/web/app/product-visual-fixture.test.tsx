@@ -86,6 +86,7 @@ const billingForVisualFixture = (): ProviderBilling[] => {
         ],
         forecast: {
           through: '2026-10-20T00:00:00Z',
+          throughBasis: 'provider_reported_usage',
           observedDays: 19,
           daysInMonth: 31,
           totals: [

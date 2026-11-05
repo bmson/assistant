@@ -70,7 +70,7 @@ export default async function CostsPage() {
       <PageHeader
         back={{ href: '/chat', label: 'Chat' }}
         title="Costs"
-        intro="See this month’s provider charges, estimate month-end costs, and control assistant usage."
+        intro="Review available provider billing feeds and the assistant usage ledger, with run-rate estimates where available."
       />
 
       {parked > 0 ? (

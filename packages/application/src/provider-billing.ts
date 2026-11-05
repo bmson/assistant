@@ -301,6 +301,7 @@ export function billingCoverageProjection(
 
 export interface BillingForecast {
   through: string;
+  throughBasis: 'provider_reported_usage' | 'fetch_time_proxy';
   observedDays: number;
   daysInMonth: number;
   totals: Array<{ currency: string; spent: number; dailyAverage: number; projected: number }>;
@@ -314,6 +315,10 @@ export function billingForecast(report: ProviderBilling): BillingForecast | unde
     report.id === 'google-cloud' || report.id === 'openai-billing'
       ? report.latestUsageAt
       : report.fetchedAt;
+  const throughBasis =
+    report.id === 'google-cloud' || report.id === 'openai-billing'
+      ? 'provider_reported_usage'
+      : 'fetch_time_proxy';
   if (!through || !/^\d{4}-\d{2}$/.test(report.period)) return;
   const start = Date.parse(`${report.period}-01T00:00:00Z`);
   const end = new Date(start);
@@ -330,6 +335,7 @@ export function billingForecast(report: ProviderBilling): BillingForecast | unde
     );
   return {
     through,
+    throughBasis,
     observedDays,
     daysInMonth,
     totals: [...amounts].map(([currency, spent]) => ({
