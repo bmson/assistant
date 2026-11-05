@@ -27,21 +27,24 @@ export type AuditCaptureMode = 'off' | 'redacted' | 'full';
 
 const EMAIL = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi;
 /**
- * A phone-shaped run: optional country prefix then digits, allowing the spaces,
- * dashes and parens people actually write them with. Bounded on both sides so
- * it cannot start mid-number. Whether a match really is a phone number is
- * decided by digit count in the replacer below, not by this shape alone.
+ * A phone-shaped run: optional country prefix and extension, allowing the
+ * spaces, dashes and parens people actually write them with. Bounded on both
+ * sides so it cannot start mid-number or immediately after a currency symbol.
+ * The final lookahead prevents backtracking from ending at a separator before
+ * another digit. The replacer counts base-phone digits separately from an
+ * optional extension.
  */
-const PHONE = /(?<![\w.])\+?\d[\d\s().-]{5,18}\d(?![\w.])/g;
+const PHONE =
+  /(?<![\w.+(\p{Sc}-])(\+?\(?\d(?:[\s().-]{0,3}\d){8,14})(?:\s*(?:ext\.?|x)\s*\d{1,6})?(?!\w|\.(?=\S)|[\s()-]+\d)/giu;
 /** Booking references, account numbers, card numbers — anything that long identifies something. */
 const LONG_DIGITS = /(?<![\w.])\d{9,}(?![\w.])/g;
 /**
- * Digits needed before a separated run is treated as a phone number rather than
- * a date. `2026-09-07` carries eight; the shortest national numbers people
- * actually write carry nine or more once a country or area code is present, and
- * anything with an explicit `+` is a phone whatever its length.
+ * Minimum base-phone digits. A date such as `2026-09-07` has only eight, while
+ * common national and country-code phone formats have at least nine.
  */
 const PHONE_MIN_DIGITS = 9;
+/** A decimal amount may be included when a dotted separator joins it to a phone. */
+const DECIMAL_AMOUNT_PREFIX = /^(\d+\.\d{2}\s+)/;
 
 /**
  * Scrub the identifiers from one string.
@@ -56,13 +59,18 @@ export function redactAuditText(text: string): string {
   return sanitizeAuditUrls(String(scrubAuditCredentials(text)), true)
     .replace(EMAIL, '[email]')
     .replace(LONG_DIGITS, '[number]')
-    .replace(PHONE, (match) => {
+    .replace(PHONE, (match, phone: string) => {
       // Without this, `2026-09-07` reads as a phone number and the dates that
       // make a record worth reviewing are the first thing redaction destroys.
-      // Count digits only — the separators are not the signal.
-      const digits = match.replace(/\D/g, '').length;
-      const explicitCountryCode = match.trimStart().startsWith('+');
-      return explicitCountryCode || digits >= PHONE_MIN_DIGITS ? '[phone]' : match;
+      // Count only the phone digits, not an optional extension.
+      const digits = phone.replace(/\D/g, '').length;
+      if (digits < PHONE_MIN_DIGITS) return match;
+
+      // Dots are valid phone separators, but also occur in decimal amounts.
+      // When a decimal amount and phone were joined into one candidate, retain
+      // the leading amount and redact the remaining phone-shaped run.
+      const amountPrefix = match.match(DECIMAL_AMOUNT_PREFIX)?.[0];
+      return amountPrefix ? `${amountPrefix}[phone]` : '[phone]';
     });
 }
 
