@@ -138,6 +138,7 @@ export class FirestoreProfileMemoryManagementRepository
         confidence: '1.00',
         ownerConfirmed: true,
         quarantined: false,
+        memoryWriteWitness: createFirestoreGenericMemoryWriteWitness(row.contentHash),
       });
       this.invalidateOwnerCard(tx, agentId, now);
       return { status: 'updated', memory: managed(row) };
@@ -152,6 +153,7 @@ export class FirestoreProfileMemoryManagementRepository
         confidence: '1.00',
         ownerConfirmed: true,
         quarantined: false,
+        memoryWriteWitness: createFirestoreGenericMemoryWriteWitness(row.contentHash),
       });
       this.invalidateOwnerCard(tx, agentId, now);
       return { status: 'updated', memory: managed(row) };
@@ -327,7 +329,10 @@ export class FirestoreProfileMemoryManagementRepository
 
   async approveQuarantined(memoryId: string): Promise<MemoryMutation> {
     return this.mutateExisting(memoryId, ({ tx, row, snapshot, agentId, now }) => {
-      tx.update(snapshot.ref, { quarantined: false });
+      tx.update(snapshot.ref, {
+        quarantined: false,
+        memoryWriteWitness: createFirestoreGenericMemoryWriteWitness(row.contentHash),
+      });
       this.invalidateOwnerCard(tx, agentId, now);
       return { status: 'updated', memory: managed(row) };
     });
