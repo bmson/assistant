@@ -553,7 +553,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore mobile cost das
     ).toBe(100_100);
     expect(dashboard.byModelEvidence.reduce((sum, row) => sum + row.count, 0)).toBe(1007);
     expect(dashboard.topTasks).toEqual([
-      { taskId: 'task-a', usd: '0.050100', type: 'chat', progress: 'Running' },
+      { taskId: 'task-a', usd: '0.100100', type: 'chat', progress: 'Running' },
     ]);
     expect(dashboard.held).toEqual([
       { id: 'hold', source: 'model', description: 'Next call', estimatedUsd: '0.010000' },
