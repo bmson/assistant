@@ -11,6 +11,9 @@ import { pathToFileURL } from 'node:url';
 import type { OwnerEditorSavedIds } from '@assistant/persistence';
 import {
   BASIC5_AUTHENTICATED_NAVIGATION_COUNT,
+  BASIC5_BROWSER_CONTROL_REQUEST_LIMIT,
+  BASIC5_BROWSER_PRESENTATION_REQUEST_LIMIT,
+  BASIC5_BROWSER_TOTAL_REQUEST_LIMIT,
   BASIC5_LOGICAL_NAVIGATION_STAGES,
   type Basic5LogicalNavigationStage,
 } from './basic5-browser-acceptance-support.js';
@@ -28,7 +31,7 @@ const CLEANUP_END_SECONDS = 400;
 const PREPARE_END_SECONDS = 130;
 const CAPTURE_BYTES = 64 * 1024;
 const PHASE_SETTLEMENT_GRACE_MS = 5_000;
-const ACCEPTANCE_CONTRACT = 'basic5-ci-user-flow-control-presentation-v6';
+const ACCEPTANCE_CONTRACT = 'basic5-ci-user-flow-control-presentation-v7';
 const CLAIM_SCOPE = {
   runtimeIdentity: 'bounded standalone artifact observed in CI checkout',
   behavior:
@@ -1997,13 +2000,13 @@ function validateCiEvidence(
     counts.authenticatedPageNavigations !== counts.pageNavigations ||
     !Number.isSafeInteger(counts.browserHttpRequests) ||
     Number(counts.browserHttpRequests) < 1 ||
-    Number(counts.browserHttpRequests) > 320 ||
+    Number(counts.browserHttpRequests) > BASIC5_BROWSER_TOTAL_REQUEST_LIMIT ||
     !Number.isSafeInteger(counts.browserControlHttpRequests) ||
     Number(counts.browserControlHttpRequests) < 1 ||
-    Number(counts.browserControlHttpRequests) > 64 ||
+    Number(counts.browserControlHttpRequests) > BASIC5_BROWSER_CONTROL_REQUEST_LIMIT ||
     !Number.isSafeInteger(counts.browserPresentationHttpRequests) ||
     Number(counts.browserPresentationHttpRequests) < 0 ||
-    Number(counts.browserPresentationHttpRequests) > 256 ||
+    Number(counts.browserPresentationHttpRequests) > BASIC5_BROWSER_PRESENTATION_REQUEST_LIMIT ||
     counts.browserHttpRequests !==
       Number(counts.browserControlHttpRequests) + Number(counts.browserPresentationHttpRequests) ||
     counts.browserPageHttpRequests !== Number(counts.browserHttpRequests) - 1 ||

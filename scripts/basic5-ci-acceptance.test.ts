@@ -2335,7 +2335,7 @@ describe('one-shot BASIC5 CI controller', () => {
 
     expect(result.errorCode).toBe('required_runtime_artifact_identity_incomplete');
     expect(result.targetStatus).toBe('not_allocated');
-    expect(result.acceptanceContract).toBe('basic5-ci-user-flow-control-presentation-v6');
+    expect(result.acceptanceContract).toBe('basic5-ci-user-flow-control-presentation-v7');
     expect(result.claimScope).toMatchObject({
       behavior:
         'four BASIC5 saves: exact search links, same-operation durable receipts, and leave/reopen/reload readbacks',
@@ -2466,7 +2466,7 @@ describe('one-shot BASIC5 CI controller', () => {
     expect(result.targetStatus).toBe('removed');
     expect(result.controllerScratchStatus).toBe('retained');
     expect(result.schemaVersion).toBe(6);
-    expect(result.acceptanceContract).toBe('basic5-ci-user-flow-control-presentation-v6');
+    expect(result.acceptanceContract).toBe('basic5-ci-user-flow-control-presentation-v7');
     expect(result.workflowContext).toMatchObject({
       event: 'push',
       ref: 'refs/heads/main',
@@ -2922,19 +2922,19 @@ describe('one-shot BASIC5 CI controller', () => {
   it('accepts the control and presentation budgets at their exact bounds', async () => {
     const ops = new FakeOps();
     Object.assign(ops.caseResult.evidence.counts, {
-      browserHttpRequests: 320,
-      browserPageHttpRequests: 319,
+      browserHttpRequests: 832,
+      browserPageHttpRequests: 831,
       browserControlHttpRequests: 64,
-      browserPresentationHttpRequests: 256,
+      browserPresentationHttpRequests: 768,
     });
     const result = await runBasic5CiAcceptance(ops);
     expect(result.result).toBe('passed');
     expect(result.schemaVersion).toBe(6);
-    expect(result.acceptanceContract).toBe('basic5-ci-user-flow-control-presentation-v6');
+    expect(result.acceptanceContract).toBe('basic5-ci-user-flow-control-presentation-v7');
     expect(result.counts).toMatchObject({
-      browserHttpRequests: 320,
+      browserHttpRequests: 832,
       browserControlHttpRequests: 64,
-      browserPresentationHttpRequests: 256,
+      browserPresentationHttpRequests: 768,
     });
   });
 
@@ -2947,15 +2947,21 @@ describe('one-shot BASIC5 CI controller', () => {
     },
     {
       browserControlHttpRequests: 16,
-      browserPresentationHttpRequests: 257,
-      browserHttpRequests: 273,
-      browserPageHttpRequests: 272,
+      browserPresentationHttpRequests: 769,
+      browserHttpRequests: 785,
+      browserPageHttpRequests: 784,
     },
     {
       browserControlHttpRequests: 64,
-      browserPresentationHttpRequests: 257,
-      browserHttpRequests: 321,
-      browserPageHttpRequests: 320,
+      browserPresentationHttpRequests: 769,
+      browserHttpRequests: 833,
+      browserPageHttpRequests: 832,
+    },
+    {
+      browserControlHttpRequests: 65,
+      browserPresentationHttpRequests: 768,
+      browserHttpRequests: 833,
+      browserPageHttpRequests: 832,
     },
     { browserHttpRequests: 25, browserPageHttpRequests: 24 },
     { browserControlHttpRequests: 0 },
