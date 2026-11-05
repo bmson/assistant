@@ -6,7 +6,7 @@ name: Memory witness schema 135 qualification
 # wrapper); image inspection/probes <=12m (eight probes at <=75s each, six
 # image inspections at <=5s each, plus <=90s wrapper/kill grace); exact lease
 # drain <=4m; manifest <=1m; image archive <=8m; checkout/setup/builder init
-# <=11m; builder teardown/artifact upload <=5m; job margin <=9m. Sum: 200m.
+# <=11m; builder teardown/proof staging/artifact uploads <=9m; job margin <=5m. Sum: 200m.
 concurrency:
   group: memory-witness-135-${{ github.event.pull_request.number }}
   cancel-in-progress: false
@@ -28,6 +28,8 @@ on:
       - "infra/ci/postgres-service.sh"
       - "infra/ci/buildx-builder-lifecycle.py"
       - "infra/ci/buildx-builder-lifecycle.test.py"
+      - "infra/ci/retain-builder-small-proof.py"
+      - "infra/ci/retain-builder-small-proof.test.py"
       - "infra/gcp/release-contracts.json"
       - "infra/gcp/release-manifest.mjs"
       - "infra/gcp/release-schema-version.mjs"
@@ -106,14 +108,15 @@ jobs:
           python3 - "$PROOF/build-tool-versions.json" "$SOURCE_SHA" <<'PY'
           import json,subprocess,sys
           path,source_sha=sys.argv[1:]
-          def version(args): return subprocess.check_output(args,text=True,timeout=5).strip()
-          value={'sourceSha':source_sha,'job':'build','node':version(['node','--version']),'pnpm':version(['pnpm','--version']),'dockerBuildx':version(['docker','buildx','version'])}
+          def version(args, timeout=5): return subprocess.check_output(args,text=True,timeout=timeout).strip()
+          value={'sourceSha':source_sha,'job':'build','node':version(['node','--version']),'pnpm':version(['pnpm','--version']),'dockerBuildx':version(['docker','buildx','version'], timeout=15)}
           assert value['node'].startswith('v26.'),value
           assert value['pnpm']=='10.34.5',value
           assert value['dockerBuildx']=='github.com/docker/buildx v0.38.1 0dbe87f36ed472fe36b6796c3f70b4210a731fc5',value
           with open(path,'w') as f: json.dump(value,f,sort_keys=True);f.write('\n')
           PY
           python3 -B infra/ci/buildx-builder-lifecycle.test.py
+          python3 -B infra/ci/retain-builder-small-proof.test.py
       - name: Create bounded local BuildKit builder
         timeout-minutes: 2
         shell: bash
@@ -373,6 +376,24 @@ jobs:
           if [[ -d "$PROOF" ]]; then
             python3 -B infra/ci/buildx-builder-lifecycle.py cleanup --proof "$PROOF"
           fi
+      - name: Stage mandatory small builder proof
+        if: always()
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          python3 -B infra/ci/retain-builder-small-proof.py \
+            --proof "$PROOF" --output "$RUNNER_TEMP/memory-witness-135-builder-proof" \
+            --source-sha "$SOURCE_SHA" --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" --job-key "$GITHUB_JOB"
+      - name: Retain mandatory small builder proof
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        if: always()
+        timeout-minutes: 3
+        with:
+          name: memory-witness-135-builder-proof-${{ github.event.pull_request.head.sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/memory-witness-135-builder-proof/
+          retention-days: 7
+          if-no-files-found: error
       - uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
         if: always()
         timeout-minutes: 3
@@ -483,8 +504,8 @@ jobs:
           python3 - "$PROOF/upgrade-tool-versions.json" "$SOURCE_SHA" <<'PY'
           import json,subprocess,sys
           path,source_sha=sys.argv[1:]
-          def version(args): return subprocess.check_output(args,text=True,timeout=5).strip()
-          value={'sourceSha':source_sha,'job':'populated-upgrade','node':version(['node','--version']),'pnpm':version(['pnpm','--version']),'dockerBuildx':version(['docker','buildx','version'])}
+          def version(args, timeout=5): return subprocess.check_output(args,text=True,timeout=timeout).strip()
+          value={'sourceSha':source_sha,'job':'populated-upgrade','node':version(['node','--version']),'pnpm':version(['pnpm','--version']),'dockerBuildx':version(['docker','buildx','version'], timeout=15)}
           assert value['node'].startswith('v26.'),value
           assert value['pnpm']=='10.34.5',value
           assert value['dockerBuildx'],value

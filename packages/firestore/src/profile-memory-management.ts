@@ -14,6 +14,7 @@ import {
 } from '@assistant/persistence';
 import { type DocumentSnapshot, FieldValue, type Transaction } from '@google-cloud/firestore';
 import { embeddingSpaceKey } from './memory.js';
+import { createFirestoreGenericMemoryWriteWitness } from './memory-write-witness.js';
 import { privacyErasureIsActive } from './privacy-erasure.js';
 import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from './store.js';
 
@@ -239,6 +240,7 @@ export class FirestoreProfileMemoryManagementRepository
         ownerConfirmed: true,
         originTrust: 'owner',
         quarantined: false,
+        memoryWriteWitness: createFirestoreGenericMemoryWriteWitness(input.contentHash),
       }),
     );
     this.invalidateOwnerCard(tx, agentId, now);
@@ -435,6 +437,7 @@ export class FirestoreProfileMemoryManagementRepository
         embeddingSpaceKey: input.embeddingSpaceKey,
         embeddingSpace: embeddingSpaceKey(this.embeddingSpace),
         retrievalRevision: input.retrievalRevision,
+        memoryWriteWitness: createFirestoreGenericMemoryWriteWitness(row.contentHash),
       }),
     );
     tx.create(this.store.doc('memoryContentHashes', input.contentHash), {
