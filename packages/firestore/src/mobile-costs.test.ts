@@ -369,6 +369,22 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore mobile cost das
       usd: '0.000000',
       createdAt: new Date('2026-09-22T11:06:00Z'),
     });
+    for (const [id, evidence] of [
+      ['number-boolean-dimensions', { basis: 'provider_reported', provider: 17, model: true }],
+      ['object-array-dimensions', { basis: 'provider_reported', provider: {}, model: ['bad'] }],
+      ['null-dimensions', { basis: 'provider_reported', provider: null, model: null }],
+      ['blank-dimensions', { basis: 'provider_reported', provider: ' ', model: '' }],
+    ] as const) {
+      batchTwo.set(store.doc('costEvents', id), {
+        id,
+        taskId: null,
+        source: 'model',
+        description: 'Malformed typed model evidence dimension',
+        evidence,
+        usd: '0.000000',
+        createdAt: new Date('2026-09-22T11:06:30Z'),
+      });
+    }
     batchTwo.set(store.doc('costEvents', 'next-month'), {
       id: 'next-month',
       taskId: null,
@@ -390,11 +406,11 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore mobile cost das
     expect(dashboard.timezone).toBe('America/Los_Angeles');
     expect(dashboard.totals).toMatchObject({ monthlySpentUsd: 0.1002, heldUsd: 0.06 });
     expect(dashboard.bySource).toEqual([
-      { source: 'model', usd: '0.100100', count: 1003 },
+      { source: 'model', usd: '99.100100', count: 1008 },
       { source: 'external_api', usd: '0.000100', count: 1 },
     ]);
     expect(dashboard.byEvidence).toEqual([
-      { basis: 'provider_reported', usd: '0.100000', count: 1000 },
+      { basis: 'provider_reported', usd: '99.100000', count: 1005 },
       { basis: 'token_rate', usd: '0.000100', count: 1 },
       { basis: 'unknown', usd: '0.000100', count: 3 },
     ]);
@@ -421,6 +437,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore mobile cost das
         usd: '0.000100',
         count: 1,
       },
+      { provider: null, model: null, basis: 'provider_reported', usd: '0.000000', count: 4 },
       { provider: null, model: null, basis: 'unknown', usd: '0.000000', count: 2 },
     ]);
     expect(
@@ -429,9 +446,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore mobile cost das
         0,
       ),
     ).toBe(100_100);
-    expect(dashboard.byModelEvidence.reduce((sum, row) => sum + row.count, 0)).toBe(
-      dashboard.bySource.find((row) => row.source === 'model')?.count,
-    );
+    expect(dashboard.byModelEvidence.reduce((sum, row) => sum + row.count, 0)).toBe(1007);
     expect(dashboard.topTasks).toEqual([
       { taskId: 'task-a', usd: '0.050100', type: 'chat', progress: 'Running' },
     ]);

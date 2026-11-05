@@ -188,16 +188,11 @@ export async function getFirestoreMobileCosts(store: InstallationStore, agentId:
       store
         .collection('costEvents')
         .where('createdAt', '>=', since)
-        .where('createdAt', '<', until)
         .orderBy('createdAt')
         // Only the fields the totals read; a month of events used to come back in full.
         .select('createdAt', 'usd', 'source', 'evidence', 'taskId'),
       (event) => {
-        if (
-          !(event.createdAt instanceof Date) ||
-          event.createdAt < since ||
-          event.createdAt >= until
-        )
+        if (!(event.createdAt instanceof Date) || event.createdAt < since)
           throw new Error('Invalid cost event timestamp');
         const micros = usdToMicros(Number(event.usd));
         const aggregate = bySource.get(event.source) ?? { micros: 0, count: 0 };
@@ -209,24 +204,6 @@ export async function getFirestoreMobileCosts(store: InstallationStore, agentId:
         evidenceTotal.micros = addMicros(evidenceTotal.micros, micros);
         evidenceTotal.count += 1;
         byEvidence.set(basis, evidenceTotal);
-        if (event.source === 'model') {
-          const provider = evidenceDimension(event.evidence?.provider);
-          const model = evidenceDimension(event.evidence?.model);
-          const key = JSON.stringify([provider, model, basis]);
-          const modelEvidence = byModelEvidence.get(key) ?? {
-            provider,
-            model,
-            basis,
-            micros: 0,
-            count: 0,
-          };
-          modelEvidence.micros = addMicros(
-            modelEvidence.micros,
-            storedLedgerUsdToMicros(event.usd),
-          );
-          modelEvidence.count += 1;
-          byModelEvidence.set(key, modelEvidence);
-        }
         if (event.taskId)
           byTask.set(event.taskId, addMicros(byTask.get(event.taskId) ?? 0, micros));
       },
@@ -235,16 +212,46 @@ export async function getFirestoreMobileCosts(store: InstallationStore, agentId:
       store
         .collection('modelCalls')
         .where('createdAt', '>=', since)
-        .where('createdAt', '<', until)
         .orderBy('createdAt')
         .select('createdAt', 'model', 'costUsd'),
       (call) => {
-        if (!(call.createdAt instanceof Date) || call.createdAt < since || call.createdAt >= until)
+        if (!(call.createdAt instanceof Date) || call.createdAt < since)
           throw new Error('Invalid model call timestamp');
         const aggregate = byModel.get(call.model) ?? { micros: 0, count: 0 };
         aggregate.micros = addMicros(aggregate.micros, usdToMicros(Number(call.costUsd)));
         aggregate.count += 1;
         byModel.set(call.model, aggregate);
+      },
+    ),
+    scan<CostEvent>(
+      store
+        .collection('costEvents')
+        .where('createdAt', '>=', since)
+        .where('createdAt', '<', until)
+        .orderBy('createdAt')
+        .select('createdAt', 'usd', 'source', 'evidence'),
+      (event) => {
+        if (
+          !(event.createdAt instanceof Date) ||
+          event.createdAt < since ||
+          event.createdAt >= until
+        )
+          throw new Error('Invalid model evidence timestamp');
+        if (event.source !== 'model') return;
+        const basis = costBasis(event.evidence);
+        const provider = evidenceDimension(event.evidence?.provider);
+        const model = evidenceDimension(event.evidence?.model);
+        const key = JSON.stringify([provider, model, basis]);
+        const modelEvidence = byModelEvidence.get(key) ?? {
+          provider,
+          model,
+          basis,
+          micros: 0,
+          count: 0,
+        };
+        modelEvidence.micros = addMicros(modelEvidence.micros, storedLedgerUsdToMicros(event.usd));
+        modelEvidence.count += 1;
+        byModelEvidence.set(key, modelEvidence);
       },
     ),
   ]);

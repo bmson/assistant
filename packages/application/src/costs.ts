@@ -72,13 +72,20 @@ function compareEvidenceDimension(left: string | null, right: string | null): nu
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
+function safeCount(value: number | string): number {
+  const parsed = typeof value === 'number' ? value : /^\d+$/.test(value) ? Number(value) : NaN;
+  if (!Number.isSafeInteger(parsed) || parsed < 0)
+    throw new Error('Invalid PostgreSQL model evidence count');
+  return parsed;
+}
+
 function modelEvidenceRows(
   rows: Array<{
     provider: string | null;
     model: string | null;
     basis: string | null;
     usd: string | null;
-    count: number;
+    count: number | string;
   }>,
 ): ModelCostEvidenceTotal[] {
   const groups = new Map<string, ModelCostEvidenceTotal & { micros: number }>();
@@ -89,7 +96,7 @@ function modelEvidenceRows(
     const key = JSON.stringify([provider, model, basis]);
     const group = groups.get(key) ?? { provider, model, basis, usd: '', count: 0, micros: 0 };
     group.micros = addMicros(group.micros, usdDecimalToMicros(row.usd ?? '0'));
-    group.count += row.count;
+    group.count += safeCount(row.count);
     groups.set(key, group);
   }
   return [...groups.values()]
@@ -106,8 +113,9 @@ function modelEvidenceRows(
 /** Load the cost-governance dashboard as a stable presentation contract. */
 export async function getCostsDashboard(db: Db): Promise<CostsDashboard> {
   const agent = await getAgent(db);
-  const monthStart = sql`date_trunc('month', timezone('UTC', now())) AT TIME ZONE 'UTC'`;
-  const monthEnd = sql`${monthStart} + interval '1 month'`;
+  const monthStart = sql`date_trunc('month', now())`;
+  const modelMonthStart = sql`date_trunc('month', timezone('UTC', now())) AT TIME ZONE 'UTC'`;
+  const modelMonthEnd = sql`${modelMonthStart} + interval '1 month'`;
   const [totals, bySource, byModel, topTasks, held, recent, [parkedCount], [taskDefault]] =
     await Promise.all([
       costTotals(db),
@@ -118,7 +126,7 @@ export async function getCostsDashboard(db: Db): Promise<CostsDashboard> {
           count: sql<number>`count(*)`,
         })
         .from(costEvents)
-        .where(and(gte(costEvents.createdAt, monthStart), lt(costEvents.createdAt, monthEnd)))
+        .where(gte(costEvents.createdAt, monthStart))
         .groupBy(costEvents.source)
         .orderBy(desc(sum(costEvents.usd))),
       db
@@ -128,7 +136,7 @@ export async function getCostsDashboard(db: Db): Promise<CostsDashboard> {
           count: sql<number>`count(*)`,
         })
         .from(modelCalls)
-        .where(and(gte(modelCalls.createdAt, monthStart), lt(modelCalls.createdAt, monthEnd)))
+        .where(gte(modelCalls.createdAt, monthStart))
         .groupBy(modelCalls.model)
         .orderBy(desc(sum(modelCalls.costUsd))),
       db
@@ -140,7 +148,7 @@ export async function getCostsDashboard(db: Db): Promise<CostsDashboard> {
         })
         .from(costEvents)
         .innerJoin(tasks, eq(tasks.id, costEvents.taskId))
-        .where(and(gte(costEvents.createdAt, monthStart), lt(costEvents.createdAt, monthEnd)))
+        .where(gte(costEvents.createdAt, monthStart))
         .groupBy(costEvents.taskId, tasks.type, tasks.progress)
         .orderBy(desc(sum(costEvents.usd)))
         .limit(10),
@@ -176,9 +184,15 @@ export async function getCostsDashboard(db: Db): Promise<CostsDashboard> {
         .where(eq(budgets.scope, 'task_default')),
     ]);
 
-  const providerExpression = sql<string | null>`nullif(${costEvents.evidence}->>'provider', '')`;
-  const modelExpression = sql<string | null>`nullif(${costEvents.evidence}->>'model', '')`;
-  const basisExpression = sql<string | null>`${costEvents.evidence}->>'basis'`;
+  const providerExpression = sql<
+    string | null
+  >`case when jsonb_typeof(${costEvents.evidence}->'provider') = 'string' then nullif(btrim(${costEvents.evidence}->>'provider'), '') else null end`;
+  const modelExpression = sql<
+    string | null
+  >`case when jsonb_typeof(${costEvents.evidence}->'model') = 'string' then nullif(btrim(${costEvents.evidence}->>'model'), '') else null end`;
+  const basisExpression = sql<
+    string | null
+  >`case when jsonb_typeof(${costEvents.evidence}->'basis') = 'string' then ${costEvents.evidence}->>'basis' else null end`;
   const [evidenceRows, modelEvidenceRawRows, [dispatchingReservations], [unknownReservations]] =
     await Promise.all([
       db
@@ -188,7 +202,7 @@ export async function getCostsDashboard(db: Db): Promise<CostsDashboard> {
           count: sql<number>`count(*)`,
         })
         .from(costEvents)
-        .where(and(gte(costEvents.createdAt, monthStart), lt(costEvents.createdAt, monthEnd)))
+        .where(gte(costEvents.createdAt, monthStart))
         .groupBy(sql`${costEvents.evidence}->>'basis'`),
       db
         .select({
@@ -196,14 +210,15 @@ export async function getCostsDashboard(db: Db): Promise<CostsDashboard> {
           model: modelExpression,
           basis: basisExpression,
           usd: sum(costEvents.usd),
-          count: sql<number>`count(*)`,
+          // postgres-js returns int8 as a decimal string unless explicitly configured otherwise.
+          count: sql<string>`count(*)`,
         })
         .from(costEvents)
         .where(
           and(
             eq(costEvents.source, 'model'),
-            gte(costEvents.createdAt, monthStart),
-            lt(costEvents.createdAt, monthEnd),
+            gte(costEvents.createdAt, modelMonthStart),
+            lt(costEvents.createdAt, modelMonthEnd),
           ),
         )
         .groupBy(providerExpression, modelExpression, basisExpression),

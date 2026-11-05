@@ -208,6 +208,18 @@ describe('PostgreSQL costs dashboard reservation exposure aggregate', () => {
                 description: 'malformed legacy evidence',
                 createdAt: now,
               },
+              ...[
+                { basis: 'provider_reported', provider: 17, model: true },
+                { basis: 'provider_reported', provider: {}, model: ['not-a-model'] },
+                { basis: 'provider_reported', provider: null, model: null },
+              ].map((evidence) => ({
+                id: randomUUID(),
+                source: 'model' as const,
+                evidence: evidence as never,
+                usd: '0.000000',
+                description: 'malformed typed model evidence dimension',
+                createdAt: now,
+              })),
               {
                 id: randomUUID(),
                 source: 'external_api',
@@ -302,22 +314,34 @@ describe('PostgreSQL costs dashboard reservation exposure aggregate', () => {
       );
       expect(unknownAfter?.count).toBe((unknownBefore?.count ?? 0) + 2);
       expect(unknownAfter?.usd).toBe(unknownBefore?.usd ?? '0.000000');
+      const malformedDimensions = after.byModelEvidence.find(
+        (row) => row.provider === null && row.model === null && row.basis === 'provider_reported',
+      );
+      const malformedDimensionsBefore = before.byModelEvidence.find(
+        (row) => row.provider === null && row.model === null && row.basis === 'provider_reported',
+      );
+      expect(malformedDimensions?.count).toBe((malformedDimensionsBefore?.count ?? 0) + 3);
+      expect(malformedDimensions?.usd).toBe(malformedDimensionsBefore?.usd ?? '0.000000');
 
       const bySourceBefore = before.bySource.find((row) => row.source === 'model');
       const bySourceAfter = after.bySource.find((row) => row.source === 'model');
-      expect((bySourceAfter?.count ?? 0) - (bySourceBefore?.count ?? 0)).toBe(6);
+      expect((bySourceAfter?.count ?? 0) - (bySourceBefore?.count ?? 0)).toBe(10);
       expect(
         usdDecimalToMicros(bySourceAfter?.usd ?? '0') -
           usdDecimalToMicros(bySourceBefore?.usd ?? '0'),
-      ).toBe(700_001);
+      ).toBe(70_700_001);
       const modelRowsMicros = after.byModelEvidence.reduce(
         (sum, row) => addMicros(sum, usdDecimalToMicros(row.usd)),
         0,
       );
-      expect(modelRowsMicros).toBe(usdDecimalToMicros(bySourceAfter?.usd ?? '0'));
-      expect(after.byModelEvidence.reduce((sum, row) => sum + row.count, 0)).toBe(
-        bySourceAfter?.count,
+      const modelRowsMicrosBefore = before.byModelEvidence.reduce(
+        (sum, row) => addMicros(sum, usdDecimalToMicros(row.usd)),
+        0,
       );
+      expect(modelRowsMicros - modelRowsMicrosBefore).toBe(700_001);
+      const modelRowsCount = after.byModelEvidence.reduce((sum, row) => sum + row.count, 0);
+      const modelRowsCountBefore = before.byModelEvidence.reduce((sum, row) => sum + row.count, 0);
+      expect(modelRowsCount - modelRowsCountBefore).toBe(9);
       expect(modelRowsMicros).toBeLessThan(
         after.byEvidence.reduce((sum, row) => addMicros(sum, usdDecimalToMicros(row.usd)), 0),
       );
