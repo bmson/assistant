@@ -2276,6 +2276,150 @@ final class NativeVisualReviewTests: XCTestCase {
         }
     }
 
+    /// Focused actual SwiftUI fixture renders. Forced viewport/size class is
+    /// explicit: this does not establish physical rotation, keyboard or VoiceOver.
+    @MainActor
+    func testMobileApprovalAndProactiveDisclosureAccessibilityLayouts() async throws {
+        guard ProcessInfo.processInfo.environment["ASSISTANT_MOBILE_CONTROLS_REVIEW"] == "1" else {
+            throw XCTSkip("Opt-in synthetic mobile controls render and native AX geometry review")
+        }
+        let fixture = try NativeReviewFixture()
+        var responses = fixture.responses
+        let path = "/api/mobile/v1/overview"
+        var overview = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(responses[path])) as? [String: Any])
+        var approvals = try XCTUnwrap(overview["approvals"] as? [String: Any])
+        var pending = try XCTUnwrap(approvals["pending"] as? [[String: Any]])
+        var approval = try XCTUnwrap(pending[0]["approval"] as? [String: Any])
+        approval["summary"] = "Send the synthetic arrival update only to the named recipient. Keep the confirmed time and original scope; do not change the booking, add recipients or agree to a fee."
+        pending[0]["approval"] = approval
+        approvals["pending"] = pending
+        overview["approvals"] = approvals
+        responses[path] = try JSONSerialization.data(withJSONObject: overview)
+        NativeReviewProtocol.install(responses)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [NativeReviewProtocol.self]
+        let client = APIClient(configuration: .init(baseURL: URL(string: "https://native-review.test")!, token: "fixture-only"), session: URLSession(configuration: configuration))
+        let suite = "assistant.mobile-controls-review"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defaults.removePersistentDomain(forName: suite)
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = AppModel(apiClient: client, defaults: defaults)
+        await model.refreshAll()
+        XCTAssertNotNil(model.overview)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let previousWindow = scene.keyWindow
+        defer { previousWindow?.makeKey() }
+        let layouts: [(String, CGSize, DynamicTypeSize, UserInterfaceSizeClass)] = [
+            ("portrait-default", CGSize(width: 390, height: 844), .large, .regular),
+            ("portrait-AX5", CGSize(width: 320, height: 700), .accessibility5, .regular),
+            ("landscape-default", CGSize(width: 844, height: 390), .large, .compact),
+            ("landscape-AX1", CGSize(width: 844, height: 390), .accessibility1, .compact),
+            ("landscape-AX5", CGSize(width: 844, height: 390), .accessibility5, .compact),
+        ]
+        func elements(_ root: NSObject) -> [NSObject] {
+            var visited = Set<ObjectIdentifier>()
+            func walk(_ value: NSObject, depth: Int) -> [NSObject] {
+                guard depth < 40, visited.insert(ObjectIdentifier(value)).inserted else { return [] }
+                var result = value.isAccessibilityElement ? [value] : []
+                if let view = value as? UIView { result += view.subviews.flatMap { walk($0, depth: depth + 1) } }
+                if let children = value.accessibilityElements {
+                    result += children.compactMap { $0 as? NSObject }.flatMap { walk($0, depth: depth + 1) }
+                }
+                let count = value.accessibilityElementCount()
+                if count > 0 && count < 2000 {
+                    for index in 0..<count {
+                        if let child = value.accessibilityElement(at: index) as? NSObject { result += walk(child, depth: depth + 1) }
+                    }
+                }
+                return result
+            }
+            return walk(root, depth: 0)
+        }
+        for scheme in [ColorScheme.light, .dark] {
+            for (name, bounds, textSize, verticalClass) in layouts {
+                for surface in ["approvals", "proactive"] {
+                    let window = UIWindow(windowScene: scene)
+                    window.frame = CGRect(origin: .zero, size: bounds)
+                    window.overrideUserInterfaceStyle = scheme == .light ? .light : .dark
+                    let content: AnyView = surface == "approvals" ? AnyView(ApprovalsView()) : AnyView(
+                        ScrollView {
+                            ProactiveAlertContent(category: "calendar", urgency: "for_your_attention",
+                                title: "Synthetic source listings need review",
+                                summary: "The checked source listings have different times. Calendar RSVP does not establish who is attending or driving. Keep both listings visible and check the original source before making a change.",
+                                startsAt: "", dueAt: "",
+                                details: [.init(label: "Source qualification", value: "The phone calendar was not checked. These synthetic facts are not evidence of live calendar coverage.")],
+                                actionSummary: "Read both original listings before deciding.")
+                                .padding(16)
+                        }
+                    )
+                    let host = UIHostingController(rootView: content.environment(model)
+                        .environment(\.colorScheme, scheme).environment(\.dynamicTypeSize, textSize)
+                        .environment(\.verticalSizeClass, verticalClass)
+                        .transaction { $0.animation = nil; $0.disablesAnimations = true })
+                    window.rootViewController = host
+                    window.makeKeyAndVisible()
+                    defer { window.isHidden = true; window.rootViewController = nil }
+                    try await Task.sleep(for: .milliseconds(500))
+                    window.layoutIfNeeded()
+                    let key = "mobile1a-\(surface)-\(name)-\(scheme == .light ? "light" : "dark")"
+                    var observations: [[String: Any]] = []
+                    func record(_ state: String) {
+                        let nativeElements = elements(window)
+                        let rows = nativeElements.map { value -> [String: Any] in
+                            let frame = value.accessibilityFrame
+                            return ["label": value.accessibilityLabel ?? "", "value": value.accessibilityValue ?? "",
+                                    "x": frame.minX, "y": frame.minY, "width": frame.width, "height": frame.height,
+                                    "traits": value.accessibilityTraits.rawValue]
+                        }
+                        observations.append(["state": state, "elements": rows])
+                        let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+                            XCTAssertTrue(window.drawHierarchy(in: window.bounds, afterScreenUpdates: true))
+                        }
+                        let attachment = XCTAttachment(image: image)
+                        attachment.name = key + "-" + state; attachment.lifetime = .keepAlways; add(attachment)
+                    }
+                    record("collapsed-top")
+                    if surface == "proactive" {
+                        let disclosure = elements(window).first { $0.accessibilityLabel == "Details" }
+                        XCTAssertNotNil(disclosure, "Native disclosure must be observable to measure its actual accessibility frame")
+                        if let disclosure {
+                            XCTAssertGreaterThanOrEqual(disclosure.accessibilityFrame.height, 44)
+                            let activated = disclosure.accessibilityActivate()
+                            observations.append(["nativeAccessibilityActivationReturned": activated,
+                                                 "limit": "Accessibility activation is not a physical tap or VoiceOver execution"])
+                            try await Task.sleep(for: .milliseconds(400))
+                            window.layoutIfNeeded()
+                            record("after-native-accessibility-activation")
+                        }
+                    }
+                    func scrolls(_ view: UIView) -> [UIScrollView] {
+                        ((view as? UIScrollView).map { [$0] } ?? []) + view.subviews.flatMap(scrolls)
+                    }
+                    if let scroll = scrolls(window).max(by: { $0.bounds.height < $1.bounds.height }) {
+                        for step in 0..<20 {
+                            let bottom = max(-scroll.adjustedContentInset.top, scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom)
+                            if scroll.contentOffset.y >= bottom - 1 { break }
+                            let next = min(bottom, scroll.contentOffset.y + max(80, scroll.bounds.height * 0.75))
+                            scroll.setContentOffset(CGPoint(x: 0, y: next), animated: false)
+                            try await Task.sleep(for: .milliseconds(80))
+                            window.layoutIfNeeded()
+                            record("scroll-\(step)")
+                        }
+                        XCTAssertGreaterThanOrEqual(scroll.contentOffset.y + 1, max(-scroll.adjustedContentInset.top, scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom), "Bounded captures must reach all actions")
+                    }
+                    let receipt: [String: Any] = ["case": key, "viewport": ["width": bounds.width, "height": bounds.height],
+                        "forcedCompactVertical": verticalClass == .compact, "accessibilitySize": textSize.isAccessibilitySize,
+                        "observations": observations, "scope": "Actual native SwiftUI synthetic fixture; forced viewport/environment, no real approval writes, physical rotation/tap/keyboard/VoiceOver proof"]
+                    let data = try JSONSerialization.data(withJSONObject: receipt, options: [.sortedKeys])
+                    let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+                    attachment.name = key + "-geometry"; attachment.lifetime = .keepAlways; add(attachment)
+                }
+            }
+        }
+        XCTAssertTrue(NativeReviewProtocol.externalRequests.isEmpty)
+        XCTAssertTrue(NativeReviewProtocol.mutations.isEmpty)
+    }
+
     @MainActor
     func testEveryPageInLightAndDark() async throws {
         let savedAppearance = UserDefaults.standard.string(forKey: AssistantAppearance.defaultsKey)
