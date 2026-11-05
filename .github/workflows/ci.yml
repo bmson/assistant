@@ -54,6 +54,7 @@ jobs:
       - name: Verify recovery proof collection without credentials or network
         run: |
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p test_owner_editor_recovery_pair.py
+          PYTHONDONTWRITEBYTECODE=1 python3 -c 'import socket, subprocess, unittest; from unittest.mock import patch; patch.object(socket, "socket", side_effect=AssertionError("network forbidden")).start(); patch.object(subprocess, "Popen", side_effect=AssertionError("process launch forbidden")).start(); suite = unittest.defaultTestLoader.discover("scripts", pattern="test_release_status.py"); assert suite.countTestCases() > 0, "release-status suite was not discovered"; result = unittest.TextTestRunner().run(suite); raise SystemExit(not result.wasSuccessful())'
           node --test scripts/owner-editor-recovery-envelope.node-test.mjs
       # 900+ lines of deploy bash run against production with no other check.
       - name: Lint shell scripts
