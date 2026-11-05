@@ -1,4 +1,4 @@
-import type { messages as messageTable } from '@assistant/db';
+import type { Db, messages as messageTable } from '@assistant/db';
 import type {
   ApplicationChatHydrationState,
   ApplicationChatPersistence,
@@ -449,6 +449,53 @@ describe('listChatHistory optional stage observation', () => {
     expect(store.listConversations).not.toHaveBeenCalled();
     expect(store.countConversations).not.toHaveBeenCalled();
     expect(store.listActiveConversationIds).not.toHaveBeenCalled();
+  });
+
+  it('forwards the optional PostgreSQL stage observer without changing the original failure', async () => {
+    const failure = new Error('synthetic owner lookup failure');
+    let queryIndex = 0;
+    const db = {
+      select: vi.fn(() => {
+        queryIndex += 1;
+        const query = {
+          from: vi.fn(),
+          limit: vi.fn().mockRejectedValue(failure),
+        };
+        query.from.mockReturnValue(query);
+        return query;
+      }),
+    } as unknown as Db;
+    const operationStages: ChatHistoryStage[] = [];
+    const postgresStages: ChatHistoryStage[] = [];
+
+    await expect(
+      listChatHistory(
+        db,
+        false,
+        (stage) => operationStages.push(stage),
+        (stage) => postgresStages.push(stage),
+      ),
+    ).rejects.toBe(failure);
+
+    expect(operationStages).toEqual(['agent_started', 'agent_failed']);
+    expect(postgresStages).toEqual(['owner_assertion_call_started', 'owner_assertion_call_threw']);
+    expect(db.select).toHaveBeenCalledOnce();
+    expect(queryIndex).toBe(1);
+  });
+
+  it('does not send PostgreSQL observer callbacks to an existing persistence store', async () => {
+    const store = persistence();
+    const postgresStages: string[] = [];
+
+    await expect(
+      listChatHistory(store, false, undefined, (stage) => postgresStages.push(stage)),
+    ).resolves.toMatchObject({
+      conversations: [{ id: 'conversation-1' }],
+      archivedCount: 2,
+      totalInScope: 3,
+      activeConversationIds: ['conversation-1'],
+    });
+    expect(postgresStages).toEqual([]);
   });
 
   it('does not start sibling reads after a synchronous no-observer query failure', async () => {

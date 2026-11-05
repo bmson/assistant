@@ -10,6 +10,22 @@ on:
         options:
           - prerequisites
           - recovery-pair
+      prerequisites_source_sha:
+        description: Approved exact run, workflow and checkout SHA; required for prerequisites only
+        type: string
+        required: false
+      prerequisites_project_sha256:
+        description: Approved SHA256 of exact configured project bytes; prerequisites only
+        type: string
+        required: false
+      prerequisites_service_account_sha256:
+        description: Approved SHA256 of exact configured service account bytes; prerequisites only
+        type: string
+        required: false
+      prerequisites_wif_provider_sha256:
+        description: Approved SHA256 of exact configured WIF provider bytes; prerequisites only
+        type: string
+        required: false
       recovery_source_sha:
         description: Exact approved current main SHA; recovery-pair only
         type: string
@@ -49,6 +65,10 @@ jobs:
       GCP_PROJECT: ${{ vars.GCP_PROJECT }}
       GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
       GCP_DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+      OWNER_EDITOR_APPROVED_SOURCE_SHA: ${{ inputs.prerequisites_source_sha }}
+      OWNER_EDITOR_APPROVED_PROJECT_SHA256: ${{ inputs.prerequisites_project_sha256 }}
+      OWNER_EDITOR_APPROVED_SERVICE_ACCOUNT_SHA256: ${{ inputs.prerequisites_service_account_sha256 }}
+      OWNER_EDITOR_APPROVED_WIF_PROVIDER_SHA256: ${{ inputs.prerequisites_wif_provider_sha256 }}
       OWNER_EDITOR_DIAGNOSTIC_SOURCE_SHA: ${{ inputs.diagnostic_source_sha }}
       OWNER_EDITOR_DIAGNOSTIC_RECIPIENT_PUBLIC_KEY: ${{ inputs.diagnostic_recipient_public_key }}
     steps:
@@ -71,7 +91,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Verify fixed target and manifest before cloud authentication
-        run: pnpm exec tsx scripts/owner-editor-release-inventory.ts --verify-source
+        run: OWNER_EDITOR_CHECKOUT_SHA="$(git rev-parse HEAD)" pnpm exec tsx scripts/owner-editor-release-inventory.ts --verify-source
       - name: Authenticate with existing protected WIF identity
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
         with:
