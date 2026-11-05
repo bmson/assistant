@@ -262,7 +262,8 @@ function fixture(
     ownerCorrection: null,
   };
   const docs = new Map<string, ReturnType<typeof snapshot>>();
-  const ownerRows = overrides.ownerRows ?? [{ id: ownerId }];
+  let ownerRows = overrides.ownerRows ?? [{ id: ownerId }];
+  let lineageRows = overrides.lineage ?? [];
   ownerRows.forEach((row, i) => {
     docs.set(`agents:${i}`, snapshot('agents', ownerId, row));
   });
@@ -327,7 +328,7 @@ function fixture(
             docs: ownerRows.map((row) => snapshot('agents', String(row.id), row)),
             size: ownerRows.length,
           };
-        const rows = overrides.lineage ?? [];
+        const rows = lineageRows;
         return {
           docs: rows.map((row, i) => snapshot(input.table, `lineage-${i}`, row)),
           size: rows.length,
@@ -375,6 +376,30 @@ function fixture(
     store,
     scope,
     calls,
+    readDocument(table: string, key: string) {
+      return docs.get(`${table}:${key}`);
+    },
+    setDocument(
+      table: string,
+      key: string,
+      data: Record<string, unknown>,
+      version?: { seconds: number; nanoseconds: number },
+    ) {
+      const updated = snapshot(
+        table,
+        key,
+        data,
+        version ?? docs.get(`${table}:${key}`)?.updateTime,
+      );
+      docs.set(`${table}:${key}`, updated);
+      return updated;
+    },
+    setOwnerRows(rows: Array<Record<string, unknown>>) {
+      ownerRows = rows;
+    },
+    setLineageRows(rows: Array<Record<string, unknown>>) {
+      lineageRows = rows;
+    },
     get nowCalls() {
       return nowCalls;
     },
@@ -709,23 +734,106 @@ describe('internal Firestore manual owner-memory evidence collector', () => {
   });
 
   it('rebuilds the complete read set and captures the clock on each invocation', async () => {
-    const first = fixture();
-    const second = fixture();
-    for (const attempt of [first, second]) {
-      const result = await collectFirestoreManualOwnerMemoryEvidenceInTransaction(
-        attempt.tx as never,
-        attempt.store as never,
+    const f = fixture();
+    const collect = () =>
+      collectFirestoreManualOwnerMemoryEvidenceInTransaction(
+        f.tx as never,
+        f.store as never,
         ownerId,
-        attempt.scope,
+        f.scope,
         memoryId,
         replacement,
       );
-      expect(result.status).toBe('observed');
-      expect(attempt.nowCalls).toBe(1);
-    }
-    expect(second.calls).toEqual(first.calls);
-    expect(first.calls).toHaveLength(8);
-    expect(second.calls).toHaveLength(8);
+
+    const first = await collect();
+    expect(first.status).toBe('observed');
+    if (first.status !== 'observed') return;
+    const originalCalls = [...f.calls];
+    f.calls.length = 0;
+
+    const changedContent = `${content} with new state`;
+    const changedMemory = f.readDocument('memories', memoryId)?.data();
+    if (!changedMemory) throw new Error('Expected fake memory document');
+    f.setDocument(
+      'memories',
+      memoryId,
+      { ...changedMemory, content: changedContent, contentHash: hash(changedContent) },
+      { seconds: 1_798_688_001, nanoseconds: 1 },
+    );
+
+    const changedPrivacy = {
+      agentId: ownerId,
+      status: 'complete',
+      generation: 'synthetic-recaptured-generation',
+    };
+    const nextPrivacy = f.setDocument('privacyErasureJobs', ownerId, changedPrivacy, {
+      seconds: 1_798_688_002,
+      nanoseconds: 2,
+    });
+    const nextPrivacyToken = ownerEditorFirestorePrivacyToken(nextPrivacy as never, ownerId);
+    if (!nextPrivacyToken) throw new Error('Expected changed fake privacy token');
+    f.scope = { ...f.scope, privacyGeneration: nextPrivacyToken };
+
+    const epochData = f.readDocument('maintenanceCursors', epochId)?.data();
+    if (!epochData) throw new Error('Expected fake epoch document');
+    const epochCursor = JSON.parse(String(epochData.cursor)) as Record<string, unknown>;
+    f.setDocument(
+      'maintenanceCursors',
+      epochId,
+      {
+        ...epochData,
+        cursor: JSON.stringify({
+          ...epochCursor,
+          privacyGenerationDigest: ownerEditorPrivacyDigest(nextPrivacyToken),
+        }),
+      },
+      { seconds: 1_798_688_003, nanoseconds: 3 },
+    );
+
+    const contactData = f.readDocument('contacts', contactId)?.data();
+    if (!contactData) throw new Error('Expected fake contact document');
+    f.setDocument(
+      'contacts',
+      contactId,
+      { ...contactData, name: 'Synthetic changed contact' },
+      { seconds: 1_798_688_004, nanoseconds: 4 },
+    );
+    f.setOwnerRows([{ id: ownerId, syntheticRevision: 2 }]);
+    f.setLineageRows([]);
+
+    const second = await collect();
+    expect(second.status).toBe('observed');
+    if (second.status !== 'observed') return;
+    expect(f.nowCalls).toBe(2);
+    expect(f.calls).toHaveLength(8);
+    expect(f.calls).toEqual([
+      originalCalls[0],
+      originalCalls[1],
+      originalCalls[2],
+      originalCalls[3],
+      `memoryTombstones:get:${hash(changedContent)}`,
+      `memoryTombstones:get:${hash(replacement)}`,
+      originalCalls[6],
+      originalCalls[7],
+    ]);
+    expect(second.manifest.memory.content).toBe(changedContent);
+    expect(second.manifest.subjectContact?.value).toMatchObject({
+      name: 'Synthetic changed contact',
+    });
+    expect(second.manifest.subjectContact?.nativeVersion).toEqual({
+      kind: 'firestore_timestamp',
+      seconds: 1_798_688_004,
+      nanoseconds: 4,
+    });
+    expect(second.readSet.privacyGeneration).toBe(nextPrivacyToken);
+    expect(second.readSet.privacyNativeVersion).toEqual({
+      seconds: 1_798_688_002,
+      nanoseconds: 2,
+    });
+    expect(second.readSet.editorEpochNativeVersion).toEqual({
+      seconds: 1_798_688_003,
+      nanoseconds: 3,
+    });
   });
 });
 
