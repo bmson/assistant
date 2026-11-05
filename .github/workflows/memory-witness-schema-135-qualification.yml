@@ -26,6 +26,8 @@ on:
       - "infra/docker/database-admin.sh"
       - "infra/ci/install-postgres17.sh"
       - "infra/ci/postgres-service.sh"
+      - "infra/ci/buildx-builder-lifecycle.py"
+      - "infra/ci/buildx-builder-lifecycle.test.py"
       - "infra/gcp/release-contracts.json"
       - "infra/gcp/release-manifest.mjs"
       - "infra/gcp/release-schema-version.mjs"
@@ -108,25 +110,18 @@ jobs:
           value={'sourceSha':source_sha,'job':'build','node':version(['node','--version']),'pnpm':version(['pnpm','--version']),'dockerBuildx':version(['docker','buildx','version'])}
           assert value['node'].startswith('v26.'),value
           assert value['pnpm']=='10.34.5',value
-          assert value['dockerBuildx'],value
+          assert value['dockerBuildx']=='github.com/docker/buildx v0.38.1 0dbe87f36ed472fe36b6796c3f70b4210a731fc5',value
           with open(path,'w') as f: json.dump(value,f,sort_keys=True);f.write('\n')
           PY
+          python3 -B infra/ci/buildx-builder-lifecycle.test.py
       - name: Create bounded local BuildKit builder
         timeout-minutes: 2
         shell: bash
         run: |
           set -Eeuo pipefail
-          timeout --signal=TERM --kill-after=2s 60s docker buildx create --name "$BUILDER" \
-            --driver docker-container --driver-opt memory=4g --driver-opt memory-swap=4g \
-            --driver-opt cpu-quota=200000 --driver-opt cpu-period=100000 --driver-opt restart-policy=no --bootstrap \
-            > "$PROOF/builder.log" 2>&1
-          timeout --signal=TERM --kill-after=2s 10s docker container inspect "buildx_buildkit_${BUILDER}0" > "$PROOF/builder-inspect.json"
-          python3 - "$PROOF/builder-inspect.json" <<'PY'
-          import json,sys
-          value=json.load(open(sys.argv[1]))[0]['HostConfig']
-          assert value['Memory']==4294967296 and value['MemorySwap']==4294967296
-          assert value['CpuQuota']==200000 and value['CpuPeriod']==100000
-          PY
+          python3 -B infra/ci/buildx-builder-lifecycle.py create \
+            --proof "$PROOF" --builder "$BUILDER" --source-sha "$SOURCE_SHA" \
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"
       - name: Build all five runtime roles and the separate migration tool image
         timeout-minutes: 150
         shell: bash
@@ -376,14 +371,7 @@ jobs:
         shell: bash
         run: |
           if [[ -d "$PROOF" ]]; then
-            set +e
-            timeout --signal=TERM --kill-after=2s 30s docker buildx rm --force "$BUILDER" > "$PROOF/builder-cleanup.log" 2>&1
-            result=$?
-            set -e
-            [[ "$result" == 0 ]] || exit "$result"
-            timeout --signal=TERM --kill-after=2s 10s docker container ls --all \
-              --filter "name=^/buildx_buildkit_${BUILDER}0$" --format '{{.ID}}' > "$PROOF/builder-residual.txt"
-            [[ ! -s "$PROOF/builder-residual.txt" ]]
+            python3 -B infra/ci/buildx-builder-lifecycle.py cleanup --proof "$PROOF"
           fi
       - uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
         if: always()

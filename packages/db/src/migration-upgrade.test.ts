@@ -32,6 +32,131 @@ const expectedOwnerTail = readMigrationFiles({ migrationsFolder: folder })
   .map(({ hash, folderMillis }) => ({ hash, createdAt: String(folderMillis) }));
 const expectedOwnerTailStart = expectedOwnerTail[0]?.createdAt;
 if (!expectedOwnerTailStart) throw new Error('Missing owner-editor migration tail');
+const portableInstallationIdPattern =
+  /^memory-witness-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const portableHandoffEnvironmentKeys = [
+  'ASSISTANT_MEMORY_WITNESS_COMPAT_INSTALLATION_ID',
+  'ASSISTANT_MEMORY_WITNESS_COMPAT_BUNDLE_PATH',
+  'ASSISTANT_MEMORY_WITNESS_COMPAT_HANDOFF_DIR',
+] as const;
+type PortableExportMode =
+  | {
+      kind: 'export-only';
+      target: { projectId: string; databaseId: string; installationId: string };
+    }
+  | {
+      kind: 'handoff';
+      target: { projectId: string; databaseId: string; installationId: string };
+      bundlePath: string;
+      handoffDirectory: string;
+    };
+
+function selectPortableExportMode(
+  environment: Readonly<Record<string, string | undefined>>,
+): PortableExportMode {
+  const [installationKey, bundlePathKey, directoryKey] = portableHandoffEnvironmentKeys;
+  const installationId = environment[installationKey];
+  const bundlePath = environment[bundlePathKey];
+  const handoffDirectory = environment[directoryKey];
+  const configured = Object.entries(environment).some(
+    ([name, value]) => name.startsWith('ASSISTANT_MEMORY_WITNESS_COMPAT_') && value !== undefined,
+  );
+  const targetBase = { projectId: 'demo-assistant-test', databaseId: '(default)' };
+
+  if (!configured) {
+    return {
+      kind: 'export-only',
+      target: { ...targetBase, installationId: `memory-witness-${randomUUID()}` },
+    };
+  }
+
+  if (
+    !installationId ||
+    !portableInstallationIdPattern.test(installationId) ||
+    !bundlePath?.trim() ||
+    !handoffDirectory?.trim()
+  )
+    throw new Error(
+      'Portable Firestore handoff requires a valid installation ID, bundle path, and private directory.',
+    );
+
+  return {
+    kind: 'handoff',
+    target: { ...targetBase, installationId },
+    bundlePath,
+    handoffDirectory,
+  };
+}
+
+it('selects portable export mode without external handoff configuration', () => {
+  const first = selectPortableExportMode({});
+  const second = selectPortableExportMode({});
+  expect(first.kind).toBe('export-only');
+  expect(second.kind).toBe('export-only');
+  if (first.kind !== 'export-only' || second.kind !== 'export-only')
+    throw new Error('Expected export-only mode.');
+  expect(first.target.projectId).toBe('demo-assistant-test');
+  expect(first.target.databaseId).toBe('(default)');
+  expect(first.target.installationId).toMatch(portableInstallationIdPattern);
+  expect(second.target.installationId).toMatch(portableInstallationIdPattern);
+  expect(first.target.installationId).not.toBe(second.target.installationId);
+});
+
+it('selects portable export mode with a complete caller handoff unchanged', () => {
+  const environment = {
+    ASSISTANT_MEMORY_WITNESS_COMPAT_INSTALLATION_ID:
+      'memory-witness-7f8bc5ce-8806-4e03-936c-30eedc5d3228',
+    ASSISTANT_MEMORY_WITNESS_COMPAT_BUNDLE_PATH: '/private handoff/postgres-export.bundle.json',
+    ASSISTANT_MEMORY_WITNESS_COMPAT_HANDOFF_DIR: '/private handoff',
+  };
+  const mode = selectPortableExportMode(environment);
+  expect(mode.kind).toBe('handoff');
+  if (mode.kind !== 'handoff') throw new Error('Expected handoff mode.');
+  expect(mode.target.installationId).toBe(
+    environment.ASSISTANT_MEMORY_WITNESS_COMPAT_INSTALLATION_ID,
+  );
+  expect(mode.bundlePath).toBe(environment.ASSISTANT_MEMORY_WITNESS_COMPAT_BUNDLE_PATH);
+  expect(mode.handoffDirectory).toBe(environment.ASSISTANT_MEMORY_WITNESS_COMPAT_HANDOFF_DIR);
+});
+
+it('rejects incomplete, blank, or invalid portable export mode configuration', () => {
+  const validId = 'memory-witness-7f8bc5ce-8806-4e03-936c-30eedc5d3228';
+  const validPath = '/tmp/postgres-export.bundle.json';
+  const validDirectory = '/tmp';
+  const invalidConfigurations = [
+    { ASSISTANT_MEMORY_WITNESS_COMPAT_INSTALLATION_ID: validId },
+    { ASSISTANT_MEMORY_WITNESS_COMPAT_BUNDLE_PATH: validPath },
+    { ASSISTANT_MEMORY_WITNESS_COMPAT_HANDOFF_DIR: validDirectory },
+    { ASSISTANT_MEMORY_WITNESS_COMPAT_NONCE: 'fixture-nonce' },
+    { ASSISTANT_MEMORY_WITNESS_COMPAT_SOURCE: 'postgres' },
+    { ASSISTANT_MEMORY_WITNESS_COMPAT_UNUSED: '' },
+    {
+      ASSISTANT_MEMORY_WITNESS_COMPAT_INSTALLATION_ID: '',
+      ASSISTANT_MEMORY_WITNESS_COMPAT_BUNDLE_PATH: validPath,
+      ASSISTANT_MEMORY_WITNESS_COMPAT_HANDOFF_DIR: validDirectory,
+    },
+    {
+      ASSISTANT_MEMORY_WITNESS_COMPAT_INSTALLATION_ID: validId,
+      ASSISTANT_MEMORY_WITNESS_COMPAT_BUNDLE_PATH: '  ',
+      ASSISTANT_MEMORY_WITNESS_COMPAT_HANDOFF_DIR: validDirectory,
+    },
+    {
+      ASSISTANT_MEMORY_WITNESS_COMPAT_INSTALLATION_ID: validId,
+      ASSISTANT_MEMORY_WITNESS_COMPAT_BUNDLE_PATH: validPath,
+      ASSISTANT_MEMORY_WITNESS_COMPAT_HANDOFF_DIR: '',
+    },
+    {
+      ASSISTANT_MEMORY_WITNESS_COMPAT_INSTALLATION_ID: 'memory-witness-not-a-uuid',
+      ASSISTANT_MEMORY_WITNESS_COMPAT_BUNDLE_PATH: validPath,
+      ASSISTANT_MEMORY_WITNESS_COMPAT_HANDOFF_DIR: validDirectory,
+    },
+  ];
+  for (const environment of invalidConfigurations)
+    expect(() => selectPortableExportMode(environment)).toThrow(
+      'Portable Firestore handoff requires a valid installation ID, bundle path, and private directory.',
+    );
+});
+
 // Snapshot at import prevents an actively authored migration being mistaken for a
 // reviewed historical prefix. The full endpoint is the current immutable journal.
 // Every shipped historical prefix is an upgrade target, including the 0020
@@ -345,6 +470,7 @@ it.each(historicalPrefixes)(
 );
 
 it('upgrades a populated 0134 memory through the standard 0135 migration and portable export', async () => {
+  const portableMode = selectPortableExportMode(process.env);
   const outerDatabaseName = assertAllocatedTestTarget({
     databaseUrl: process.env.DATABASE_URL,
     testDatabaseUrl: process.env.TEST_DATABASE_URL,
@@ -517,14 +643,7 @@ it('upgrades a populated 0134 memory through the standard 0135 migration and por
       witnessIsSqlNull: true,
     });
 
-    const portableInstallationId = process.env.ASSISTANT_MEMORY_WITNESS_COMPAT_INSTALLATION_ID;
-    if (!portableInstallationId || !/^memory-witness-[0-9a-f-]{36}$/.test(portableInstallationId))
-      throw new Error('Portable Firestore export requires the caller-owned fresh installation ID.');
-    const portableTarget = {
-      projectId: 'demo-assistant-test',
-      databaseId: '(default)',
-      installationId: portableInstallationId,
-    };
+    const portableTarget = portableMode.target;
     const bundle = await exportWorkspaceSnapshot({
       databaseUrl: target.databaseUrl,
       agentId: owner,
@@ -548,13 +667,9 @@ it('upgrades a populated 0134 memory through the standard 0135 migration and por
       expect(Object.hasOwn(record.data, 'memory_write_witness')).toBe(false);
     }
 
-    const handoffPath = process.env.ASSISTANT_MEMORY_WITNESS_COMPAT_BUNDLE_PATH;
-    const handoffDirectory = process.env.ASSISTANT_MEMORY_WITNESS_COMPAT_HANDOFF_DIR;
-    if (handoffPath || handoffDirectory) {
-      if (!handoffPath || !handoffDirectory)
-        throw new Error('Portable Firestore handoff requires both path and private directory.');
-      const privateDirectory = resolve(handoffDirectory);
-      const resolvedHandoffPath = resolve(handoffPath);
+    if (portableMode.kind === 'handoff') {
+      const privateDirectory = resolve(portableMode.handoffDirectory);
+      const resolvedHandoffPath = resolve(portableMode.bundlePath);
       const directoryStat = await lstat(privateDirectory);
       if (
         !directoryStat.isDirectory() ||
