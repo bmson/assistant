@@ -218,6 +218,61 @@ class ReleaseStatusTests(unittest.TestCase):
             with self.subTest(instant=instant):
                 self.assertEqual(m.authority_status(packet, MAIN, m.timestamp(instant))['expiry'], expected)
 
+    def test_condition_conflict_is_not_hidden_by_matching_top_level_expiry(self):
+        # QA RS1: the matching top-level value previously prevented parsing
+        # the supplied, already-expired condition.
+        packet = {**self.inventory_packet(), 'expiryUtc': '2030-01-01T00:10:00Z',
+                  'condition': {'expression': 'request.time < timestamp("2030-01-01T00:04:00Z")'}}
+        result = m.authority_status(packet, MAIN, m.timestamp('2030-01-01T00:06:00Z'))
+        self.assertEqual(result['expiry'], 'unknown_or_unbound')
+        self.assertIsNone(result['expiresAt'])
+        self.assertEqual(result['approval'], 'not_evaluated')
+        self.assertEqual(result['grantApplied'], 'unknown')
+
+    def test_all_timing_source_combinations_require_agreement(self):
+        facts = [{'expiryUtc': '2030-01-01T00:10:00Z'},
+                 {'approvalNotAfterUtc': '2029-12-31T16:10:00-08:00'},
+                 {'condition': {'expression': 'request.time < timestamp("2030-01-01T01:10:00+01:00")'}}]
+        conflicting = [{'expiryUtc': '2030-01-01T00:04:00Z'},
+                       {'approvalNotAfterUtc': '2030-01-01T00:04:00Z'},
+                       {'condition': {'expression': 'request.time < timestamp("2030-01-01T00:04:00Z")'}}]
+        at = m.timestamp('2030-01-01T00:06:00Z')
+        for nested in (False, True):
+            for mask in range(1, 8):
+                packet = self.inventory_packet() if nested else {'source': MAIN}
+                selected = [i for i in range(3) if mask & (1 << i)]
+                for i in selected:
+                    packet.update(facts[i])
+                with self.subTest(nested=nested, mask=mask, conflict=None):
+                    result = m.authority_status(packet, OTHER, at)
+                    self.assertEqual(result['expiry'], 'window_open')
+                    self.assertEqual(m.timestamp(result['expiresAt']), m.timestamp('2030-01-01T00:10:00Z'))
+                    self.assertEqual(result['sourceBinding'], 'stale')
+                    self.assertEqual(result['approval'], 'not_evaluated')
+                    self.assertEqual(result['grantApplied'], 'unknown')
+                for i in selected:
+                    with self.subTest(nested=nested, mask=mask, conflict=i):
+                        result = m.authority_status({**packet, **conflicting[i]}, MAIN, at)
+                        expected = 'unknown_or_unbound' if nested or len(selected) > 1 else 'expired'
+                        self.assertEqual(result['expiry'], expected)
+
+    def test_every_recognized_condition_bound_and_malformed_fact_is_checked(self):
+        at = m.timestamp('2030-01-01T00:06:00Z')
+        same = 'request.time < timestamp("2030-01-01T00:10:00Z")'
+        earlier = 'request.time < timestamp("2030-01-01T00:04:00Z")'
+        for expression, expected in [(same + ' && ' + same, 'window_open'),
+                                     ('request.time < timestamp( "2030-01-01T00:10:00Z" )', 'window_open'),
+                                     (same + ' && ' + earlier, 'unknown_or_unbound')]:
+            with self.subTest(expression=expression):
+                packet = {**self.inventory_packet(), 'condition': {'expression': expression}}
+                self.assertEqual(m.authority_status(packet, MAIN, at)['expiry'], expected)
+        for malformed in [{'expiryUtc': None}, {'approvalNotAfterUtc': 'invalid'},
+                          {'condition': {'expression': 'request.time < timestamp("not-a-time")'}},
+                          {'condition': {'expression': 'request.time < timestamp("")'}}]:
+            with self.subTest(malformed=malformed):
+                packet = {**self.inventory_packet(), **malformed}
+                self.assertEqual(m.authority_status(packet, MAIN, at)['expiry'], 'unknown_or_unbound')
+
     def test_cli_inventory_window_is_offline_redacted_and_source_bound(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / 'inventory.json'

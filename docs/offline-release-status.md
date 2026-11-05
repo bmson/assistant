@@ -27,9 +27,12 @@ Inventory proposals using `window.dispatchNotBeforeUtc` and
 `window.dispatchNotAfterUtc` require two timezone-aware times with start before
 end. The report includes `opensAt` and `expiresAt`: before start is
 `not_yet_open`, start is included in `window_open`, and end is already `expired`.
-Offsets are compared as instants. A malformed interval or conflict with a supplied
-legacy expiry is `unknown_or_unbound`; it does not fall back to a different open
-window. Source binding stays independent, owner approval remains `not_evaluated`,
+Offsets are compared as instants. All supplied `expiryUtc`, `approvalNotAfterUtc`,
+recognized `request.time < timestamp("...")` condition bounds, and nested window
+end must parse and agree. Contradictions are `unknown_or_unbound` even without a
+nested window; no timing source takes precedence over another. A malformed
+interval also stays unknown rather than falling back to another open window.
+Source binding stays independent, owner approval remains `not_evaluated`,
 and grant application stays unknown. These are dispatch-timing claims only; they
 do not establish current source/configuration, job scheduling or launch authority.
 
