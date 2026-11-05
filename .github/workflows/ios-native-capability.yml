@@ -41,16 +41,23 @@ jobs:
           def save(name, value):
               (root / name).write_text(json.dumps(value, indent=2) + '\n')
           def group_exists(pid):
-              try: os.killpg(pid, 0); return True
-              except ProcessLookupError: return False
-          def drain(pid):
+              listed = subprocess.run(['/bin/ps','-axo','pgid='], env=env, capture_output=True, text=True, timeout=2, check=True)
+              return str(pid) in listed.stdout.split()
+          def drain(process):
+              pid = process.pid
+              process.poll() # Reap an exited parent before observing its group.
               if not group_exists(pid): return True
-              os.killpg(pid, signal.SIGTERM)
+              try: os.killpg(pid, signal.SIGTERM)
+              except ProcessLookupError: pass
+              except PermissionError: process.poll(); return not group_exists(pid)
               end = time.monotonic() + 3
-              while group_exists(pid) and time.monotonic() < end: time.sleep(.1)
-              if group_exists(pid): os.killpg(pid, signal.SIGKILL)
+              while group_exists(pid) and time.monotonic() < end: process.poll(); time.sleep(.1)
+              if group_exists(pid):
+                  try: os.killpg(pid, signal.SIGKILL)
+                  except ProcessLookupError: pass
+                  except PermissionError: process.poll(); return not group_exists(pid)
               end = time.monotonic() + 2
-              while group_exists(pid) and time.monotonic() < end: time.sleep(.1)
+              while group_exists(pid) and time.monotonic() < end: process.poll(); time.sleep(.1)
               return not group_exists(pid)
           def run(name, args, seconds, on_output=None):
               global log_bytes
@@ -77,7 +84,7 @@ jobs:
                   except BaseException as error: problem = repr(error)
                   finally:
                       selector.close(); process.stdout.close()
-                      clean = drain(process.pid)
+                      clean = drain(process)
                       try: process.wait(timeout=3)
                       except subprocess.TimeoutExpired: clean = False
                       record.update(exit=process.returncode, closed=clean, problem=problem)
@@ -160,8 +167,8 @@ jobs:
                           os.killpg(record['pid'], signal.SIGTERM); time.sleep(1)
                           try: os.killpg(record['pid'], signal.SIGKILL)
                           except ProcessLookupError: pass
-                      try: os.killpg(record['pid'],0); errors.append('Owned process group still present/unknown')
-                      except ProcessLookupError: pass
+                      code, groups = call(['/bin/ps','-axo','pgid='])
+                      if code or str(record['pid']) in groups.split(): errors.append('Owned process group still present/unknown')
               lease = root/'lease.json'
               if lease.exists():
                   owned = json.loads(lease.read_text()); udid=owned['udid']
