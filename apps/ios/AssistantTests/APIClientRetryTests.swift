@@ -5516,6 +5516,41 @@ extension APIClientRetryTests {
         return model
     }
 
+    @MainActor
+    func testAppModelNotificationHandlerRegistrarInjectsOwnerGuardedHandlersOnce() async throws {
+        let suite = "assistant.notification-handler-registrar.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        var registrationCount = 0
+        var capturedHandlers: AppNotificationHandlers?
+        let model = AppModel(
+            apiClient: makeClient(),
+            defaults: defaults,
+            storeConnectionToken: { _ in },
+            registerNotificationHandlers: { handlers in
+                registrationCount += 1
+                capturedHandlers = handlers
+            }
+        )
+
+        XCTAssertEqual(registrationCount, 1)
+        XCTAssertNil(model.bootstrap, "The isolated model starts without a resolved owner")
+        let handlers = try XCTUnwrap(capturedHandlers)
+        let accepted = await handlers.approvalDecision(
+            "synthetic-approval", "approve", "synthetic-owner"
+        )
+        XCTAssertFalse(accepted, "A notification for an unresolved owner must not reach approval mutation")
+
+        do {
+            try await handlers.deviceToken("synthetic-token", "synthetic-scope")
+            XCTFail("An unresolved registration scope must reject the device token")
+        } catch APIError.invalidResponse {
+            // The injected production closure retains its scope guard.
+        }
+        XCTAssertTrue(StubURLProtocol.attempts.isEmpty, "Neither rejected handler may issue a request")
+    }
+
     func testNotificationDestinationRejectsMalformedOwnerAndNeverTreatsPathsAsConversationIDs() throws {
         XCTAssertNil(AssistantNotificationDestination(userInfo: ["route": "unknown"]))
         XCTAssertNil(AssistantNotificationDestination(userInfo: ["route": "chat", "agentId": 42]))
