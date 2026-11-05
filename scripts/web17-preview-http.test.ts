@@ -1,8 +1,10 @@
 import { createRequire } from 'node:module';
 import { describe, expect, it } from 'vitest';
 import {
+  boundedWeb17HttpLogText,
   projectWeb17HttpTransportObservations,
   WEB17_PREVIEW_LINE_CAP,
+  WEB17_PREVIEW_LOG_BYTE_CAP,
 } from './web17-preview-diagnostics.js';
 import {
   createWeb17TransportDiagnostics,
@@ -65,6 +67,38 @@ function install(
 }
 
 describe('WEB-17 local preview HTTP observer', () => {
+  it.each([1, 2, 3])('bounds decoded tails beginning with %i replacement characters', (count) => {
+    const cap = WEB17_PREVIEW_LOG_BYTE_CAP;
+    const rawTail = Buffer.concat([Buffer.alloc(count, 0x80), Buffer.alloc(cap - count, 0x61)]);
+    const input = rawTail.toString('utf8');
+    expect(rawTail.length).toBe(cap);
+    expect(Buffer.byteLength(input, 'utf8')).toBeGreaterThan(cap);
+    const bounded = boundedWeb17HttpLogText(input);
+    expect(Buffer.byteLength(bounded.text, 'utf8')).toBeLessThanOrEqual(cap);
+    expect(bounded.text).toBe('\ufffd'.repeat(Math.floor(count / 3)) + 'a'.repeat(cap - count));
+    expect(bounded.truncated).toBe(true);
+  });
+
+  it.each(
+    ['a', 'ø', '界', '😀', '\ufffd'].flatMap((unit) =>
+      ['', 'x', 'xx', 'xxx'].map((tail) => ({ unit, tail })),
+    ),
+  )('keeps complete code points for $unit with tail "$tail"', ({ unit, tail }) => {
+    const cap = WEB17_PREVIEW_LOG_BYTE_CAP;
+    const width = Buffer.byteLength(unit, 'utf8');
+    const bounded = boundedWeb17HttpLogText(unit.repeat(Math.ceil(cap / width) + 2) + tail);
+    expect(bounded.text).toBe(unit.repeat(Math.floor((cap - tail.length) / width)) + tail);
+    expect(Buffer.byteLength(bounded.text, 'utf8')).toBeLessThanOrEqual(cap);
+    expect(bounded.truncated).toBe(true);
+  });
+
+  it.each(['a', 'ø', '界', '😀'])('preserves exactly capped %s text without truncation', (unit) => {
+    const cap = WEB17_PREVIEW_LOG_BYTE_CAP;
+    const width = Buffer.byteLength(unit, 'utf8');
+    const input = unit.repeat(Math.floor(cap / width)) + 'a'.repeat(cap % width);
+    expect(boundedWeb17HttpLogText(input)).toEqual({ text: input, truncated: false });
+  });
+
   it('forwards the exact event once with its original receiver, arguments and return', () => {
     const records: Record<string, unknown>[] = [];
     const Server = install(records);

@@ -95,6 +95,20 @@ export type Web17HttpTransportObservation = {
   writableFinished?: boolean;
 };
 
+/** Keep a UTF-8 suffix at complete code-point boundaries without repeated encoding. */
+export function boundedWeb17HttpLogText(input: string): { text: string; truncated: boolean } {
+  const suffix = Buffer.from(input.slice(-WEB17_PREVIEW_LOG_BYTE_CAP), 'utf8');
+  let start = Math.max(0, suffix.length - WEB17_PREVIEW_LOG_BYTE_CAP);
+  // Buffer.from(string) produces valid UTF-8: at most three continuation bytes
+  // can follow a cut. Starting at a leading byte avoids decoder replacement growth.
+  while (start < suffix.length && (suffix.readUInt8(start) & 0xc0) === 0x80) start += 1;
+  return {
+    text: suffix.subarray(start).toString('utf8'),
+    truncated:
+      input.length > WEB17_PREVIEW_LOG_BYTE_CAP || suffix.length > WEB17_PREVIEW_LOG_BYTE_CAP,
+  };
+}
+
 /** Validates fixed preload records without retaining the source log or any raw values. */
 export function projectWeb17HttpTransportObservations(
   input: unknown,
@@ -106,17 +120,8 @@ export function projectWeb17HttpTransportObservations(
 } {
   if (typeof input !== 'string' || !selectedNonce || !chatAllNonce.test(selectedNonce))
     return { status: 'unavailable', events: [] };
-  let text = input;
-  let incomplete = inputTruncated;
-  if (
-    input.length > WEB17_PREVIEW_LOG_BYTE_CAP ||
-    Buffer.byteLength(input, 'utf8') > WEB17_PREVIEW_LOG_BYTE_CAP
-  ) {
-    const suffix = Buffer.from(input.slice(-WEB17_PREVIEW_LOG_BYTE_CAP), 'utf8');
-    text = suffix.subarray(-WEB17_PREVIEW_LOG_BYTE_CAP).toString('utf8');
-    if (Buffer.byteLength(text, 'utf8') > WEB17_PREVIEW_LOG_BYTE_CAP) text = text.slice(1);
-    incomplete = true;
-  }
+  const { text, truncated } = boundedWeb17HttpLogText(input);
+  let incomplete = inputTruncated || truncated;
   let lines = text.split(/\r?\n/);
   if (lines.length > WEB17_PREVIEW_LINE_CAP) {
     lines = lines.slice(-WEB17_PREVIEW_LINE_CAP);
