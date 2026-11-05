@@ -1,4 +1,5 @@
 import type { ChatHistoryStage } from '@assistant/application/chat';
+import type { PostgresAgentResolutionStage } from '@assistant/db';
 
 export const WEB17_CHAT_ALL_STAGE_PREFIX = '[WEB17_CHAT_ALL_STAGE] ';
 export const WEB17_CHAT_ALL_STAGE_EVENT_CAP = 20;
@@ -33,6 +34,12 @@ const historyStages: readonly ChatHistoryStage[] = [
   'active_ids_started',
   'active_ids_completed',
   'active_ids_failed',
+  'owner_assertion_call_started',
+  'owner_assertion_call_returned',
+  'owner_assertion_call_threw',
+  'agent_row_lookup_call_started',
+  'agent_row_lookup_call_returned',
+  'agent_row_lookup_call_threw',
 ];
 
 export const WEB17_CHAT_ALL_PHASES = [...requestStages, ...historyStages] as const;
@@ -50,6 +57,7 @@ export type Web17ChatAllStageEvent = {
 export type Web17ChatAllStageObserver = {
   record(phase: Web17ChatAllPhase | ChatHistoryStage): void;
   recordHistoryStage(phase: ChatHistoryStage): void;
+  recordPostgresAgentResolutionStage(phase: PostgresAgentResolutionStage): void;
 };
 
 export function isWeb17ChatAllPreviewEnabled(input: {
@@ -92,6 +100,7 @@ export function createWeb17ChatAllStageObserver(input: {
   host: unknown;
   requestClass: unknown;
   nonce: unknown;
+  postgresDetail?: boolean;
   now?: () => number;
   write?: (line: string) => void;
 }): Web17ChatAllStageObserver | undefined {
@@ -104,6 +113,7 @@ export function createWeb17ChatAllStageObserver(input: {
     return undefined;
 
   const nonce = input.nonce;
+  const postgresDetail = input.postgresDetail === true;
   // Browser-side classification is a correlation hint, not server-proven RSC state or authority.
   const prefetch = input.requestClass === 'rsc-prefetch';
   const now = input.now ?? (() => performance.now());
@@ -118,6 +128,17 @@ export function createWeb17ChatAllStageObserver(input: {
 
   const record = (phase: Web17ChatAllPhase | ChatHistoryStage) => {
     if (!isPhase(phase) || events >= WEB17_CHAT_ALL_STAGE_EVENT_CAP) return;
+    if (
+      !postgresDetail &&
+      (phase === 'owner_assertion_call_started' ||
+        phase === 'owner_assertion_call_returned' ||
+        phase === 'owner_assertion_call_threw' ||
+        phase === 'agent_row_lookup_call_started' ||
+        phase === 'agent_row_lookup_call_returned' ||
+        phase === 'agent_row_lookup_call_threw')
+    )
+      return;
+    if (postgresDetail && (phase === 'auth_started' || phase === 'search_params_started')) return;
     events += 1;
     let elapsed = Number.NaN;
     try {
@@ -139,7 +160,11 @@ export function createWeb17ChatAllStageObserver(input: {
     }
   };
 
-  return { record, recordHistoryStage: record };
+  return {
+    record,
+    recordHistoryStage: record,
+    recordPostgresAgentResolutionStage: record,
+  };
 }
 
 export function isWeb17ChatAllPhase(value: unknown): value is Web17ChatAllPhase {
