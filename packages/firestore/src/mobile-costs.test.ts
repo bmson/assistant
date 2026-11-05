@@ -570,7 +570,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore mobile cost das
       estimatedUsd: '0.030000',
       estimateComplete: true,
     });
-    expect(dashboard.recent[0]?.id).toBe('other');
+    expect(dashboard.recent[0]?.id).toBe('next-month');
     expect(dashboard.parkedTasks).toBe(1);
     expect(dashboard.taskDefaultLimit).toBe('0.50');
   }, 30_000);

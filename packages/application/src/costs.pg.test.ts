@@ -284,7 +284,10 @@ describe('PostgreSQL costs dashboard reservation exposure aggregate', () => {
       if (!before || !after) throw new Error('Synthetic dashboard snapshots were not captured');
 
       const fixtureRows = after.byModelEvidence.filter(
-        (row) => row.model === model || (row.provider === null && row.model === null),
+        (row) =>
+          row.model === model ||
+          row.model === `vertex:${model}` ||
+          (row.provider === null && row.model === null),
       );
       expect(fixtureRows).toContainEqual({
         provider: 'openrouter',
