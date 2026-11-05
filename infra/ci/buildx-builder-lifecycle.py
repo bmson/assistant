@@ -27,6 +27,11 @@ CPU_QUOTA = 200000
 CPU_PERIOD = 100000
 MEMORY = 4 * 1024**3
 BUILDKIT_STATE_DIR = "/var/lib/buildkit"
+STATE_VOLUME_REMOVE_TIMEOUT_SECONDS = 50
+POST_REMOVE_OBSERVATION_SECONDS = 15
+POST_REMOVE_POLL_SECONDS = 0.5
+POST_REMOVE_READ_DRAIN_RESERVE_SECONDS = 7
+POST_REMOVE_CLOSURE_RESERVE_SECONDS = 43
 
 
 class LifecycleError(RuntimeError):
@@ -236,14 +241,18 @@ class Lifecycle:
         self.lock = threading.Lock()
         self.events: list[dict[str, Any]] = []
         self.first_failure: dict[str, Any] | None = None
+        self.first_mutation_failure: dict[str, Any] | None = None
         self.deadline = time.monotonic() + budget_seconds if budget_seconds is not None else None
 
-    def call(self, stage: str, args: list[str], timeout: float) -> Result:
+    def call(
+        self, stage: str, args: list[str], timeout: float, reserve_seconds: float = 24
+    ) -> Result:
+        mutation = args[:2] in (["container", "rm"], ["volume", "rm"], ["buildx", "rm"])
         if self.deadline is not None:
             remaining = self.deadline - time.monotonic()
-            # Reserve TERM/KILL grace plus terminal receipt time before starting
-            # another daemon request. Cleanup never consumes the full step cap.
-            effective_timeout = min(timeout, remaining - 24)
+            # Reserve bounded recovery/closure time before each daemon request.
+            # A long state-volume removal gets a larger, explicit closure reserve.
+            effective_timeout = min(timeout, remaining - reserve_seconds)
             if effective_timeout <= 0:
                 raise LifecycleError("cleanup time budget reserve reached before Docker request")
             timeout = effective_timeout
@@ -252,6 +261,7 @@ class Lifecycle:
         event = {
             "stage": stage,
             "command": ["docker", *args],
+            "mutation": mutation,
             "timeoutSeconds": timeout,
             "elapsedSeconds": round(time.monotonic() - started, 3),
             "exitCode": result.code,
@@ -263,7 +273,18 @@ class Lifecycle:
         self.events.append(event)
         _append_event(self.proof, event, self.lock)
         if result.code != 0 and self.first_failure is None:
-            self.first_failure = {
+            failure = {
+                "stage": stage,
+                "command": ["docker", *args],
+                "exitCode": result.code,
+                "timedOut": result.timed_out,
+                "processGroupDrained": result.drained,
+                "stdout": result.stdout[-8192:],
+                "stderr": result.stderr[-8192:],
+            }
+            self.first_failure = failure
+        if mutation and result.code != 0 and self.first_mutation_failure is None:
+            self.first_mutation_failure = self.first_failure if self.first_failure and self.first_failure.get("stage") == stage else {
                 "stage": stage,
                 "command": ["docker", *args],
                 "exitCode": result.code,
@@ -438,6 +459,7 @@ def _terminal_receipt(
     reason: str | None,
     first_error: dict[str, Any] | None,
     identity: dict[str, Any] | None,
+    first_mutation_error: dict[str, Any] | None = None,
 ) -> None:
     receipt = {
         "format": 1,
@@ -450,6 +472,8 @@ def _terminal_receipt(
         "leasePresent": lease is not None,
         "identity": identity,
         "firstCleanupError": first_error,
+        "firstMutationError": first_mutation_error,
+        "qualificationPassed": status == "closed",
         "observationsAndActions": events,
         "finishedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
     }
@@ -725,42 +749,110 @@ def cleanup_builder(proof: Path, runner: Any | None = None) -> int:
             removed = lifecycle.call(
                 "remove-exact-owned-state-volume",
                 ["volume", "rm", lease["stateVolume"]],
-                15,
+                STATE_VOLUME_REMOVE_TIMEOUT_SECONDS,
+                reserve_seconds=POST_REMOVE_CLOSURE_RESERVE_SECONDS,
             )
             if removed.code != 0:
                 lifecycle.record_local(
                     "volume-remove-error-retained",
                     {"exitCode": removed.code, "timedOut": removed.timed_out},
                 )
-                retry_rows = lifecycle.list_volumes(
-                    "reobserve-state-volume-after-remove-error", lease["stateVolume"]
+            # The Docker request may time out after the daemon accepted removal.
+            # Observe only; a second delete can race a delayed original request
+            # and is intentionally forbidden.
+            observation_deadline = time.monotonic() + POST_REMOVE_OBSERVATION_SECONDS
+            while True:
+                observation_remaining = observation_deadline - time.monotonic()
+                # DockerRunner may spend up to seven extra seconds draining a
+                # timed-out read's process group. Do not start a read that could
+                # consume the metadata/terminal-proof reserve after this window.
+                read_timeout = min(2, observation_remaining - POST_REMOVE_READ_DRAIN_RESERVE_SECONDS)
+                if read_timeout <= 0:
+                    raise LifecycleError("state volume absence remained unknown at observation deadline")
+                listing = lifecycle.call(
+                    "observe-state-volume-after-remove",
+                    [
+                        "volume", "ls", "--filter", f"name=^{lease['stateVolume']}$",
+                        "--format", "{{.Name}}",
+                    ],
+                    read_timeout,
                 )
-                if retry_rows:
-                    if retry_rows != [lease["stateVolume"]]:
-                        raise LifecycleError("post-error state volume name is not exact")
-                    retry_volume = lifecycle.inspect_volume(
-                        "reinspect-state-volume-after-remove-error", lease["stateVolume"]
+                if listing.code != 0:
+                    lifecycle.record_local(
+                        "state-volume-list-observation-unavailable",
+                        {"exitCode": listing.code, "timedOut": listing.timed_out},
                     )
-                    problem = _validate_volume(retry_volume, lease, expected_volume)
-                    if problem:
-                        raise LifecycleError(problem)
-                    retry_users = lifecycle.list_containers(
-                        "recheck-state-volume-users-after-remove-error",
-                        ["--filter", f"volume={lease['stateVolume']}"],
+                    time.sleep(min(POST_REMOVE_POLL_SECONDS, max(0, observation_deadline - time.monotonic())))
+                    continue
+                observed_rows = [line for line in listing.stdout.splitlines() if line]
+                if not observed_rows:
+                    lifecycle.record_local("state-volume-absence-observed", {"absent": True})
+                    break
+                if observed_rows != [lease["stateVolume"]]:
+                    raise LifecycleError("post-remove state volume name is not exact")
+                observation_remaining = observation_deadline - time.monotonic()
+                read_timeout = min(3, observation_remaining - POST_REMOVE_READ_DRAIN_RESERVE_SECONDS)
+                if read_timeout <= 0:
+                    raise LifecycleError("state volume absence remained unknown at observation deadline")
+                inspected = lifecycle.call(
+                    "inspect-state-volume-after-remove",
+                    ["volume", "inspect", lease["stateVolume"]],
+                    read_timeout,
+                )
+                if inspected.code != 0:
+                    lifecycle.record_local(
+                        "state-volume-inspect-observation-unavailable",
+                        {"exitCode": inspected.code, "timedOut": inspected.timed_out},
                     )
-                    if retry_users:
-                        raise LifecycleError("state volume remains attached after remove error")
-                    retry = lifecycle.call(
-                        "retry-remove-reobserved-state-volume",
-                        ["volume", "rm", lease["stateVolume"]],
-                        10,
+                    time.sleep(min(POST_REMOVE_POLL_SECONDS, max(0, observation_deadline - time.monotonic())))
+                    continue
+                volume_value = json.loads(inspected.stdout)
+                if not isinstance(volume_value, list) or len(volume_value) != 1 or not isinstance(volume_value[0], dict):
+                    raise LifecycleError("inspect-state-volume-after-remove returned malformed data")
+                observed_volume = volume_value[0]
+                problem = _validate_volume(observed_volume, lease, expected_volume)
+                if problem:
+                    raise LifecycleError(problem)
+                observation_remaining = observation_deadline - time.monotonic()
+                read_timeout = min(2, observation_remaining - POST_REMOVE_READ_DRAIN_RESERVE_SECONDS)
+                if read_timeout <= 0:
+                    raise LifecycleError("state volume absence remained unknown at observation deadline")
+                users_result = lifecycle.call(
+                    "observe-state-volume-users-after-remove",
+                    [
+                        "container", "ls", "--all", "--no-trunc", "--filter",
+                        f"volume={lease['stateVolume']}", "--format", "{{.ID}} {{.Names}}",
+                    ],
+                    read_timeout,
+                )
+                if users_result.code != 0:
+                    lifecycle.record_local(
+                        "state-volume-users-observation-unavailable",
+                        {"exitCode": users_result.code, "timedOut": users_result.timed_out},
                     )
-                    if retry.code != 0:
-                        retry_rows = lifecycle.list_volumes(
-                            "terminal-check-state-volume-after-retry", lease["stateVolume"]
-                        )
-                        if retry_rows:
-                            raise LifecycleError("owned state volume remains after bounded retry")
+                    time.sleep(min(POST_REMOVE_POLL_SECONDS, max(0, observation_deadline - time.monotonic())))
+                    continue
+                users: list[tuple[str, str]] = []
+                for line in users_result.stdout.splitlines():
+                    parts = line.split(maxsplit=1)
+                    if len(parts) != 2:
+                        raise LifecycleError("state volume users returned a malformed container row")
+                    users.append((parts[0], parts[1]))
+                if users and any(
+                    (not identity)
+                    or cid != identity.get("containerId")
+                    or name != lease["containerName"]
+                    for cid, name in users
+                ):
+                    raise LifecycleError("state volume is attached to an unowned or unknown container")
+                lifecycle.record_local(
+                    "state-volume-still-present-observed",
+                    {"users": len(users), "remainingSeconds": max(0, round(observation_deadline - time.monotonic(), 3))},
+                )
+                remaining = observation_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise LifecycleError("owned state volume remains at observation deadline")
+                time.sleep(min(POST_REMOVE_POLL_SECONDS, remaining))
 
         # Prove both Docker resources absent before closing Buildx's local record.
         premetadata_rows = lifecycle.list_all_containers("pre-metadata-container-inventory")
@@ -795,8 +887,13 @@ def cleanup_builder(proof: Path, runner: Any | None = None) -> int:
         if final_names or final_ids or final_volumes or lease["builder"] in final_builders:
             raise LifecycleError("terminal absence proof failed for builder, container, or state volume")
 
-        outcome = "closed"
-        return_code = 0
+        if lifecycle.first_mutation_failure is not None:
+            outcome = "closed_with_error"
+            reason = "resources closed, but a cleanup mutation returned nonzero or timed out"
+            return_code = 1
+        else:
+            outcome = "closed"
+            return_code = 0
     except Exception as error:
         outcome = "unknown"
         reason = str(error)
@@ -805,7 +902,7 @@ def cleanup_builder(proof: Path, runner: Any | None = None) -> int:
     finally:
         _terminal_receipt(
             proof, lease, lifecycle.events, outcome, reason,
-            lifecycle.first_failure, identity
+            lifecycle.first_failure, identity, lifecycle.first_mutation_failure
         )
     return return_code
 

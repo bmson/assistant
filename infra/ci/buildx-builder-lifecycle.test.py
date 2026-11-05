@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import time
 import subprocess
 import tempfile
 import unittest
@@ -83,6 +84,12 @@ class FakeDocker:
         self.commands: list[list[str]] = []
         self.volume_rm_behavior = "success"
         self.volume_rm_calls = 0
+        self.volume_ls_after_rm: list[str] = []
+        self.volume_ls_after_rm_calls = 0
+        self.fail_volume_listing_after_rm = False
+        self.volume_ls_failures_remaining = 0
+        self.replace_volume_after_rm: dict[str, Any] | None = None
+        self.volume_rm_delay = 0.0
         self.fail_container_listing = False
         self.foreign_volume_user = False
 
@@ -118,6 +125,22 @@ class FakeDocker:
             return LIFECYCLE.Result(args, 1, stderr=f"Error: No such object: {cid}")
 
         if args[:2] == ["volume", "ls"]:
+            if self.volume_rm_calls and self.fail_volume_listing_after_rm:
+                return LIFECYCLE.Result(args, 1, stderr="daemon unavailable after remove")
+            if self.volume_rm_calls and self.volume_ls_failures_remaining:
+                self.volume_ls_failures_remaining -= 1
+                return LIFECYCLE.Result(args, 124, stderr="volume listing timed out", timed_out=True)
+            if self.volume_rm_calls and self.volume_ls_after_rm:
+                index = min(self.volume_ls_after_rm_calls, len(self.volume_ls_after_rm) - 1)
+                observed = self.volume_ls_after_rm[index]
+                self.volume_ls_after_rm_calls += 1
+                if observed == "absent":
+                    self.volume = None
+                elif observed == "replacement" and self.replace_volume_after_rm:
+                    self.volume = dict(self.replace_volume_after_rm)
+                return LIFECYCLE.Result(
+                    args, 0, stdout=f"{self.lease['stateVolume']}\n" if self.volume else ""
+                )
             name = self.lease["stateVolume"]
             return LIFECYCLE.Result(args, 0, stdout=f"{name}\n" if self.volume else "")
 
@@ -152,6 +175,8 @@ class FakeDocker:
             if self.foreign_volume_user or self.container:
                 return LIFECYCLE.Result(args, 1, stderr="volume is in use")
             self.volume_rm_calls += 1
+            if self.volume_rm_delay:
+                time.sleep(self.volume_rm_delay)
             if self.volume_rm_behavior == "timeout-nochange" and self.volume_rm_calls == 1:
                 return LIFECYCLE.Result(args, 124, stderr="volume rm timed out", timed_out=True)
             if self.volume_rm_behavior in ("timeout-removed", "error-removed") and self.volume_rm_calls == 1:
@@ -159,6 +184,8 @@ class FakeDocker:
                 if self.volume_rm_behavior == "error-removed":
                     return LIFECYCLE.Result(args, 1, stderr="daemon error after volume removal")
                 return LIFECYCLE.Result(args, 124, stderr="volume rm timed out", timed_out=True)
+            if self.volume_rm_behavior == "success-busy" and self.volume_rm_calls == 1:
+                return LIFECYCLE.Result(args, 0)
             self.volume = None
             return LIFECYCLE.Result(args, 0)
 
@@ -180,29 +207,35 @@ class BuilderLifecycleTests(unittest.TestCase):
 
     def test_timeout_then_exact_recovery_closes_and_retains_first_failure(self):
         self.runner.volume_rm_behavior = "timeout-nochange"
-        self.assertEqual(LIFECYCLE.cleanup_builder(self.proof, self.runner), 0)
+        self.runner.volume_ls_after_rm = ["present", "absent"]
+        self.assertEqual(LIFECYCLE.cleanup_builder(self.proof, self.runner), 1)
         receipt = self.receipt()
-        self.assertEqual(receipt["status"], "closed")
+        self.assertEqual(receipt["status"], "closed_with_error")
+        self.assertFalse(receipt["qualificationPassed"])
         self.assertEqual(receipt["firstCleanupError"]["exitCode"], 124)
+        self.assertEqual(receipt["firstMutationError"]["exitCode"], 124)
         self.assertTrue(receipt["firstCleanupError"]["timedOut"])
-        self.assertEqual(self.runner.volume_rm_calls, 2)
+        self.assertEqual(self.runner.volume_rm_calls, 1)
         self.assertIsNone(self.runner.container)
         self.assertIsNone(self.runner.volume)
         self.assertFalse(self.runner.registered)
 
     def test_timed_out_delete_already_absent_still_gets_independent_final_proof(self):
         self.runner.volume_rm_behavior = "timeout-removed"
-        self.assertEqual(LIFECYCLE.cleanup_builder(self.proof, self.runner), 0)
+        self.assertEqual(LIFECYCLE.cleanup_builder(self.proof, self.runner), 1)
         self.assertEqual(self.receipt()["firstCleanupError"]["exitCode"], 124)
+        self.assertEqual(self.receipt()["status"], "closed_with_error")
+        self.assertEqual(self.runner.volume_rm_calls, 1)
         stages = [event.get("stage") for event in self.receipt()["observationsAndActions"]]
         self.assertIn("terminal-container-inventory", stages)
         self.assertIn("terminal-state-volume-absence", stages)
 
     def test_nonzero_volume_remove_with_resource_absent_retains_error(self):
         self.runner.volume_rm_behavior = "error-removed"
-        self.assertEqual(LIFECYCLE.cleanup_builder(self.proof, self.runner), 0)
+        self.assertEqual(LIFECYCLE.cleanup_builder(self.proof, self.runner), 1)
         self.assertEqual(self.receipt()["firstCleanupError"]["exitCode"], 1)
-        self.assertEqual(self.receipt()["status"], "closed")
+        self.assertEqual(self.receipt()["firstMutationError"]["exitCode"], 1)
+        self.assertEqual(self.receipt()["status"], "closed_with_error")
         self.assertFalse(self.runner.registered)
 
     def test_unknown_observation_fails_before_any_mutation(self):
@@ -245,6 +278,88 @@ class BuilderLifecycleTests(unittest.TestCase):
         self.assertEqual(self.receipt()["status"], "unknown")
         self.assertIsNotNone(self.runner.container)
         self.assertIsNotNone(self.runner.volume)
+        self.assertFalse(any(command[:2] == ["buildx", "rm"] for command in self.runner.commands))
+
+    def test_slow_volume_delete_over_15_seconds_can_complete_within_50_second_bound(self):
+        self.runner.volume_rm_delay = 15.1
+        self.assertEqual(LIFECYCLE.cleanup_builder(self.proof, self.runner), 0)
+        event = next(
+            item for item in self.receipt()["observationsAndActions"]
+            if item.get("stage") == "remove-exact-owned-state-volume"
+        )
+        self.assertGreaterEqual(event["timeoutSeconds"], 50)
+        self.assertGreater(event["elapsedSeconds"], 15)
+        self.assertEqual(self.runner.volume_rm_calls, 1)
+
+    def test_timed_out_delete_busy_then_absent_closes_but_fails_qualification(self):
+        self.runner.volume_rm_behavior = "timeout-nochange"
+        self.runner.volume_ls_after_rm = ["present", "absent"]
+        self.assertEqual(LIFECYCLE.cleanup_builder(self.proof, self.runner), 1)
+        receipt = self.receipt()
+        stages = [event.get("stage") for event in receipt["observationsAndActions"]]
+        self.assertIn("state-volume-still-present-observed", stages)
+        self.assertIn("state-volume-absence-observed", stages)
+        self.assertEqual(self.runner.volume_rm_calls, 1)
+        self.assertEqual(receipt["status"], "closed_with_error")
+
+    def test_successful_delete_with_transient_busy_read_then_absence_passes(self):
+        self.runner.volume_rm_behavior = "success-busy"
+        self.runner.volume_ls_after_rm = ["present", "absent"]
+        self.assertEqual(LIFECYCLE.cleanup_builder(self.proof, self.runner), 0)
+        receipt = self.receipt()
+        self.assertEqual(receipt["status"], "closed")
+        self.assertTrue(receipt["qualificationPassed"])
+        self.assertIsNone(receipt["firstMutationError"])
+        self.assertEqual(self.runner.volume_rm_calls, 1)
+        self.assertFalse(self.runner.registered)
+
+    def test_transient_timed_out_volume_list_retries_to_known_absence(self):
+        self.runner.volume_rm_behavior = "success-busy"
+        self.runner.volume_ls_failures_remaining = 1
+        self.runner.volume_ls_after_rm = ["absent"]
+        self.assertEqual(LIFECYCLE.cleanup_builder(self.proof, self.runner), 0)
+        receipt = self.receipt()
+        self.assertEqual(receipt["status"], "closed")
+        self.assertTrue(receipt["qualificationPassed"])
+        self.assertIsNone(receipt["firstMutationError"])
+        self.assertEqual(receipt["firstCleanupError"]["exitCode"], 124)
+        stages = [event.get("stage") for event in receipt["observationsAndActions"]]
+        self.assertIn("state-volume-list-observation-unavailable", stages)
+        self.assertIn("state-volume-absence-observed", stages)
+        self.assertEqual(self.runner.volume_rm_calls, 1)
+
+    def test_unknown_volume_observation_after_mutation_fails_without_metadata_close(self):
+        self.runner.volume_rm_behavior = "timeout-nochange"
+        self.runner.fail_volume_listing_after_rm = True
+        with patch.object(LIFECYCLE, "POST_REMOVE_OBSERVATION_SECONDS", 0.03), patch.object(
+            LIFECYCLE, "POST_REMOVE_POLL_SECONDS", 0.002
+        ), patch.object(LIFECYCLE, "POST_REMOVE_READ_DRAIN_RESERVE_SECONDS", 0.001):
+            self.assertEqual(LIFECYCLE.cleanup_builder(self.proof, self.runner), 1)
+        self.assertEqual(self.receipt()["status"], "unknown")
+        self.assertEqual(self.receipt()["firstMutationError"]["exitCode"], 124)
+        self.assertTrue(self.runner.registered)
+        self.assertFalse(any(command[:2] == ["buildx", "rm"] for command in self.runner.commands))
+
+    def test_persistently_present_owned_volume_fails_deadline_without_second_delete(self):
+        self.runner.volume_rm_behavior = "timeout-nochange"
+        with patch.object(LIFECYCLE, "POST_REMOVE_OBSERVATION_SECONDS", 0.03), patch.object(
+            LIFECYCLE, "POST_REMOVE_POLL_SECONDS", 0.002
+        ), patch.object(LIFECYCLE, "POST_REMOVE_READ_DRAIN_RESERVE_SECONDS", 0.001):
+            self.assertEqual(LIFECYCLE.cleanup_builder(self.proof, self.runner), 1)
+        self.assertEqual(self.receipt()["status"], "unknown")
+        self.assertEqual(self.runner.volume_rm_calls, 1)
+        self.assertTrue(self.runner.registered)
+        self.assertFalse(any(command[:2] == ["buildx", "rm"] for command in self.runner.commands))
+
+    def test_same_name_replacement_after_remove_fails_without_metadata_close(self):
+        self.runner.volume_rm_behavior = "timeout-nochange"
+        self.runner.volume_ls_after_rm = ["replacement"]
+        self.runner.replace_volume_after_rm = dict(self.volume)
+        self.runner.replace_volume_after_rm["Mountpoint"] = "/foreign/replacement"
+        self.assertEqual(LIFECYCLE.cleanup_builder(self.proof, self.runner), 1)
+        self.assertEqual(self.receipt()["status"], "unknown")
+        self.assertEqual(self.runner.volume_rm_calls, 1)
+        self.assertTrue(self.runner.registered)
         self.assertFalse(any(command[:2] == ["buildx", "rm"] for command in self.runner.commands))
 
     def test_missing_lease_fails_without_docker_commands(self):
