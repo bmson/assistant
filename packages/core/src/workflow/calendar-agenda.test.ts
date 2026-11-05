@@ -169,6 +169,14 @@ describe('calendarAgendaCards', () => {
     expect(curlyContraction[0]?.householdDay).toHaveProperty('nextQuestion');
     for (const requestText of [
       "Show my agenda. Don't ask who is driving?",
+      'Show my agenda. Don’t ask who is driving?',
+      'Show my agenda. Shouldn’t ask who is driving?',
+      'Show my agenda. Can’t ask who is driving?',
+      'Translate "Who is driving?"',
+      '"Who is driving?"',
+      '`Who is driving?`',
+      'Show my agenda. "Who is driving?" is the text on an invitation.',
+      'Show my agenda. Translate who is driving?',
       'Show my agenda. My spouse asks who is driving?',
       "Show my agenda. The note says 'Who is driving?'",
       'Show my agenda. The note says ‘Who is driving?’',
@@ -179,7 +187,11 @@ describe('calendarAgendaCards', () => {
         request: request(),
         requestText,
       });
-      expect(guarded[0]?.householdDay).not.toHaveProperty('nextQuestion');
+      expect(guarded[0]?.householdDay?.nextQuestion, requestText).toBeUndefined();
+      if (requestText.startsWith('Show my agenda.')) {
+        expect(items(guarded)).toHaveLength(projected.length);
+        expect(guarded[0]?.counts).toEqual(withOwnerRelevance[0]?.counts);
+      }
     }
   });
 

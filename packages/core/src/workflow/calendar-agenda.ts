@@ -185,8 +185,13 @@ export function wantsCalendarAgenda(request?: PersonalReadRequest | null, ownerT
 }
 
 function asksAboutDriving(ownerText: string): boolean {
-  if (!ownerText || /[“”]/.test(ownerText)) return false;
-  const clauses = ownerText.split(/(?<=[.!?])\s+/);
+  if (
+    !ownerText ||
+    /["“”`]/.test(ownerText) ||
+    /\b(?:translate|translation|paraphrase|rewrite|wording)\b/i.test(ownerText)
+  )
+    return false;
+  const clauses = ownerText.replace(/[‘’]/g, "'").split(/(?<=[.!?])\s+/);
   return clauses.some((clause) => {
     if (
       !clause.includes('?') ||
