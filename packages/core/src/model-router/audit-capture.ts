@@ -43,8 +43,29 @@ const LONG_DIGITS = /(?<![\w.])\d{9,}(?![\w.])/g;
  * common national and country-code phone formats have at least nine.
  */
 const PHONE_MIN_DIGITS = 9;
-/** A decimal amount may be included when a dotted separator joins it to a phone. */
-const DECIMAL_AMOUNT_PREFIX = /^(\d+\.\d{2}\s+)/;
+/** Keep currency- or label-marked decimal amounts from joining a nearby phone. */
+const PROTECTED_AMOUNT =
+  /(?:\p{Sc}\s*\d+(?:,\d{3})*\.\d+|\b(?:USD|EUR|GBP|CAD|AUD|NZD|JPY|CHF|SEK|NOK|DKK|INR|CNY|MXN|BRL|SGD|HKD|KRW|PLN|THB|ZAR|ILS|TRY)\s+\d+(?:,\d{3})*\.\d+|\b(?:total|amount|cost|price|fee|paid)\s+(?:(?:\p{Sc}\s*|\b(?:USD|EUR|GBP|CAD|AUD|NZD|JPY|CHF|SEK|NOK|DKK|INR|CNY|MXN|BRL|SGD|HKD|KRW|PLN|THB|ZAR|ILS|TRY)\s+)?)\d+(?:,\d{3})*\.\d+)/giu;
+
+function redactPhoneShapes(text: string): string {
+  return text.replace(PHONE, (match, phone: string) => {
+    // Count only the phone digits, not an optional extension.
+    const digits = phone.replace(/\D/g, '').length;
+    return digits >= PHONE_MIN_DIGITS ? '[phone]' : match;
+  });
+}
+
+function redactPhonesPreservingAmounts(text: string): string {
+  let output = '';
+  let cursor = 0;
+  for (const amount of text.matchAll(PROTECTED_AMOUNT)) {
+    const start = amount.index;
+    output += redactPhoneShapes(text.slice(cursor, start));
+    output += amount[0];
+    cursor = start + amount[0].length;
+  }
+  return output + redactPhoneShapes(text.slice(cursor));
+}
 
 /**
  * Scrub the identifiers from one string.
@@ -56,22 +77,10 @@ const DECIMAL_AMOUNT_PREFIX = /^(\d+\.\d{2}\s+)/;
  * remain.
  */
 export function redactAuditText(text: string): string {
-  return sanitizeAuditUrls(String(scrubAuditCredentials(text)), true)
+  const safeText = sanitizeAuditUrls(String(scrubAuditCredentials(text)), true)
     .replace(EMAIL, '[email]')
-    .replace(LONG_DIGITS, '[number]')
-    .replace(PHONE, (match, phone: string) => {
-      // Without this, `2026-09-07` reads as a phone number and the dates that
-      // make a record worth reviewing are the first thing redaction destroys.
-      // Count only the phone digits, not an optional extension.
-      const digits = phone.replace(/\D/g, '').length;
-      if (digits < PHONE_MIN_DIGITS) return match;
-
-      // Dots are valid phone separators, but also occur in decimal amounts.
-      // When a decimal amount and phone were joined into one candidate, retain
-      // the leading amount and redact the remaining phone-shaped run.
-      const amountPrefix = match.match(DECIMAL_AMOUNT_PREFIX)?.[0];
-      return amountPrefix ? `${amountPrefix}[phone]` : '[phone]';
-    });
+    .replace(LONG_DIGITS, '[number]');
+  return redactPhonesPreservingAmounts(safeText);
 }
 
 /** Apply the capture mode and the length cap to one optional field. */

@@ -46,6 +46,11 @@ describe('redactAuditText', () => {
     expect(redactAuditText('Call 415.555.0123.')).toBe('Call [phone].');
   });
 
+  it('removes a phone with mixed dot and space separators as one number', () => {
+    expect(redactAuditText('Call 415.55 50123.')).toBe('Call [phone].');
+    expect(redactAuditText('The 415.55 50123.')).toBe('The [phone].');
+  });
+
   it('preserves a date beside a phone number', () => {
     expect(redactAuditText('Date 2026-09-07 415-555-0123.')).toBe('Date 2026-09-07 [phone].');
   });
@@ -55,9 +60,15 @@ describe('redactAuditText', () => {
       'Total USD 10.99 415-555-0123.',
       'Total 10.99 415-555-0123.',
       'Total $ 10.99 415-555-0123.',
+      'Total 10.9 415-555-0123.',
+      'Total 10.999 415-555-0123.',
     ]) {
       expect(redactAuditText(text)).toBe(text.replace('415-555-0123', '[phone]'));
     }
+  });
+
+  it('does not count a protected amount toward a short code phone match', () => {
+    expect(redactAuditText('Total 10.99 123-456.')).toBe('Total 10.99 123-456.');
   });
 
   it('redacts a written extension along with its phone number', () => {
