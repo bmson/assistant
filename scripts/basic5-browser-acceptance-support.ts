@@ -32,6 +32,28 @@ export const BASIC5_BROWSER_CONTROL_REQUEST_LIMIT = 64;
 export const BASIC5_BROWSER_PRESENTATION_REQUEST_LIMIT = 256;
 export const BASIC5_BROWSER_TOTAL_REQUEST_LIMIT = 320;
 
+/** Exact logical route sequence for the four-save synthetic acceptance journey. */
+export const BASIC5_LOGICAL_NAVIGATION_STAGES = [
+  'identity_people_search',
+  'identity_open_person',
+  'identity_leave_to_people_search',
+  'identity_reopen_person',
+  'identity_reload_person',
+  'family_add_leave_to_connections_search',
+  'family_add_reopen_person',
+  'family_add_reload_person',
+  'family_correction_leave_to_connections_search',
+  'family_correction_reopen_person',
+  'family_correction_reload_person',
+  'note_correction_library_search',
+  'note_correction_open_note',
+  'note_correction_leave_to_library_search',
+  'note_correction_reopen_note',
+  'note_correction_reload_note',
+] as const;
+export type Basic5LogicalNavigationStage = (typeof BASIC5_LOGICAL_NAVIGATION_STAGES)[number];
+export const BASIC5_AUTHENTICATED_NAVIGATION_COUNT = BASIC5_LOGICAL_NAVIGATION_STAGES.length;
+
 export const BASIC5_PRESENTATION_REQUEST_CLASSES = [
   'document',
   'next_static_asset',
@@ -44,7 +66,7 @@ export type Basic5PresentationRequestClassCounts = Record<Basic5PresentationRequ
 export type Basic5PresentationRequestDiagnostics = {
   /** Most recent goto attempt bucket at observation time; not the request initiator. */
   bucketMostRecentNavigation: number;
-  /** Index 0 is before the first goto; indices 1 through 6 are goto generations. */
+  /** Index 0 is before the first goto; indices 1 through 16 are the fixed journey stages. */
   byNavigation: Basic5PresentationRequestClassCounts[];
   totals: Basic5PresentationRequestClassCounts;
 };
@@ -174,7 +196,10 @@ export function createBasic5BrowserRequestBudget(baseUrl: string): Basic5Browser
   let browserBudgetExceeded = false;
   let navigationBucket = 0;
   let presentationDiagnosticsKnown = true;
-  const presentationByNavigation = Array.from({ length: 7 }, emptyPresentationClassCounts);
+  const presentationByNavigation = Array.from(
+    { length: BASIC5_AUTHENTICATED_NAVIGATION_COUNT + 1 },
+    emptyPresentationClassCounts,
+  );
   const presentationTotals = emptyPresentationClassCounts();
   return {
     observe(url, method, anonymousProbe = false, metadata) {
@@ -215,7 +240,11 @@ export function createBasic5BrowserRequestBudget(baseUrl: string): Basic5Browser
       return sameOrigin && !browserBudgetExceeded;
     },
     setNavigationBucket(bucket) {
-      if (!Number.isSafeInteger(bucket) || bucket < 0 || bucket > 6) {
+      if (
+        !Number.isSafeInteger(bucket) ||
+        bucket < 0 ||
+        bucket > BASIC5_AUTHENTICATED_NAVIGATION_COUNT
+      ) {
         presentationDiagnosticsKnown = false;
         return;
       }

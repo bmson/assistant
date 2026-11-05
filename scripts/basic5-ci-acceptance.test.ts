@@ -7,6 +7,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { OwnerEditorSavedIds } from '@assistant/persistence';
 import { describe, expect, it, vi } from 'vitest';
+import { BASIC5_LOGICAL_NAVIGATION_STAGES } from './basic5-browser-acceptance-support.js';
 import {
   assertBasic5CiUtilityChildSucceeded,
   assertBasic5CiWorkflowAdmission,
@@ -175,10 +176,22 @@ function validEvidence(): Basic5CiEvidence {
       familyCorrection: true,
       noteCorrection: true,
     },
+    journeyFacts: {
+      navigationStages: [...BASIC5_LOGICAL_NAVIGATION_STAGES],
+      findResultCounts: { people: 2, connections: 2, savedNotes: 2 },
+      exactTargetHrefMatches: { people: 2, connections: 2, savedNotes: 2 },
+      reloadCount: 4,
+      reopenedPageReadbacks: {
+        identity: true,
+        familyAdd: true,
+        familyCorrection: true,
+        noteCorrection: true,
+      },
+    },
     counts: {
       readinessAttempts: 8,
-      pageNavigations: 6,
-      authenticatedPageNavigations: 6,
+      pageNavigations: 16,
+      authenticatedPageNavigations: 16,
       browserHttpRequests: 24,
       browserControlHttpRequests: 16,
       browserPresentationHttpRequests: 8,
@@ -365,9 +378,9 @@ class FakeDirectChild extends EventEmitter implements Basic5CiDirectChildHandle 
 }
 
 describe('one-shot BASIC5 CI controller', () => {
-  it('accepts producer evidence only after the exact v1 envelope survives JSON roundtrip', async () => {
+  it('accepts producer evidence only after the exact v2 envelope survives JSON roundtrip', async () => {
     const built = validEvidence();
-    expect(built.schemaVersion).toBe(1);
+    expect(built.schemaVersion).toBe(2);
     expect(BASIC5_CI_EVIDENCE_LABEL).toBe(
       'synthetic Auth.js cookie; provider-unqualified local embedding transport',
     );
@@ -379,7 +392,20 @@ describe('one-shot BASIC5 CI controller', () => {
     const result = await runBasic5CiAcceptance(ops);
 
     expect(result.result).toBe('passed');
-    expect(result.schemaVersion).toBe(5);
+    expect(result.schemaVersion).toBe(6);
+    expect(result.journeyFacts).toEqual({
+      navigationStages: [...BASIC5_LOGICAL_NAVIGATION_STAGES],
+      findResultCounts: { people: 2, connections: 2, savedNotes: 2 },
+      exactTargetHrefMatches: { people: 2, connections: 2, savedNotes: 2 },
+      reloadCount: 4,
+      reopenedPageReadbacks: {
+        identity: true,
+        familyAdd: true,
+        familyCorrection: true,
+        noteCorrection: true,
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain('Alex Rivera');
   });
 
   it.each([
@@ -392,7 +418,7 @@ describe('one-shot BASIC5 CI controller', () => {
     {
       name: 'wrong schemaVersion',
       mutate: (evidence: Record<string, unknown>) => {
-        evidence.schemaVersion = 2;
+        evidence.schemaVersion = 1;
       },
     },
     {
@@ -404,7 +430,7 @@ describe('one-shot BASIC5 CI controller', () => {
     {
       name: 'string schemaVersion',
       mutate: (evidence: Record<string, unknown>) => {
-        evidence.schemaVersion = '1';
+        evidence.schemaVersion = '2';
       },
     },
     {
@@ -423,6 +449,29 @@ describe('one-shot BASIC5 CI controller', () => {
       name: 'unknown envelope key',
       mutate: (evidence: Record<string, unknown>) => {
         evidence.extraEnvelopeField = true;
+      },
+    },
+    {
+      name: 'missing leave and reopen journey stage',
+      mutate: (evidence: Record<string, unknown>) => {
+        const journeyFacts = evidence.journeyFacts as { navigationStages: string[] };
+        journeyFacts.navigationStages[2] = 'identity_reopen_person';
+      },
+    },
+    {
+      name: 'missing reopened-page readback',
+      mutate: (evidence: Record<string, unknown>) => {
+        const journeyFacts = evidence.journeyFacts as {
+          reopenedPageReadbacks: Record<string, boolean>;
+        };
+        journeyFacts.reopenedPageReadbacks.familyAdd = false;
+      },
+    },
+    {
+      name: 'unexpected journey fact field',
+      mutate: (evidence: Record<string, unknown>) => {
+        const journeyFacts = evidence.journeyFacts as Record<string, unknown>;
+        journeyFacts.noteText = 'synthetic note content must not enter the receipt';
       },
     },
   ])('holds for malformed evidence envelope: $name', async ({ mutate }) => {
@@ -2286,9 +2335,10 @@ describe('one-shot BASIC5 CI controller', () => {
 
     expect(result.errorCode).toBe('required_runtime_artifact_identity_incomplete');
     expect(result.targetStatus).toBe('not_allocated');
-    expect(result.acceptanceContract).toBe('basic5-ci-user-flow-control-presentation-v5');
+    expect(result.acceptanceContract).toBe('basic5-ci-user-flow-control-presentation-v6');
     expect(result.claimScope).toMatchObject({
-      behavior: 'four BASIC5 saves: scoped UI success and same-operation durable receipts',
+      behavior:
+        'four BASIC5 saves: exact search links, same-operation durable receipts, and leave/reopen/reload readbacks',
       ancestorWorkspaceDependencies: 'unqualified',
       unexercisedRoutes: 'unqualified',
       containerIndependence: 'unqualified',
@@ -2415,8 +2465,8 @@ describe('one-shot BASIC5 CI controller', () => {
     expect(result.cleanupComplete).toBe(true);
     expect(result.targetStatus).toBe('removed');
     expect(result.controllerScratchStatus).toBe('retained');
-    expect(result.schemaVersion).toBe(5);
-    expect(result.acceptanceContract).toBe('basic5-ci-user-flow-control-presentation-v5');
+    expect(result.schemaVersion).toBe(6);
+    expect(result.acceptanceContract).toBe('basic5-ci-user-flow-control-presentation-v6');
     expect(result.workflowContext).toMatchObject({
       event: 'push',
       ref: 'refs/heads/main',
@@ -2879,8 +2929,8 @@ describe('one-shot BASIC5 CI controller', () => {
     });
     const result = await runBasic5CiAcceptance(ops);
     expect(result.result).toBe('passed');
-    expect(result.schemaVersion).toBe(5);
-    expect(result.acceptanceContract).toBe('basic5-ci-user-flow-control-presentation-v5');
+    expect(result.schemaVersion).toBe(6);
+    expect(result.acceptanceContract).toBe('basic5-ci-user-flow-control-presentation-v6');
     expect(result.counts).toMatchObject({
       browserHttpRequests: 320,
       browserControlHttpRequests: 64,

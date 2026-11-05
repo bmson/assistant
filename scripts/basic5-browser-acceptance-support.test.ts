@@ -12,11 +12,13 @@ import {
   assertBasic5AnonymousPageResponse,
   assertBasic5ReceiptSequence,
   BASIC5_AUTH_COOKIE_NAME,
+  BASIC5_AUTHENTICATED_NAVIGATION_COUNT,
   BASIC5_BROWSER_ACTIONS,
   BASIC5_BROWSER_CONTROL_REQUEST_LIMIT,
   BASIC5_BROWSER_PRESENTATION_REQUEST_LIMIT,
   BASIC5_BROWSER_TOTAL_REQUEST_LIMIT,
   BASIC5_EMBEDDING_DIMENSIONS,
+  BASIC5_LOGICAL_NAVIGATION_STAGES,
   BASIC5_READINESS_ATTEMPT_LIMIT,
   BASIC5_SAVED_STATUS_PATTERN,
   type Basic5StoredUserFlowReceiptExpectation,
@@ -337,15 +339,40 @@ describe('task-specific BASIC5 control and presentation request budgets', () => 
     expect(BASIC5_BROWSER_TOTAL_REQUEST_LIMIT).toBe(320);
   });
 
-  it('routes a synthetic six-navigation, RSC/prefetch, public/asset, four-command sequence through the actual adapter', async () => {
+  it('pins the 16 semantic navigation stages for the four-save journey', () => {
+    expect(BASIC5_AUTHENTICATED_NAVIGATION_COUNT).toBe(16);
+    expect(BASIC5_LOGICAL_NAVIGATION_STAGES).toEqual([
+      'identity_people_search',
+      'identity_open_person',
+      'identity_leave_to_people_search',
+      'identity_reopen_person',
+      'identity_reload_person',
+      'family_add_leave_to_connections_search',
+      'family_add_reopen_person',
+      'family_add_reload_person',
+      'family_correction_leave_to_connections_search',
+      'family_correction_reopen_person',
+      'family_correction_reload_person',
+      'note_correction_library_search',
+      'note_correction_open_note',
+      'note_correction_leave_to_library_search',
+      'note_correction_reopen_note',
+      'note_correction_reload_note',
+    ]);
+  });
+
+  it('routes a synthetic 16-navigation, RSC/prefetch, public/asset, four-command sequence through the actual adapter', async () => {
     const budget = createBasic5BrowserRequestBudget(baseUrl);
     // This is a synthetic contract replay, not a reconstruction of a retained
     // run. Presentation GETs can read application data and establish no auth proof.
     expect(budget.observe(`${baseUrl}/people/person`, 'GET', true)).toBe(true);
     const requests: Array<[string, string]> = [
-      ...Array.from({ length: 6 }, () => ['/people/person', 'GET'] as [string, string]),
       ...Array.from(
-        { length: 6 },
+        { length: BASIC5_AUTHENTICATED_NAVIGATION_COUNT },
+        () => ['/people/person', 'GET'] as [string, string],
+      ),
+      ...Array.from(
+        { length: BASIC5_AUTHENTICATED_NAVIGATION_COUNT },
         (_, i) => [`/people/person?_rsc=synthetic-${i}`, 'GET'] as [string, string],
       ),
       ...Array.from(
@@ -378,9 +405,9 @@ describe('task-specific BASIC5 control and presentation request budgets', () => 
     }
     expect(oldCombinedWouldBlock).toBe(true);
     expect(checkTotals(budget)).toEqual({
-      browserHttpRequests: 87,
+      browserHttpRequests: 107,
       browserControlHttpRequests: 5,
-      browserPresentationHttpRequests: 82,
+      browserPresentationHttpRequests: 102,
       browserBudgetExceeded: false,
     });
   });
@@ -399,21 +426,22 @@ describe('task-specific BASIC5 control and presentation request budgets', () => 
     await routeOne('/public/logo.svg', 'image');
     await routeOne('/people/person?_rsc=private-query-value', 'fetch');
     await routeOne('/people/person?_rsc=prefetch-query-value', 'fetch');
-    budget.setNavigationBucket(6);
+    budget.setNavigationBucket(BASIC5_AUTHENTICATED_NAVIGATION_COUNT);
     await routeOne('/people/person', 'fetch');
     checkTotals(budget);
     const diagnostics = budget.snapshot().browserPresentationDiagnostics;
     expect(diagnostics).toEqual({
-      bucketMostRecentNavigation: 6,
-      byNavigation: [
-        { document: 1, next_static_asset: 0, public_asset: 0, rsc_or_prefetch: 0, other: 0 },
-        { document: 1, next_static_asset: 1, public_asset: 1, rsc_or_prefetch: 2, other: 0 },
-        { document: 0, next_static_asset: 0, public_asset: 0, rsc_or_prefetch: 0, other: 0 },
-        { document: 0, next_static_asset: 0, public_asset: 0, rsc_or_prefetch: 0, other: 0 },
-        { document: 0, next_static_asset: 0, public_asset: 0, rsc_or_prefetch: 0, other: 0 },
-        { document: 0, next_static_asset: 0, public_asset: 0, rsc_or_prefetch: 0, other: 0 },
-        { document: 0, next_static_asset: 0, public_asset: 0, rsc_or_prefetch: 0, other: 1 },
-      ],
+      bucketMostRecentNavigation: BASIC5_AUTHENTICATED_NAVIGATION_COUNT,
+      byNavigation: Array.from(
+        { length: BASIC5_AUTHENTICATED_NAVIGATION_COUNT + 1 },
+        (_, index) => ({
+          document: index === 0 || index === 1 ? 1 : 0,
+          next_static_asset: index === 1 ? 1 : 0,
+          public_asset: index === 1 ? 1 : 0,
+          rsc_or_prefetch: index === 1 ? 2 : 0,
+          other: index === BASIC5_AUTHENTICATED_NAVIGATION_COUNT ? 1 : 0,
+        }),
+      ),
       totals: { document: 2, next_static_asset: 1, public_asset: 1, rsc_or_prefetch: 2, other: 1 },
     });
     expect(JSON.stringify(diagnostics)).not.toContain('private-query-value');
@@ -423,6 +451,16 @@ describe('task-specific BASIC5 control and presentation request budgets', () => 
     expect(laterSnapshot).not.toBe(diagnostics);
     expect(laterSnapshot?.byNavigation).not.toBe(diagnostics?.byNavigation);
     expect(laterSnapshot?.byNavigation[0]).not.toBe(diagnostics?.byNavigation[0]);
+  });
+
+  it('keeps request routing available but marks diagnostics unknown outside the fixed stage buckets', async () => {
+    const budget = createBasic5BrowserRequestBudget(baseUrl);
+    budget.setNavigationBucket(BASIC5_AUTHENTICATED_NAVIGATION_COUNT + 1);
+    const route = fakeRoute(`${baseUrl}/people/person`, 'GET', [], 'document');
+    await routeBasic5BrowserRequest(budget, route, (allowed) => expect(allowed).toBe(true));
+    expect(route.continue).toHaveBeenCalledOnce();
+    expect(budget.snapshot().browserPresentationDiagnostics).toBeNull();
+    expect(budget.snapshot().browserBudgetExceeded).toBe(false);
   });
 
   it('keeps diagnostic counts unknown if request metadata is invalid without changing fail-closed routing', async () => {
