@@ -1,5 +1,6 @@
 import contextlib
 import datetime
+import hashlib
 import io
 import json
 from pathlib import Path
@@ -152,6 +153,95 @@ class ReleaseStatusTests(unittest.TestCase):
     def test_unbound_or_malformed_expiry_is_unknown(self):
         for authority in [{'expiryUtc': None}, {'expiryUtc': 'invalid'}, {'expiryUtc': '2030-01-01T00:10:00'}]:
             self.assertEqual(m.authority_status(authority, MAIN, NOW)['expiry'], 'unknown_or_unbound')
+
+    def inventory_packet(self):
+        return {'kind': 'PROPOSED_ONLY_NOT_AUTHORIZED', 'source': MAIN,
+                'window': {'dispatchNotBeforeUtc': '2030-01-01T00:05:00Z',
+                           'dispatchNotAfterUtc': '2030-01-01T00:10:00Z'},
+                'approval': None}
+
+    def test_inventory_window_has_exact_open_and_expired_boundaries(self):
+        packet = self.inventory_packet()
+        for instant, expected in [('2030-01-01T00:04:59Z', 'not_yet_open'),
+                                  ('2030-01-01T00:05:00Z', 'window_open'),
+                                  ('2030-01-01T00:09:59Z', 'window_open'),
+                                  ('2030-01-01T00:10:00Z', 'expired'),
+                                  ('2030-01-01T00:10:01Z', 'expired')]:
+            with self.subTest(instant=instant):
+                result = m.authority_status(packet, MAIN, m.timestamp(instant))
+                self.assertEqual(result['expiry'], expected)
+                self.assertEqual(result['opensAt'], '2030-01-01T00:05:00+00:00')
+                self.assertEqual(result['expiresAt'], '2030-01-01T00:10:00+00:00')
+
+    def test_inventory_window_never_approves_or_follows_a_moved_source(self):
+        packet = self.inventory_packet()
+        result = m.summarize(OTHER, m.timestamp('2030-01-01T00:06:00Z'), authority=packet)
+        self.assertEqual(result['authority']['expiry'], 'window_open')
+        self.assertEqual(result['authority']['sourceBinding'], 'stale')
+        self.assertEqual(result['authority']['approval'], 'not_evaluated')
+        self.assertEqual(result['authority']['grantApplied'], 'unknown')
+        self.assertEqual(result['deployed']['current'], 'unknown')
+        self.assertEqual(result['installed']['current'], 'unknown')
+        self.assertNotIn('releaseGo', result)
+
+    def test_malformed_inventory_intervals_do_not_fall_back_to_legacy_expiry(self):
+        valid = self.inventory_packet()['window']
+        for window in [None, 'not-an-object', {},
+                       {'dispatchNotAfterUtc': valid['dispatchNotAfterUtc']},
+                       {'dispatchNotBeforeUtc': valid['dispatchNotBeforeUtc']},
+                       {**valid, 'dispatchNotBeforeUtc': '2030-01-01T00:05:00'},
+                       {**valid, 'dispatchNotAfterUtc': 'invalid'},
+                       {**valid, 'dispatchNotBeforeUtc': valid['dispatchNotAfterUtc']},
+                       {**valid, 'dispatchNotBeforeUtc': '2030-01-01T00:11:00Z'}]:
+            with self.subTest(window=window):
+                packet = {**self.inventory_packet(), 'window': window,
+                          'approvalNotAfterUtc': valid['dispatchNotAfterUtc']}
+                result = m.authority_status(packet, MAIN, NOW)
+                self.assertEqual(result['expiry'], 'unknown_or_unbound')
+                self.assertIsNone(result['opensAt'])
+                self.assertIsNone(result['expiresAt'])
+
+    def test_conflicting_inventory_and_legacy_expiry_is_unknown(self):
+        packet = {**self.inventory_packet(), 'expiryUtc': '2030-01-01T00:20:00Z'}
+        self.assertEqual(m.authority_status(packet, MAIN, NOW)['expiry'], 'unknown_or_unbound')
+        packet['expiryUtc'] = '2029-12-31T16:10:00-08:00'
+        self.assertEqual(m.authority_status(packet, MAIN, NOW)['expiry'], 'not_yet_open')
+        packet['approvalNotAfterUtc'] = '2030-01-01T00:20:00Z'
+        self.assertEqual(m.authority_status(packet, MAIN, NOW)['expiry'], 'unknown_or_unbound')
+
+    def test_inventory_offsets_are_compared_as_instants(self):
+        packet = {**self.inventory_packet(), 'approvalNotAfterUtc': '2030-01-01T00:10:00Z',
+                  'window': {'dispatchNotBeforeUtc': '2029-12-31T16:05:00-08:00',
+                             'dispatchNotAfterUtc': '2030-01-01T01:10:00+01:00'}}
+        for instant, expected in [('2030-01-01T00:05:00Z', 'window_open'),
+                                  ('2030-01-01T00:10:00Z', 'expired')]:
+            with self.subTest(instant=instant):
+                self.assertEqual(m.authority_status(packet, MAIN, m.timestamp(instant))['expiry'], expected)
+
+    def test_cli_inventory_window_is_offline_redacted_and_source_bound(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'inventory.json'
+            packet = self.inventory_packet()
+            packet['window']['unrelated'] = {'token': 'PRIVATE-TOKEN'}
+            packet['approval'] = {'accepted': True, 'actor': 'PRIVATE@example.test'}
+            raw = json.dumps(packet).encode()
+            path.write_bytes(raw)
+            output = io.StringIO()
+            with patch.object(socket, 'socket', side_effect=AssertionError('offline only')), \
+                 patch.object(m.sys, 'argv', ['release_status.py', '--main', OTHER,
+                                             '--as-of', '2030-01-01T00:06:00Z',
+                                             '--authority', str(path)]), \
+                 contextlib.redirect_stdout(output):
+                m.main()
+            text = output.getvalue()
+            self.assertNotIn('PRIVATE', text)
+            self.assertNotIn(folder, text)
+            result = json.loads(text)
+            self.assertEqual(result['authority']['expiry'], 'window_open')
+            self.assertEqual(result['authority']['sourceBinding'], 'stale')
+            self.assertEqual(result['authority']['approval'], 'not_evaluated')
+            self.assertEqual(result['authority']['grantApplied'], 'unknown')
+            self.assertEqual(result['inputs'], [{'input': 1, 'sha256': hashlib.sha256(raw).hexdigest()}])
 
     def test_historical_deployed_and_installed_claims_are_not_current_state(self):
         handoff = {'source': {'main': OTHER}, 'release': {'deployed': False, 'installed': True,

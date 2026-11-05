@@ -143,7 +143,27 @@ def authority_status(receipt, main, as_of):
         match = re.search(r'request[.]time\s*<\s*timestamp\("([^\"]+)"\)', str(condition.get('expression', '')))
         raw_expiry = match.group(1) if match else None
     expiry = timestamp(raw_expiry)
-    return {'expiry': ('expired' if expiry <= as_of else 'window_open') if expiry else 'unknown_or_unbound',
+    opens = None
+    if 'window' in receipt:
+        window = receipt['window']
+        start = timestamp(window.get('dispatchNotBeforeUtc')) if isinstance(window, dict) else None
+        end = timestamp(window.get('dispatchNotAfterUtc')) if isinstance(window, dict) else None
+        legacy_ends = [timestamp(receipt[key]) for key in ('expiryUtc', 'approvalNotAfterUtc')
+                       if receipt.get(key) is not None]
+        if raw_expiry:
+            legacy_ends.append(expiry)
+        # A declared interval must stand on its own. Do not hide malformed or
+        # contradictory current metadata behind an otherwise valid old expiry.
+        if (start is None or end is None or start >= end
+                or any(value != end for value in legacy_ends)):
+            expiry = None
+        else:
+            opens, expiry = start, end
+    state = ('expired' if expiry <= as_of else 'window_open') if expiry else 'unknown_or_unbound'
+    if opens and as_of < opens:
+        state = 'not_yet_open'
+    return {'expiry': state,
+            'opensAt': opens.isoformat() if opens else None,
             'expiresAt': expiry.isoformat() if expiry else None,
             'source': source, 'sourceBinding': 'same' if source == main else 'stale' if source else 'unbound',
             'approval': 'not_evaluated', 'grantApplied': 'unknown',

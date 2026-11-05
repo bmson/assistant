@@ -23,6 +23,16 @@ The report keeps these distinctions:
 - Deployment and installation remain current-state unknown. Existing handoff booleans, source associations and last-qualified installed source are historical claims shown separately. A green source/CI result is never converted into serving or installed behavior.
 - Expired, unbound and open time windows are distinct from source binding, IAM application and owner approval. An open window is not permission to act; no policy/application state is inferred. Invalid or absent times remain unknown.
 
+Inventory proposals using `window.dispatchNotBeforeUtc` and
+`window.dispatchNotAfterUtc` require two timezone-aware times with start before
+end. The report includes `opensAt` and `expiresAt`: before start is
+`not_yet_open`, start is included in `window_open`, and end is already `expired`.
+Offsets are compared as instants. A malformed interval or conflict with a supplied
+legacy expiry is `unknown_or_unbound`; it does not fall back to a different open
+window. Source binding stays independent, owner approval remains `not_evaluated`,
+and grant application stays unknown. These are dispatch-timing claims only; they
+do not establish current source/configuration, job scheduling or launch authority.
+
 The native execution adapter recognizes the existing `actualEvidence` XCTest-summary receipt with a log hash. It reports what the receipt records; it does not reread/reverify the original log, authenticate receipts or establish device acceptance. The tool does not consume free-form “passed” prose or a build-only line as executed tests. Provider/production freshness remains outside its scope.
 
 Both retained root merge formats are supported: older `merged: true`/`mergedAt` records, and current `ROOT-MERGE-*.json` claims with a positive PR/CI run and complete `head,priorMain,merge,tree` hashes. The latter is reported as a historical `root_merge_claim` with an unknown timestamp. `priorMain` is never used as a verified Git parent; ancestry remains unknown without supplied `parents` links (apart from literal equality with the selected commit). Incomplete, malformed, explicit non-merged or proposal metadata is not asserted to be merged. A recognized receipt shape does not authenticate its author or independently verify GitHub state.
