@@ -106,8 +106,8 @@ jobs:
           python3 - "$PROOF/build-tool-versions.json" "$SOURCE_SHA" <<'PY'
           import json,subprocess,sys
           path,source_sha=sys.argv[1:]
-          def version(args): return subprocess.check_output(args,text=True,timeout=5).strip()
-          value={'sourceSha':source_sha,'job':'build','node':version(['node','--version']),'pnpm':version(['pnpm','--version']),'dockerBuildx':version(['docker','buildx','version'])}
+          def version(args, timeout=5): return subprocess.check_output(args,text=True,timeout=timeout).strip()
+          value={'sourceSha':source_sha,'job':'build','node':version(['node','--version']),'pnpm':version(['pnpm','--version']),'dockerBuildx':version(['docker','buildx','version'], timeout=15)}
           assert value['node'].startswith('v26.'),value
           assert value['pnpm']=='10.34.5',value
           assert value['dockerBuildx']=='github.com/docker/buildx v0.38.1 0dbe87f36ed472fe36b6796c3f70b4210a731fc5',value
@@ -483,8 +483,8 @@ jobs:
           python3 - "$PROOF/upgrade-tool-versions.json" "$SOURCE_SHA" <<'PY'
           import json,subprocess,sys
           path,source_sha=sys.argv[1:]
-          def version(args): return subprocess.check_output(args,text=True,timeout=5).strip()
-          value={'sourceSha':source_sha,'job':'populated-upgrade','node':version(['node','--version']),'pnpm':version(['pnpm','--version']),'dockerBuildx':version(['docker','buildx','version'])}
+          def version(args, timeout=5): return subprocess.check_output(args,text=True,timeout=timeout).strip()
+          value={'sourceSha':source_sha,'job':'populated-upgrade','node':version(['node','--version']),'pnpm':version(['pnpm','--version']),'dockerBuildx':version(['docker','buildx','version'], timeout=15)}
           assert value['node'].startswith('v26.'),value
           assert value['pnpm']=='10.34.5',value
           assert value['dockerBuildx'],value
