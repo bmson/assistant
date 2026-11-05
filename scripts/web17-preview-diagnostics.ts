@@ -46,6 +46,12 @@ const chatAllElapsedBuckets = new Set([
 ]);
 const chatAllStageMarker = '[WEB17_CHAT_ALL_STAGE] ';
 const chatAllNonce = /^[A-Za-z0-9_-]{22,32}$/;
+const httpTransportMarker = '[WEB17_HTTP] ';
+const httpPhases = new Set([
+  'node_request_dispatch',
+  'node_response_finish',
+  'node_response_close',
+]);
 type Route = (typeof routes)[number];
 type DurationBucket = 'under_1s' | 'under_5s' | 'under_20s' | '20s_or_more' | 'unknown';
 
@@ -81,6 +87,122 @@ export type Web17PreviewDiagnostics = {
     other: number;
   };
 };
+
+export type Web17HttpTransportObservation = {
+  phase: 'node_request_dispatch' | 'node_response_finish' | 'node_response_close';
+  nonce: string;
+  status?: number;
+  writableFinished?: boolean;
+};
+
+/** Validates fixed preload records without retaining the source log or any raw values. */
+export function projectWeb17HttpTransportObservations(
+  input: unknown,
+  selectedNonce: string | null,
+  inputTruncated = false,
+): {
+  status: 'unavailable' | 'incomplete' | 'observed';
+  events: Web17HttpTransportObservation[];
+} {
+  if (typeof input !== 'string' || !selectedNonce || !chatAllNonce.test(selectedNonce))
+    return { status: 'unavailable', events: [] };
+  let text = input;
+  let incomplete = inputTruncated;
+  if (
+    input.length > WEB17_PREVIEW_LOG_BYTE_CAP ||
+    Buffer.byteLength(input, 'utf8') > WEB17_PREVIEW_LOG_BYTE_CAP
+  ) {
+    const suffix = Buffer.from(input.slice(-WEB17_PREVIEW_LOG_BYTE_CAP), 'utf8');
+    text = suffix.subarray(-WEB17_PREVIEW_LOG_BYTE_CAP).toString('utf8');
+    if (Buffer.byteLength(text, 'utf8') > WEB17_PREVIEW_LOG_BYTE_CAP) text = text.slice(1);
+    incomplete = true;
+  }
+  let lines = text.split(/\r?\n/);
+  if (lines.length > WEB17_PREVIEW_LINE_CAP) {
+    lines = lines.slice(-WEB17_PREVIEW_LINE_CAP);
+    incomplete = true;
+  }
+  const events: Web17HttpTransportObservation[] = [];
+  let matched = false;
+  let validRecordCount = 0;
+  for (const line of lines) {
+    const markerIndex = line.indexOf(httpTransportMarker);
+    if (markerIndex < 0) continue;
+    const encoded = line.slice(markerIndex + httpTransportMarker.length);
+    if (Buffer.byteLength(line, 'utf8') > 256) {
+      incomplete = true;
+      continue;
+    }
+    try {
+      const value = JSON.parse(encoded) as Record<string, unknown>;
+      if (
+        value.kind !== 'WEB17_HTTP_TRANSPORT' ||
+        value.layer !== 'node_local' ||
+        value.duplicatePossible !== true ||
+        typeof value.nonce !== 'string' ||
+        !chatAllNonce.test(value.nonce) ||
+        typeof value.phase !== 'string' ||
+        !httpPhases.has(value.phase)
+      ) {
+        incomplete = true;
+        continue;
+      }
+      const expectedKeys =
+        value.phase === 'node_request_dispatch'
+          ? ['duplicatePossible', 'kind', 'layer', 'nonce', 'phase']
+          : value.phase === 'node_response_finish'
+            ? ['duplicatePossible', 'kind', 'layer', 'nonce', 'phase', 'status']
+            : ['duplicatePossible', 'kind', 'layer', 'nonce', 'phase', 'writableFinished'];
+      if (Object.keys(value).sort().join(',') !== expectedKeys.join(',')) {
+        incomplete = true;
+        continue;
+      }
+      if (
+        value.phase === 'node_response_finish' &&
+        value.status !== null &&
+        (!Number.isInteger(value.status) ||
+          (value.status as number) < 100 ||
+          (value.status as number) > 599)
+      ) {
+        incomplete = true;
+        continue;
+      }
+      if (value.phase === 'node_response_close' && typeof value.writableFinished !== 'boolean') {
+        incomplete = true;
+        continue;
+      }
+      validRecordCount += 1;
+      if (validRecordCount >= 48) incomplete = true;
+      if (value.nonce !== selectedNonce) continue;
+      matched = true;
+      if (events.length >= 48) {
+        incomplete = true;
+        continue;
+      }
+      if (value.phase === 'node_response_finish') {
+        events.push({
+          nonce: selectedNonce,
+          phase: 'node_response_finish',
+          ...(typeof value.status === 'number' ? { status: value.status } : {}),
+        });
+      } else if (value.phase === 'node_response_close') {
+        events.push({
+          nonce: selectedNonce,
+          phase: 'node_response_close',
+          writableFinished: value.writableFinished as boolean,
+        });
+      } else {
+        events.push({ nonce: selectedNonce, phase: 'node_request_dispatch' });
+      }
+    } catch {
+      incomplete = true;
+    }
+  }
+  return {
+    status: incomplete ? 'incomplete' : matched ? 'observed' : 'unavailable',
+    events,
+  };
+}
 
 function emptyRoute(): RouteDiagnostics {
   return {
@@ -270,7 +392,9 @@ export function projectWeb17PreviewDiagnostics(
   return result;
 }
 
-function readTail(path: string): { text: string; truncated: boolean } | undefined {
+export function readWeb17PreviewLogTail(
+  path: string,
+): { text: string; truncated: boolean } | undefined {
   let descriptor: number | undefined;
   try {
     const stats = statSync(path);
@@ -288,7 +412,7 @@ function readTail(path: string): { text: string; truncated: boolean } | undefine
 
 function runCli(): void {
   const path = process.argv[2];
-  const tail = path ? readTail(resolve(path)) : undefined;
+  const tail = path ? readWeb17PreviewLogTail(resolve(path)) : undefined;
   const diagnostics = projectWeb17PreviewDiagnostics(tail?.text, {
     logAvailable: Boolean(tail),
     inputTruncated: tail?.truncated ?? false,

@@ -403,7 +403,10 @@ jobs:
             exit "$assistant_web17_exit"
           }
           trap cleanup_web17_preview EXIT
-          setsid pnpm --filter @assistant/web exec next dev --webpack --hostname 127.0.0.1 --port 3001 > "$RUNNER_TEMP/assistant-web17-preview.log" 2>&1 &
+          if ! assistant_web17_http_token="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("base64url"))' 2>/dev/null)" || [[ ! "$assistant_web17_http_token" =~ ^[A-Za-z0-9_-]{43}$ ]]; then
+            assistant_web17_http_token=""
+          fi
+          WEB17_HTTP_DIAGNOSTIC_TOKEN="$assistant_web17_http_token" NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--require=$GITHUB_WORKSPACE/scripts/web17-preview-http.cjs" setsid pnpm --filter @assistant/web exec next dev --webpack --hostname 127.0.0.1 --port 3001 > "$RUNNER_TEMP/assistant-web17-preview.log" 2>&1 &
           assistant_web17_pgid=$!
           assistant_web17_ready=false
           for assistant_attempt in {1..60}; do
@@ -419,7 +422,7 @@ jobs:
           if [ "$assistant_web17_ready" != true ]; then
             exit 1
           fi
-          pnpm exec tsx scripts/web17-delayed-old-poll.browser.ts
+          WEB17_PREVIEW_LOG_PATH="$RUNNER_TEMP/assistant-web17-preview.log" WEB17_HTTP_DIAGNOSTIC_TOKEN="$assistant_web17_http_token" pnpm exec tsx scripts/web17-delayed-old-poll.browser.ts
       - name: Preserve sanitized WEB-17 evidence
         if: ${{ always() && steps.web17_preview.outcome != 'skipped' }}
         uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
