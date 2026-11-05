@@ -1,5 +1,4 @@
-import type { ChatHistoryStage } from '@assistant/application/chat';
-import type { PostgresAgentResolutionStage } from '@assistant/db';
+import type { ChatHistoryStage, PostgresAgentResolutionStage } from '@assistant/application/chat';
 
 export const WEB17_CHAT_ALL_STAGE_PREFIX = '[WEB17_CHAT_ALL_STAGE] ';
 export const WEB17_CHAT_ALL_STAGE_EVENT_CAP = 20;

@@ -20,6 +20,8 @@ import type { UIMessage } from 'ai';
 import { listSavedCards } from './cards.js';
 import { taskActivityComposerChecklistCancellationPolicy } from './tasks/commands.js';
 
+export type { PostgresAgentResolutionStage };
+
 const TERMINAL_TASK_STATUSES = ['done', 'failed', 'cancelled'];
 /** A task in one of these is not going to produce more output on its own. */
 export const SETTLED_TASK_STATUSES = new Set([
