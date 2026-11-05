@@ -2296,7 +2296,7 @@ final class NativeVisualReviewTests: XCTestCase {
         var approval = try XCTUnwrap(pending[0]["approval"] as? [String: Any])
         approval["summary"] = "Send the synthetic arrival update only to the named recipient. Keep the confirmed time and original scope; do not change the booking, add recipients or agree to a fee."
         pending[0]["approval"] = approval
-        approvals["pending"] = pending
+        approvals["pending"] = [pending[0]]
         overview["approvals"] = approvals
         responses[path] = try JSONSerialization.data(withJSONObject: overview)
         NativeReviewProtocol.install(responses)
@@ -2369,12 +2369,22 @@ final class NativeVisualReviewTests: XCTestCase {
                     let key = "mobile1a-\(surface)-\(name)-\(scheme == .light ? "light" : "dark")"
                     var observations: [[String: Any]] = []
                     var actionFrames: [String: CGRect] = [:]
+                    func scrolls(_ view: UIView) -> [UIScrollView] {
+                        ((view as? UIScrollView).map { [$0] } ?? []) + view.subviews.flatMap(scrolls)
+                    }
                     func record(_ state: String) throws {
                         try checkBudget()
                         let nativeElements = elements(window)
+                        let offset = scrolls(window).max(by: { $0.bounds.height < $1.bounds.height })?.contentOffset ?? .zero
                         for element in nativeElements {
                             if let label = element.accessibilityLabel, ["Approve", "Deny", "More"].contains(label) {
-                                actionFrames[label] = element.accessibilityFrame
+                                let visibleFrame = window.screen.coordinateSpace.convert(element.accessibilityFrame, to: window)
+                                if visibleFrame.height > 0 && visibleFrame.intersects(window.bounds) {
+                                    // The single approval may need several viewports.
+                                    // Compare stable content positions, not screen Y
+                                    // values gathered at different scroll offsets.
+                                    actionFrames[label] = visibleFrame.offsetBy(dx: offset.x, dy: offset.y)
+                                }
                             }
                         }
                         let rows = nativeElements.map { value -> [String: Any] in
@@ -2383,7 +2393,8 @@ final class NativeVisualReviewTests: XCTestCase {
                                     "x": frame.minX, "y": frame.minY, "width": frame.width, "height": frame.height,
                                     "traits": value.accessibilityTraits.rawValue]
                         }
-                        observations.append(["state": state, "elements": rows])
+                        observations.append(["state": state, "elements": rows,
+                                             "primaryScrollOffsetX": offset.x, "primaryScrollOffsetY": offset.y])
                         let png: Data = try autoreleasepool {
                             let format = UIGraphicsImageRendererFormat()
                             format.scale = 1 // Native UIKit fixture capture at one pixel per point.
@@ -2424,9 +2435,6 @@ final class NativeVisualReviewTests: XCTestCase {
                             try record("after-native-accessibility-activation")
                         }
                     }
-                    func scrolls(_ view: UIView) -> [UIScrollView] {
-                        ((view as? UIScrollView).map { [$0] } ?? []) + view.subviews.flatMap(scrolls)
-                    }
                     if let scroll = scrolls(window).max(by: { $0.bounds.height < $1.bounds.height }) {
                         for step in 0..<20 {
                             try checkBudget()
@@ -2462,6 +2470,10 @@ final class NativeVisualReviewTests: XCTestCase {
                     let receipt: [String: Any] = ["case": key, "viewport": ["width": bounds.width, "height": bounds.height],
                         "forcedCompactVertical": verticalClass == .compact, "accessibilitySize": textSize.isAccessibilitySize,
                         "capturePixelsPerPoint": 1, "retainedPNGBytes": retainedPNGBytes, "maximumPNGBytes": maximumPNGBytes,
+                        "actionFramesCoordinateSpace": "window point coordinates plus primary scroll content offset; one pending approval",
+                        "actionContentFrames": actionFrames.map { label, frame in
+                            ["label": label, "x": frame.minX, "y": frame.minY, "width": frame.width, "height": frame.height] as [String: Any]
+                        },
                         "observations": observations, "scope": "Actual native SwiftUI synthetic fixture; forced viewport/environment, no real approval writes, physical rotation/tap/keyboard/VoiceOver proof"]
                     let data = try JSONSerialization.data(withJSONObject: receipt, options: [.sortedKeys])
                     let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
