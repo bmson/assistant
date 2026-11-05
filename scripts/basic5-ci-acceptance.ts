@@ -10,6 +10,11 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import type { OwnerEditorSavedIds } from '@assistant/persistence';
 import {
+  BASIC5_AUTHENTICATED_NAVIGATION_COUNT,
+  BASIC5_LOGICAL_NAVIGATION_STAGES,
+  type Basic5LogicalNavigationStage,
+} from './basic5-browser-acceptance-support.js';
+import {
   type Basic5CiVitestDiagnostic,
   basic5CiVitestCaptureLimit,
   contentFreeBasic5CiVitestDiagnostic,
@@ -23,10 +28,11 @@ const CLEANUP_END_SECONDS = 400;
 const PREPARE_END_SECONDS = 130;
 const CAPTURE_BYTES = 64 * 1024;
 const PHASE_SETTLEMENT_GRACE_MS = 5_000;
-const ACCEPTANCE_CONTRACT = 'basic5-ci-user-flow-control-presentation-v5';
+const ACCEPTANCE_CONTRACT = 'basic5-ci-user-flow-control-presentation-v6';
 const CLAIM_SCOPE = {
   runtimeIdentity: 'bounded standalone artifact observed in CI checkout',
-  behavior: 'four BASIC5 saves: scoped UI success and same-operation durable receipts',
+  behavior:
+    'four BASIC5 saves: exact search links, same-operation durable receipts, and leave/reopen/reload readbacks',
   ancestorWorkspaceDependencies: 'unqualified',
   unexercisedRoutes: 'unqualified',
   containerIndependence: 'unqualified',
@@ -56,8 +62,21 @@ export type Basic5CiTarget = {
   token: string;
 };
 
+export type Basic5CiJourneyFacts = {
+  navigationStages: Basic5LogicalNavigationStage[];
+  findResultCounts: { people: number; connections: number; savedNotes: number };
+  exactTargetHrefMatches: { people: number; connections: number; savedNotes: number };
+  reloadCount: number;
+  reopenedPageReadbacks: {
+    identity: boolean;
+    familyAdd: boolean;
+    familyCorrection: boolean;
+    noteCorrection: boolean;
+  };
+};
+
 export type Basic5CiEvidence = {
-  schemaVersion: 1;
+  schemaVersion: 2;
   label: typeof BASIC5_CI_EVIDENCE_LABEL;
   result: 'passed' | 'failed';
   standalone: { sourceCommit: string | null; buildId: string | null; serverSha256: string | null };
@@ -86,6 +105,7 @@ export type Basic5CiEvidence = {
     ids: OwnerEditorSavedIds | null;
   }>;
   durableReadbacks: Record<string, boolean>;
+  journeyFacts: Basic5CiJourneyFacts;
   counts: Record<string, unknown>;
   cleanup: Record<string, boolean>;
   externalCleanupSupervisorRequired: boolean;
@@ -98,7 +118,7 @@ export type Basic5CiEvidencePayload = Omit<Basic5CiEvidence, 'schemaVersion' | '
 
 /** Add the controller's exact inner-evidence identity to a typed producer payload. */
 export function buildBasic5CiEvidence(payload: Basic5CiEvidencePayload): Basic5CiEvidence {
-  return { ...payload, schemaVersion: 1, label: BASIC5_CI_EVIDENCE_LABEL };
+  return { ...payload, schemaVersion: 2, label: BASIC5_CI_EVIDENCE_LABEL };
 }
 
 export type Basic5CiQuiescence = {
@@ -1719,6 +1739,7 @@ function validateCiEvidence(
       'fixture',
       'receipts',
       'durableReadbacks',
+      'journeyFacts',
       'counts',
       'cleanup',
       'externalCleanupSupervisorRequired',
@@ -1728,7 +1749,7 @@ function validateCiEvidence(
     ],
     'acceptance_evidence',
   );
-  if (evidence.schemaVersion !== 1 || evidence.label !== BASIC5_CI_EVIDENCE_LABEL)
+  if (evidence.schemaVersion !== 2 || evidence.label !== BASIC5_CI_EVIDENCE_LABEL)
     throw new Basic5CiHold('acceptance_evidence_schema_or_label_mismatch');
   requireExactKeys(
     evidence.standalone,
@@ -1760,6 +1781,32 @@ function validateCiEvidence(
     evidence.durableReadbacks,
     ['identity', 'familyAdd', 'familyCorrection', 'noteCorrection'],
     'durable_readbacks',
+  );
+  requireExactKeys(
+    evidence.journeyFacts,
+    [
+      'navigationStages',
+      'findResultCounts',
+      'exactTargetHrefMatches',
+      'reloadCount',
+      'reopenedPageReadbacks',
+    ],
+    'journey_facts',
+  );
+  requireExactKeys(
+    evidence.journeyFacts.findResultCounts,
+    ['people', 'connections', 'savedNotes'],
+    'journey_find_result_counts',
+  );
+  requireExactKeys(
+    evidence.journeyFacts.exactTargetHrefMatches,
+    ['people', 'connections', 'savedNotes'],
+    'journey_target_href_counts',
+  );
+  requireExactKeys(
+    evidence.journeyFacts.reopenedPageReadbacks,
+    ['identity', 'familyAdd', 'familyCorrection', 'noteCorrection'],
+    'journey_reopened_page_readbacks',
   );
   requireExactKeys(
     evidence.counts,
@@ -1917,13 +1964,36 @@ function validateCiEvidence(
     )
   )
     throw new Basic5CiHold('durable_readbacks_incomplete');
+  const journeyFacts = evidence.journeyFacts;
+  const reopenedReadbackKeys: readonly (keyof typeof journeyFacts.reopenedPageReadbacks)[] = [
+    'identity',
+    'familyAdd',
+    'familyCorrection',
+    'noteCorrection',
+  ];
+  if (
+    !Array.isArray(journeyFacts.navigationStages) ||
+    journeyFacts.navigationStages.length !== BASIC5_LOGICAL_NAVIGATION_STAGES.length ||
+    journeyFacts.navigationStages.some(
+      (stage, index) => stage !== BASIC5_LOGICAL_NAVIGATION_STAGES[index],
+    ) ||
+    journeyFacts.findResultCounts.people !== 2 ||
+    journeyFacts.findResultCounts.connections !== 2 ||
+    journeyFacts.findResultCounts.savedNotes !== 2 ||
+    journeyFacts.exactTargetHrefMatches.people !== 2 ||
+    journeyFacts.exactTargetHrefMatches.connections !== 2 ||
+    journeyFacts.exactTargetHrefMatches.savedNotes !== 2 ||
+    journeyFacts.reloadCount !== 4 ||
+    !reopenedReadbackKeys.every((key) => journeyFacts.reopenedPageReadbacks[key] === true)
+  )
+    throw new Basic5CiHold('user_journey_find_reopen_readback_incomplete');
   const counts = evidence.counts;
   const providers = counts.providerRequests as Record<string, unknown> | undefined;
   if (
     !Number.isSafeInteger(counts.readinessAttempts) ||
     Number(counts.readinessAttempts) < 1 ||
     Number(counts.readinessAttempts) > 451 ||
-    counts.pageNavigations !== 6 ||
+    counts.pageNavigations !== BASIC5_AUTHENTICATED_NAVIGATION_COUNT ||
     counts.authenticatedPageNavigations !== counts.pageNavigations ||
     !Number.isSafeInteger(counts.browserHttpRequests) ||
     Number(counts.browserHttpRequests) < 1 ||
@@ -1943,8 +2013,7 @@ function validateCiEvidence(
     counts.ownerEditorPostCount !== 4 ||
     counts.ownerApplyRequests !== 4 ||
     !Number.isSafeInteger(counts.recoveryGets) ||
-    Number(counts.recoveryGets) < 0 ||
-    Number(counts.recoveryGets) > 64 ||
+    Number(counts.recoveryGets) !== 0 ||
     counts.recoveryRequests !== 0 ||
     counts.embeddingRequests !== 3 ||
     counts.fixtureModelCalls !== 3 ||
@@ -1965,6 +2034,54 @@ function validateCiEvidence(
     ].every((key) => cleanup[key] === true)
   )
     throw new Basic5CiHold('fixture_cleanup_receipt_incomplete');
+}
+
+function contentFreeJourneyFacts(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const source = value as Record<string, unknown>;
+  const count = (candidate: unknown) =>
+    typeof candidate === 'number' &&
+    Number.isSafeInteger(candidate) &&
+    candidate >= 0 &&
+    candidate <= BASIC5_AUTHENTICATED_NAVIGATION_COUNT
+      ? candidate
+      : null;
+  const matches = (candidate: unknown) =>
+    candidate && typeof candidate === 'object' && !Array.isArray(candidate)
+      ? (candidate as Record<string, unknown>)
+      : {};
+  const findResultCounts = matches(source.findResultCounts);
+  const exactTargetHrefMatches = matches(source.exactTargetHrefMatches);
+  const reopenedPageReadbacks = matches(source.reopenedPageReadbacks);
+  const knownStages = new Set<string>(BASIC5_LOGICAL_NAVIGATION_STAGES);
+  const navigationStages = Array.isArray(source.navigationStages)
+    ? source.navigationStages
+        .filter(
+          (stage): stage is Basic5LogicalNavigationStage =>
+            typeof stage === 'string' && knownStages.has(stage),
+        )
+        .slice(0, BASIC5_AUTHENTICATED_NAVIGATION_COUNT)
+    : [];
+  return {
+    navigationStages,
+    findResultCounts: {
+      people: count(findResultCounts.people),
+      connections: count(findResultCounts.connections),
+      savedNotes: count(findResultCounts.savedNotes),
+    },
+    exactTargetHrefMatches: {
+      people: count(exactTargetHrefMatches.people),
+      connections: count(exactTargetHrefMatches.connections),
+      savedNotes: count(exactTargetHrefMatches.savedNotes),
+    },
+    reloadCount: count(source.reloadCount),
+    reopenedPageReadbacks: {
+      identity: reopenedPageReadbacks.identity === true,
+      familyAdd: reopenedPageReadbacks.familyAdd === true,
+      familyCorrection: reopenedPageReadbacks.familyCorrection === true,
+      noteCorrection: reopenedPageReadbacks.noteCorrection === true,
+    },
+  };
 }
 
 function contentFreeReceipt(record: Record<string, unknown>): Record<string, unknown> {
@@ -1995,6 +2112,7 @@ function contentFreeReceipt(record: Record<string, unknown>): Record<string, unk
     'executionEnvironment',
     'receipts',
     'durableReadbacks',
+    'journeyFacts',
     'counts',
     'quiescence',
     'cleanupComplete',
@@ -2022,6 +2140,7 @@ function contentFreeReceipt(record: Record<string, unknown>): Record<string, unk
     ];
   if ('workflowContext' in clean)
     clean.workflowContext = contentFreeWorkflowContext(clean.workflowContext);
+  if ('journeyFacts' in clean) clean.journeyFacts = contentFreeJourneyFacts(clean.journeyFacts);
   if ('requiredArtifactIdentity' in clean)
     clean.requiredArtifactIdentity = contentFreeRequiredArtifactIdentity(
       clean.requiredArtifactIdentity,
@@ -2063,10 +2182,10 @@ export async function runBasic5CiAcceptance(
   const started = ops.now();
   const deadline = started + OUTER_SECONDS * 1000;
   const receipt: Record<string, unknown> = {
-    schemaVersion: 5,
+    schemaVersion: 6,
     acceptanceContract: ACCEPTANCE_CONTRACT,
     claimScope: CLAIM_SCOPE,
-    scope: 'one BASIC5 CI browser acceptance case',
+    scope: 'one four-save, 16-navigation BASIC5 CI browser acceptance case',
     result: 'hold',
     cleanupComplete: false,
     targetRetained: false,
@@ -2153,6 +2272,7 @@ export async function runBasic5CiAcceptance(
           result.evidence.durableReadbacks[key],
         ]),
       ),
+      journeyFacts: contentFreeJourneyFacts(result.evidence.journeyFacts),
       counts: Object.fromEntries([
         ...[
           'readinessAttempts',
