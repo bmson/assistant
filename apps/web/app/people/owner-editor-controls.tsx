@@ -740,10 +740,7 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
         ) : active ? (
           <Modal label={title} onClose={close} dismissible={!state.busy}>
             <h2 className="text-lg font-semibold text-strong">{title}</h2>
-            <p className="text-sm text-muted">
-              Closing does not cancel a save. Reloading may lose this draft; if the result is
-              unknown, reopen this page to check that same save.
-            </p>
+            <OwnerEditorCloseGuidance state={state} grant={grant} targetId={displayedTargetId} />
             {conflictReview}
             <form
               ref={form}
@@ -1100,6 +1097,42 @@ export function OwnerEditorRemovalActions(props: {
       </form>
     </div>
   );
+}
+
+export function ownerEditorCloseGuidance(
+  state: OwnerEditorOperationState,
+  grant: OwnerEditorFormGrant | null,
+  targetId: string | null | undefined,
+): string | null {
+  if (state.phase === 'checking' || state.phase === 'resolved' || state.phase === 'blocked')
+    return null;
+
+  const marker = state.marker;
+  const currentSaveIsPending =
+    state.phase === 'pending' &&
+    !!grant?.issuedOperationHandle &&
+    marker?.id === grant.issuedOperationHandle &&
+    marker.command === grant.command &&
+    targetId !== undefined &&
+    marker.targetId === targetId &&
+    (!state.reply || state.reply.operationId === grant.operationId);
+
+  return currentSaveIsPending
+    ? 'The result of this save is not confirmed. Reopen this page to check the same save before trying again.'
+    : 'Closing does not save this draft. Reloading may lose it.';
+}
+
+export function OwnerEditorCloseGuidance({
+  state,
+  grant,
+  targetId,
+}: {
+  state: OwnerEditorOperationState;
+  grant: OwnerEditorFormGrant | null;
+  targetId: string | null | undefined;
+}) {
+  const guidance = ownerEditorCloseGuidance(state, grant, targetId);
+  return guidance ? <p className="text-sm text-muted">{guidance}</p> : null;
 }
 
 export function OwnerEditorPeopleSelectors(props: {
