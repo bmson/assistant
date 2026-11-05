@@ -7,6 +7,8 @@ import {
   createPostgresApplicationChatPersistence,
   createPostgresGeneratedCardRepository,
   type Db,
+  type PostgresAgentResolutionStage,
+  type PostgresAgentResolutionStageObserver,
 } from '@assistant/db';
 import type {
   ApplicationChatMessage,
@@ -17,6 +19,8 @@ import type {
 import type { UIMessage } from 'ai';
 import { listSavedCards } from './cards.js';
 import { taskActivityComposerChecklistCancellationPolicy } from './tasks/commands.js';
+
+export type { PostgresAgentResolutionStage };
 
 const TERMINAL_TASK_STATUSES = ['done', 'failed', 'cancelled'];
 /** A task in one of these is not going to produce more output on its own. */
@@ -145,11 +149,14 @@ export type ChatStore =
   | ApplicationChatPersistence
   | { chat: ApplicationChatPersistence; generatedCards: GeneratedCardRepository };
 
-function chatPersistence(store: ChatStore): ApplicationChatPersistence {
+function chatPersistence(
+  store: ChatStore,
+  observePostgresAgentResolutionStage?: PostgresAgentResolutionStageObserver,
+): ApplicationChatPersistence {
   if ('chat' in store) return store.chat;
   return 'kind' in store && store.kind === 'application-chat-persistence'
     ? store
-    : createPostgresApplicationChatPersistence(store as Db);
+    : createPostgresApplicationChatPersistence(store as Db, observePostgresAgentResolutionStage);
 }
 
 function cardPersistence(store: ChatStore): GeneratedCardRepository | undefined {
@@ -688,6 +695,7 @@ export async function archiveInactiveChats(store: ChatStore, olderThanDays = 30)
 }
 
 export type ChatHistoryStage =
+  | PostgresAgentResolutionStage
   | 'agent_started'
   | 'agent_completed'
   | 'agent_failed'
@@ -770,8 +778,9 @@ export async function listChatHistory(
   store: ChatStore,
   archived: boolean,
   observeStage?: ChatHistoryStageObserver,
+  observePostgresAgentResolutionStage?: PostgresAgentResolutionStageObserver,
 ) {
-  const persistence = chatPersistence(store);
+  const persistence = chatPersistence(store, observePostgresAgentResolutionStage);
   const agent = await observeChatHistoryOperation(observeStage, 'agent', () =>
     persistence.resolveAgent(),
   );

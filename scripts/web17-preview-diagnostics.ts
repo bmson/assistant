@@ -36,6 +36,12 @@ const chatAllPhases = new Set([
   'active_ids_started',
   'active_ids_completed',
   'active_ids_failed',
+  'owner_assertion_call_started',
+  'owner_assertion_call_returned',
+  'owner_assertion_call_threw',
+  'agent_row_lookup_call_started',
+  'agent_row_lookup_call_returned',
+  'agent_row_lookup_call_threw',
 ]);
 const chatAllElapsedBuckets = new Set([
   'under_1s',

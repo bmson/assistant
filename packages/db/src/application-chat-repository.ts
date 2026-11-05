@@ -74,6 +74,27 @@ import {
 } from './schema.js';
 import { createPostgresTaskRepository } from './task-lifecycle-repository.js';
 
+export type PostgresAgentResolutionStage =
+  | 'owner_assertion_call_started'
+  | 'owner_assertion_call_returned'
+  | 'owner_assertion_call_threw'
+  | 'agent_row_lookup_call_started'
+  | 'agent_row_lookup_call_returned'
+  | 'agent_row_lookup_call_threw';
+
+export type PostgresAgentResolutionStageObserver = (stage: PostgresAgentResolutionStage) => void;
+
+function notifyAgentResolutionStage(
+  observer: PostgresAgentResolutionStageObserver | undefined,
+  stage: PostgresAgentResolutionStage,
+) {
+  try {
+    observer?.(stage);
+  } catch {
+    // Optional diagnostics must not change agent resolution.
+  }
+}
+
 const TERMINAL_TASK_STATUSES = ['done', 'failed', 'cancelled'];
 const GOAL_BLOCKED_PREFIX = 'Waiting on the owner:';
 const DIRECT_CHAT_LEASE_MS = 10 * 60_000;
@@ -157,7 +178,10 @@ async function assertRecallSourcesNotHidden(
   }
 }
 
-export function createPostgresApplicationChatPersistence(db: Db): ApplicationChatPersistence {
+export function createPostgresApplicationChatPersistence(
+  db: Db,
+  observeAgentResolutionStage?: PostgresAgentResolutionStageObserver,
+): ApplicationChatPersistence {
   async function owned(agentId: string, conversationId: string) {
     const [row] = await db
       .select()
@@ -175,13 +199,31 @@ export function createPostgresApplicationChatPersistence(db: Db): ApplicationCha
     },
 
     async resolveAgent() {
-      const ownerId = await assertPostgresInstallationOwner(db);
-      const [agent] = await db
-        .select()
-        .from(agents)
-        .where(eq(agents.id, ownerId))
-        .orderBy(asc(agents.createdAt), asc(agents.id))
-        .limit(1);
+      notifyAgentResolutionStage(observeAgentResolutionStage, 'owner_assertion_call_started');
+      let ownerId: string;
+      try {
+        ownerId = await assertPostgresInstallationOwner(db);
+      } catch (error) {
+        notifyAgentResolutionStage(observeAgentResolutionStage, 'owner_assertion_call_threw');
+        throw error;
+      }
+      notifyAgentResolutionStage(observeAgentResolutionStage, 'owner_assertion_call_returned');
+
+      notifyAgentResolutionStage(observeAgentResolutionStage, 'agent_row_lookup_call_started');
+      let rows: (typeof agents.$inferSelect)[];
+      try {
+        rows = await db
+          .select()
+          .from(agents)
+          .where(eq(agents.id, ownerId))
+          .orderBy(asc(agents.createdAt), asc(agents.id))
+          .limit(1);
+      } catch (error) {
+        notifyAgentResolutionStage(observeAgentResolutionStage, 'agent_row_lookup_call_threw');
+        throw error;
+      }
+      notifyAgentResolutionStage(observeAgentResolutionStage, 'agent_row_lookup_call_returned');
+      const [agent] = rows;
       if (!agent) throw new Error('no agent row — run pnpm seed');
       return agent;
     },

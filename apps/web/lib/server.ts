@@ -149,6 +149,7 @@ import {
   documents,
   files,
   improvementProposals,
+  type PostgresAgentResolutionStageObserver,
   skills,
   withPostgresPrivacyObservationFence,
 } from '@assistant/db';
@@ -775,8 +776,11 @@ function createApplication(options: { profileMemory?: ProfileMemoryCommandPersis
     acknowledgeMessageDelivery: (conversationId: string, messageId: string, clientId: string) =>
       acknowledgeChatMessageDelivery(db, conversationId, messageId, clientId),
     archiveInactiveChats: () => archiveInactiveChats(db),
-    listChatHistory: (archived: boolean, observeStage?: ChatHistoryStageObserver) =>
-      listChatHistory(db, archived, observeStage),
+    listChatHistory: (
+      archived: boolean,
+      observeStage?: ChatHistoryStageObserver,
+      observePostgresAgentResolutionStage?: PostgresAgentResolutionStageObserver,
+    ) => listChatHistory(db, archived, observeStage, observePostgresAgentResolutionStage),
     getChatConversation: (conversationId: string, input: { taskId?: string; cursor?: string }) =>
       getChatConversationView(db, conversationId, input),
     getChatUpdates: (input: {
@@ -1637,8 +1641,11 @@ function createFirestoreChatApplication() {
     acknowledgeMessageDelivery: (conversationId: string, messageId: string, clientId: string) =>
       acknowledgeChatMessageDelivery(chat, conversationId, messageId, clientId),
     archiveInactiveChats: () => archiveInactiveChats(chat),
-    listChatHistory: (archived: boolean, observeStage?: ChatHistoryStageObserver) =>
-      listChatHistory(chat, archived, observeStage),
+    listChatHistory: (
+      archived: boolean,
+      observeStage?: ChatHistoryStageObserver,
+      _observePostgresAgentResolutionStage?: PostgresAgentResolutionStageObserver,
+    ) => listChatHistory(chat, archived, observeStage),
     getChatConversation: (conversationId: string, input: { taskId?: string; cursor?: string }) =>
       getChatConversationView(chatReads, conversationId, input),
     cancelChatTurn: (input: { conversationId: string; clientOperationId: string }) =>

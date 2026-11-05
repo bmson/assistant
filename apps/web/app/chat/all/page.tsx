@@ -40,6 +40,7 @@ export default async function ChatListPage({
     diagnosticsEnabled: process.env.WEB17_DIAGNOSTICS,
   });
   let stageObserver: ReturnType<typeof createWeb17ChatAllStageObserver>;
+  const postgresDetail = process.env.PERSISTENCE_DRIVER === 'postgres';
   if (diagnosticsEnabled) {
     try {
       const requestHeaders = await headers();
@@ -48,6 +49,7 @@ export default async function ChatListPage({
         host: requestHeaders.get('host'),
         requestClass: requestHeaders.get('x-web17-request-class'),
         nonce: requestHeaders.get('x-web17-attempt'),
+        postgresDetail,
       });
     } catch {
       // Optional diagnostics must not change the chat list response.
@@ -80,6 +82,7 @@ export default async function ChatListPage({
     history = await getChatApplication().listChatHistory(
       archived,
       stageObserver?.recordHistoryStage,
+      postgresDetail ? stageObserver?.recordPostgresAgentResolutionStage : undefined,
     );
     recordStage?.('history_completed');
   } catch (error) {
