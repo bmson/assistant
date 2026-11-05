@@ -1,0 +1,208 @@
+name: Native controls one-off capability
+on:
+  pull_request:
+    paths:
+      - apps/ios/AssistantUITestHost/**
+      - apps/ios/AssistantUITests/**
+      - apps/ios/Assistant.xcodeproj/project.pbxproj
+      - apps/ios/Assistant.xcodeproj/xcshareddata/xcschemes/AssistantUIFixtures.xcscheme
+      - apps/ios/Assistant/AppModel.swift
+      - .github/workflows/ios-native-capability.yml
+permissions:
+  contents: read
+concurrency:
+  group: native-controls-capability-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+jobs:
+  capability:
+    # One-off mechanism qualification; not an ongoing full component gate.
+    name: One native controls capability
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Build and run exactly one synthetic capability
+        timeout-minutes: 12
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 - <<'PY'
+          import os, sys, json, re, time, signal, selectors, subprocess, hashlib
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP']) / 'native-controls-evidence'
+          root.mkdir(mode=0o700, exist_ok=False)
+          build = Path(os.environ['RUNNER_TEMP']) / 'native-controls-build'
+          env = {k:v for k,v in os.environ.items() if k in {'HOME','USER','LOGNAME','SHELL','TMPDIR','LANG','LC_ALL'}}
+          env['PATH'] = '/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin'
+          log_bytes = 0
+          def save(name, value):
+              (root / name).write_text(json.dumps(value, indent=2) + '\n')
+          def group_exists(pid):
+              try: os.killpg(pid, 0); return True
+              except ProcessLookupError: return False
+          def drain(pid):
+              if not group_exists(pid): return True
+              os.killpg(pid, signal.SIGTERM)
+              end = time.monotonic() + 3
+              while group_exists(pid) and time.monotonic() < end: time.sleep(.1)
+              if group_exists(pid): os.killpg(pid, signal.SIGKILL)
+              end = time.monotonic() + 2
+              while group_exists(pid) and time.monotonic() < end: time.sleep(.1)
+              return not group_exists(pid)
+          def run(name, args, seconds, on_output=None):
+              global log_bytes
+              process = subprocess.Popen(args, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+              record = {'pid':process.pid, 'args':args, 'closed':False}
+              save('active-command.json', record)
+              deadline = time.monotonic() + seconds
+              selector = selectors.DefaultSelector(); selector.register(process.stdout, selectors.EVENT_READ)
+              problem = None
+              with (root / (name + '.log')).open('wb') as log:
+                  try:
+                      while selector.get_map():
+                          if time.monotonic() >= deadline: raise TimeoutError(name + ' deadline')
+                          if name == 'test' and sum(p.stat().st_size for p in root.rglob('*') if p.is_file()) > 128*1024*1024: raise RuntimeError('Total evidence cap exceeded')
+                          for key, _ in selector.select(.2):
+                              chunk = os.read(key.fd, 65536)
+                              if not chunk: selector.unregister(key.fileobj); continue
+                              remaining = 64 * 1024 * 1024 - log_bytes
+                              log.write(chunk[:max(0, remaining)]); log_bytes += min(len(chunk), max(0, remaining))
+                              if len(chunk) > remaining: raise RuntimeError('Total raw log cap exceeded')
+                      log.flush()
+                      if on_output: on_output((root / (name + '.log')).read_text())
+                      process.wait(timeout=max(.1, deadline-time.monotonic()))
+                  except BaseException as error: problem = repr(error)
+                  finally:
+                      selector.close(); process.stdout.close()
+                      clean = drain(process.pid)
+                      try: process.wait(timeout=3)
+                      except subprocess.TimeoutExpired: clean = False
+                      record.update(exit=process.returncode, closed=clean, problem=problem)
+                      save('active-command.json', record); save(name + '-process.json', record)
+              if problem or not clean or process.returncode != 0:
+                  raise RuntimeError(name + ' failed: ' + str(record))
+              return (root / (name + '.log')).read_text(errors='replace')
+          try:
+              if os.environ['GITHUB_RUN_ATTEMPT'] != '1': raise RuntimeError('No rerun authority')
+              head = run('source-head', ['git','rev-parse','HEAD'], 10).strip()
+              if head != os.environ['EXPECTED_HEAD']: raise RuntimeError('Checkout pin mismatch')
+              paths = sorted(set(Path('apps/ios').rglob('*.swift')) | {Path('apps/ios/Assistant.xcodeproj/project.pbxproj'), Path('.github/workflows/ios-native-capability.yml'), Path('apps/ios/Assistant.xcodeproj/xcshareddata/xcschemes/AssistantUIFixtures.xcscheme')})
+              pins = {str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
+              save('source.json', {'head':head,'pins':pins,'scope':'synthetic one-off capability only'})
+              xcodes = list(Path('/Applications').glob('Xcode*.app'))
+              version = lambda s: tuple(int(v) for v in re.findall(r'\d+', str(s)))
+              if not xcodes: raise RuntimeError('No installed Xcode')
+              chosen = max(xcodes, key=lambda p: version(p.name))
+              env['DEVELOPER_DIR'] = str(chosen / 'Contents/Developer')
+              run('xcode-version', ['xcodebuild','-version'], 10)
+              run('sdks', ['xcodebuild','-showsdks'], 10)
+              devices = json.loads(run('available-devices', ['xcrun','simctl','list','devices','available','--json'], 10))
+              candidates = [(version(rt), d['name'], rt, d) for rt, ds in devices['devices'].items() if 'SimRuntime.iOS-' in rt for d in ds if d.get('isAvailable') and d['name'].startswith('iPhone') and version(rt) >= (26,)]
+              if not candidates: raise RuntimeError('No available iOS >=26 iPhone template')
+              _, _, runtime, template = max(candidates, key=lambda c:(c[0], c[1]))
+              name = 'Assistant-Capability-' + os.environ['GITHUB_RUN_ID'] + '-' + os.environ['GITHUB_RUN_ATTEMPT']
+              lease = {'udid':None,'name':name,'runtime':runtime,'template':template,'createdByRun':os.environ['GITHUB_RUN_ID']}
+              save('lease.json', lease) # Durable intent precedes resource creation.
+              def bind_lease(text):
+                  udid = text.strip()
+                  if not re.fullmatch(r'[A-Fa-f0-9-]{36}', udid): raise RuntimeError('Invalid created simulator UUID')
+                  lease['udid'] = udid; save('lease.json', lease)
+              udid = run('create-simulator', ['xcrun','simctl','create',name,template['deviceTypeIdentifier'],runtime], 10, bind_lease).strip()
+              run('build', ['xcodebuild','-project','apps/ios/Assistant.xcodeproj','-scheme','AssistantUIFixtures','-configuration','Debug','-destination','id='+udid,'-derivedDataPath',str(build),'CODE_SIGNING_ALLOWED=NO','CODE_SIGNING_REQUIRED=NO','CODE_SIGN_IDENTITY=','build-for-testing'], 420)
+              products = build / 'Build/Products'
+              runs = list(products.glob('*.xctestrun'))
+              if len(runs) != 1: raise RuntimeError('Expected exactly one built xctestrun')
+              binaries = {}
+              for bundle in ['AssistantUITestHost.app','AssistantUITests-Runner.app']:
+                  folder = products / 'Debug-iphonesimulator' / bundle
+                  if not folder.is_dir(): raise RuntimeError('Missing built bundle '+bundle)
+                  binaries[bundle] = {str(p.relative_to(folder)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(folder.rglob('*')) if p.is_file() and not p.is_symlink()}
+              save('binary-pins.json', {'xctestrunSHA':hashlib.sha256(runs[0].read_bytes()).hexdigest(),'bundles':binaries})
+              if any(hashlib.sha256(Path(p).read_bytes()).hexdigest()!=h for p,h in pins.items()): raise RuntimeError('Source drift')
+              result = root / 'capability.xcresult'
+              output = run('test', ['xcodebuild','test-without-building','-xctestrun',str(runs[0]),'-destination','id='+udid,'-destination-timeout','30','-parallel-testing-enabled','NO','-maximum-concurrent-test-simulator-destinations','1','-test-timeouts-enabled','YES','-default-test-execution-time-allowance','60','-maximum-test-execution-time-allowance','60','-only-testing:AssistantUITests/MobileControlsUITests/testNativeControlsCapability','-resultBundlePath',str(result)], 180)
+              summary = json.loads(run('summary', ['xcrun','xcresulttool','get','test-results','summary','--path',str(result)], 10))
+              run('named-tests', ['xcrun','xcresulttool','get','test-results','tests','--path',str(result)], 10)
+              named = re.search(r'MobileControlsUITests[^\n]{0,160}testNativeControlsCapability[^\n]{0,80}\bpassed\b', output, re.I)
+              if not named or [summary.get(k) for k in ['totalTestCount','passedTests','failedTests','skippedTests']] != [1,1,0,0]: raise RuntimeError('Missing exact named single PASS/zero-skip evidence')
+              save('outcome.json', {'result':'PASS','namedTest':'AssistantUITests/MobileControlsUITests/testNativeControlsCapability','summary':summary,'sourceHead':head,'qualification':'synthetic capability only; no full matrix, VoiceOver, rotation or persistence acceptance'})
+          except BaseException as error:
+              save('failure.json', {'result':'HOLD','error':repr(error)})
+              raise
+          PY
+      - name: Close only the leased simulator and bound evidence
+        id: cleanup
+        if: always()
+        timeout-minutes: 1
+        run: |
+          python3 - <<'PY'
+          import os, json, subprocess, signal, time
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP']) / 'native-controls-evidence'
+          root.mkdir(mode=0o700, exist_ok=True)
+          errors = []; receipt = {'attempted':True}
+          def call(args):
+              p = subprocess.run(args, capture_output=True, text=True, timeout=8)
+              text=p.stdout+p.stderr
+              if len(text)>1024*1024: raise RuntimeError('Cleanup response exceeds1MiB')
+              return p.returncode, text
+          try:
+              active = root/'active-command.json'
+              if active.exists():
+                  record = json.loads(active.read_text())
+                  if not record['closed']:
+                      # Refuse an unbound PID; never kill a shared/global service.
+                      code, command = call(['ps','-p',str(record['pid']),'-o','command='])
+                      if code == 0 and 'xcodebuild' in command and 'native-controls-build' in command:
+                          os.killpg(record['pid'], signal.SIGTERM); time.sleep(1)
+                          try: os.killpg(record['pid'], signal.SIGKILL)
+                          except ProcessLookupError: pass
+                      try: os.killpg(record['pid'],0); errors.append('Owned process group still present/unknown')
+                      except ProcessLookupError: pass
+              lease = root/'lease.json'
+              if lease.exists():
+                  owned = json.loads(lease.read_text()); udid=owned['udid']
+                  if owned['createdByRun'] != os.environ['GITHUB_RUN_ID']: raise RuntimeError('Lease owner mismatch')
+                  code, text = call(['xcrun','simctl','list','devices','--json'])
+                  if code: raise RuntimeError(text)
+                  devices={d['udid']:d for ds in json.loads(text)['devices'].values() for d in ds}
+                  if udid is None:
+                      matches=[d for d in devices.values() if d['name']==owned['name']]
+                      if len(matches)>1: raise RuntimeError('Ambiguous owned create intent')
+                      if matches: udid=matches[0]['udid'];owned['udid']=udid;lease.write_text(json.dumps(owned,indent=2)+'\n')
+                  device=devices.get(udid)
+                  if device and device['name'] != owned['name']: raise RuntimeError('Lease name mismatch')
+                  if device and device['state']=='Booted':
+                      for bundle in ['com.baldvinsmarason.assistant.uitesthost','com.baldvinsmarason.assistant.uitesthost.tests.xctrunner']:
+                          call(['xcrun','simctl','terminate',udid,bundle])
+                      code, detail=call(['xcrun','simctl','shutdown',udid])
+                      if code: errors.append(detail[-2000:])
+                  if device:
+                      code, detail=call(['xcrun','simctl','delete',udid])
+                      if code: errors.append(detail[-2000:])
+                  code, text=call(['xcrun','simctl','list','devices','--json'])
+                  if code or any(d['udid']==udid for ds in json.loads(text)['devices'].values() for d in ds): errors.append('Owned simulator absence unverified')
+                  receipt['ownedUUID']=udid
+          except BaseException as error: errors.append(repr(error))
+          receipt['errors']=errors; (root/'cleanup.json').write_text(json.dumps(receipt,indent=2)+'\n')
+          total=sum(p.stat().st_size for p in root.rglob('*') if p.is_file())
+          upload=root
+          if total > 128*1024*1024:
+              errors.append('Total evidence exceeds128MiB including automatic XCTest attachments')
+              upload=Path(os.environ['RUNNER_TEMP'])/'native-controls-oversize';upload.mkdir(exist_ok=True)
+              (upload/'failure-manifest.json').write_text(json.dumps({'result':'HOLD','totalBytes':total,'errors':errors,'boundary':'Oversize evidence omitted, never accepted as PASS'},indent=2)+'\n')
+          with open(os.environ['GITHUB_OUTPUT'],'a') as out: out.write('upload='+str(upload)+'\n')
+          if errors: raise SystemExit('Owned closure/evidence bound failed: '+str(errors))
+          PY
+      - name: Preserve synthetic capability evidence
+        if: always()
+        timeout-minutes: 1
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
+        with:
+          name: native-controls-capability-${{ github.event.pull_request.head.sha }}
+          path: ${{ steps.cleanup.outputs.upload }}
+          retention-days: 14
+          if-no-files-found: error
