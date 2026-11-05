@@ -26,7 +26,13 @@ const HASH = /^[0-9a-f]{64}$/;
 const sha256 = (body: string) => createHash('sha256').update(body, 'utf8').digest('hex');
 
 /**
- * Closed normalized manifest for one manual-content correction. Every read must
+ * Closed version-2 normalized manifest for one manual-content correction.
+ * Version 1 and its target timestamp/full-contact shape are rejected, not
+ * reinterpreted. PostgreSQL memories have no native update timestamp. Exact
+ * owned body/hash/lifecycle reads bind this input; commit-time row CAS remains
+ * separate and is never substituted for external provenance.
+ *
+ * Every read must
  * eventually come from the same admitted native transaction, BEFORE any writes.
  * This pure function cannot establish authentication, actual read completeness,
  * independent old/new lookups, query phantom fencing, CAS, or writer admission.
@@ -43,7 +49,6 @@ export function projectManualOwnerMemoryCorrection(
       'memoryId',
       'observedAt',
       'memory',
-      'memoryNativeVersion',
       'oldHashTombstone',
       'newHashTombstone',
       'subjectContact',
@@ -51,7 +56,7 @@ export function projectManualOwnerMemoryCorrection(
       'replacement',
     ]);
     if (
-      manifest.version !== 1 ||
+      manifest.version !== 2 ||
       (manifest.driver !== 'postgres' && manifest.driver !== 'firestore') ||
       !uuid(manifest.ownerId) ||
       !uuid(manifest.memoryId)
@@ -142,35 +147,20 @@ export function projectManualOwnerMemoryCorrection(
         contact.nativeVersion === null
       )
         return null;
-      const fields = exact(contact.value, [
-        'id',
-        'name',
-        'aliases',
-        'emails',
-        'phones',
-        'relationship',
-        'trust',
-        'identityAuthority',
-        'notes',
-        'createdAt',
-        'updatedAt',
-      ]);
+      const fields = exact(contact.value, ['id', 'name', 'aliases', 'trust', 'identityAuthority']);
       if (
         fields.id !== memory.subjectContactId ||
         typeof fields.name !== 'string' ||
         !fields.name.trim() ||
         !strings(fields.aliases) ||
-        !strings(fields.emails) ||
-        !strings(fields.phones) ||
-        typeof fields.relationship !== 'string' ||
         typeof fields.trust !== 'string' ||
         !['owner', 'known', 'unknown'].includes(fields.trust) ||
-        ![null, 'owner', 'inferred'].includes(fields.identityAuthority as string | null) ||
-        typeof fields.notes !== 'string'
+        ![null, 'owner', 'inferred'].includes(fields.identityAuthority as string | null)
       )
         return null;
-      instant(fields.createdAt);
-      instant(fields.updatedAt);
+      // Real external versions remain mandatory. A version change invalidates
+      // even unchanged identity values. For PostgreSQL's writer-maintained
+      // updatedAt this does not prove that every contact writer advances it.
       dependencies.push(contact);
     }
     const make = (contentHash: string, reads: Json[]) =>
@@ -189,19 +179,6 @@ export function projectManualOwnerMemoryCorrection(
         queries: [lineage],
       });
     const prewrite = make(memory.contentHash, dependencies);
-    // Validate the old native read version strictly with the unchanged codec,
-    // but never fingerprint target-memory updateTime/retrieval metadata. Its
-    // own correction necessarily changes that version; future CAS stays separate.
-    if (manifest.memoryNativeVersion == null) return null;
-    make(memory.contentHash, [
-      {
-        collection: 'contacts',
-        key: manifest.memoryId,
-        state: 'present',
-        value: {},
-        nativeVersion: manifest.memoryNativeVersion,
-      },
-    ]);
     const eligible = ownerMemoryCorrectionEligibility({
       ownerId: manifest.ownerId,
       memory: {

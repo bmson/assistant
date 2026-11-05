@@ -18,14 +18,14 @@ const missing = (bodyHash: string) => ({
   value: null,
   nativeVersion: null,
 });
-const nativeVersion = (driver: string) =>
+const contactNativeVersion = (driver: string) =>
   driver === 'postgres'
     ? { kind: 'postgres_timestamp', value: '2026-11-04T12:13:14.123456Z' }
     : { kind: 'firestore_timestamp', seconds: 1_798_688_000, nanoseconds: 123_456_789 };
 
 function fixture(driver = 'postgres', contact = true) {
   return {
-    version: 1,
+    version: 2,
     driver,
     ownerId,
     memoryId,
@@ -44,7 +44,6 @@ function fixture(driver = 'postgres', contact = true) {
       quarantined: false,
       ownerCorrection: null,
     },
-    memoryNativeVersion: nativeVersion(driver),
     oldHashTombstone: missing(oldHash),
     newHashTombstone: missing(newHash),
     subjectContact: contact
@@ -56,16 +55,10 @@ function fixture(driver = 'postgres', contact = true) {
             id: contactId,
             name: 'Synthetic contact',
             aliases: ['Synthetic alias'],
-            emails: ['synthetic@example.invalid'],
-            phones: [],
-            relationship: '',
             trust: 'known',
             identityAuthority: null,
-            notes: '',
-            createdAt: '2026-11-01T00:00:00.000Z',
-            updatedAt: '2026-11-04T12:13:14.123Z',
           },
-          nativeVersion: nativeVersion(driver),
+          nativeVersion: contactNativeVersion(driver),
         }
       : null,
     lineageQuery: {
@@ -90,6 +83,8 @@ describe('internal pure manual owner-memory projection', () => {
       it(`projects distinct old/new hash evidence for ${driver}, contact=${contact}`, () => {
         const input = fixture(driver, contact);
         const before = structuredClone(input);
+        expect(input.version).toBe(2);
+        expect(Object.hasOwn(input, 'memoryNativeVersion')).toBe(false);
         const result = projectManualOwnerMemoryCorrection(input);
         expect(result).not.toBeNull();
         expect(result?.prewrite.contentHash).toBe(oldHash);
@@ -107,6 +102,35 @@ describe('internal pure manual owner-memory projection', () => {
         expect(
           result?.current.dependencies.find((d) => d.collection === 'memoryTombstones'),
         ).toEqual(missing(newHash));
+        const prewriteContact = result?.prewrite.dependencies.find(
+          (dependency) => dependency.collection === 'contacts',
+        );
+        const currentContact = result?.current.dependencies.find(
+          (dependency) => dependency.collection === 'contacts',
+        );
+        if (contact) {
+          expect(Object.keys(subject(input).value).sort()).toEqual([
+            'aliases',
+            'id',
+            'identityAuthority',
+            'name',
+            'trust',
+          ]);
+          expect(prewriteContact?.value).toEqual(subject(input).value);
+          expect(currentContact?.value).toEqual(subject(input).value);
+          expect(Object.keys(prewriteContact?.value ?? {}).sort()).toEqual([
+            'aliases',
+            'id',
+            'identityAuthority',
+            'name',
+            'trust',
+          ]);
+          expect(prewriteContact?.nativeVersion).toEqual(subject(input).nativeVersion);
+          expect(currentContact?.nativeVersion).toEqual(subject(input).nativeVersion);
+        } else {
+          expect(prewriteContact).toBeUndefined();
+          expect(currentContact).toBeUndefined();
+        }
         expect(input).toEqual(before);
       });
     }
@@ -121,30 +145,27 @@ describe('internal pure manual owner-memory projection', () => {
     Object.assign(alreadyTombstoned.oldHashTombstone, {
       state: 'present',
       value: { contentHash: oldHash, reason: 'previous deletion' },
-      nativeVersion: nativeVersion('postgres'),
+      nativeVersion: contactNativeVersion('postgres'),
     });
     expect(projectManualOwnerMemoryCorrection(alreadyTombstoned)).toBeNull();
   });
 
-  it.each([
-    ['name', 'Synthetic renamed contact'],
-    ['aliases', ['Synthetic changed alias']],
-    ['emails', ['changed@example.invalid']],
-    ['phones', ['+15555550100']],
-    ['relationship', 'family'],
-    ['trust', 'owner'],
-    ['identityAuthority', 'owner'],
-    ['notes', 'Synthetic contact note'],
-    ['updatedAt', '2026-11-04T12:13:15.123Z'],
-  ])('binds actual contact %s values even at the same ID/native version', (field, changed) => {
-    const input = fixture();
-    const original = projectManualOwnerMemoryCorrection(input);
-    Object.assign(subject(input).value, { [field]: changed });
-    const result = projectManualOwnerMemoryCorrection(input);
-    expect(result).not.toBeNull();
-    expect(result?.prewriteFingerprint).not.toBe(original?.prewriteFingerprint);
-    expect(result?.expectedCurrentFingerprint).not.toBe(original?.expectedCurrentFingerprint);
-  });
+  for (const driver of ['postgres', 'firestore']) {
+    it.each([
+      ['name', 'Synthetic renamed contact'] as [string, string | string[]],
+      ['aliases', ['Synthetic changed alias']],
+      ['trust', 'owner'],
+      ['identityAuthority', 'owner'],
+    ])(`binds contact %s values for ${driver} at the same ID/native version`, (field, changed) => {
+      const input = fixture(driver);
+      const original = projectManualOwnerMemoryCorrection(input);
+      Object.assign(subject(input).value, { [field]: changed });
+      const result = projectManualOwnerMemoryCorrection(input);
+      expect(result).not.toBeNull();
+      expect(result?.prewriteFingerprint).not.toBe(original?.prewriteFingerprint);
+      expect(result?.expectedCurrentFingerprint).not.toBe(original?.expectedCurrentFingerprint);
+    });
+  }
 
   it.each(['postgres', 'firestore'])('preserves exact %s contact native revisions', (driver) => {
     const input = fixture(driver);
@@ -153,19 +174,72 @@ describe('internal pure manual owner-memory projection', () => {
       driver === 'postgres'
         ? { kind: 'postgres_timestamp', value: '2026-11-04T12:13:14.123457Z' }
         : { kind: 'firestore_timestamp', seconds: 1_798_688_000, nanoseconds: 123_456_790 };
-    expect(projectManualOwnerMemoryCorrection(input)?.expectedCurrentFingerprint).not.toBe(
-      original?.expectedCurrentFingerprint,
-    );
+    const result = projectManualOwnerMemoryCorrection(input);
+    expect(result?.prewriteFingerprint).not.toBe(original?.prewriteFingerprint);
+    expect(result?.expectedCurrentFingerprint).not.toBe(original?.expectedCurrentFingerprint);
   });
 
-  it('validates memory native revision but excludes the self-changing revision from both fingerprints', () => {
-    const input = fixture();
-    const original = projectManualOwnerMemoryCorrection(input);
-    input.memoryNativeVersion = {
-      kind: 'postgres_timestamp',
-      value: '2026-11-04T12:13:14.123457Z',
+  it.each(['postgres', 'firestore'])(
+    'requires a known external %s contact native version',
+    (driver) => {
+      for (const value of [null, { kind: 'unknown_revision', value: 'opaque' }]) {
+        const input = fixture(driver);
+        (subject(input) as unknown as { nativeVersion: unknown }).nativeVersion = value;
+        expect(projectManualOwnerMemoryCorrection(input)).toBeNull();
+      }
+    },
+  );
+
+  it('rejects wrong-driver and precision-losing contact native versions', () => {
+    const postgresWrongDriver = fixture('postgres');
+    subject(postgresWrongDriver).nativeVersion = {
+      kind: 'firestore_timestamp',
+      seconds: 1_798_688_000,
+      nanoseconds: 123_456_789,
     };
-    expect(projectManualOwnerMemoryCorrection(input)).toEqual(original);
+    expect(projectManualOwnerMemoryCorrection(postgresWrongDriver)).toBeNull();
+
+    const firestoreWrongDriver = fixture('firestore');
+    subject(firestoreWrongDriver).nativeVersion = {
+      kind: 'postgres_timestamp',
+      value: '2026-11-04T12:13:14.123456Z',
+    };
+    expect(projectManualOwnerMemoryCorrection(firestoreWrongDriver)).toBeNull();
+
+    for (const value of [
+      { kind: 'postgres_timestamp', value: '2026-11-04T12:13:14.123Z' },
+      { kind: 'postgres_timestamp', value: '2026-11-04T12:13:14.1234567Z' },
+      { kind: 'firestore_timestamp', seconds: 1_798_688_000, nanoseconds: 1_000_000_000 },
+      { kind: 'firestore_timestamp', seconds: 1_798_688_000, nanoseconds: 123.5 },
+    ]) {
+      const driver = value.kind === 'postgres_timestamp' ? 'postgres' : 'firestore';
+      const input = fixture(driver);
+      subject(input).nativeVersion = value;
+      expect(projectManualOwnerMemoryCorrection(input)).toBeNull();
+    }
+  });
+
+  it('rejects the legacy v1 manifest and v2 manifests with obsolete target-version/contact fields', () => {
+    const legacyVersion = fixture();
+    legacyVersion.version = 1;
+    expect(projectManualOwnerMemoryCorrection(legacyVersion)).toBeNull();
+
+    const obsoleteMemoryVersion = fixture();
+    Object.assign(obsoleteMemoryVersion, {
+      memoryNativeVersion: { kind: 'postgres_timestamp', value: '2026-11-04T12:13:14.123456Z' },
+    });
+    expect(projectManualOwnerMemoryCorrection(obsoleteMemoryVersion)).toBeNull();
+
+    const legacyContactFields = fixture();
+    Object.assign(subject(legacyContactFields).value, {
+      emails: ['old-shape@example.invalid'],
+      phones: [],
+      relationship: 'old shape',
+      notes: 'old shape',
+      createdAt: '2026-11-01T00:00:00.000Z',
+      updatedAt: '2026-11-04T12:13:14.123456Z',
+    });
+    expect(projectManualOwnerMemoryCorrection(legacyContactFields)).toBeNull();
   });
 
   const negatives: Array<[string, (input: ReturnType<typeof fixture>) => void]> = [
@@ -340,26 +414,9 @@ describe('internal pure manual owner-memory projection', () => {
     ],
     ['unmodeled contact field', (x) => Object.assign(subject(x).value, { futureField: true })],
     [
-      'unknown PG contact native version',
-      (x) => Object.assign(subject(x), { nativeVersion: null }),
-    ],
-    ['unknown memory native version', (x) => Object.assign(x, { memoryNativeVersion: null })],
-    [
-      'wrong native driver',
-      (x) => {
-        x.memoryNativeVersion = nativeVersion('firestore');
-      },
-    ],
-    [
-      'rounded malformed native version',
-      (x) => {
-        x.memoryNativeVersion = { kind: 'postgres_timestamp', value: '2026-11-04T12:13:14.123Z' };
-      },
-    ],
-    [
       'unknown manifest version',
       (x) => {
-        x.version = 2;
+        x.version = 3;
       },
     ],
     [
