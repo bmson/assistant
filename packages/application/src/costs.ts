@@ -111,11 +111,13 @@ function modelEvidenceRows(
 }
 
 /** Load the cost-governance dashboard as a stable presentation contract. */
-export async function getCostsDashboard(db: Db): Promise<CostsDashboard> {
+export async function getCostsDashboard(db: Db, modelEvidenceAt?: Date): Promise<CostsDashboard> {
   const agent = await getAgent(db);
   const monthStart = sql`date_trunc('month', now())`;
-  const modelMonthStart = sql`date_trunc('month', timezone('UTC', now())) AT TIME ZONE 'UTC'`;
-  const modelMonthEnd = sql`${modelMonthStart} + interval '1 month'`;
+  const modelEvidenceClock = modelEvidenceAt ? sql`${modelEvidenceAt}::timestamptz` : sql`now()`;
+  const modelUtcMonth = sql`date_trunc('month', timezone('UTC', ${modelEvidenceClock}))`;
+  const modelMonthStart = sql`${modelUtcMonth} AT TIME ZONE 'UTC'`;
+  const modelMonthEnd = sql`(${modelUtcMonth} + interval '1 month') AT TIME ZONE 'UTC'`;
   const [totals, bySource, byModel, topTasks, held, recent, [parkedCount], [taskDefault]] =
     await Promise.all([
       costTotals(db),

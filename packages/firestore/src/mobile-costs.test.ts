@@ -314,6 +314,111 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore mobile cost das
     await disposeStore(store);
   });
 
+  async function replaceStoreAt(now: Date): Promise<void> {
+    await disposeStore(store);
+    store = emulatorStore(() => now);
+    await seedBudget(store);
+    await Promise.all([
+      store.doc('coordination', 'budget-holds').set({ heldMicros: 0 }),
+      store.doc('budgetPeriods', `day:${now.toISOString().slice(0, 10)}`).set({ spentMicros: 0 }),
+      store.doc('budgetPeriods', `month:${now.toISOString().slice(0, 7)}`).set({ spentMicros: 0 }),
+      store.doc('agents', 'owner').set({
+        id: 'owner',
+        name: 'Owner',
+        timezone: 'America/Los_Angeles',
+        locale: 'en-US',
+        signature: '',
+        createdAt: new Date('2026-01-01T00:00:00Z'),
+        updatedAt: new Date('2026-01-01T00:00:00Z'),
+      }),
+    ]);
+  }
+
+  async function seedUtcBoundaryEvents(
+    model: string,
+    start: string,
+    priorMonth: string,
+    end: string,
+  ) {
+    await Promise.all(
+      [
+        { id: 'before-start', createdAt: priorMonth, usd: '0.000020' },
+        { id: 'at-start', createdAt: start, usd: '0.000001' },
+        { id: 'before-end', createdAt: end, usd: '0.000002' },
+        { id: 'at-end', createdAt: end, usd: '0.000020' },
+      ].map(({ id, createdAt, usd }) =>
+        store.doc('costEvents', `${model}-${id}`).set({
+          id: `${model}-${id}`,
+          source: 'model',
+          description: 'UTC month boundary fixture',
+          evidence: { basis: 'provider_reported', provider: 'boundary-test', model },
+          usd,
+          createdAt: new Date(createdAt),
+        }),
+      ),
+    );
+  }
+
+  it('matches PostgreSQL UTC month boundaries in March across the Los Angeles DST change', async () => {
+    const model = 'fixed-utc-march-boundary';
+    await replaceStoreAt(new Date('2026-03-01T00:30:00Z'));
+    await seedUtcBoundaryEvents(
+      model,
+      '2026-03-01T00:00:00Z',
+      '2026-02-28T23:59:59.999Z',
+      '2026-03-31T23:59:59.999Z',
+    );
+    await store.doc('costEvents', `${model}-at-end`).set({
+      id: `${model}-at-end`,
+      source: 'model',
+      description: 'At April UTC end',
+      evidence: { basis: 'provider_reported', provider: 'boundary-test', model },
+      usd: '0.000020',
+      createdAt: new Date('2026-04-01T00:00:00Z'),
+    });
+
+    const dashboard = await getFirestoreMobileCosts(store, 'owner');
+    expect(dashboard.byModelEvidence.filter((row) => row.model === model)).toEqual([
+      {
+        provider: 'boundary-test',
+        model,
+        basis: 'provider_reported',
+        usd: '0.000003',
+        count: 2,
+      },
+    ]);
+  });
+
+  it('matches PostgreSQL UTC month boundaries in November at the LA-local October date', async () => {
+    const model = 'fixed-utc-november-boundary';
+    await replaceStoreAt(new Date('2026-11-01T00:30:00Z'));
+    await seedUtcBoundaryEvents(
+      model,
+      '2026-11-01T00:00:00Z',
+      '2026-10-31T23:59:59.999Z',
+      '2026-11-30T23:59:59.999Z',
+    );
+    await store.doc('costEvents', `${model}-at-end`).set({
+      id: `${model}-at-end`,
+      source: 'model',
+      description: 'At December UTC end',
+      evidence: { basis: 'provider_reported', provider: 'boundary-test', model },
+      usd: '0.000020',
+      createdAt: new Date('2026-12-01T00:00:00Z'),
+    });
+
+    const dashboard = await getFirestoreMobileCosts(store, 'owner');
+    expect(dashboard.byModelEvidence.filter((row) => row.model === model)).toEqual([
+      {
+        provider: 'boundary-test',
+        model,
+        basis: 'provider_reported',
+        usd: '0.000003',
+        count: 2,
+      },
+    ]);
+  });
+
   it('reads every page and preserves owner-scoped dashboard totals', async () => {
     const batchOne = store.db.batch();
     const batchTwo = store.db.batch();

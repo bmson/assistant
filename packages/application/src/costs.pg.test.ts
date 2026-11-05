@@ -10,6 +10,7 @@ import {
 } from '@assistant/db';
 import { assertAllocatedTestTarget } from '@assistant/db/test-target';
 import { addMicros, usdDecimalToMicros } from '@assistant/persistence';
+import { sql } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import { getCostsDashboard } from './costs.js';
 
@@ -345,6 +346,154 @@ describe('PostgreSQL costs dashboard reservation exposure aggregate', () => {
       expect(modelRowsMicros).toBeLessThan(
         after.byEvidence.reduce((sum, row) => addMicros(sum, usdDecimalToMicros(row.usd)), 0),
       );
+    } finally {
+      await db.$client.end();
+    }
+  });
+
+  it('uses UTC month boundaries for additive model evidence under a DST-observing session timezone', async () => {
+    const db = createDb(DATABASE_URL, { max: 1, statementTimeoutMs: 10_000 });
+    const marchModel = `utc-march-${randomUUID()}`;
+    const novemberModel = `utc-november-${randomUUID()}`;
+    const marchAt = new Date('2026-03-01T00:30:00.000Z');
+    const novemberAt = new Date('2026-11-01T00:30:00.000Z');
+    const rollback = new Error('rollback synthetic UTC month-boundary fixture');
+    let marchRows: Awaited<ReturnType<typeof getCostsDashboard>>['byModelEvidence'] = [];
+    let novemberRows: Awaited<ReturnType<typeof getCostsDashboard>>['byModelEvidence'] = [];
+    let rollbackObserved = false;
+
+    try {
+      try {
+        await db.transaction(async (tx) => {
+          await tx.execute(sql`set local time zone 'America/Los_Angeles'`);
+          await tx.insert(costEvents).values([
+            {
+              id: randomUUID(),
+              source: 'model',
+              evidence: {
+                basis: 'provider_reported',
+                provider: 'boundary-test',
+                model: marchModel,
+              },
+              usd: '0.000020',
+              description: 'before March UTC start',
+              createdAt: new Date('2026-02-28T23:59:59.999Z'),
+            },
+            {
+              id: randomUUID(),
+              source: 'model',
+              evidence: {
+                basis: 'provider_reported',
+                provider: 'boundary-test',
+                model: marchModel,
+              },
+              usd: '0.000001',
+              description: 'at March UTC start',
+              createdAt: new Date('2026-03-01T00:00:00.000Z'),
+            },
+            {
+              id: randomUUID(),
+              source: 'model',
+              evidence: {
+                basis: 'provider_reported',
+                provider: 'boundary-test',
+                model: marchModel,
+              },
+              usd: '0.000002',
+              description: 'before April UTC end after DST change',
+              createdAt: new Date('2026-03-31T23:59:59.999Z'),
+            },
+            {
+              id: randomUUID(),
+              source: 'model',
+              evidence: {
+                basis: 'provider_reported',
+                provider: 'boundary-test',
+                model: marchModel,
+              },
+              usd: '0.000020',
+              description: 'at April UTC end',
+              createdAt: new Date('2026-04-01T00:00:00.000Z'),
+            },
+            {
+              id: randomUUID(),
+              source: 'model',
+              evidence: {
+                basis: 'provider_reported',
+                provider: 'boundary-test',
+                model: novemberModel,
+              },
+              usd: '0.000020',
+              description: 'before November UTC start',
+              createdAt: new Date('2026-10-31T23:59:59.999Z'),
+            },
+            {
+              id: randomUUID(),
+              source: 'model',
+              evidence: {
+                basis: 'provider_reported',
+                provider: 'boundary-test',
+                model: novemberModel,
+              },
+              usd: '0.000001',
+              description: 'at November UTC start',
+              createdAt: new Date('2026-11-01T00:00:00.000Z'),
+            },
+            {
+              id: randomUUID(),
+              source: 'model',
+              evidence: {
+                basis: 'provider_reported',
+                provider: 'boundary-test',
+                model: novemberModel,
+              },
+              usd: '0.000002',
+              description: 'before December UTC end',
+              createdAt: new Date('2026-11-30T23:59:59.999Z'),
+            },
+            {
+              id: randomUUID(),
+              source: 'model',
+              evidence: {
+                basis: 'provider_reported',
+                provider: 'boundary-test',
+                model: novemberModel,
+              },
+              usd: '0.000040',
+              description: 'at December UTC end',
+              createdAt: new Date('2026-12-01T00:00:00.000Z'),
+            },
+          ]);
+          const march = await getCostsDashboard(tx as unknown as Db, marchAt);
+          const november = await getCostsDashboard(tx as unknown as Db, novemberAt);
+          marchRows = march.byModelEvidence.filter((row) => row.model === marchModel);
+          novemberRows = november.byModelEvidence.filter((row) => row.model === novemberModel);
+          throw rollback;
+        });
+      } catch (error) {
+        if (error !== rollback) throw error;
+        rollbackObserved = true;
+      }
+
+      expect(rollbackObserved).toBe(true);
+      expect(marchRows).toEqual([
+        {
+          provider: 'boundary-test',
+          model: marchModel,
+          basis: 'provider_reported',
+          usd: '0.000003',
+          count: 2,
+        },
+      ]);
+      expect(novemberRows).toEqual([
+        {
+          provider: 'boundary-test',
+          model: novemberModel,
+          basis: 'provider_reported',
+          usd: '0.000003',
+          count: 2,
+        },
+      ]);
     } finally {
       await db.$client.end();
     }
