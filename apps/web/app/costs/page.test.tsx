@@ -77,13 +77,18 @@ describe.skipIf(!localEmulator)('Firestore costs page with PostgreSQL offline', 
         taskId: 'cost-task',
         source: 'model',
         description: 'Owner charge',
+        evidence: {
+          basis: 'provider_reported',
+          provider: 'vertex',
+          model: 'vertex:gemini-test',
+        },
         usd: '0.123400',
         createdAt: now,
       }),
       store.doc('modelCalls', 'owner-model').set({
         id: 'owner-model',
         model: 'gemini-test',
-        costUsd: '0.123400',
+        costUsd: '99.000000',
         createdAt: now,
       }),
     ]);
@@ -112,6 +117,11 @@ describe.skipIf(!localEmulator)('Firestore costs page with PostgreSQL offline', 
     expect(mocks.db).not.toHaveBeenCalled();
     expect(html).toContain('Owner charge');
     expect(html).toContain('gemini-test');
+    expect(html).toContain('By model evidence this month');
+    expect(html).toContain('vertex:gemini-test');
+    expect(html).toContain('Provider-reported');
+    expect(html).not.toContain('$99.00');
+    expect(html).not.toContain('$99.00');
     expect(html).toContain('Owner work');
     expect(html).toContain('$0.12');
     expect(html).toContain('<form');

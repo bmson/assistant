@@ -1,6 +1,16 @@
 import { randomUUID } from 'node:crypto';
-import { agents, costEvents, costReservations, createDb, type Db } from '@assistant/db';
+import {
+  agents,
+  costEvents,
+  costReservations,
+  createDb,
+  createPostgresCostRepository,
+  type Db,
+  modelCalls,
+} from '@assistant/db';
 import { assertAllocatedTestTarget } from '@assistant/db/test-target';
+import { addMicros, usdDecimalToMicros } from '@assistant/persistence';
+import { sql } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import { getCostsDashboard } from './costs.js';
 
@@ -126,6 +136,367 @@ describe('PostgreSQL costs dashboard reservation exposure aggregate', () => {
       expect(after.held.some((row) => row.id === dispatchingReservationId)).toBe(false);
       expect(after.held.some((row) => row.id === reconciledReservationId)).toBe(false);
       expect(after.held.some((row) => row.id === releasedReservationId)).toBe(false);
+    } finally {
+      await db.$client.end();
+    }
+  });
+
+  it('groups only current-month model cost events by normalized evidence without folding retries', async () => {
+    const db = createDb(DATABASE_URL, { max: 1, statementTimeoutMs: 10_000 });
+    const now = new Date();
+    const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+    const nextMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+    const model = `finance-model-${randomUUID()}`;
+    const retryOne = randomUUID();
+    const retryTwo = randomUUID();
+    const rollback = new Error('rollback synthetic model evidence fixture');
+    let before: Awaited<ReturnType<typeof getCostsDashboard>> | undefined;
+    let after: Awaited<ReturnType<typeof getCostsDashboard>> | undefined;
+    let rollbackObserved = false;
+
+    try {
+      try {
+        await db.transaction(
+          async (tx) => {
+            before = await getCostsDashboard(tx as unknown as Db);
+            await tx.insert(costReservations).values([
+              {
+                id: retryOne,
+                source: 'model',
+                estimatedUsd: '0.100000',
+                description: 'first synthetic retry',
+              },
+              {
+                id: retryTwo,
+                source: 'model',
+                estimatedUsd: '0.200000',
+                description: 'second synthetic retry',
+              },
+            ]);
+            await tx.insert(costEvents).values([
+              {
+                id: randomUUID(),
+                source: 'model',
+                evidence: { basis: 'token_rate', provider: 'openrouter', model },
+                usd: '0.000001',
+                description: 'estimated model event',
+                createdAt: now,
+              },
+              {
+                id: randomUUID(),
+                source: 'model',
+                evidence: {
+                  basis: 'provider_reported',
+                  provider: 'vertex',
+                  model: `vertex:${model}`,
+                },
+                usd: '0.400000',
+                description: 'other provider event',
+                createdAt: now,
+              },
+              {
+                id: randomUUID(),
+                source: 'model',
+                usd: '0.000000',
+                description: 'legacy missing evidence',
+                createdAt: now,
+              },
+              {
+                id: randomUUID(),
+                source: 'model',
+                evidence: { basis: 'unexpected_basis', provider: ' ', model: '' } as never,
+                usd: '0.000000',
+                description: 'malformed legacy evidence',
+                createdAt: now,
+              },
+              ...[
+                { basis: 'provider_reported', provider: 17, model: true },
+                { basis: 'provider_reported', provider: {}, model: ['not-a-model'] },
+                { basis: 'provider_reported', provider: null, model: null },
+              ].map((evidence) => ({
+                id: randomUUID(),
+                source: 'model' as const,
+                evidence: evidence as never,
+                usd: '0.000000',
+                description: 'malformed typed model evidence dimension',
+                createdAt: now,
+              })),
+              {
+                id: randomUUID(),
+                source: 'external_api',
+                evidence: { basis: 'provider_reported', provider: 'openrouter', model },
+                usd: '99.000000',
+                description: 'non-model source decoy',
+                createdAt: now,
+              },
+              {
+                id: randomUUID(),
+                source: 'model',
+                evidence: { basis: 'provider_reported', provider: 'openrouter', model },
+                usd: '80.000000',
+                description: 'previous UTC month decoy',
+                createdAt: new Date(monthStart.getTime() - 1),
+              },
+              {
+                id: randomUUID(),
+                source: 'model',
+                evidence: { basis: 'provider_reported', provider: 'openrouter', model },
+                usd: '70.000000',
+                description: 'next UTC month decoy',
+                createdAt: nextMonth,
+              },
+            ]);
+            const costs = createPostgresCostRepository(tx as unknown as Db);
+            const firstRetry = {
+              usd: 0.1,
+              evidence: {
+                basis: 'provider_reported' as const,
+                provider: 'openrouter',
+                model,
+                requestId: 'same-provider-request',
+              },
+            };
+            await costs.reconcile(retryOne, firstRetry);
+            await costs.reconcile(retryOne, firstRetry);
+            await costs.reconcile(retryTwo, { ...firstRetry, usd: 0.2 });
+            await tx.insert(modelCalls).values({
+              id: randomUUID(),
+              role: 'chat',
+              model,
+              inputTokens: 10,
+              outputTokens: 10,
+              costUsd: '60.000000',
+              createdAt: now,
+            });
+            after = await getCostsDashboard(tx as unknown as Db);
+            throw rollback;
+          },
+          { isolationLevel: 'repeatable read' },
+        );
+      } catch (error) {
+        if (error !== rollback) throw error;
+        rollbackObserved = true;
+      }
+
+      expect(rollbackObserved).toBe(true);
+      expect(before).toBeDefined();
+      expect(after).toBeDefined();
+      if (!before || !after) throw new Error('Synthetic dashboard snapshots were not captured');
+
+      const fixtureRows = after.byModelEvidence.filter(
+        (row) =>
+          row.model === model ||
+          row.model === `vertex:${model}` ||
+          (row.provider === null && row.model === null),
+      );
+      expect(fixtureRows).toContainEqual({
+        provider: 'openrouter',
+        model,
+        basis: 'provider_reported',
+        usd: '0.300000',
+        count: 2,
+      });
+      expect(fixtureRows).toContainEqual({
+        provider: 'openrouter',
+        model,
+        basis: 'token_rate',
+        usd: '0.000001',
+        count: 1,
+      });
+      expect(fixtureRows).toContainEqual({
+        provider: 'vertex',
+        model: `vertex:${model}`,
+        basis: 'provider_reported',
+        usd: '0.400000',
+        count: 1,
+      });
+      const unknownBefore = before.byModelEvidence.find(
+        (row) => row.provider === null && row.model === null && row.basis === 'unknown',
+      );
+      const unknownAfter = after.byModelEvidence.find(
+        (row) => row.provider === null && row.model === null && row.basis === 'unknown',
+      );
+      expect(unknownAfter?.count).toBe((unknownBefore?.count ?? 0) + 2);
+      expect(unknownAfter?.usd).toBe(unknownBefore?.usd ?? '0.000000');
+      const malformedDimensions = after.byModelEvidence.find(
+        (row) => row.provider === null && row.model === null && row.basis === 'provider_reported',
+      );
+      const malformedDimensionsBefore = before.byModelEvidence.find(
+        (row) => row.provider === null && row.model === null && row.basis === 'provider_reported',
+      );
+      expect(malformedDimensions?.count).toBe((malformedDimensionsBefore?.count ?? 0) + 3);
+      expect(malformedDimensions?.usd).toBe(malformedDimensionsBefore?.usd ?? '0.000000');
+
+      const bySourceBefore = before.bySource.find((row) => row.source === 'model');
+      const bySourceAfter = after.bySource.find((row) => row.source === 'model');
+      expect((bySourceAfter?.count ?? 0) - (bySourceBefore?.count ?? 0)).toBe(10);
+      expect(
+        usdDecimalToMicros(bySourceAfter?.usd ?? '0') -
+          usdDecimalToMicros(bySourceBefore?.usd ?? '0'),
+      ).toBe(70_700_001);
+      const modelRowsMicros = after.byModelEvidence.reduce(
+        (sum, row) => addMicros(sum, usdDecimalToMicros(row.usd)),
+        0,
+      );
+      const modelRowsMicrosBefore = before.byModelEvidence.reduce(
+        (sum, row) => addMicros(sum, usdDecimalToMicros(row.usd)),
+        0,
+      );
+      expect(modelRowsMicros - modelRowsMicrosBefore).toBe(700_001);
+      const modelRowsCount = after.byModelEvidence.reduce((sum, row) => sum + row.count, 0);
+      const modelRowsCountBefore = before.byModelEvidence.reduce((sum, row) => sum + row.count, 0);
+      expect(modelRowsCount - modelRowsCountBefore).toBe(9);
+      expect(modelRowsMicros).toBeLessThan(
+        after.byEvidence.reduce((sum, row) => addMicros(sum, usdDecimalToMicros(row.usd)), 0),
+      );
+    } finally {
+      await db.$client.end();
+    }
+  });
+
+  it('uses UTC month boundaries for additive model evidence under a DST-observing session timezone', async () => {
+    const db = createDb(DATABASE_URL, { max: 1, statementTimeoutMs: 10_000 });
+    const marchModel = `utc-march-${randomUUID()}`;
+    const novemberModel = `utc-november-${randomUUID()}`;
+    const marchAt = new Date('2026-03-01T00:30:00.000Z');
+    const novemberAt = new Date('2026-11-01T00:30:00.000Z');
+    const rollback = new Error('rollback synthetic UTC month-boundary fixture');
+    let marchRows: Awaited<ReturnType<typeof getCostsDashboard>>['byModelEvidence'] = [];
+    let novemberRows: Awaited<ReturnType<typeof getCostsDashboard>>['byModelEvidence'] = [];
+    let rollbackObserved = false;
+
+    try {
+      try {
+        await db.transaction(async (tx) => {
+          await tx.execute(sql`set local time zone 'America/Los_Angeles'`);
+          await tx.insert(costEvents).values([
+            {
+              id: randomUUID(),
+              source: 'model',
+              evidence: {
+                basis: 'provider_reported',
+                provider: 'boundary-test',
+                model: marchModel,
+              },
+              usd: '0.000020',
+              description: 'before March UTC start',
+              createdAt: new Date('2026-02-28T23:59:59.999Z'),
+            },
+            {
+              id: randomUUID(),
+              source: 'model',
+              evidence: {
+                basis: 'provider_reported',
+                provider: 'boundary-test',
+                model: marchModel,
+              },
+              usd: '0.000001',
+              description: 'at March UTC start',
+              createdAt: new Date('2026-03-01T00:00:00.000Z'),
+            },
+            {
+              id: randomUUID(),
+              source: 'model',
+              evidence: {
+                basis: 'provider_reported',
+                provider: 'boundary-test',
+                model: marchModel,
+              },
+              usd: '0.000002',
+              description: 'before April UTC end after DST change',
+              createdAt: new Date('2026-03-31T23:59:59.999Z'),
+            },
+            {
+              id: randomUUID(),
+              source: 'model',
+              evidence: {
+                basis: 'provider_reported',
+                provider: 'boundary-test',
+                model: marchModel,
+              },
+              usd: '0.000020',
+              description: 'at April UTC end',
+              createdAt: new Date('2026-04-01T00:00:00.000Z'),
+            },
+            {
+              id: randomUUID(),
+              source: 'model',
+              evidence: {
+                basis: 'provider_reported',
+                provider: 'boundary-test',
+                model: novemberModel,
+              },
+              usd: '0.000020',
+              description: 'before November UTC start',
+              createdAt: new Date('2026-10-31T23:59:59.999Z'),
+            },
+            {
+              id: randomUUID(),
+              source: 'model',
+              evidence: {
+                basis: 'provider_reported',
+                provider: 'boundary-test',
+                model: novemberModel,
+              },
+              usd: '0.000001',
+              description: 'at November UTC start',
+              createdAt: new Date('2026-11-01T00:00:00.000Z'),
+            },
+            {
+              id: randomUUID(),
+              source: 'model',
+              evidence: {
+                basis: 'provider_reported',
+                provider: 'boundary-test',
+                model: novemberModel,
+              },
+              usd: '0.000002',
+              description: 'before December UTC end',
+              createdAt: new Date('2026-11-30T23:59:59.999Z'),
+            },
+            {
+              id: randomUUID(),
+              source: 'model',
+              evidence: {
+                basis: 'provider_reported',
+                provider: 'boundary-test',
+                model: novemberModel,
+              },
+              usd: '0.000040',
+              description: 'at December UTC end',
+              createdAt: new Date('2026-12-01T00:00:00.000Z'),
+            },
+          ]);
+          const march = await getCostsDashboard(tx as unknown as Db, marchAt);
+          const november = await getCostsDashboard(tx as unknown as Db, novemberAt);
+          marchRows = march.byModelEvidence.filter((row) => row.model === marchModel);
+          novemberRows = november.byModelEvidence.filter((row) => row.model === novemberModel);
+          throw rollback;
+        });
+      } catch (error) {
+        if (error !== rollback) throw error;
+        rollbackObserved = true;
+      }
+
+      expect(rollbackObserved).toBe(true);
+      expect(marchRows).toEqual([
+        {
+          provider: 'boundary-test',
+          model: marchModel,
+          basis: 'provider_reported',
+          usd: '0.000003',
+          count: 2,
+        },
+      ]);
+      expect(novemberRows).toEqual([
+        {
+          provider: 'boundary-test',
+          model: novemberModel,
+          basis: 'provider_reported',
+          usd: '0.000003',
+          count: 2,
+        },
+      ]);
     } finally {
       await db.$client.end();
     }
