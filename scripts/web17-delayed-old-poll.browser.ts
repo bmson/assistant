@@ -27,6 +27,10 @@ import {
   WEB17_RSC_ATTEMPT_NONCE_HEADER,
 } from './web17-navigation-diagnostics.js';
 import {
+  projectWeb17HttpTransportObservations,
+  readWeb17PreviewLogTail,
+} from './web17-preview-diagnostics.js';
+import {
   createWeb17TransportDiagnostics,
   emitWeb17Safely,
   observeWeb17Safely,
@@ -41,6 +45,8 @@ assert(['localhost', '127.0.0.1', '::1'].includes(origin.hostname));
 const databaseUrl = process.env.DATABASE_URL;
 assert(databaseUrl, 'Set DATABASE_URL to the isolated CI PostgreSQL database');
 const web17PreviewDiagnosticsEnabled = process.env.WEB17_DIAGNOSTICS === '1';
+const web17HttpDiagnosticToken = process.env.WEB17_HTTP_DIAGNOSTIC_TOKEN;
+const WEB17_HTTP_DIAGNOSTIC_TOKEN_HEADER = 'x-web17-diagnostic-token';
 
 function isPathOrChild(pathname: string, basePath: string): boolean {
   return pathname === basePath || pathname.startsWith(`${basePath}/`);
@@ -745,6 +751,14 @@ async function verifyUnmountedPollDoesNotPublishAfterRemount(): Promise<void> {
   const emitTransport = (result: 'passed' | 'failed') =>
     emitWeb17Safely(async () => {
       if (!web17PreviewDiagnosticsEnabled) return;
+      const logPath = process.env.WEB17_PREVIEW_LOG_PATH;
+      const logTail = logPath ? readWeb17PreviewLogTail(logPath) : undefined;
+      const nodeObservations = projectWeb17HttpTransportObservations(
+        logTail?.text,
+        transportDiagnostics.snapshot().selectedNonce,
+        logTail?.truncated ?? false,
+      );
+      transportDiagnostics.importNodeObservations(nodeObservations.events, nodeObservations.status);
       transportDiagnostics.seal(result);
       const serialized = JSON.stringify(transportDiagnostics.snapshot());
       console.error(`[WEB-17-TRANSPORT] ${serialized}`);
@@ -990,6 +1004,9 @@ async function verifyUnmountedPollDoesNotPublishAfterRemount(): Promise<void> {
             ...allHeaders,
             [WEB17_RSC_ATTEMPT_NONCE_HEADER]: nonce,
             [WEB17_REQUEST_CLASS_HEADER]: requestClass,
+            ...(web17HttpDiagnosticToken && /^[A-Za-z0-9_-]{43}$/.test(web17HttpDiagnosticToken)
+              ? { [WEB17_HTTP_DIAGNOSTIC_TOKEN_HEADER]: web17HttpDiagnosticToken }
+              : {}),
           };
         }
       } catch {

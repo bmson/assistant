@@ -65,7 +65,8 @@ describe('bounded WEB17 transport observations', () => {
     trace.seal('failed');
     expect(trace.snapshot()).toMatchObject({
       result: 'failed',
-      serverTransport: 'NOT_INSTRUMENTED',
+      serverTransport: 'PARTIAL_NODE_LOCAL',
+      nodeObservationStatus: 'unavailable',
     });
     expect(trace.snapshot().events.map((event) => event.phase)).toEqual([
       'continue_started',
@@ -170,7 +171,8 @@ describe('WEB17 diagnostic origins and privacy', () => {
     trace.seal('failed');
     expect(trace.snapshot()).toMatchObject({
       remountAssertions: 'NOT_RUN',
-      serverTransport: 'NOT_INSTRUMENTED',
+      serverTransport: 'PARTIAL_NODE_LOCAL',
+      nodeObservationStatus: 'unavailable',
     });
   });
   it('does not let an observer or a broken clock throw into browser flow', () => {

@@ -16,9 +16,19 @@ const phases = [
   'request_failed',
   'sizes_observed',
   'sizes_unavailable',
+  'node_request_dispatch',
+  'node_response_finish',
+  'node_response_close',
 ] as const;
 export type Web17TransportPhase = (typeof phases)[number];
-type Metadata = { status?: number; responseBodyBytes?: number; nonceHeaderInjected?: boolean };
+type Metadata = {
+  status?: number;
+  responseBodyBytes?: number;
+  nonceHeaderInjected?: boolean;
+  layer?: 'node_local';
+  duplicatePossible?: boolean;
+  writableFinished?: boolean;
+};
 type Event = Metadata & {
   sequence: number;
   nonce: string;
@@ -27,6 +37,7 @@ type Event = Metadata & {
   sinceClickMs: number | null;
   sinceRequestMs: number | null;
 };
+type NodeObservationStatus = 'unavailable' | 'incomplete' | 'observed';
 
 /** Diagnostic failures must never change the observed browser flow. */
 export function observeWeb17Safely(observe: () => void): void {
@@ -90,6 +101,7 @@ export function createWeb17TransportDiagnostics(now = () => performance.now()) {
   const events: Event[] = [];
   let overflow = false;
   let selectedNonce: string | null = null;
+  let nodeObservationStatus: NodeObservationStatus = 'unavailable';
   let result: 'passed' | 'failed' | 'interrupted' | null = null;
   const snapshot = () => ({
     version: 2,
@@ -97,7 +109,8 @@ export function createWeb17TransportDiagnostics(now = () => performance.now()) {
     result,
     selectedNonce,
     // App-router data-ready markers do not expose the Node response lifecycle.
-    serverTransport: 'NOT_INSTRUMENTED',
+    serverTransport: 'PARTIAL_NODE_LOCAL',
+    nodeObservationStatus,
     requestStartObservation: requestAt === null ? 'unavailable' : 'observed',
     remountAssertions,
     browserErrorsAreUncorrelated: true,
@@ -149,7 +162,7 @@ export function createWeb17TransportDiagnostics(now = () => performance.now()) {
       nonce: unknown,
       phase: Web17TransportPhase,
       metadata: Metadata = {},
-      observedAt?: number,
+      observedAt?: number | null,
     ) {
       if (
         result ||
@@ -159,7 +172,7 @@ export function createWeb17TransportDiagnostics(now = () => performance.now()) {
         !phases.includes(phase)
       )
         return;
-      const at = observedAt ?? readClock();
+      const at = observedAt === undefined ? readClock() : observedAt;
       const event: Event = {
         sequence: events.length + 1,
         nonce,
@@ -178,6 +191,10 @@ export function createWeb17TransportDiagnostics(now = () => performance.now()) {
         event.responseBodyBytes = metadata.responseBodyBytes;
       if (typeof metadata.nonceHeaderInjected === 'boolean')
         event.nonceHeaderInjected = metadata.nonceHeaderInjected;
+      if (metadata.layer === 'node_local') event.layer = 'node_local';
+      if (metadata.duplicatePossible === true) event.duplicatePossible = true;
+      if (typeof metadata.writableFinished === 'boolean')
+        event.writableFinished = metadata.writableFinished;
       if (
         events.length >= WEB17_TRANSPORT_EVENT_CAP ||
         !fits({ ...snapshot(), events: [...events, event] })
@@ -186,6 +203,37 @@ export function createWeb17TransportDiagnostics(now = () => performance.now()) {
         return;
       }
       events.push(event);
+    },
+    importNodeObservations(
+      observations: Array<{
+        nonce: string;
+        phase: 'node_request_dispatch' | 'node_response_finish' | 'node_response_close';
+        status?: number;
+        writableFinished?: boolean;
+      }>,
+      status: NodeObservationStatus,
+    ) {
+      if (result || !selectedNonce) return;
+      nodeObservationStatus = status;
+      const eventCountBefore = events.length;
+      for (const observation of observations) {
+        if (observation.nonce !== selectedNonce) continue;
+        this.record(
+          selectedNonce,
+          observation.phase,
+          {
+            layer: 'node_local',
+            duplicatePossible: true,
+            ...(observation.status === undefined ? {} : { status: observation.status }),
+            ...(observation.writableFinished === undefined
+              ? {}
+              : { writableFinished: observation.writableFinished }),
+          },
+          null,
+        );
+      }
+      if (events.length - eventCountBefore < observations.length)
+        nodeObservationStatus = 'incomplete';
     },
     seal(outcome: 'passed' | 'failed' | 'interrupted') {
       if (!result && outcome === 'passed') remountAssertions = 'PASSED';
