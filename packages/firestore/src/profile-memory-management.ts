@@ -14,6 +14,7 @@ import {
 } from '@assistant/persistence';
 import { type DocumentSnapshot, FieldValue, type Transaction } from '@google-cloud/firestore';
 import { embeddingSpaceKey } from './memory.js';
+import { createFirestoreGenericMemoryWriteWitness } from './memory-write-witness.js';
 import { privacyErasureIsActive } from './privacy-erasure.js';
 import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from './store.js';
 
@@ -137,6 +138,7 @@ export class FirestoreProfileMemoryManagementRepository
         confidence: '1.00',
         ownerConfirmed: true,
         quarantined: false,
+        memoryWriteWitness: createFirestoreGenericMemoryWriteWitness(row.contentHash),
       });
       this.invalidateOwnerCard(tx, agentId, now);
       return { status: 'updated', memory: managed(row) };
@@ -151,6 +153,7 @@ export class FirestoreProfileMemoryManagementRepository
         confidence: '1.00',
         ownerConfirmed: true,
         quarantined: false,
+        memoryWriteWitness: createFirestoreGenericMemoryWriteWitness(row.contentHash),
       });
       this.invalidateOwnerCard(tx, agentId, now);
       return { status: 'updated', memory: managed(row) };
@@ -239,6 +242,7 @@ export class FirestoreProfileMemoryManagementRepository
         ownerConfirmed: true,
         originTrust: 'owner',
         quarantined: false,
+        memoryWriteWitness: createFirestoreGenericMemoryWriteWitness(input.contentHash),
       }),
     );
     this.invalidateOwnerCard(tx, agentId, now);
@@ -325,7 +329,10 @@ export class FirestoreProfileMemoryManagementRepository
 
   async approveQuarantined(memoryId: string): Promise<MemoryMutation> {
     return this.mutateExisting(memoryId, ({ tx, row, snapshot, agentId, now }) => {
-      tx.update(snapshot.ref, { quarantined: false });
+      tx.update(snapshot.ref, {
+        quarantined: false,
+        memoryWriteWitness: createFirestoreGenericMemoryWriteWitness(row.contentHash),
+      });
       this.invalidateOwnerCard(tx, agentId, now);
       return { status: 'updated', memory: managed(row) };
     });
@@ -435,6 +442,7 @@ export class FirestoreProfileMemoryManagementRepository
         embeddingSpaceKey: input.embeddingSpaceKey,
         embeddingSpace: embeddingSpaceKey(this.embeddingSpace),
         retrievalRevision: input.retrievalRevision,
+        memoryWriteWitness: createFirestoreGenericMemoryWriteWitness(row.contentHash),
       }),
     );
     tx.create(this.store.doc('memoryContentHashes', input.contentHash), {

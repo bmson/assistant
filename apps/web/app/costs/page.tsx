@@ -55,7 +55,7 @@ export default async function CostsPage() {
     timezone: tz,
     totals,
     bySource,
-    byModel,
+    byModelEvidence,
     topTasks,
     held,
     recent,
@@ -191,21 +191,51 @@ export default async function CostsPage() {
               </table>
             </div>
             <div>
-              <h2 className="text-sm font-medium">By model this month</h2>
+              <h2 className="text-sm font-medium">By model evidence this month</h2>
+              <p className="mt-1 text-xs text-muted">
+                Recorded model cost events in USD. Provider values are connection or route labels;
+                retries may appear as separate events.
+              </p>
               <table className="mt-3 w-full text-sm">
+                <thead>
+                  <tr className="text-left text-xs text-muted">
+                    <th scope="col" className="py-1.5 font-normal">
+                      Provider connection
+                    </th>
+                    <th scope="col" className="py-1.5 font-normal">
+                      Model
+                    </th>
+                    <th scope="col" className="py-1.5 font-normal">
+                      Cost basis
+                    </th>
+                    <th scope="col" className="py-1.5 text-right font-normal">
+                      Events
+                    </th>
+                    <th scope="col" className="py-1.5 text-right font-normal">
+                      USD
+                    </th>
+                  </tr>
+                </thead>
                 <tbody>
-                  {byModel.map((row) => (
-                    <tr key={row.model} className="border-t border-edge/60">
-                      <td className="max-w-0 truncate py-1.5">{row.model}</td>
-                      <td className="py-1.5 text-right text-xs text-muted">{row.count}×</td>
-                      <td className="py-1.5 text-right tabular-nums">
-                        {formatUsd(String(row.usd ?? '0'))}
+                  {byModelEvidence.map((row) => (
+                    <tr
+                      key={JSON.stringify([row.provider, row.model, row.basis])}
+                      className="border-t border-edge/60"
+                    >
+                      <td className="max-w-0 truncate py-1.5">
+                        {row.provider ?? 'Unknown connection'}
                       </td>
+                      <td className="max-w-0 truncate py-1.5">{row.model ?? 'Unknown model'}</td>
+                      <td className="py-1.5">{COST_BASIS_LABELS[row.basis]}</td>
+                      <td className="py-1.5 text-right text-xs text-muted">{row.count}</td>
+                      <td className="py-1.5 text-right tabular-nums">{formatUsd(row.usd)}</td>
                     </tr>
                   ))}
-                  {byModel.length === 0 ? (
+                  {byModelEvidence.length === 0 ? (
                     <tr>
-                      <td className="py-1.5 text-muted">No model calls this month</td>
+                      <td colSpan={5} className="py-1.5 text-muted">
+                        No model cost events recorded this month
+                      </td>
                     </tr>
                   ) : null}
                 </tbody>

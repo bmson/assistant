@@ -2755,6 +2755,7 @@ struct WorkspaceView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .disclosureGroupStyle(AssistantEvidenceDisclosureStyle())
         }
         .assistantCard(in: colorScheme, strokeTint: AssistantTheme.inkMuted(for: colorScheme).opacity(0.3))
     }
@@ -3206,11 +3207,21 @@ struct SpendingBreakdownCard: View {
                     Text(entry.amountLabel).font(.subheadline.monospacedDigit())
                 }
             } else {
-                HStack(alignment: .firstTextBaseline, spacing: 10) {
-                    Text(entry.label).font(.subheadline.weight(.medium))
-                    Spacer(minLength: 4)
-                    Text(entry.amountLabel).font(.subheadline.monospacedDigit())
-                        .layoutPriority(1)
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        Text(entry.label).font(.subheadline.weight(.medium))
+                            .fixedSize(horizontal: true, vertical: true)
+                        Spacer(minLength: 4)
+                        Text(entry.amountLabel).font(.subheadline.monospacedDigit())
+                            .fixedSize(horizontal: true, vertical: true)
+                            .layoutPriority(1)
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(entry.label).font(.subheadline.weight(.medium))
+                            .fixedSize(horizontal: false, vertical: true)
+                        Text(entry.amountLabel).font(.subheadline.monospacedDigit())
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
             Text("\(entry.count) usage \(entry.count == 1 ? "entry" : "entries")")

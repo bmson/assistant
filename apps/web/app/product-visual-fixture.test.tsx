@@ -1015,6 +1015,14 @@ it.each(fixtureStates)(
       expect(html).toContain('Google Cloud');
       expect(html).toContain('OpenRouter');
       expect(html).toContain('Google Vertex AI');
+      expect(html).toContain('By model evidence this month');
+      expect(html).toContain('Provider connection');
+      expect(html).toContain('vertex/gemini-2.5-flash');
+      expect(html).toContain('Unknown connection');
+      expect(html).toContain('Unknown model');
+      expect(html).toContain('Unverified / historical');
+      expect(html).toContain('128</td>');
+      expect(html).toContain('Recorded model cost events in USD.');
       expect(html).toContain('$12.00');
       expect(html).toContain('€4.00');
       expect(html).toContain('$0.0004');

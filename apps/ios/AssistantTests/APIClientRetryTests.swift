@@ -9,6 +9,28 @@ import CryptoKit
 /// deterministically. Each queued outcome is consumed by one request, so a test
 /// says exactly what the first attempt and the retry each see.
 final class StubURLProtocol: URLProtocol {
+    private struct ReplacementTaskStreamFixtureCapture {
+        let testCaseID: String
+        var callbacksDelivered: Bool?
+    }
+
+    struct DiagnosticRequestSnapshot {
+        struct ChatPost {
+            let body: Data
+            let authorization: String?
+        }
+        struct StatusGet {
+            let url: URL
+            let authorization: String?
+        }
+
+        let chatPostCount: Int
+        let secondChatPost: ChatPost?
+        let statusGetCount: Int
+        let statusGets: [StatusGet]
+        let statusGetsTruncated: Bool
+    }
+
     enum Outcome {
         case failure(URLError)
         case success(status: Int, body: Data)
@@ -46,6 +68,7 @@ final class StubURLProtocol: URLProtocol {
     private static var streamsByIdentity: [String: StubURLProtocol] = [:]
     private static var readyStreamIdentities: Set<String> = []
     private static var activeTestCaseID: String?
+    private static var replacementTaskStreamFixtureCapture: ReplacementTaskStreamFixtureCapture?
 
     static func beginTestCase(_ id: String) {
         lock.withLock {
@@ -69,12 +92,16 @@ final class StubURLProtocol: URLProtocol {
             streamsByOperation = [:]
             streamsByIdentity = [:]
             readyStreamIdentities = []
+            replacementTaskStreamFixtureCapture = nil
         }
     }
 
     static func endTestCase(_ id: String) {
         lock.withLock {
-            if activeTestCaseID == id { activeTestCaseID = nil }
+            if activeTestCaseID == id {
+                activeTestCaseID = nil
+                replacementTaskStreamFixtureCapture = nil
+            }
         }
     }
 
@@ -183,6 +210,53 @@ final class StubURLProtocol: URLProtocol {
         }
     }
 
+    static func diagnosticRequestSnapshot(testCaseID: String) -> DiagnosticRequestSnapshot? {
+        guard lock.try() else { return nil }
+        defer { lock.unlock() }
+        guard activeTestCaseID == testCaseID else { return nil }
+
+        var chatPostCount = 0
+        var secondChatPost: DiagnosticRequestSnapshot.ChatPost?
+        var statusGetCount = 0
+        var statusGets: [DiagnosticRequestSnapshot.StatusGet] = []
+        var statusGetsTruncated = false
+        for index in recordedMethods.indices {
+            guard index < recordedURLs.count,
+                  index < recordedBodies.count,
+                  index < recordedHeaders.count,
+                  Self.testCaseID(in: recordedHeaders[index]) == testCaseID else { continue }
+            let method = recordedMethods[index]
+            let url = recordedURLs[index]
+            let headers = recordedHeaders[index]
+            let authorization = headers.first {
+                $0.key.caseInsensitiveCompare("authorization") == .orderedSame
+            }?.value
+            if method == "POST", url.path == "/api/mobile/v1/chat" {
+                if chatPostCount < 2 {
+                    chatPostCount += 1
+                    if chatPostCount == 2 {
+                        secondChatPost = .init(body: recordedBodies[index], authorization: authorization)
+                    }
+                }
+            }
+            if method == "GET", url.path == "/api/mobile/v1/chat/status" {
+                statusGetCount += 1
+                if statusGets.count < 8 {
+                    statusGets.append(.init(url: url, authorization: authorization))
+                } else {
+                    statusGetsTruncated = true
+                }
+            }
+        }
+        return .init(
+            chatPostCount: chatPostCount,
+            secondChatPost: secondChatPost,
+            statusGetCount: statusGetCount,
+            statusGets: statusGets,
+            statusGetsTruncated: statusGetsTruncated
+        )
+    }
+
     static func appendStream(_ body: Data, operationId: String? = nil, authorization: String? = nil) {
         let stream = lock.withLock {
             if let operationId, let authorization {
@@ -198,6 +272,29 @@ final class StubURLProtocol: URLProtocol {
     static func isStreamReady(operationId: String, authorization: String) -> Bool {
         let key = streamIdentityKey(operationId: operationId, authorization: authorization)
         return lock.withLock { readyStreamIdentities.contains(key) }
+    }
+
+    static func tryIsStreamReady(operationId: String, authorization: String) -> Bool? {
+        let key = streamIdentityKey(operationId: operationId, authorization: authorization)
+        guard lock.try() else { return nil }
+        defer { lock.unlock() }
+        return readyStreamIdentities.contains(key)
+    }
+
+    static func captureReplacementTaskStream(testCaseID: String) {
+        guard lock.try() else { return }
+        defer { lock.unlock() }
+        guard activeTestCaseID == testCaseID else { return }
+        replacementTaskStreamFixtureCapture = .init(testCaseID: testCaseID)
+    }
+
+    static func replacementTaskStreamCallbacksDelivered(testCaseID: String) -> Bool? {
+        guard lock.try() else { return nil }
+        defer { lock.unlock() }
+        guard let capture = replacementTaskStreamFixtureCapture,
+              capture.testCaseID == testCaseID,
+              activeTestCaseID == testCaseID else { return nil }
+        return capture.callbacksDelivered
     }
 
     static func cancelStream(operationId: String, authorization: String) {
@@ -235,6 +332,61 @@ final class StubURLProtocol: URLProtocol {
             guard let requestCaseID = testCaseID(in: headers), requestCaseID == activeTestCaseID else { return }
             readyStreamIdentities.insert(identityKey)
         }
+    }
+
+    private static func noteReplacementTaskStreamCallbacksDelivered(
+        testCaseID: String?,
+        method: String?,
+        path: String?,
+        identityKey: String?
+    ) {
+        guard let testCaseID, let identityKey else { return }
+        guard method == "POST",
+              path == "/api/mobile/v1/chat",
+              let candidate = replacementChatPostIdentityCandidate(testCaseID: testCaseID),
+              let replacementBody = try? JSONSerialization.jsonObject(with: candidate.body) as? [String: Any],
+              let replacementOperationID = replacementBody["clientOperationId"] as? String,
+              identityKey == streamIdentityKey(
+                  operationId: replacementOperationID,
+                  authorization: candidate.authorization
+              ),
+              lock.try() else { return }
+        defer { lock.unlock() }
+        guard activeTestCaseID == testCaseID,
+              var capture = replacementTaskStreamFixtureCapture,
+              capture.testCaseID == testCaseID else { return }
+        capture.callbacksDelivered = true
+        replacementTaskStreamFixtureCapture = capture
+    }
+
+    private static func replacementChatPostIdentityCandidate(
+        testCaseID: String
+    ) -> (body: Data, authorization: String)? {
+        guard lock.try() else { return nil }
+        defer { lock.unlock() }
+        guard activeTestCaseID == testCaseID,
+              replacementTaskStreamFixtureCapture?.testCaseID == testCaseID else { return nil }
+        var matchingChatPosts = 0
+        var replacementPostIndex: Int?
+        for index in recordedMethods.indices {
+            guard index < recordedURLs.count,
+                  index < recordedBodies.count,
+                  index < recordedHeaders.count,
+                  recordedMethods[index] == "POST",
+                  recordedURLs[index].path == "/api/mobile/v1/chat",
+                  Self.testCaseID(in: recordedHeaders[index]) == testCaseID else { continue }
+            matchingChatPosts += 1
+            if matchingChatPosts == 2 {
+                replacementPostIndex = index
+                break
+            }
+        }
+        guard let replacementPostIndex,
+              let authorization = recordedHeaders[replacementPostIndex].first(where: {
+                  $0.key.caseInsensitiveCompare("authorization") == .orderedSame
+              })?.value,
+              !authorization.isEmpty else { return nil }
+        return (recordedBodies[replacementPostIndex], authorization)
     }
 
     private static func next(for method: String, url: URL?, body: Data, headers: [String: String], timeout: TimeInterval) -> Outcome {
@@ -419,6 +571,12 @@ final class StubURLProtocol: URLProtocol {
             client.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
             client.urlProtocol(self, didLoad: body)
             Self.markStreamReady(identityKey: registration.identityKey, headers: request.allHTTPHeaderFields ?? [:])
+            Self.noteReplacementTaskStreamCallbacksDelivered(
+                testCaseID: Self.testCaseID(in: request.allHTTPHeaderFields ?? [:]),
+                method: request.httpMethod,
+                path: request.url?.path,
+                identityKey: registration.identityKey
+            )
         case let .operationCancellation(status, outcome):
             let sent = try? JSONSerialization.jsonObject(with: requestBody) as? [String: String]
             var body: [String: Any] = [
@@ -5927,6 +6085,56 @@ extension APIClientRetryTests {
         func requestCount(_ path: String) -> Int {
             StubURLProtocol.urls.filter { $0.path == path }.count
         }
+        func replacementTaskPollCount(
+            in snapshot: StubURLProtocol.DiagnosticRequestSnapshot
+        ) -> Int? {
+            guard !snapshot.statusGetsTruncated,
+                  let secondChatPost = snapshot.secondChatPost,
+                  let replacementAuthorization = secondChatPost.authorization,
+                  !replacementAuthorization.isEmpty else { return nil }
+            return min(8, snapshot.statusGets.filter { request in
+                guard request.authorization == replacementAuthorization,
+                      let statusComponents = URLComponents(url: request.url, resolvingAgainstBaseURL: false) else {
+                    return false
+                }
+                return statusComponents.queryItems?.contains {
+                    $0.name == "taskId" && $0.value == taskIDs[1]
+                } == true
+            }.count)
+        }
+        func replacementStreamReady(
+            in snapshot: StubURLProtocol.DiagnosticRequestSnapshot
+        ) -> Bool? {
+            guard let secondChatPost = snapshot.secondChatPost,
+                  let authorization = secondChatPost.authorization,
+                  !authorization.isEmpty,
+                  let body = try? JSONSerialization.jsonObject(with: secondChatPost.body) as? [String: Any],
+                  let operationID = body["clientOperationId"] as? String else { return nil }
+            return StubURLProtocol.tryIsStreamReady(operationId: operationID, authorization: authorization)
+        }
+        var replacementStatusBaseline: Int?
+        var replacementChatPostObserved: Bool?
+        var fixtureStreamCallbacksDelivered: Bool?
+        var fixtureStreamReady: Bool?
+        var workingPhaseObserved: Bool?
+        var statusRequestsSinceReplacementSend: Int?
+        var correlatedReplacementTaskPollCount: Int?
+
+        func replacementStageDiagnostics() -> String {
+            let chatPost = replacementChatPostObserved.map { String($0) } ?? "unknown"
+            let callbacksDelivered = fixtureStreamCallbacksDelivered.map { String($0) } ?? "unknown"
+            let workingPhase = workingPhaseObserved.map { String($0) } ?? "unknown"
+            let statusRequests = statusRequestsSinceReplacementSend.map { String($0) } ?? "unknown"
+            let replacementTaskPolls = correlatedReplacementTaskPollCount.map { String($0) } ?? "unknown"
+            let firstPollObserved = correlatedReplacementTaskPollCount.map { String($0 > 0) } ?? "unknown"
+            return "replacementStages={chatPost=\(chatPost), "
+                + "fixtureCallbacks=\(callbacksDelivered), "
+                + "fixtureReady=\(fixtureStreamReady.map { String($0) } ?? "unknown"), "
+                + "workingPhaseObserved=\(workingPhase), "
+                + "statusRequestsSinceReplacementSend=\(statusRequests), "
+                + "replacementTaskPolls=\(replacementTaskPolls), "
+                + "firstReplacementPoll=\(firstPollObserved), admittedTask=unknown}"
+        }
 
         model.send("Old owner turn")
         let firstFinalHeld = try await waitForReplyPollFixture {
@@ -5947,11 +6155,38 @@ extension APIClientRetryTests {
         XCTAssertFalse(model.isSettlingOrdinaryTurn, diagnostics())
         XCTAssertTrue(model.canAdmitOrdinarySend, diagnostics())
 
+        replacementStatusBaseline = StubURLProtocol
+            .diagnosticRequestSnapshot(testCaseID: testCaseID)?.statusGetCount
+        StubURLProtocol.captureReplacementTaskStream(testCaseID: testCaseID)
         model.send("Replacement owner turn")
+        let replacementStreamID = model.sendDisplayState?.streamID
         let secondFinalHeld = try await waitForReplyPollFixture {
-            requestCount(statusPath) >= 4 && StubURLProtocol.isHoldingResponse(path: statusPath)
+            if let snapshot = StubURLProtocol.diagnosticRequestSnapshot(testCaseID: testCaseID) {
+                replacementChatPostObserved = snapshot.chatPostCount >= 2
+                fixtureStreamCallbacksDelivered = StubURLProtocol
+                    .replacementTaskStreamCallbacksDelivered(testCaseID: testCaseID)
+                fixtureStreamReady = replacementStreamReady(in: snapshot)
+                if let replacementStreamID,
+                   model.sendDisplayState?.streamID == replacementStreamID,
+                   model.sendDisplayState?.phase == .working {
+                    workingPhaseObserved = true
+                } else if workingPhaseObserved == nil {
+                    workingPhaseObserved = false
+                }
+                if let replacementStatusBaseline {
+                    statusRequestsSinceReplacementSend = min(
+                        8,
+                        max(0, snapshot.statusGetCount - replacementStatusBaseline)
+                    )
+                }
+                correlatedReplacementTaskPollCount = replacementTaskPollCount(in: snapshot)
+            }
+            return requestCount(statusPath) >= 4 && StubURLProtocol.isHoldingResponse(path: statusPath)
         }
-        try requireReplyPollFixtureStage(secondFinalHeld, "Replacement-owner terminal response was not held. \(diagnostics())")
+        try requireReplyPollFixtureStage(
+            secondFinalHeld,
+            "Replacement-owner terminal response was not held. \(diagnostics()) \(replacementStageDiagnostics())"
+        )
         StubURLProtocol.releaseHeldResponse(path: statusPath)
         let secondSettlementHeld = try await waitForReplyPollFixture { surfaces.finishCount == 2 }
         try requireReplyPollFixtureStage(secondSettlementHeld, "Replacement-owner settlement was not held. \(diagnostics())")

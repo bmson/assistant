@@ -568,6 +568,18 @@ export function createProductVisualData(empty: boolean) {
       softPct: 80,
     },
     byEvidence: empty ? [] : [{ basis: 'token_rate', usd: '8.42', count: 128 }],
+    byModelEvidence: empty
+      ? []
+      : [
+          {
+            provider: 'vertex',
+            model: 'vertex/gemini-2.5-flash',
+            basis: 'token_rate',
+            usd: '8.42',
+            count: 128,
+          },
+          { provider: null, model: null, basis: 'unknown', usd: '0.000000', count: 1 },
+        ],
     dispatchingAttempts: {
       count: 0,
       countComplete: true,
