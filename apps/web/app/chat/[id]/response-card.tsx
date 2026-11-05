@@ -70,6 +70,13 @@ import Image from 'next/image';
 import type { ReactNode } from 'react';
 import { useEffect, useRef, useState } from 'react';
 import { chip, focusRing, microLabelClass } from '@/lib/ui';
+import {
+  CalendarHouseholdComparison,
+  CalendarHouseholdEventDetails,
+  type CalendarHouseholdIndex,
+  CalendarHouseholdSummary,
+  calendarHouseholdIndex,
+} from './calendar-household-day';
 import { CardFormBlock } from './card-form-block';
 import type { CardFormDraft, CardFormIdentity } from './card-form-operations';
 import { requestCardPolling } from './card-refresh-events';
@@ -690,7 +697,7 @@ function CalendarAgendaRow({ item }: { item: Raw }) {
       <span className="min-w-0 text-xs leading-5 font-medium text-muted [overflow-wrap:anywhere]">
         {day === 'All day' ? str(item.time) : time}
       </span>
-      <span className="min-w-0">
+      <div className="min-w-0">
         <span className="block font-medium leading-5 text-strong [overflow-wrap:anywhere]">
           {str(item.title)}
         </span>
@@ -704,6 +711,7 @@ function CalendarAgendaRow({ item }: { item: Raw }) {
             {str(item.note)}
           </span>
         ) : null}
+        <CalendarHouseholdEventDetails value={item.householdDetails} title={str(item.title)} />
         {item.showCalendarAttribution === true && calendars.length ? (
           <span className="mt-1 block text-xs leading-4 text-muted [overflow-wrap:anywhere]">
             {calendars.join(' · ')}
@@ -718,7 +726,7 @@ function CalendarAgendaRow({ item }: { item: Raw }) {
             ))}
           </span>
         ) : null}
-      </span>
+      </div>
     </li>
   );
 }
@@ -771,7 +779,9 @@ function CalendarAgendaSection({ section, date }: { section: Raw; date: string }
           </p>
         </div>
       ) : (
-        <p className="text-sm text-muted">No events on the calendar. Showing 0 of 0 events.</p>
+        <p className="text-sm text-muted">
+          No events returned in these checked sources. Showing 0 of 0 events.
+        </p>
       )}
       {items.length > CALENDAR_AGENDA_PREVIEW_LIMIT ? (
         <button
@@ -792,7 +802,13 @@ function CalendarAgendaSection({ section, date }: { section: Raw; date: string }
   );
 }
 
-function CalendarAgendaAttention({ section }: { section: Raw }) {
+function CalendarAgendaAttention({
+  section,
+  eventIndex,
+}: {
+  section: Raw;
+  eventIndex: CalendarHouseholdIndex;
+}) {
   const items = recs(section.items).filter(validBriefingItem);
   const inlinePairDetails =
     typeof section.itemCount === 'number' && !Object.hasOwn(section, 'overlaps');
@@ -836,6 +852,7 @@ function CalendarAgendaAttention({ section }: { section: Raw }) {
                     {str(item.detail)}
                   </p>
                 ) : null}
+                <CalendarHouseholdComparison value={item.comparison} index={eventIndex} />
               </li>
             ))}
           </ul>
@@ -861,8 +878,10 @@ export function visibleCalendarAgendaItems(items: Raw[], showAll: boolean): Raw[
 
 function CalendarAgendaCard({ data }: { data: Raw }) {
   const sections = recs(data.sections).filter(validCalendarAgendaSection);
+  const eventIndex = calendarHouseholdIndex(sections);
   return (
     <CardShell icon={CalendarDays} label={['Agenda', str(data.date)].filter(Boolean).join(' · ')}>
+      <CalendarHouseholdSummary value={data.householdDay} index={eventIndex} />
       {str(data.lead) ? (
         <p className="text-sm font-medium text-strong text-pretty [overflow-wrap:anywhere]">
           {str(data.lead)}
@@ -875,7 +894,9 @@ function CalendarAgendaCard({ data }: { data: Raw }) {
             if (section.type === 'agenda')
               return <CalendarAgendaSection key={key} section={section} date={str(data.date)} />;
             if (Object.hasOwn(section, 'overlaps') || typeof section.itemCount === 'number')
-              return <CalendarAgendaAttention key={key} section={section} />;
+              return (
+                <CalendarAgendaAttention key={key} section={section} eventIndex={eventIndex} />
+              );
             return <BriefingList key={key} section={section} />;
           })}
         </div>
@@ -2702,7 +2723,10 @@ function ResponseCardView({
       return <WeatherCard data={data} />;
     case 'briefing':
       return data.presentation === 'calendar-agenda' ? (
-        <CalendarAgendaCard data={data} />
+        <CalendarAgendaCard
+          key={JSON.stringify([formSessionScope, conversationId, data])}
+          data={data}
+        />
       ) : (
         <BriefingCard data={data} />
       );
