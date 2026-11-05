@@ -1,3 +1,4 @@
+import type { OwnerEditorReply } from '@assistant/persistence/owner-editor';
 import {
   Children,
   type ComponentProps,
@@ -7,7 +8,9 @@ import {
 } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
+import type { OwnerEditorOperationState } from '@/lib/owner-editor-operation';
 import {
+  OwnerEditorCloseGuidance,
   OwnerEditorConflictReview,
   OwnerEditorControls,
   type OwnerEditorControlsProps,
@@ -37,6 +40,143 @@ const base: OwnerEditorControlsProps = {
   },
   createGrant,
 };
+
+const readyOperationState: OwnerEditorOperationState = {
+  phase: 'ready',
+  reviewRequired: false,
+  reviewTargetId: null,
+  marker: null,
+  busy: false,
+  reply: null,
+  fieldErrors: {},
+  message: '',
+};
+
+describe('owner editor close guidance follows the active operation marker', () => {
+  it('uses unsent draft wording for a ready form', () => {
+    const html = renderToStaticMarkup(
+      <OwnerEditorCloseGuidance state={readyOperationState} grant={createGrant} targetId={null} />,
+    );
+    expect(html).toContain('Closing does not save this draft. Reloading may lose it.');
+    expect(html).not.toContain('The result of this save is not confirmed.');
+  });
+
+  it('keeps draft wording when validation leaves the form editable', () => {
+    const html = renderToStaticMarkup(
+      <OwnerEditorCloseGuidance
+        state={{ ...readyOperationState, fieldErrors: { name: 'Enter a name.' } }}
+        grant={createGrant}
+        targetId={null}
+      />,
+    );
+    expect(html).toContain('Closing does not save this draft. Reloading may lose it.');
+    expect(html).not.toContain('The result of this save is not confirmed.');
+  });
+
+  it('leaves a conflict review to its existing operation status', () => {
+    const html = renderToStaticMarkup(
+      <OwnerEditorCloseGuidance
+        state={{ ...readyOperationState, phase: 'resolved', reviewRequired: true }}
+        grant={createGrant}
+        targetId={null}
+      />,
+    );
+    expect(html).toBe('');
+  });
+
+  it('uses uncertainty wording only for a pending marker scoped to this form', () => {
+    const marker = {
+      id: createGrant.issuedOperationHandle,
+      command: 'create_person' as const,
+      targetId: null,
+    };
+    const pendingState: OwnerEditorOperationState = {
+      ...readyOperationState,
+      phase: 'pending',
+      marker,
+      message: 'The result is unknown. Check the same save before trying again.',
+    };
+    const html = renderToStaticMarkup(
+      <OwnerEditorCloseGuidance state={pendingState} grant={createGrant} targetId={null} />,
+    );
+    expect(pendingState.reply).toBeNull(); // A persisted marker alone does not prove dispatch.
+    expect(html).toContain(
+      'The result of this save is not confirmed. Reopen this page to check the same save before trying again.',
+    );
+
+    const matchingReply: OwnerEditorReply = {
+      version: 1,
+      authority: 'unresolved',
+      command: 'create_person',
+      operationId: createGrant.operationId,
+      outcome: 'outcome_unknown',
+      reason: 'receipt_unavailable',
+    };
+    const matchingReplyState = { ...pendingState, reply: matchingReply };
+    const matchingReplyHtml = renderToStaticMarkup(
+      <OwnerEditorCloseGuidance state={matchingReplyState} grant={createGrant} targetId={null} />,
+    );
+    expect(matchingReplyHtml).toContain('The result of this save is not confirmed.');
+
+    const mismatchingReplyState = {
+      ...pendingState,
+      reply: { ...matchingReply, operationId: '99999999-9999-4999-8999-999999999999' },
+    };
+    const mismatchingReplyHtml = renderToStaticMarkup(
+      <OwnerEditorCloseGuidance
+        state={mismatchingReplyState}
+        grant={createGrant}
+        targetId={null}
+      />,
+    );
+    expect(mismatchingReplyHtml).toContain(
+      'Closing does not save this draft. Reloading may lose it.',
+    );
+    expect(mismatchingReplyHtml).not.toContain('The result of this save is not confirmed.');
+    expect(mismatchingReplyState.message).toBe(pendingState.message);
+
+    const otherFormMarkers = [
+      { ...marker, id: 'another-issued-handle' },
+      { ...marker, command: 'update_person_identity' as const },
+      { ...marker, targetId: contact },
+    ];
+    for (const marker of otherFormMarkers) {
+      const otherForm = renderToStaticMarkup(
+        <OwnerEditorCloseGuidance
+          state={{ ...pendingState, marker }}
+          grant={createGrant}
+          targetId={null}
+        />,
+      );
+      expect(otherForm).toContain('Closing does not save this draft. Reloading may lose it.');
+      expect(otherForm).not.toContain('The result of this save is not confirmed.');
+    }
+
+    const withoutGrant = renderToStaticMarkup(
+      <OwnerEditorCloseGuidance state={pendingState} grant={null} targetId={null} />,
+    );
+    expect(withoutGrant).toContain('Closing does not save this draft. Reloading may lose it.');
+
+    const withoutTarget = renderToStaticMarkup(
+      <OwnerEditorCloseGuidance state={pendingState} grant={createGrant} targetId={undefined} />,
+    );
+    expect(withoutTarget).toContain('Closing does not save this draft. Reloading may lose it.');
+  });
+
+  it.each(['checking', 'resolved', 'blocked'] as const)(
+    'leaves %s status wording to the operation status',
+    (phase) => {
+      const html = renderToStaticMarkup(
+        <OwnerEditorCloseGuidance
+          state={{ ...readyOperationState, phase }}
+          grant={createGrant}
+          targetId={null}
+        />,
+      );
+      expect(html).toBe('');
+    },
+  );
+});
 
 function actualSelectorNodes(node: ReactNode): ReactElement<ComponentProps<'select'>>[] {
   const selects: ReactElement<ComponentProps<'select'>>[] = [];
