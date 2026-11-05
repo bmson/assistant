@@ -1,9 +1,11 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { type OwnerEditorScope, ownerEditorPrivacyDigest } from '@assistant/persistence';
-import { describe, expect, it } from 'vitest';
+import { type DocumentReference, Firestore, type Transaction } from '@google-cloud/firestore';
+import { afterEach, describe, expect, it } from 'vitest';
 import { projectManualOwnerMemoryCorrection } from '../../persistence/src/owner-memory-manual-projection.js';
+import { ownerEditorFirestorePrivacyToken } from './owner-editor-repository.js';
 import { collectFirestoreManualOwnerMemoryEvidenceInTransaction } from './owner-memory-manual-evidence.js';
-import { documentKey } from './store.js';
+import { documentKey, InstallationStore } from './store.js';
 
 const ownerId = '11111111-1111-4111-8111-111111111111';
 const memoryId = '22222222-2222-4222-8222-222222222222';
@@ -13,6 +15,168 @@ const content = 'Synthetic stored manual note';
 const replacement = 'Synthetic corrected manual note';
 const hash = (value: string) => createHash('sha256').update(value, 'utf8').digest('hex');
 const epochId = `owner-editor-epoch:${ownerId}`;
+const emulatorHost = process.env.FIRESTORE_EMULATOR_HOST;
+const localEmulator = /^(?:127\.0\.0\.1|localhost):\d+$/.test(emulatorHost ?? '');
+if (emulatorHost && !localEmulator) throw new Error('Loopback Firestore emulator required');
+if (localEmulator && process.env.ASSISTANT_TEST_NO_EXTERNAL_CREDENTIALS !== '1')
+  throw new Error('Run Firestore emulator tests through the credential-isolating test runner');
+
+type NativeFixture = {
+  store: InstallationStore;
+  refs: DocumentReference[];
+  ownerId: string;
+  memoryId: string;
+  contactId: string;
+  content: string;
+  replacement: string;
+  scope: OwnerEditorScope;
+  epochName: string;
+  privacyRef: DocumentReference;
+  epochRef: DocumentReference;
+  contactRef: DocumentReference;
+};
+
+let activeNativeResources: { store: InstallationStore; refs: DocumentReference[] } | undefined;
+
+async function createNativeFixture(): Promise<NativeFixture> {
+  if (!localEmulator) throw new Error('Local Firestore emulator is not configured');
+  const projectId = 'demo-assistant-test';
+  const installationId = `manual-evidence-${randomUUID()}`;
+  const now = new Date('2026-11-04T14:00:00.000Z');
+  const store = new InstallationStore(
+    new Firestore({ projectId }),
+    installationId,
+    () => new Date(now),
+    projectId,
+  );
+  const ownerId = randomUUID();
+  const memoryId = randomUUID();
+  const contactId = randomUUID();
+  const content = `Synthetic Firestore memory ${randomUUID()}`;
+  const replacement = `Synthetic Firestore replacement ${randomUUID()}`;
+  const epoch = randomUUID();
+  const epochName = `owner-editor-epoch:${ownerId}`;
+  const refs: DocumentReference[] = [];
+  activeNativeResources = { store, refs };
+  const put = async (collection: string, id: string, value: Record<string, unknown>) => {
+    const ref = store.doc(collection, id);
+    refs.push(ref);
+    await ref.set(value);
+    return ref;
+  };
+  const privacyRef = await put('privacyErasureJobs', ownerId, {
+    agentId: ownerId,
+    status: 'complete',
+    generation: `generation-${randomUUID()}`,
+  });
+  const privacyToken = ownerEditorFirestorePrivacyToken(await privacyRef.get(), ownerId);
+  if (!privacyToken) throw new Error('Fixture privacy token unavailable');
+  const epochRef = await put('maintenanceCursors', epochName, {
+    name: epochName,
+    cursor: JSON.stringify({
+      ownerId,
+      epoch,
+      ready: true,
+      privacyGenerationDigest: ownerEditorPrivacyDigest(privacyToken),
+    }),
+  });
+  await put('agents', ownerId, { id: ownerId });
+  const contentHash = hash(content);
+  await put('memories', memoryId, {
+    id: memoryId,
+    agentId: ownerId,
+    content,
+    contentHash,
+    category: 'knowledge',
+    source: 'manual',
+    sourceTaskId: null,
+    subjectContactId: contactId,
+    expiresAt: null,
+    supersededById: null,
+    quarantined: false,
+    ownerCorrection: null,
+  });
+  const contactRef = await put('contacts', contactId, {
+    id: contactId,
+    agentId: ownerId,
+    name: 'Synthetic emulator contact',
+    aliases: ['Synthetic alias'],
+    trust: 'known',
+    identityAuthority: null,
+    notes: 'Excluded from normalized evidence',
+  });
+  const fixture: NativeFixture = {
+    store,
+    refs,
+    ownerId,
+    memoryId,
+    contactId,
+    content,
+    replacement,
+    scope: {
+      ownerId,
+      sessionDigest: 'synthetic-session-digest',
+      epoch,
+      privacyGeneration: privacyToken,
+      command: 'correct_owner_memory',
+      operationId: randomUUID(),
+      targetId: memoryId,
+      nonce: randomUUID(),
+      issuedAt: now.getTime(),
+      expiresAt: now.getTime() + 60_000,
+    },
+    epochName,
+    privacyRef,
+    epochRef,
+    contactRef,
+  };
+  return fixture;
+}
+
+async function collectNative(fixture: NativeFixture) {
+  let writeAttempts = 0;
+  const result = await fixture.store.db.runTransaction(
+    (tx) =>
+      collectFirestoreManualOwnerMemoryEvidenceInTransaction(
+        new Proxy(tx, {
+          get(target, property) {
+            if (['set', 'create', 'update', 'delete'].includes(String(property)))
+              return () => {
+                writeAttempts += 1;
+                throw new Error('Collector attempted a transaction write');
+              };
+            const value = Reflect.get(target, property, target);
+            return typeof value === 'function' ? value.bind(target) : value;
+          },
+        }) as Transaction,
+        fixture.store,
+        fixture.ownerId,
+        fixture.scope,
+        fixture.memoryId,
+        fixture.replacement,
+      ),
+    { maxAttempts: 2 },
+  );
+  expect(writeAttempts).toBe(0);
+  return result;
+}
+
+afterEach(async () => {
+  const fixture = activeNativeResources;
+  activeNativeResources = undefined;
+  if (!fixture) return;
+  try {
+    if (fixture.refs.length > 8) throw new Error('Native fixture cleanup bound exceeded');
+    const cleanup = fixture.store.db.batch();
+    for (const ref of fixture.refs) cleanup.delete(ref);
+    await cleanup.commit();
+    await fixture.store.root.delete();
+    const remaining = await Promise.all(fixture.refs.map((ref) => ref.get()));
+    expect(remaining.every((snapshot) => !snapshot.exists)).toBe(true);
+  } finally {
+    await fixture.store.db.terminate();
+  }
+});
 
 class Ref {
   constructor(
@@ -70,6 +234,7 @@ function fixture(
     privacyVersion?: { seconds: number; nanoseconds: number };
     scopePrivacyGeneration?: string | null;
     contactVersion?: { seconds: number; nanoseconds: number } | null;
+    wrongPhysicalContact?: boolean;
     observedAt?: Date;
     tombstones?: Set<string>;
     lineage?: Array<Record<string, unknown>>;
@@ -169,7 +334,11 @@ function fixture(
         };
       }
       calls.push(`${input.table}:get:${input.key}`);
-      return docs.get(`${input.table}:${input.key}`) ?? snapshot(input.table, input.key, null);
+      const found =
+        docs.get(`${input.table}:${input.key}`) ?? snapshot(input.table, input.key, null);
+      return input.table === 'contacts' && overrides.wrongPhysicalContact
+        ? { ...found, id: 'wrong-physical-contact' }
+        : found;
     },
     async getAll(...refs: Ref[]) {
       calls.push(...refs.map((ref) => `${ref.table}:getAll:${ref.key}`));
@@ -263,7 +432,28 @@ describe('internal Firestore manual owner-memory evidence collector', () => {
       },
     });
     expect(result.manifest.subjectContact?.value).not.toHaveProperty('notes');
-    expect(projectManualOwnerMemoryCorrection(result.manifest)).not.toBeNull();
+    const originalProjection = projectManualOwnerMemoryCorrection(result.manifest);
+    expect(originalProjection).not.toBeNull();
+    const sameVersionIdentityChange = structuredClone(result.manifest);
+    if (
+      !sameVersionIdentityChange.subjectContact?.value ||
+      typeof sameVersionIdentityChange.subjectContact.value !== 'object'
+    )
+      throw new Error('Expected normalized contact');
+    (sameVersionIdentityChange.subjectContact.value as Record<string, unknown>).name =
+      'Synthetic changed contact';
+    expect(
+      projectManualOwnerMemoryCorrection(sameVersionIdentityChange)?.prewriteFingerprint,
+    ).not.toBe(originalProjection?.prewriteFingerprint);
+
+    const nativeVersionOnlyChange = structuredClone(result.manifest);
+    if (!nativeVersionOnlyChange.subjectContact?.nativeVersion) {
+      throw new Error('Expected native contact version');
+    }
+    nativeVersionOnlyChange.subjectContact.nativeVersion.nanoseconds += 1;
+    expect(
+      projectManualOwnerMemoryCorrection(nativeVersionOnlyChange)?.prewriteFingerprint,
+    ).not.toBe(originalProjection?.prewriteFingerprint);
     expect(result.readSet.privacyGeneration).toBe(f.scope.privacyGeneration);
     expect(result.readSet.privacyNativeVersion).toEqual({
       seconds: 1_798_688_000,
@@ -469,6 +659,30 @@ describe('internal Firestore manual owner-memory evidence collector', () => {
     );
     expect(noVersion).toEqual({ status: 'unknown', reason: 'contact_unavailable' });
 
+    const malformedVersion = fixture({
+      contactVersion: { seconds: 1_798_688_000, nanoseconds: 1_000_000_000 },
+    });
+    const invalidVersion = await collectFirestoreManualOwnerMemoryEvidenceInTransaction(
+      malformedVersion.tx as never,
+      malformedVersion.store as never,
+      ownerId,
+      malformedVersion.scope,
+      memoryId,
+      replacement,
+    );
+    expect(invalidVersion).toEqual({ status: 'unknown', reason: 'transaction_unknown' });
+
+    const physicalMismatch = fixture({ wrongPhysicalContact: true });
+    const wrongPhysical = await collectFirestoreManualOwnerMemoryEvidenceInTransaction(
+      physicalMismatch.tx as never,
+      physicalMismatch.store as never,
+      ownerId,
+      physicalMismatch.scope,
+      memoryId,
+      replacement,
+    );
+    expect(wrongPhysical).toEqual({ status: 'unknown', reason: 'contact_unavailable' });
+
     const wrongContact = fixture({
       contact: { id: ownerId, name: 'Wrong', aliases: [], trust: 'known', identityAuthority: null },
     });
@@ -514,3 +728,99 @@ describe('internal Firestore manual owner-memory evidence collector', () => {
     expect(second.calls).toHaveLength(8);
   });
 });
+
+describe.skipIf(!localEmulator)(
+  'Firestore manual owner-memory evidence on the loopback SDK emulator',
+  () => {
+    it('captures native updateTime and rebuilds evidence after a same-identity write', async () => {
+      const fixture = await createNativeFixture();
+      const first = await collectNative(fixture);
+      expect(first.status).toBe('observed');
+      if (first.status !== 'observed') return;
+      const contactSnapshot = await fixture.contactRef.get();
+      expect(contactSnapshot.updateTime).toBeDefined();
+      expect(first.manifest.subjectContact?.nativeVersion).toEqual({
+        kind: 'firestore_timestamp',
+        seconds: contactSnapshot.updateTime?.seconds,
+        nanoseconds: contactSnapshot.updateTime?.nanoseconds,
+      });
+      expect(projectManualOwnerMemoryCorrection(first.manifest)).not.toBeNull();
+
+      const sameVersionChange = structuredClone(first.manifest);
+      if (
+        !sameVersionChange.subjectContact?.value ||
+        typeof sameVersionChange.subjectContact.value !== 'object'
+      )
+        throw new Error('Expected contact observation');
+      (sameVersionChange.subjectContact.value as Record<string, unknown>).name =
+        'Synthetic same-version name change';
+      const changedIdentity = projectManualOwnerMemoryCorrection(sameVersionChange);
+      const originalProjection = projectManualOwnerMemoryCorrection(first.manifest);
+      expect(changedIdentity?.prewriteFingerprint).not.toBe(
+        originalProjection?.prewriteFingerprint,
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      await fixture.contactRef.update({ notes: 'Synthetic unrelated update' });
+      const second = await collectNative(fixture);
+      expect(second.status).toBe('observed');
+      if (second.status !== 'observed') return;
+      expect(second.manifest.subjectContact?.value).toEqual(first.manifest.subjectContact?.value);
+      expect(second.manifest.subjectContact?.nativeVersion).not.toEqual(
+        first.manifest.subjectContact?.nativeVersion,
+      );
+      const versionOnlyProjection = projectManualOwnerMemoryCorrection(second.manifest);
+      expect(versionOnlyProjection?.prewriteFingerprint).not.toBe(
+        originalProjection?.prewriteFingerprint,
+      );
+    }, 45_000);
+
+    it('rejects changed privacy, unready epoch, and newly present lineage in fresh transactions', async () => {
+      const fixture = await createNativeFixture();
+      const initial = await collectNative(fixture);
+      expect(initial.status).toBe('observed');
+
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      await fixture.privacyRef.update({ notes: 'Synthetic same-generation update' });
+      const stalePrivacy = await collectNative(fixture);
+      expect(stalePrivacy).toEqual({ status: 'unknown', reason: 'privacy_unavailable' });
+
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      await fixture.privacyRef.update({ generation: `rotated-${randomUUID()}` });
+      const rotatedPrivacy = await collectNative(fixture);
+      expect(rotatedPrivacy).toEqual({ status: 'unknown', reason: 'privacy_unavailable' });
+
+      const currentToken = ownerEditorFirestorePrivacyToken(
+        await fixture.privacyRef.get(),
+        fixture.ownerId,
+      );
+      if (!currentToken) throw new Error('Expected complete privacy token');
+      const currentCursor = JSON.parse(
+        String((await fixture.epochRef.get()).get('cursor')),
+      ) as Record<string, unknown>;
+      await fixture.epochRef.update({
+        cursor: JSON.stringify({
+          ...currentCursor,
+          ready: false,
+          privacyGenerationDigest: ownerEditorPrivacyDigest(currentToken),
+        }),
+      });
+      fixture.scope = { ...fixture.scope, privacyGeneration: currentToken };
+      const unreadyEpoch = await collectNative(fixture);
+      expect(unreadyEpoch).toEqual({ status: 'unknown', reason: 'epoch_unavailable' });
+
+      await fixture.epochRef.update({
+        cursor: JSON.stringify({
+          ...currentCursor,
+          ready: true,
+          privacyGenerationDigest: ownerEditorPrivacyDigest(currentToken),
+        }),
+      });
+      const lineageRef = fixture.store.doc('memoryImportLineage', `lineage-${randomUUID()}`);
+      fixture.refs.push(lineageRef);
+      await lineageRef.set({ source: 'synthetic', memoryId: fixture.memoryId });
+      const newlyShared = await collectNative(fixture);
+      expect(newlyShared).toEqual({ status: 'unknown', reason: 'lineage_incomplete' });
+    }, 45_000);
+  },
+);
