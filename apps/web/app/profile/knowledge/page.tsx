@@ -22,6 +22,10 @@ import {
   loadFirestoreMemoryLibrary,
 } from '@/lib/firestore-knowledge';
 import { entityKindLabel } from '@/lib/knowledge';
+import {
+  createMemoryLibraryDiagnosticContext,
+  withMemoryLibraryPhase,
+} from '@/lib/memory-library-diagnostics';
 import { memoryNoteHref, memoryNoteReturnTo } from '@/lib/memory-note-context';
 import { savedNoteCreatedLabel, savedNoteValidityLabel } from '@/lib/saved-note-date-display';
 import { withPostgresMemoryBrowseRead } from '@/lib/server';
@@ -86,10 +90,11 @@ async function loadWorkspace(
   view: 'library' | 'map' | 'connections',
   libraryInput: LibraryInput,
   mapInput: MapInput,
+  diagnostics?: ReturnType<typeof createMemoryLibraryDiagnosticContext>,
 ) {
   if (loadConfig().PERSISTENCE_DRIVER === 'firestore') {
     if (view === 'library') {
-      const [library, filters] = await loadFirestoreMemoryLibrary(libraryInput);
+      const [library, filters] = await loadFirestoreMemoryLibrary(libraryInput, diagnostics);
       return { library, filters, map: null, missingEntity: false };
     }
     // The existing fenced Firestore shared snapshot includes overview/findings.
@@ -166,6 +171,7 @@ export default async function KnowledgePage({
       ? raw.connectivity
       : 'all';
   const source = bounded(raw.source);
+  const diagnostics = view === 'library' ? createMemoryLibraryDiagnosticContext() : undefined;
   const activeLibraryFilters =
     Number(state !== 'in-use') +
     Number(filter !== 'all') +
@@ -212,7 +218,11 @@ export default async function KnowledgePage({
   };
   let data: Awaited<ReturnType<typeof loadWorkspace>>;
   try {
-    data = await loadWorkspace(view, libraryInput, mapInput);
+    data = diagnostics
+      ? await withMemoryLibraryPhase(diagnostics, 'overall', () =>
+          loadWorkspace(view, libraryInput, mapInput, diagnostics),
+        )
+      : await loadWorkspace(view, libraryInput, mapInput);
   } catch {
     return (
       <PageShell size="reading">
