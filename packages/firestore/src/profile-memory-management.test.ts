@@ -1,10 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { EmbeddingSpace, Records } from '@assistant/persistence';
-import { FieldValue } from '@google-cloud/firestore';
+import { FieldValue, type Transaction } from '@google-cloud/firestore';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { embeddingSpaceKey } from './memory.js';
 import { FirestoreProfileMemoryManagementRepository } from './profile-memory-management.js';
-import { decodeRecord, encodeRecord, type InstallationStore } from './store.js';
+import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from './store.js';
 import { disposeStore, emulatorStore } from './test-store.js';
 
 const space: EmbeddingSpace = {
@@ -15,6 +15,8 @@ const space: EmbeddingSpace = {
 };
 const vector = [1, 0, 0];
 const embeddingIdentity = { embeddingSpaceKey: embeddingSpaceKey(space) };
+const testAgentId = 'agent-a';
+const testContactId = 'owner-contact';
 
 function hash(content: string): string {
   return createHash('sha256').update(content).digest('hex');
@@ -57,6 +59,138 @@ function memory(
     ...patch,
   };
 }
+
+describe('Firestore profile memory witness writes', () => {
+  it('writes fresh unattributed witnesses for manual creates, including same-hash recreation', () => {
+    type CapturedWrite = {
+      operation: 'create' | 'set';
+      ref: { collection: string; id: string };
+      data: Record<string, unknown>;
+    };
+    const firstWrites: CapturedWrite[] = [];
+    const secondWrites: CapturedWrite[] = [];
+    const fakeStore = {
+      doc: (collection: string, id: string) => ({ collection, id }),
+      now: () => new Date('2026-09-19T15:00:00Z'),
+    } as unknown as InstallationStore;
+    const transaction = (writes: CapturedWrite[]) =>
+      ({
+        create: (ref: { collection: string; id: string }, data: Record<string, unknown>) =>
+          writes.push({ operation: 'create', ref, data }),
+        set: (ref: { collection: string; id: string }, data: Record<string, unknown>) =>
+          writes.push({ operation: 'set', ref, data }),
+      }) as unknown as Transaction;
+    const repository = new FirestoreProfileMemoryManagementRepository(fakeStore, space);
+    const content = 'same manual fact';
+    const input = {
+      memoryId: randomUUID(),
+      retrievalRevision: randomUUID(),
+      subjectContactId: testContactId,
+      content,
+      contentHash: hash(content),
+      domain: 'preferences',
+      importance: 3,
+      pinned: false,
+      embedding: vector,
+      embeddingSpaceKey: embeddingSpaceKey(space),
+    };
+
+    repository.createRecordInTransaction(transaction(firstWrites), testAgentId, input, new Date());
+    repository.createRecordInTransaction(
+      transaction(secondWrites),
+      testAgentId,
+      { ...input, retrievalRevision: randomUUID() },
+      new Date(),
+    );
+
+    const memoryWrites = [firstWrites, secondWrites].map((writes) =>
+      writes.find((write) => write.ref.collection === 'memories'),
+    );
+    const witnesses = memoryWrites.map((write) =>
+      write ? decodeRecord<Records['memories']>(write.data).memoryWriteWitness : undefined,
+    );
+    expect(memoryWrites.every((write) => write?.ref.id === input.memoryId)).toBe(true);
+    expect(witnesses[0]).toMatchObject({ contentHash: input.contentHash, attribution: null });
+    expect(witnesses[1]).toMatchObject({ contentHash: input.contentHash, attribution: null });
+    expect(witnesses[0]?.writeVersion).not.toBe(witnesses[1]?.writeVersion);
+    expect(
+      firstWrites.filter((write) => write.ref.collection === 'memoryContentHashes'),
+    ).toHaveLength(1);
+    expect(
+      secondWrites.filter((write) => write.ref.collection === 'memoryContentHashes'),
+    ).toHaveLength(1);
+  });
+
+  it('replaces prior/imported witness on a same-hash correction in the same transaction update', async () => {
+    const id = randomUUID();
+    const original = memory(id, testAgentId, testContactId, 'unchanged body', {
+      memoryWriteWitness: {
+        version: 1,
+        writeVersion: '22222222-2222-4222-8222-222222222222',
+        contentHash: hash('unchanged body'),
+        attribution: {
+          operationKey: 'b'.repeat(64),
+          requestHash: 'c'.repeat(64),
+          provenanceFingerprint: 'd'.repeat(64),
+        },
+      },
+    });
+    const memoryRef = { collection: 'memories', id };
+    const snapshot = {
+      exists: true,
+      id: documentKey(id),
+      ref: memoryRef,
+      data: () => original,
+    };
+    const writes: Array<{
+      operation: 'update' | 'set';
+      ref: { collection: string; id: string };
+      data: Record<string, unknown>;
+    }> = [];
+    const fakeStore = {
+      doc: (collection: string, key: string) => ({ collection, id: key }),
+      now: () => new Date('2026-09-19T15:00:00Z'),
+    } as unknown as InstallationStore;
+    const tx = {
+      get: async () => snapshot,
+      getAll: async (...refs: Array<{ collection: string; id: string }>) =>
+        refs.map((ref) =>
+          ref.collection === 'memoryTombstones'
+            ? { exists: false }
+            : { exists: true, get: (field: string) => (field === 'memoryId' ? id : undefined) },
+        ),
+      update: (ref: { collection: string; id: string }, data: Record<string, unknown>) =>
+        writes.push({ operation: 'update', ref, data }),
+      set: (ref: { collection: string; id: string }, data: Record<string, unknown>) =>
+        writes.push({ operation: 'set', ref, data }),
+    } as unknown as Transaction;
+    const repository = new FirestoreProfileMemoryManagementRepository(fakeStore, space);
+    const correction = {
+      memoryId: id,
+      expectedContentHash: original.contentHash,
+      content: original.content,
+      contentHash: original.contentHash,
+      embedding: vector,
+      embeddingSpaceKey: embeddingSpaceKey(space),
+    };
+
+    await repository.correctInTransaction(tx, testAgentId, correction);
+    await repository.correctInTransaction(tx, testAgentId, correction);
+
+    const updates = writes.filter((write) => write.operation === 'update');
+    expect(updates).toHaveLength(2);
+    const witnesses = updates.map(
+      (write) =>
+        decodeRecord<{ memoryWriteWitness: Records['memories']['memoryWriteWitness'] }>(write.data)
+          .memoryWriteWitness,
+    );
+    expect(witnesses[0]).toMatchObject({ contentHash: original.contentHash, attribution: null });
+    expect(witnesses[1]).toMatchObject({ contentHash: original.contentHash, attribution: null });
+    expect(witnesses[0]?.writeVersion).not.toBe(original.memoryWriteWitness?.writeVersion);
+    expect(witnesses[1]?.writeVersion).not.toBe(witnesses[0]?.writeVersion);
+    expect(updates.every((write) => write.ref === memoryRef)).toBe(true);
+  });
+});
 
 describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
   'Firestore profile memory management repository',
