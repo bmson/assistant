@@ -60,6 +60,84 @@ function memory(
   };
 }
 
+type CapturedMutationWrite = {
+  operation: 'update' | 'set';
+  ref: { collection: string; id: string };
+  data: Record<string, unknown>;
+};
+
+function fakeExistingMemoryRepository(
+  initial: Records['memories'],
+  options: {
+    memoryDocumentId?: string;
+    memoryExists?: boolean;
+    tombstoneExists?: boolean;
+    privacyErasureStatus?: string;
+    commitError?: Error;
+  } = {},
+) {
+  const agentId = testAgentId;
+  const memoryDocumentId = options.memoryDocumentId ?? initial.id;
+  const memoryRef = { collection: 'memories', id: documentKey(memoryDocumentId) };
+  let memoryData: Record<string, unknown> = { ...initial };
+  const writes: CapturedMutationWrite[] = [];
+  const fakeStore = {
+    now: () => new Date('2026-09-19T15:00:00Z'),
+    collection: (collection: string) => ({
+      limit: (limit: number) => ({ kind: 'query', collection, limit }),
+    }),
+    doc: (collection: string, id: string) => ({ collection, id: documentKey(id) }),
+    db: {
+      runTransaction: async <T>(callback: (tx: Transaction) => Promise<T>): Promise<T> => {
+        const staged: CapturedMutationWrite[] = [];
+        const agentSnapshot = {
+          exists: true,
+          id: documentKey(agentId),
+          get: (field: string) => (field === 'id' ? agentId : undefined),
+        };
+        const transaction = {
+          get: async (ref: { collection?: string; kind?: string; id?: string }) => {
+            if (ref.kind === 'query') return { size: 1, docs: [agentSnapshot] };
+            if (ref.collection === 'memories')
+              return {
+                exists: options.memoryExists !== false,
+                id: documentKey(memoryDocumentId),
+                ref: memoryRef,
+                data: () => ({ ...memoryData }),
+              };
+            if (ref.collection === 'privacyErasureJobs')
+              return {
+                exists: options.privacyErasureStatus !== undefined,
+                get: (field: string) =>
+                  field === 'status' ? options.privacyErasureStatus : undefined,
+              };
+            if (ref.collection === 'memoryTombstones')
+              return { exists: options.tombstoneExists === true };
+            return { exists: false };
+          },
+          update: (ref: { collection: string; id: string }, data: Record<string, unknown>) =>
+            staged.push({ operation: 'update', ref, data }),
+          set: (ref: { collection: string; id: string }, data: Record<string, unknown>) =>
+            staged.push({ operation: 'set', ref, data }),
+        } as unknown as Transaction;
+        const result = await callback(transaction);
+        if (options.commitError) throw options.commitError;
+        for (const write of staged) {
+          writes.push(write);
+          if (write.operation === 'update' && write.ref.collection === 'memories')
+            memoryData = { ...memoryData, ...write.data };
+        }
+        return result;
+      },
+    },
+  } as unknown as InstallationStore;
+  return {
+    repository: new FirestoreProfileMemoryManagementRepository(fakeStore, space),
+    getMemory: () => ({ ...memoryData }),
+    writes,
+  };
+}
+
 describe('Firestore profile memory witness writes', () => {
   it('writes fresh unattributed witnesses for manual creates, including same-hash recreation', () => {
     type CapturedWrite = {
@@ -190,6 +268,202 @@ describe('Firestore profile memory witness writes', () => {
     expect(witnesses[1]?.writeVersion).not.toBe(witnesses[0]?.writeVersion);
     expect(updates.every((write) => write.ref === memoryRef)).toBe(true);
   });
+
+  it('rotates an unattributed witness on each eligible same-hash lifecycle write', async () => {
+    const id = randomUUID();
+    const content = 'same lifecycle fact';
+    const contentHash = hash(content);
+    const priorWitness = {
+      version: 1 as const,
+      writeVersion: '11111111-1111-4111-8111-111111111111',
+      contentHash,
+      attribution: {
+        operationKey: 'b'.repeat(64),
+        requestHash: 'c'.repeat(64),
+        provenanceFingerprint: 'd'.repeat(64),
+      },
+    };
+    const initial = memory(id, testAgentId, testContactId, content, {
+      expiresAt: new Date('2026-09-18T00:00:00Z'),
+      supersededById: randomUUID(),
+      quarantined: true,
+      memoryWriteWitness: priorWitness,
+    });
+    const fixture = fakeExistingMemoryRepository(initial);
+    const lifecycleWrites = [
+      {
+        name: 'confirm',
+        invoke: () => fixture.repository.confirm(id),
+        fields: { confidence: '1.00', ownerConfirmed: true, quarantined: false },
+      },
+      {
+        name: 'restore',
+        invoke: () => fixture.repository.restore(id),
+        fields: {
+          expiresAt: null,
+          supersededById: null,
+          confidence: '1.00',
+          ownerConfirmed: true,
+          quarantined: false,
+        },
+      },
+      {
+        name: 'approveQuarantined',
+        invoke: () => fixture.repository.approveQuarantined(id),
+        fields: { quarantined: false },
+      },
+    ];
+
+    let previousVersion = priorWitness.writeVersion;
+    const writtenVersions = new Set<string>();
+    for (const lifecycleWrite of lifecycleWrites) {
+      for (let repetition = 0; repetition < 2; repetition += 1) {
+        expect(await lifecycleWrite.invoke(), `${lifecycleWrite.name} ${repetition}`).toMatchObject(
+          { status: 'updated' },
+        );
+        const update = fixture.writes
+          .filter((write) => write.operation === 'update' && write.ref.collection === 'memories')
+          .at(-1);
+        expect(update).toBeDefined();
+        const witness = update?.data
+          .memoryWriteWitness as Records['memories']['memoryWriteWitness'];
+        expect(witness).toMatchObject({ contentHash, attribution: null });
+        expect(witness?.writeVersion).not.toBe(previousVersion);
+        expect(writtenVersions.has(witness?.writeVersion ?? '')).toBe(false);
+        writtenVersions.add(witness?.writeVersion ?? '');
+        previousVersion = witness?.writeVersion ?? '';
+        expect(update?.data).toMatchObject(lifecycleWrite.fields);
+        expect(Object.keys(update?.data ?? {}).sort()).toEqual(
+          [...Object.keys(lifecycleWrite.fields), 'memoryWriteWitness'].sort(),
+        );
+      }
+    }
+
+    expect([...writtenVersions]).toHaveLength(6);
+    expect(fixture.writes.filter((write) => write.operation === 'set')).toHaveLength(6);
+    expect(fixture.getMemory()).toMatchObject({
+      id,
+      agentId: testAgentId,
+      subjectContactId: testContactId,
+      content,
+      contentHash,
+      source: initial.source,
+      importance: initial.importance,
+      pinned: initial.pinned,
+      memoryWriteWitness: { contentHash, attribution: null },
+    });
+  });
+
+  it('leaves the witness unchanged for prominence-only writes', async () => {
+    const id = randomUUID();
+    const content = 'prominence does not change currentness content';
+    const priorWitness = {
+      version: 1 as const,
+      writeVersion: '22222222-2222-4222-8222-222222222222',
+      contentHash: hash(content),
+      attribution: {
+        operationKey: 'e'.repeat(64),
+        requestHash: 'f'.repeat(64),
+        provenanceFingerprint: 'a'.repeat(64),
+      },
+    };
+    const fixture = fakeExistingMemoryRepository(
+      memory(id, testAgentId, testContactId, content, { memoryWriteWitness: priorWitness }),
+    );
+
+    expect(await fixture.repository.setProminence(id, 'always')).toMatchObject({
+      status: 'updated',
+    });
+    const update = fixture.writes.find(
+      (write) => write.operation === 'update' && write.ref.collection === 'memories',
+    );
+    expect(update?.data).toEqual({ pinned: true });
+    expect(fixture.getMemory().memoryWriteWitness).toEqual(priorWitness);
+  });
+
+  it('keeps existing no-write guards and aborts malformed or failed writes without partial state', async () => {
+    const id = randomUUID();
+    const content = 'guarded lifecycle fact';
+    const base = memory(id, testAgentId, testContactId, content);
+    const missingHash = memory(id, testAgentId, testContactId, content);
+    delete (missingHash as Partial<Records['memories']>).contentHash;
+    const invalidCases: Array<{
+      name: string;
+      row: Records['memories'];
+      options?: Parameters<typeof fakeExistingMemoryRepository>[1];
+      result: { status: 'not-found' | 'tombstoned' };
+    }> = [
+      {
+        name: 'missing memory',
+        row: base,
+        options: { memoryExists: false },
+        result: { status: 'not-found' },
+      },
+      {
+        name: 'foreign owner',
+        row: { ...base, agentId: 'agent-b' },
+        result: { status: 'not-found' },
+      },
+      {
+        name: 'mismatched embedded id',
+        row: { ...base, id: randomUUID() },
+        options: { memoryDocumentId: id },
+        result: { status: 'not-found' },
+      },
+      {
+        name: 'missing hash',
+        row: missingHash,
+        result: { status: 'not-found' },
+      },
+      {
+        name: 'empty hash',
+        row: { ...base, contentHash: '' },
+        result: { status: 'not-found' },
+      },
+      {
+        name: 'non-string hash',
+        row: { ...base, contentHash: null as unknown as string },
+        result: { status: 'not-found' },
+      },
+      {
+        name: 'tombstone',
+        row: base,
+        options: { tombstoneExists: true },
+        result: { status: 'tombstoned' },
+      },
+    ];
+
+    for (const invalidCase of invalidCases) {
+      const fixture = fakeExistingMemoryRepository(invalidCase.row, invalidCase.options);
+      expect(await fixture.repository.confirm(id), invalidCase.name).toEqual(invalidCase.result);
+      expect(fixture.writes, invalidCase.name).toHaveLength(0);
+    }
+
+    const erasureFixture = fakeExistingMemoryRepository(base, {
+      privacyErasureStatus: 'running',
+    });
+    await expect(erasureFixture.repository.confirm(id)).rejects.toThrow(
+      'Privacy erasure is in progress',
+    );
+    expect(erasureFixture.writes).toHaveLength(0);
+
+    const malformedHashFixture = fakeExistingMemoryRepository({
+      ...base,
+      contentHash: 'not-a-sha256',
+      memoryWriteWitness: null,
+    });
+    expect(await malformedHashFixture.repository.confirm(id)).toMatchObject({ status: 'updated' });
+    expect(
+      malformedHashFixture.writes.find((write) => write.ref.collection === 'memories')?.data
+        .memoryWriteWitness,
+    ).toBeNull();
+
+    const commitFailure = new Error('synthetic transaction commit failure');
+    const failedFixture = fakeExistingMemoryRepository(base, { commitError: commitFailure });
+    await expect(failedFixture.repository.confirm(id)).rejects.toThrow(commitFailure);
+    expect(failedFixture.writes).toHaveLength(0);
+    expect(failedFixture.getMemory()).toEqual(base);
+  });
 });
 
 describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
@@ -197,19 +471,43 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
   () => {
     let store: InstallationStore;
     let repository: FirestoreProfileMemoryManagementRepository;
+    let cleanupReadbackTargets: {
+      memoryIds: string[];
+      contentHashes: string[];
+      ownerCardIds: string[];
+    };
     const agentId = 'agent-a';
     const contactId = 'owner-contact';
 
     beforeEach(async () => {
       store = emulatorStore(() => new Date('2026-09-19T15:00:00Z'));
       repository = new FirestoreProfileMemoryManagementRepository(store, space);
+      cleanupReadbackTargets = { memoryIds: [], contentHashes: [], ownerCardIds: [] };
       await Promise.all([
         store.doc('agents', agentId).set({ id: agentId }),
         store.doc('contacts', contactId).set({ id: contactId, trust: 'owner' }),
       ]);
     });
 
-    afterEach(async () => disposeStore(store));
+    afterEach(async () => {
+      if (cleanupReadbackTargets.memoryIds.length === 0) {
+        await disposeStore(store);
+        return;
+      }
+
+      try {
+        await store.db.recursiveDelete(store.root);
+        for (const memoryId of cleanupReadbackTargets.memoryIds)
+          expect((await store.doc('memories', memoryId).get()).exists).toBe(false);
+        for (const contentHash of cleanupReadbackTargets.contentHashes)
+          expect((await store.doc('memoryContentHashes', contentHash).get()).exists).toBe(false);
+        for (const ownerCardId of cleanupReadbackTargets.ownerCardIds)
+          expect((await store.doc('ownerCards', ownerCardId).get()).exists).toBe(false);
+        expect(await store.root.listCollections()).toHaveLength(0);
+      } finally {
+        await store.db.terminate();
+      }
+    });
 
     async function seed(row: Records['memories']): Promise<void> {
       await Promise.all([
@@ -275,6 +573,213 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       await store.doc('memoryTombstones', row.contentHash).set({ contentHash: row.contentHash });
       expect(await repository.get(id)).toBeNull();
       expect(await repository.confirm(id)).toEqual({ status: 'tombstoned' });
+    });
+
+    it('invalidates the prior witness across a persisted same-hash lifecycle A-B-A', async () => {
+      const lifecycleCases = [
+        {
+          name: 'confirm',
+          invoke: (id: string) => repository.confirm(id),
+          fieldsA: {
+            expiresAt: null,
+            supersededById: null,
+            confidence: '1.00',
+            ownerConfirmed: true,
+            quarantined: false,
+          },
+          fieldsB: { confidence: '0.70', ownerConfirmed: false, quarantined: true },
+        },
+        {
+          name: 'restore',
+          invoke: (id: string) => repository.restore(id),
+          fieldsA: {
+            expiresAt: null,
+            supersededById: null,
+            confidence: '1.00',
+            ownerConfirmed: true,
+            quarantined: false,
+          },
+          fieldsB: {
+            expiresAt: new Date('2026-09-18T00:00:00Z'),
+            confidence: '0.70',
+            ownerConfirmed: false,
+            quarantined: true,
+          },
+        },
+        {
+          name: 'approveQuarantined',
+          invoke: (id: string) => repository.approveQuarantined(id),
+          fieldsA: { quarantined: false },
+          fieldsB: { quarantined: true },
+        },
+      ];
+      const versions = new Set<string>();
+
+      for (const lifecycle of lifecycleCases) {
+        const id = randomUUID();
+        const content = `same-hash lifecycle ${lifecycle.name}`;
+        const contentHash = hash(content);
+        const priorWitness = {
+          version: 1 as const,
+          writeVersion: randomUUID(),
+          contentHash,
+          attribution: {
+            operationKey: 'b'.repeat(64),
+            requestHash: 'c'.repeat(64),
+            provenanceFingerprint: 'd'.repeat(64),
+          },
+        };
+        // This seeded attribution represents history only; it is not minted by this test.
+        const original = memory(id, agentId, contactId, content, {
+          expiresAt: null,
+          supersededById: null,
+          ownerConfirmed: true,
+          confidence: '1.00',
+          quarantined: false,
+          memoryWriteWitness: priorWitness,
+        });
+        cleanupReadbackTargets.memoryIds.push(id);
+        cleanupReadbackTargets.contentHashes.push(contentHash);
+        cleanupReadbackTargets.ownerCardIds.push(agentId);
+        await seed(original);
+
+        const initialA = decodeRecord<Records['memories']>(
+          (await store.doc('memories', id).get()).data(),
+        );
+        expect(initialA).toMatchObject({
+          id,
+          content,
+          contentHash,
+          ...lifecycle.fieldsA,
+          memoryWriteWitness: priorWitness,
+        });
+
+        await store.doc('memories', id).update(lifecycle.fieldsB);
+        const stateB = decodeRecord<Records['memories']>(
+          (await store.doc('memories', id).get()).data(),
+        );
+        expect(stateB).toMatchObject({
+          id,
+          content,
+          contentHash,
+          ...lifecycle.fieldsB,
+          memoryWriteWitness: priorWitness,
+        });
+
+        let previousVersion: string = priorWitness.writeVersion;
+        const assertPersistedA = async () => {
+          expect(await lifecycle.invoke(id)).toMatchObject({ status: 'updated' });
+          const saved = decodeRecord<Records['memories']>(
+            (await store.doc('memories', id).get()).data(),
+          );
+          const witness = saved.memoryWriteWitness;
+          expect(witness).toMatchObject({ contentHash, attribution: null });
+          expect(witness?.writeVersion).not.toBe(previousVersion);
+          expect(versions.has(witness?.writeVersion ?? '')).toBe(false);
+          versions.add(witness?.writeVersion ?? '');
+          previousVersion = witness?.writeVersion ?? '';
+          expect(saved).toMatchObject({
+            id,
+            agentId,
+            subjectContactId: contactId,
+            content,
+            contentHash,
+            ...lifecycle.fieldsA,
+          });
+        };
+
+        await assertPersistedA();
+        await assertPersistedA();
+        expect((await store.doc('memoryTombstones', contentHash).get()).exists).toBe(false);
+        expect((await store.doc('memoryContentHashes', contentHash).get()).get('memoryId')).toBe(
+          id,
+        );
+      }
+
+      expect([...versions]).toHaveLength(6);
+    });
+
+    it('rolls back a staged lifecycle witness when the transaction callback fails', async () => {
+      const id = randomUUID();
+      const content = 'aborted lifecycle update';
+      const contentHash = hash(content);
+      const priorWitness = {
+        version: 1 as const,
+        writeVersion: '55555555-5555-4555-8555-555555555555',
+        contentHash,
+        attribution: {
+          operationKey: 'b'.repeat(64),
+          requestHash: 'c'.repeat(64),
+          provenanceFingerprint: 'd'.repeat(64),
+        },
+      };
+      const row = memory(id, agentId, contactId, content, {
+        ownerConfirmed: false,
+        confidence: '0.70',
+        quarantined: true,
+        memoryWriteWitness: priorWitness,
+      });
+      cleanupReadbackTargets.memoryIds.push(id);
+      cleanupReadbackTargets.contentHashes.push(contentHash);
+      cleanupReadbackTargets.ownerCardIds.push(agentId);
+      await seed(row);
+      await store.doc('ownerCards', agentId).set({
+        agentId,
+        content: 'existing owner card',
+        compiledAt: new Date('2026-09-19T14:00:00Z'),
+      });
+
+      const failure = new Error('synthetic abort after staged memory update');
+      const runTransaction = store.db.runTransaction.bind(store.db);
+      const failingDb = new Proxy(store.db, {
+        get(target, property) {
+          if (property === 'runTransaction') {
+            return <T>(callback: (tx: Transaction) => Promise<T>): Promise<T> =>
+              runTransaction((transaction) => {
+                const failingTransaction = new Proxy(transaction, {
+                  get(tx, txProperty) {
+                    if (txProperty === 'update') {
+                      const update = Reflect.get(tx, txProperty, tx) as (
+                        ...args: unknown[]
+                      ) => unknown;
+                      return (...args: unknown[]) => {
+                        update.apply(tx, args);
+                        throw failure;
+                      };
+                    }
+                    const value = Reflect.get(tx, txProperty, tx);
+                    return typeof value === 'function' ? value.bind(tx) : value;
+                  },
+                }) as Transaction;
+                return callback(failingTransaction);
+              });
+          }
+          const value = Reflect.get(target, property, target);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+      const failingStore = new Proxy(store, {
+        get(target, property, receiver) {
+          return property === 'db' ? failingDb : Reflect.get(target, property, receiver);
+        },
+      });
+      const failingRepository = new FirestoreProfileMemoryManagementRepository(failingStore, space);
+
+      await expect(failingRepository.confirm(id)).rejects.toThrow(failure);
+      const saved = decodeRecord<Records['memories']>(
+        (await store.doc('memories', id).get()).data(),
+      );
+      expect(saved).toMatchObject({
+        ownerConfirmed: false,
+        confidence: '0.70',
+        quarantined: true,
+        content,
+        contentHash,
+        memoryWriteWitness: priorWitness,
+      });
+      expect((await store.doc('ownerCards', agentId).get()).data()).toMatchObject({
+        content: 'existing owner card',
+      });
     });
 
     it('corrects with a hash CAS while preserving ownership and source provenance', async () => {
