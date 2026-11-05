@@ -33,6 +33,8 @@ describe('redactAuditText', () => {
       '+47 912 34 567',
       '+1 415 555 0132',
       '415 555 0123',
+      '415 555 01 23',
+      '44 20 7946 0958',
     ]) {
       expect(redactAuditText(`Call ${phone} today`)).toBe('Call [phone] today');
     }
@@ -59,16 +61,25 @@ describe('redactAuditText', () => {
     for (const text of [
       'Total USD 10.99 415-555-0123.',
       'Total 10.99 415-555-0123.',
+      'Total $10.99 415-555-0123.',
       'Total $ 10.99 415-555-0123.',
+      'Total: 10.99 415-555-0123.',
       'Total 10.9 415-555-0123.',
       'Total 10.999 415-555-0123.',
+      'Total 123456.99 415-555-0123.',
     ]) {
       expect(redactAuditText(text)).toBe(text.replace('415-555-0123', '[phone]'));
     }
   });
 
-  it('does not count a protected amount toward a short code phone match', () => {
-    expect(redactAuditText('Total 10.99 123-456.')).toBe('Total 10.99 123-456.');
+  it('redacts an ambiguous amount and short code when the joined run is phone-shaped', () => {
+    expect(redactAuditText('Total 10.99 123-456.')).toBe('Total [phone].');
+  });
+
+  it('redacts a full phone-shaped run even when its prefix looks like an amount', () => {
+    expect(redactAuditText('Total 415.55 50123.')).toBe('Total [phone].');
+    expect(redactAuditText('Total 415.555.0123.')).toBe('Total [phone].');
+    expect(redactAuditText('Total 44.20 7946 0958.')).toBe('Total [phone].');
   });
 
   it('redacts a written extension along with its phone number', () => {

@@ -43,10 +43,20 @@ const LONG_DIGITS = /(?<![\w.])\d{9,}(?![\w.])/g;
  * common national and country-code phone formats have at least nine.
  */
 const PHONE_MIN_DIGITS = 9;
-/** Keep currency- or label-marked decimal amounts from joining a nearby phone. */
-const PROTECTED_AMOUNT =
-  /(?:\p{Sc}\s*\d+(?:,\d{3})*\.\d+|\b(?:USD|EUR|GBP|CAD|AUD|NZD|JPY|CHF|SEK|NOK|DKK|INR|CNY|MXN|BRL|SGD|HKD|KRW|PLN|THB|ZAR|ILS|TRY)\s+\d+(?:,\d{3})*\.\d+|\b(?:total|amount|cost|price|fee|paid)\s+(?:(?:\p{Sc}\s*|\b(?:USD|EUR|GBP|CAD|AUD|NZD|JPY|CHF|SEK|NOK|DKK|INR|CNY|MXN|BRL|SGD|HKD|KRW|PLN|THB|ZAR|ILS|TRY)\s+)?)\d+(?:,\d{3})*\.\d+)/giu;
+const PHONE_AT_START = new RegExp(PHONE.source, 'iu');
+/** Explicitly marked decimal amounts that may sit immediately before a phone. */
+const AMOUNT_PREFIX =
+  /(?:\p{Sc}\s*|\b(?:USD|EUR|GBP|CAD|AUD|NZD|JPY|CHF|SEK|NOK|DKK|INR|CNY|MXN|BRL|SGD|HKD|KRW|PLN|THB|ZAR|ILS|TRY)\s+|\b(?:total|amount|cost|price|fee|paid)\s*:\s*|\b(?:total|amount|cost|price|fee|paid)\s+)(?:(?:\p{Sc}\s*|\b(?:USD|EUR|GBP|CAD|AUD|NZD|JPY|CHF|SEK|NOK|DKK|INR|CNY|MXN|BRL|SGD|HKD|KRW|PLN|THB|ZAR|ILS|TRY)\s+)?)\d+(?:,\d{3})*\.\d+(?=\s+)/giu;
 
+function startsWithEligiblePhone(text: string): boolean {
+  const leadingWhitespace = text.match(/^\s*/)?.[0].length ?? 0;
+  const candidate = text.slice(leadingWhitespace);
+  const match = PHONE_AT_START.exec(candidate);
+  const phone = match?.[1];
+  return (
+    match?.index === 0 && phone !== undefined && phone.replace(/\D/g, '').length >= PHONE_MIN_DIGITS
+  );
+}
 function redactPhoneShapes(text: string): string {
   return text.replace(PHONE, (match, phone: string) => {
     // Count only the phone digits, not an optional extension.
@@ -56,9 +66,14 @@ function redactPhoneShapes(text: string): string {
 }
 
 function redactPhonesPreservingAmounts(text: string): string {
+  const protectedAmounts = [...text.matchAll(AMOUNT_PREFIX)].filter((amount) =>
+    startsWithEligiblePhone(text.slice(amount.index + amount[0].length)),
+  );
+  if (protectedAmounts.length === 0) return redactPhoneShapes(text);
+
   let output = '';
   let cursor = 0;
-  for (const amount of text.matchAll(PROTECTED_AMOUNT)) {
+  for (const amount of protectedAmounts) {
     const start = amount.index;
     output += redactPhoneShapes(text.slice(cursor, start));
     output += amount[0];
