@@ -561,7 +561,10 @@ struct BriefingCardView: View {
             .fixedSize(horizontal: false, vertical: true)
             .padding(.horizontal, 6)
             .padding(.vertical, 3)
-            .background(AssistantTheme.sunken(for: colorScheme), in: Capsule())
+            .background(
+                AssistantTheme.sunken(for: colorScheme),
+                in: RoundedRectangle(cornerRadius: AssistantTheme.controlCornerRadius, style: .continuous)
+            )
         return Group {
             if item.meta.isEmpty {
                 details
