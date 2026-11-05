@@ -582,6 +582,7 @@ describe('month-end run rate', () => {
   it('uses the Google usage horizon, credits and separate currencies', () => {
     const forecast = billingForecast(report);
     expect(forecast?.observedDays).toBe(15);
+    expect(forecast?.throughBasis).toBe('provider_reported_usage');
     expect(forecast?.totals).toEqual([
       { currency: 'USD', spent: 30, dailyAverage: 2, projected: 60 },
       { currency: 'EUR', spent: 15, dailyAverage: 1, projected: 30 },
@@ -608,7 +609,20 @@ describe('month-end run rate', () => {
       fetchedAt: '2024-02-16T00:00:00Z',
     });
     expect(forecast?.daysInMonth).toBe(29);
+    expect(forecast?.throughBasis).toBe('fetch_time_proxy');
+    expect(forecast?.through).toBe('2024-02-16T00:00:00Z');
     expect(forecast?.totals[0]?.projected).toBe(58);
+  });
+
+  it('does not invent provider usage freshness for fetch-time forecasts', () => {
+    const forecast = billingForecast({
+      ...report,
+      id: 'openrouter',
+      latestUsageAt: null,
+      fetchedAt: '2026-09-16T00:00:00Z',
+    });
+    expect(forecast?.throughBasis).toBe('fetch_time_proxy');
+    expect(forecast?.through).toBe('2026-09-16T00:00:00Z');
   });
 
   it('projects amount-only reported cost without claiming an after-credits amount', () => {

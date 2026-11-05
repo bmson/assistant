@@ -234,6 +234,7 @@ describe('provider billing presentation', () => {
             ],
             forecast: {
               through: '2026-09-24T00:00:00Z',
+              throughBasis: 'provider_reported_usage',
               observedDays: 23,
               daysInMonth: 30,
               totals: [{ currency: 'USD', spent: 9, dailyAverage: 0.39, projected: 11.7 }],
@@ -286,6 +287,7 @@ it('shows forecast and inclusion without creating a second Vertex total', () => 
           ],
           forecast: {
             through: '2026-09-16T00:00:00Z',
+            throughBasis: 'provider_reported_usage',
             observedDays: 15,
             daysInMonth: 30,
             totals: [{ currency: 'USD', spent: 15, dailyAverage: 1, projected: 30 }],
@@ -299,12 +301,33 @@ it('shows forecast and inclusion without creating a second Vertex total', () => 
           status: 'included',
           includedIn: 'google-cloud',
         },
+        {
+          ...report,
+          id: 'openrouter',
+          label: 'OpenRouter',
+          status: 'reported',
+          lines: [
+            { service: 'OpenRouter', detail: '', currency: 'USD', cost: 15, credits: 0, net: 15 },
+          ],
+          forecast: {
+            through: '2026-09-16T00:00:00Z',
+            throughBasis: 'fetch_time_proxy',
+            observedDays: 15,
+            daysInMonth: 30,
+            totals: [{ currency: 'USD', spent: 15, dailyAverage: 1, projected: 30 }],
+            message: 'Assumes similar usage.',
+          },
+        },
       ]}
     />,
   );
   expect(html).toContain('Estimated month end');
   expect(html).toContain('$30.00');
   expect(html).toContain('Average per day');
+  expect(html).toContain('Provider usage through 2026-09-16T00:00:00Z.');
+  expect(html).toContain(
+    'Fetch time 2026-09-16T00:00:00Z used as a proxy for the usage cutoff; provider usage timestamp unavailable.',
+  );
   expect(html).toContain('Vertex is included only');
   expect(html).toContain('In Google Cloud report');
   expect(html).not.toContain('Unavailable');

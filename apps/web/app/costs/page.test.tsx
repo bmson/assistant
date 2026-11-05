@@ -116,7 +116,7 @@ describe.skipIf(!localEmulator)('Firestore costs page with PostgreSQL offline', 
     expect(html).toContain('$0.12');
     expect(html).toContain('<form');
     expect(html).toContain('Update caps');
-    expect(html).toContain('estimate month-end costs');
+    expect(html).toContain('available provider billing feeds');
     expect(html).toContain('Assistant spending limits');
     expect(html).not.toContain('href="/tasks');
   });
