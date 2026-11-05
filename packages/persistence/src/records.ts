@@ -9,6 +9,7 @@ import type {
 } from './owner-call-operation-receipt.js';
 import type { OwnerEditorOperationRecord } from './owner-editor.js';
 import type { OwnerCorrection } from './owner-memory-correction.js';
+import type { OwnerMemoryWriteWitness } from './owner-memory-write-witness.js';
 import type { OwnerCallActionGrantUsage } from './phone-call-owner-action-grant.js';
 
 export interface Records {
@@ -485,6 +486,8 @@ export interface Records {
     confidence: string;
     contentHash: string;
     ownerCorrection?: OwnerCorrection | null;
+    /** Durable identity of one memory write; absent/null is legacy unknown. */
+    memoryWriteWitness?: OwnerMemoryWriteWitness | null;
     goalId: string | null;
     originTrust: string;
     category: string;

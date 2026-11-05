@@ -19,6 +19,7 @@ RUN pnpm install --frozen-lockfile --filter @assistant/document-processor... \
 
 FROM mirror.gcr.io/library/node:26-slim
 WORKDIR /app
+COPY infra/gcp/release-contracts.json /app/infra/gcp/release-contracts.json
 # tesseract (OCR) + poppler (pdftoppm rasterizes scanned PDFs page-by-page).
 RUN apt-get update \
   && apt-get upgrade -y --no-install-recommends \

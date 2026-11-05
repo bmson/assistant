@@ -683,6 +683,41 @@ describe('migration format integrity', () => {
     input.manifest.bundleChecksum = checksum(input.records);
     expect(() => validate(input)).toThrow('Owner editor runtime metadata cannot be imported');
   });
+  it('rejects incoming memory witnesses before accepting recomputed portable checksums', () => {
+    for (const field of ['memoryWriteWitness', 'memory_write_witness']) {
+      const input = bundle();
+      const data = {
+        id: 'memory-1',
+        contentHash: 'a'.repeat(64),
+        [field]: {
+          version: 1,
+          writeVersion: '11111111-1111-4111-8111-111111111111',
+          contentHash: 'a'.repeat(64),
+          attribution: null,
+        },
+      } as MigrationRecord['data'];
+      const record: MigrationRecord = {
+        table: 'memories',
+        collection: 'memories',
+        id: 'memory-1',
+        data,
+        checksum: checksum(data),
+      };
+      input.records.push(record);
+      input.manifest.tables.memories = {
+        collection: 'memories',
+        count: 1,
+        checksum: checksum([record]),
+      };
+      input.manifest.coverage.supportedTables = ['agents', 'memories'];
+      input.manifest.recordCount = input.records.length;
+      input.manifest.bundleChecksum = checksum(input.records);
+
+      expect(() => validate(input)).toThrow(
+        'Installation-local memory write witness cannot appear in a portable migration bundle',
+      );
+    }
+  });
   it('rejects duplicate records even with newly recomputed bundle and table checksums', () => {
     const input = bundle();
     const first = input.records[0];

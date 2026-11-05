@@ -11,6 +11,7 @@ import type {
   OwnerCorrection,
   OwnerEditorCommand,
   OwnerEditorTerminalResult,
+  OwnerMemoryWriteWitness,
   Records,
 } from '@assistant/persistence';
 import { sql } from 'drizzle-orm';
@@ -1318,6 +1319,7 @@ export const memories = pgTable(
     content: text('content').notNull(),
     contentHash: text('content_hash').notNull().unique(),
     ownerCorrection: jsonb('owner_correction').$type<OwnerCorrection>(),
+    memoryWriteWitness: jsonb('memory_write_witness').$type<OwnerMemoryWriteWitness>(),
     embedding: vector('embedding', { dimensions: 1536 }),
     /** Provider/model/width revision for the stored vector; null means legacy/unknown. */
     embeddingSpaceKey: text('embedding_space_key'),
@@ -1363,6 +1365,38 @@ export const memories = pgTable(
     check(
       'memories_domain_check',
       sql`${t.domain} IS NULL OR ${t.domain} IN ('identity','work','home','relationships','preferences','health','other')`,
+    ),
+    check(
+      'memories_memory_write_witness_check',
+      sql`CASE
+        WHEN ${t.memoryWriteWitness} IS NULL THEN TRUE
+        WHEN ${t.memoryWriteWitness} = 'null'::jsonb THEN TRUE
+        WHEN jsonb_typeof(${t.memoryWriteWitness}) IS DISTINCT FROM 'object' THEN FALSE
+        ELSE (
+          (${t.memoryWriteWitness} - ARRAY['version','writeVersion','contentHash','attribution']) = '{}'::jsonb
+          AND ${t.memoryWriteWitness} ?& ARRAY['version','writeVersion','contentHash','attribution']
+          AND jsonb_typeof(${t.memoryWriteWitness}->'version') = 'number'
+          AND (${t.memoryWriteWitness}->'version' = '1'::jsonb) IS TRUE
+          AND jsonb_typeof(${t.memoryWriteWitness}->'writeVersion') = 'string'
+          AND (${t.memoryWriteWitness}->>'writeVersion' ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$') IS TRUE
+          AND jsonb_typeof(${t.memoryWriteWitness}->'contentHash') = 'string'
+          AND (${t.memoryWriteWitness}->>'contentHash' ~ '^[0-9a-f]{64}$') IS TRUE
+          AND CASE
+            WHEN (${t.memoryWriteWitness}->'attribution') = 'null'::jsonb THEN TRUE
+            WHEN jsonb_typeof(${t.memoryWriteWitness}->'attribution') IS DISTINCT FROM 'object' THEN FALSE
+            ELSE (
+              ((${t.memoryWriteWitness}->'attribution') - ARRAY['operationKey','requestHash','provenanceFingerprint']) = '{}'::jsonb
+              AND (${t.memoryWriteWitness}->'attribution') ?& ARRAY['operationKey','requestHash','provenanceFingerprint']
+              AND jsonb_typeof((${t.memoryWriteWitness}->'attribution')->'operationKey') = 'string'
+              AND ((${t.memoryWriteWitness}->'attribution')->>'operationKey' ~ '^[0-9a-f]{64}$') IS TRUE
+              AND jsonb_typeof((${t.memoryWriteWitness}->'attribution')->'requestHash') = 'string'
+              AND ((${t.memoryWriteWitness}->'attribution')->>'requestHash' ~ '^[0-9a-f]{64}$') IS TRUE
+              AND jsonb_typeof((${t.memoryWriteWitness}->'attribution')->'provenanceFingerprint') = 'string'
+              AND ((${t.memoryWriteWitness}->'attribution')->>'provenanceFingerprint' ~ '^[0-9a-f]{64}$') IS TRUE
+            ) IS TRUE
+          END
+        ) IS TRUE
+      END`,
     ),
     index('memories_embedding_idx').using('hnsw', t.embedding.op('vector_cosine_ops')),
     index('memories_agent_category_idx').on(t.agentId, t.category, t.createdAt),

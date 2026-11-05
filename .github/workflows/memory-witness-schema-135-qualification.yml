@@ -1,0 +1,621 @@
+# Credential-free qualification of the exact schema-135 candidate images.
+# Images are built locally, never pushed; migration and service checks use only
+# an allocator-owned local PostgreSQL fixture.
+name: Memory witness schema 135 qualification
+# Bound: build step <=150m (six 24m builds, <=1m total kill grace, 5m
+# wrapper); image inspection/probes <=12m (eight probes at <=75s each, six
+# image inspections at <=5s each, plus <=90s wrapper/kill grace); exact lease
+# drain <=4m; manifest <=1m; image archive <=8m; checkout/setup/builder init
+# <=11m; builder teardown/artifact upload <=5m; job margin <=9m. Sum: 200m.
+concurrency:
+  group: memory-witness-135-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+on:
+  pull_request:
+    # Match all copied application/package/worker inputs and exact build/test files.
+    # iOS, audit screenshots/docs and unrelated GCP/IAM files are outside these contexts.
+    paths:
+      - ".github/workflows/memory-witness-schema-135-qualification.yml"
+      - ".dockerignore"
+      - "infra/docker/agent.Dockerfile"
+      - "infra/docker/web.Dockerfile"
+      - "infra/docker/browser-job.Dockerfile"
+      - "infra/docker/code-runner.Dockerfile"
+      - "infra/docker/document-processor.Dockerfile"
+      - "infra/docker/migrate.Dockerfile"
+      - "infra/docker/database-admin.sh"
+      - "infra/ci/install-postgres17.sh"
+      - "infra/ci/postgres-service.sh"
+      - "infra/ci/buildx-builder-lifecycle.py"
+      - "infra/ci/buildx-builder-lifecycle.test.py"
+      - "infra/gcp/release-contracts.json"
+      - "infra/gcp/release-manifest.mjs"
+      - "infra/gcp/release-schema-version.mjs"
+      - "infra/gcp/release-manifest.test.mjs"
+      - "infra/gcp/release-contract-134.test.mjs"
+      - "infra/gcp/release-contract-135.test.mjs"
+      - "infra/gcp/release-role-build-contract-135.test.mjs"
+      - "infra/gcp/fixtures/postgres-journal.schema134.json"
+      - "infra/gcp/fixtures/release-contracts.schema134.json"
+      - "apps/agent/**"
+      - "apps/web/**"
+      - "packages/**"
+      - "workers/browser-job/**"
+      - "workers/code-runner/**"
+      - "workers/document-processor/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "turbo.json"
+      - "tsconfig.base.json"
+      - "assistant.config.ts"
+      - "scripts/test.ts"
+      - "scripts/test-target.ts"
+      - "scripts/deny-test-egress.mjs"
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 200
+    permissions:
+      contents: read
+    env:
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
+      BUILDER: memory-witness-135-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Initialize runner-derived private paths
+        timeout-minutes: 1
+        env:
+          DOCKER_CONFIG: ${{ runner.temp }}/memory-witness-docker
+          PROOF: ${{ runner.temp }}/memory-witness-135-proof
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          printf 'DOCKER_CONFIG=%s\nPROOF=%s\n' "$DOCKER_CONFIG" "$PROOF" >> "$GITHUB_ENV"
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        timeout-minutes: 2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Prepare credential-free local Docker client
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -m 700 "$DOCKER_CONFIG" "$PROOF" "$RUNNER_TEMP/memory-witness-bin"
+          printf '{"auths":{}}\n' > "$DOCKER_CONFIG/config.json"
+          real_docker="$(command -v docker)"
+          printf '#!/usr/bin/env bash\nexec /usr/bin/env -u DOCKER_CONTEXT -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH %q --host unix:///var/run/docker.sock "$@"\n' "$real_docker" > "$RUNNER_TEMP/memory-witness-bin/docker"
+          chmod 700 "$RUNNER_TEMP/memory-witness-bin/docker"
+          echo "$RUNNER_TEMP/memory-witness-bin" >> "$GITHUB_PATH"
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
+          timeout --signal=TERM --kill-after=2s 10s docker version --format '{{json .Server}}' > "$PROOF/docker-server.json"
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa
+        timeout-minutes: 2
+        with:
+          version: 10.34.5
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        timeout-minutes: 2
+        with:
+          node-version: 26
+      - name: Record pinned build tool versions
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - "$PROOF/build-tool-versions.json" "$SOURCE_SHA" <<'PY'
+          import json,subprocess,sys
+          path,source_sha=sys.argv[1:]
+          def version(args): return subprocess.check_output(args,text=True,timeout=5).strip()
+          value={'sourceSha':source_sha,'job':'build','node':version(['node','--version']),'pnpm':version(['pnpm','--version']),'dockerBuildx':version(['docker','buildx','version'])}
+          assert value['node'].startswith('v26.'),value
+          assert value['pnpm']=='10.34.5',value
+          assert value['dockerBuildx']=='github.com/docker/buildx v0.38.1 0dbe87f36ed472fe36b6796c3f70b4210a731fc5',value
+          with open(path,'w') as f: json.dump(value,f,sort_keys=True);f.write('\n')
+          PY
+          python3 -B infra/ci/buildx-builder-lifecycle.test.py
+      - name: Create bounded local BuildKit builder
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 -B infra/ci/buildx-builder-lifecycle.py create \
+            --proof "$PROOF" --builder "$BUILDER" --source-sha "$SOURCE_SHA" \
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"
+      - name: Build all five runtime roles and the separate migration tool image
+        timeout-minutes: 150
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          build() {
+            role="$1"; file="$2"; shift 2
+            tag="local/memory-witness-${role}:${SOURCE_SHA}"
+            set +e
+            timeout --signal=TERM --kill-after=10s 24m docker buildx build --builder "$BUILDER" \
+              --platform linux/amd64 --load --file "$file" --build-arg "GIT_SHA=$SOURCE_SHA" \
+              --label "org.opencontainers.image.revision=$SOURCE_SHA" --tag "$tag" \
+              --metadata-file "$PROOF/${role}-build-metadata.json" --progress plain . \
+              2>&1 | head -c 8388609 > "$PROOF/${role}-build.log"
+            codes=("${PIPESTATUS[@]}")
+            set -e
+            (( $(wc -c < "$PROOF/${role}-build.log") <= 8388608 ))
+            [[ "${codes[0]}" == 0 && "${codes[1]}" == 0 ]]
+            printf '%s\n' "$tag" > "$PROOF/${role}-tag.txt"
+          }
+          build agent infra/docker/agent.Dockerfile
+          build web infra/docker/web.Dockerfile
+          build browser infra/docker/browser-job.Dockerfile
+          build code infra/docker/code-runner.Dockerfile
+          build processor infra/docker/document-processor.Dockerfile
+          build migration infra/docker/migrate.Dockerfile
+
+      - name: Inspect images and run bounded owned entrypoint probes
+        id: role_image_probes
+        timeout-minutes: 12
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - "$PROOF" "$SOURCE_SHA" <<'PY'
+          import hashlib,json,os,re,secrets,selectors,subprocess,sys,time
+          root,sha=sys.argv[1:]
+          lease_path=os.path.join(root,'owned-probe-leases.json')
+          leases=[]
+          def save_leases():
+              temp=lease_path+'.tmp'
+              with open(temp,'w') as f:
+                  json.dump({'sourceSha':sha,'leases':leases},f,sort_keys=True);f.write('\n');f.flush();os.fsync(f.fileno())
+              os.chmod(temp,0o600);os.replace(temp,lease_path)
+              directory=os.open(root,os.O_RDONLY)
+              try: os.fsync(directory)
+              finally: os.close(directory)
+          save_leases()
+          specs={
+            'agent':['node','--enable-source-maps','/app/index.mjs'],
+            'web':['node','/app/apps/web/server.js'],
+            'browser':['./node_modules/.bin/tsx','src/index.ts'],
+            'code':['./node_modules/.bin/tsx','src/index.ts'],
+            'processor':['./node_modules/.bin/tsx','src/index.ts'],
+            'migration':['pnpm','--filter','@assistant/db','reconcile'],
+          }
+          contract=open(os.path.join('infra','gcp','release-contracts.json'),'rb').read()
+          contract_sha=hashlib.sha256(contract).hexdigest()
+          expected_worker_error={
+              'browser':b'BROWSER_JOB_INPUT is not set',
+              'code':b'CODE_JOB_INPUT is not set',
+              'processor':b'DOCUMENT_JOB_INPUT is not set',
+          }
+          probe_receipts=[]
+          def inspect(name):
+              result=subprocess.run(['docker','container','inspect',name],capture_output=True,timeout=5)
+              if result.returncode:
+                  return None
+              return json.loads(result.stdout)[0]
+          def absent(name,cid):
+              by_name=subprocess.run(['docker','container','ls','--all','--no-trunc','--filter',f'name=^/{name}$','--format','{{.ID}} {{.Names}}'],capture_output=True,text=True,timeout=5,check=True).stdout.strip()
+              by_id=subprocess.run(['docker','container','ls','--all','--no-trunc','--filter',f'id={cid}','--format','{{.ID}} {{.Names}}'],capture_output=True,text=True,timeout=5,check=True).stdout.strip() if cid else ''
+              if by_name or by_id: raise RuntimeError(f'owned probe container remains: {name}')
+          def owned_probe(role,image_id,command,extra,expected):
+              name=f'memory-witness-{role}-{secrets.token_hex(16)}'
+              lease={'role':role,'name':name,'imageId':image_id,'containerId':None,'ownerLabel':name}
+              leases.append(lease);save_leases()
+              cid=None; output=bytearray(); exit_code=None; primary=None; cleanup=None; process=None
+              log_path=os.path.join(root,f'{role}-owned-probe.log')
+              try:
+                  create=['docker','container','create','--name',name,'--label',f'com.assistant.memory-witness.owner={name}','--network','none','--read-only','--log-driver','none',*extra,image_id,*command]
+                  created=subprocess.run(create,capture_output=True,text=True,timeout=10)
+                  if created.returncode: raise RuntimeError(f'{role} owned container create failed: {created.stderr[-2000:]}')
+                  cid=created.stdout.strip()
+                  if not re.fullmatch(r'[a-f0-9]{64}',cid): raise RuntimeError(f'{role} create returned invalid container ID')
+                  lease['containerId']=cid;save_leases()
+                  actual=inspect(name)
+                  if not actual or actual['Id']!=cid or actual['Image']!=image_id or actual['Name']!=f'/{name}' or actual['Config']['Labels'].get('com.assistant.memory-witness.owner')!=name: raise RuntimeError(f'{role} container identity mismatch')
+                  process=subprocess.Popen(['docker','container','start','--attach',name],stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+                  selector=selectors.DefaultSelector(); selector.register(process.stdout,selectors.EVENT_READ)
+                  deadline=time.monotonic()+15
+                  while True:
+                      if time.monotonic()>=deadline: raise TimeoutError(f'{role} entrypoint exceeded 15s')
+                      events=selector.select(min(0.25,max(0,deadline-time.monotonic())))
+                      eof=False
+                      for _,_ in events:
+                          chunk=os.read(process.stdout.fileno(),8192)
+                          if chunk:
+                              output.extend(chunk)
+                              if len(output)>65536: raise RuntimeError(f'{role} output exceeded 64KiB cap')
+                          else:
+                              eof=True
+                      if process.poll() is not None and eof: break
+                  exit_code=process.returncode
+                  if exit_code!=0: raise RuntimeError(f'{role} entrypoint exit {exit_code}')
+                  actual=inspect(name)
+                  if not actual or actual['Id']!=cid or actual['Image']!=image_id or actual['Name']!=f'/{name}' or actual['State']['Status']!='exited' or actual['State']['ExitCode']!=0: raise RuntimeError(f'{role} container did not exit successfully with the registered identity')
+                  if expected is not None and expected not in output: raise RuntimeError(f'{role} entrypoint missed fail-closed input diagnostic')
+                  if expected is None and bytes(output)!=contract: raise RuntimeError(f'{role} embedded contract bytes differ from source')
+              except Exception as error:
+                  primary=error
+              finally:
+                  if process is not None and process.poll() is None:
+                      process.terminate()
+                      try: process.wait(timeout=3)
+                      except subprocess.TimeoutExpired: process.kill(); process.wait(timeout=3)
+                  try:
+                      actual=inspect(name)
+                      if actual:
+                          if actual['Image']!=image_id or actual['Name']!=f'/{name}' or actual['Config']['Labels'].get('com.assistant.memory-witness.owner')!=name or (cid and actual['Id']!=cid): raise RuntimeError(f'{role} cleanup identity mismatch; refusing removal')
+                          cid=actual['Id']
+                          subprocess.run(['docker','container','rm','--force',name],capture_output=True,timeout=15,check=True)
+                      absent(name,cid)
+                      cleanup={'containerId':cid,'removed':bool(cid),'absenceVerified':True}
+                  except Exception as error:
+                      cleanup={'containerId':cid,'removed':False,'absenceVerified':False,'error':str(error)[:2000]}
+                  with open(log_path,'wb') as log: log.write(bytes(output[:65536]))
+                  probe_receipts.append({'role':role,'name':name,'containerId':cid,'imageId':image_id,'exitCode':exit_code,'outputSha256':hashlib.sha256(output).hexdigest(),'cleanup':cleanup})
+                  lease['containerId']=cid;lease['cleanup']=cleanup;save_leases()
+                  with open(os.path.join(root,'owned-probe-containers.json'),'w') as f:
+                      json.dump({'sourceSha':sha,'allContainersRemoved':len(probe_receipts)==8 and all(x['cleanup']['absenceVerified'] for x in probe_receipts),'expectedProbeCount':8,'probes':probe_receipts},f,sort_keys=True);f.write('\n')
+              if primary and cleanup and not cleanup['absenceVerified']: raise ExceptionGroup(f'{role} probe and cleanup failed',[primary,RuntimeError(cleanup['error'])])
+              if primary: raise primary
+              if not cleanup or not cleanup['absenceVerified']: raise RuntimeError(f'{role} probe container cleanup is unverified')
+          images={}
+          for role,cmd in specs.items():
+              tag=open(os.path.join(root,role+'-tag.txt')).read().strip()
+              value=json.loads(subprocess.check_output(['docker','image','inspect',tag],text=True,timeout=5))[0]
+              assert value['Config']['Cmd']==cmd,(role,value['Config']['Cmd'])
+              assert value['Config']['Labels']['org.opencontainers.image.revision']==sha
+              if role in ('agent','web'):
+                  assert f'BUILD_SHA={sha}' in value['Config']['Env']
+              if role != 'migration':
+                  owned_probe(f'{role}-contract',value['Id'],['/app/infra/gcp/release-contracts.json'],['--entrypoint','cat'],None)
+              if role in expected_worker_error:
+                  owned_probe(role,value['Id'],[],['--tmpfs','/tmp:rw,nosuid,nodev,size=16m','--env','ASSISTANT_TEST_NO_EXTERNAL_CREDENTIALS=1'],expected_worker_error[role])
+              images[role]=value['Id']
+          assert len(set(images.values()))==6
+          assert len(probe_receipts)==8 and len(leases)==8
+          assert all(x['cleanup']['absenceVerified'] for x in probe_receipts)
+          with open(os.path.join(root,'role-images.json'),'w') as f:
+              json.dump({'sourceSha':sha,'contractSha256':contract_sha,
+                         'imageIdBasis':'Docker local image configuration ID, not registry manifest digest',
+                         'images':images},f,sort_keys=True);f.write('\n')
+          PY
+      - name: Drain every pre-registered owned probe container
+        if: always()
+        timeout-minutes: 4
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p -m 700 "$PROOF"
+          python3 - "$PROOF/owned-probe-leases.json" "$PROOF/owned-probe-cleanup.json" "${{ steps.role_image_probes.outcome }}" <<'PY'
+          import json,os,re,subprocess,sys
+          source,receipt,probe_outcome=sys.argv[1:]
+          leases=json.load(open(source)) if os.path.isfile(source) else {'leases':[]}
+          if os.path.isfile(source) and leases.get('sourceSha')!=os.environ['SOURCE_SHA']:
+              raise SystemExit('probe cleanup registry source pin mismatch; refusing container mutations')
+          results=[]
+          if probe_outcome=='success' and len(leases.get('leases',[]))!=8:
+              raise SystemExit('successful role probe step did not register exactly eight owned containers')
+          def run(args,timeout):
+              return subprocess.run(args,capture_output=True,text=True,timeout=timeout)
+          def rows(value):
+              return run(['docker','container','ls','--all','--no-trunc','--filter',value,'--format','{{.ID}} {{.Names}}'],5)
+          for lease in leases.get('leases',[]):
+              name=lease['name'];image=lease['imageId'];cid=lease.get('containerId')
+              if (not re.fullmatch(r'memory-witness-(agent-contract|web-contract|browser-contract|code-contract|processor-contract|browser|code|processor)-[0-9a-f]{32}',name)
+                  or lease.get('ownerLabel')!=name or not re.fullmatch(r'sha256:[0-9a-f]{64}',image)
+                  or (cid is not None and not re.fullmatch(r'[0-9a-f]{64}',cid))):
+                  raise SystemExit('probe cleanup registry identity is malformed; refusing container mutations')
+              result={'name':name,'imageId':image,'containerId':cid,'removed':False,'absenceVerified':False}
+              try:
+                  inspected=run(['docker','container','inspect',name],5)
+                  if inspected.returncode==0:
+                      actual=json.loads(inspected.stdout)[0]
+                      actual_id=actual['Id']
+                      if actual['Name']!=f'/{name}' or actual['Image']!=image or actual['Config']['Labels'].get('com.assistant.memory-witness.owner')!=lease.get('ownerLabel') or (cid and cid!=actual_id):
+                          raise RuntimeError('registered name resolved to a different container identity; refusing removal')
+                      result['containerId']=actual_id
+                      removed=run(['docker','container','rm','--force',name],15)
+                      if removed.returncode: raise RuntimeError(removed.stderr[-2000:] or 'exact owned container remove failed')
+                      result['removed']=True
+                  elif inspected.returncode not in (1,125):
+                      raise RuntimeError(f'inspect failed with status {inspected.returncode}: {inspected.stderr[-1000:]}')
+                  by_name=rows(f'name=^/{name}$')
+                  if by_name.returncode: raise RuntimeError(f'name absence query failed: {by_name.stderr[-1000:]}')
+                  by_id=rows(f'id={cid}') if cid else None
+                  if by_id and by_id.returncode: raise RuntimeError(f'ID absence query failed: {by_id.stderr[-1000:]}')
+                  result['absenceVerified']=not by_name.stdout.strip() and (by_id is None or not by_id.stdout.strip())
+                  if not result['absenceVerified']: raise RuntimeError('registered container remains after cleanup')
+              except Exception as error:
+                  result['error']=str(error)[:2000]
+              results.append(result)
+          value={'sourceSha':leases.get('sourceSha'),'probeStepOutcome':probe_outcome,'registeredCount':len(leases.get('leases',[])),'completeProbeSet':len(leases.get('leases',[]))==8,'allRegisteredAbsent':all(x['absenceVerified'] for x in results),'containers':results}
+          with open(receipt,'w') as f: json.dump(value,f,sort_keys=True);f.write('\n')
+          if not value['allRegisteredAbsent']: raise SystemExit('registered owned probe cleanup is incomplete or unknown')
+          PY
+      - name: Admit exact local image IDs to the schema 135 manifest
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mapfile -t ids < <(python3 - "$PROOF/role-images.json" <<'PY'
+          import json,sys
+          x=json.load(open(sys.argv[1]))['images']
+          for role in ['agent','web','browser','code','processor']: print(x[role])
+          PY
+          )
+          node infra/gcp/release-manifest.mjs create "$PROOF/schema-135-local-image-manifest.json" \
+            "memory-witness-135-${SOURCE_SHA:0:12}" local.invalid/assistant agent,web,browser,code,processor postgres "${ids[@]}"
+          node infra/gcp/release-manifest.mjs validate "$PROOF/schema-135-local-image-manifest.json"
+          python3 - "$PROOF/schema-135-local-image-manifest.json" "$PROOF/role-images.json" <<'PY'
+          import json,sys
+          manifest,receipt=map(lambda p:json.load(open(p)),sys.argv[1:])
+          assert manifest['schemaVersion']==135
+          assert manifest['selected']==['agent','web','browser','code','processor']
+          for role in manifest['selected']:
+              assert manifest['components'][role]['digest']==receipt['images'][role]
+              assert manifest['components'][role]['schema']['min']==135
+              assert manifest['components'][role]['schema']['max']==135
+          PY
+      - name: Retain all runtime role images and the separate migration image for forward recovery qualification
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          timeout --signal=TERM --kill-after=10s 6m docker save \
+            "$(cat "$PROOF/agent-tag.txt")" "$(cat "$PROOF/web-tag.txt")" \
+            "$(cat "$PROOF/browser-tag.txt")" "$(cat "$PROOF/code-tag.txt")" \
+            "$(cat "$PROOF/processor-tag.txt")" "$(cat "$PROOF/migration-tag.txt")" \
+            | gzip -1 | head -c 4294967297 > "$PROOF/role-images.tar.gz"
+          (( $(wc -c < "$PROOF/role-images.tar.gz") <= 4294967296 ))
+          (cd "$PROOF" && sha256sum role-images.tar.gz > role-images.tar.gz.sha256)
+      - name: Remove only this job's builder
+        if: always()
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          if [[ -d "$PROOF" ]]; then
+            python3 -B infra/ci/buildx-builder-lifecycle.py cleanup --proof "$PROOF"
+          fi
+      - uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        if: always()
+        timeout-minutes: 3
+        with:
+          name: memory-witness-135-images-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/memory-witness-135-proof/
+          retention-days: 7
+          if-no-files-found: error
+
+  populated-upgrade:
+    needs: build
+    runs-on: ubuntu-24.04
+    # Bounded steps sum to <=66m; 9m remains for runner scheduling/diagnostics.
+    timeout-minutes: 75
+    permissions:
+      contents: read
+    env:
+      DATABASE_URL: postgres://assistant:assistant@localhost:5432/assistant
+      TEST_DATABASE_URL: postgres://assistant:assistant@localhost:5432/assistant_test
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
+      ASSISTANT_MEMORY_WITNESS_EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Initialize runner-derived private paths
+        timeout-minutes: 1
+        env:
+          DOCKER_CONFIG: ${{ runner.temp }}/memory-witness-db-docker
+          PROOF: ${{ runner.temp }}/memory-witness-135-db-proof
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          printf 'DOCKER_CONFIG=%s\nPROOF=%s\n' "$DOCKER_CONFIG" "$PROOF" >> "$GITHUB_ENV"
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        timeout-minutes: 2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        timeout-minutes: 3
+        with:
+          name: memory-witness-135-images-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/memory-witness-135-images
+      - name: Load immutable local role image IDs
+        timeout-minutes: 4
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -m 700 "$PROOF" "$DOCKER_CONFIG" "$RUNNER_TEMP/memory-witness-db-bin"
+          printf '{"auths":{}}\n' > "$DOCKER_CONFIG/config.json"
+          real_docker="$(command -v docker)"
+          printf '#!/usr/bin/env bash\nexec /usr/bin/env -u DOCKER_CONTEXT -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH %q --host unix:///var/run/docker.sock "$@"\n' "$real_docker" > "$RUNNER_TEMP/memory-witness-db-bin/docker"
+          chmod 700 "$RUNNER_TEMP/memory-witness-db-bin/docker"
+          echo "$RUNNER_TEMP/memory-witness-db-bin" >> "$GITHUB_PATH"
+          export PATH="$RUNNER_TEMP/memory-witness-db-bin:$PATH"
+          timeout --signal=TERM --kill-after=2s 10s docker version --format '{{json .Server}}' > "$PROOF/docker-server.json"
+          cd "$RUNNER_TEMP/memory-witness-135-images"
+          sha256sum -c role-images.tar.gz.sha256
+          timeout --signal=TERM --kill-after=10s 3m docker load -i role-images.tar.gz > "$PROOF/docker-load.log"
+          cp role-images.json "$PROOF/role-images.json"
+          cp schema-135-local-image-manifest.json "$PROOF/schema-135-local-image-manifest.json"
+          cd "$GITHUB_WORKSPACE"
+          python3 - "$PROOF/role-images.json" "$SOURCE_SHA" <<'PY'
+          import hashlib,json,subprocess,sys
+          path,sha=sys.argv[1:]; value=json.load(open(path)); assert value['sourceSha']==sha
+          contract=open('infra/gcp/release-contracts.json','rb').read()
+          assert value['contractSha256']==hashlib.sha256(contract).hexdigest()
+          expected_cmd={
+              'agent':['node','--enable-source-maps','/app/index.mjs'],
+              'web':['node','/app/apps/web/server.js'],
+              'browser':['./node_modules/.bin/tsx','src/index.ts'],
+              'code':['./node_modules/.bin/tsx','src/index.ts'],
+              'processor':['./node_modules/.bin/tsx','src/index.ts'],
+              'migration':['pnpm','--filter','@assistant/db','reconcile'],
+          }
+          for role in ['agent','web','browser','code','processor','migration']:
+              image=value['images'][role]
+              actual=json.loads(subprocess.check_output(['docker','image','inspect',image],text=True,timeout=5))[0]
+              assert image==actual['Id'],(role,image,actual['Id'])
+              assert actual['Config']['Labels']['org.opencontainers.image.revision']==sha
+              assert actual['Config']['Cmd']==expected_cmd[role]
+              # Exact embedded bytes were read from every runtime image using
+              # named, image-bound containers with verified cleanup in build.
+          PY
+      - name: Install the owned PostgreSQL 17 test service
+        timeout-minutes: 5
+        run: bash infra/ci/install-postgres17.sh
+      - name: Start the test service
+        timeout-minutes: 2
+        env:
+          POSTGRES_USER: assistant
+          POSTGRES_PASSWORD: assistant
+          POSTGRES_DB: assistant
+        run: bash infra/ci/postgres-service.sh start
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa
+        timeout-minutes: 2
+        with:
+          version: 10.34.5
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        timeout-minutes: 2
+        with:
+          node-version: 26
+          cache: pnpm
+      - name: Record populated-upgrade tool versions
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - "$PROOF/upgrade-tool-versions.json" "$SOURCE_SHA" <<'PY'
+          import json,subprocess,sys
+          path,source_sha=sys.argv[1:]
+          def version(args): return subprocess.check_output(args,text=True,timeout=5).strip()
+          value={'sourceSha':source_sha,'job':'populated-upgrade','node':version(['node','--version']),'pnpm':version(['pnpm','--version']),'dockerBuildx':version(['docker','buildx','version'])}
+          assert value['node'].startswith('v26.'),value
+          assert value['pnpm']=='10.34.5',value
+          assert value['dockerBuildx'],value
+          with open(path,'w') as f: json.dump(value,f,sort_keys=True);f.write('\n')
+          PY
+      - run: pnpm install --frozen-lockfile
+        timeout-minutes: 8
+      - name: Run the populated 0134 to 0135 upgrade through the migration image and both runtime roles
+        id: schema135_populated_test
+        timeout-minutes: 28
+        env:
+          ASSISTANT_MEMORY_WITNESS_IMAGE_RECEIPT: ${{ runner.temp }}/memory-witness-135-db-proof/role-images.json
+          ASSISTANT_MEMORY_WITNESS_PROOF_DIR: ${{ runner.temp }}/memory-witness-135-db-proof
+          ASSISTANT_MEMORY_WITNESS_EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
+          ASSISTANT_TEST_NO_EXTERNAL_CREDENTIALS: "1"
+        run: |
+          set -Eeuo pipefail
+          title='qualifies the schema 135 migration image, runtime readiness, and generic write compatibility'
+          set +e
+          timeout --signal=TERM --kill-after=10s 24m pnpm test packages/db/src/memory-witness-135-role-qualification.test.ts \
+            -t "^${title}$" --reporter=json --outputFile.json="$PROOF/vitest-result.json" \
+            > "$PROOF/vitest-run.log" 2>&1
+          test_status=$?
+          set -e
+          python3 - "$PROOF/vitest-result.json" "$PROOF/vitest-summary.json" "$test_status" "$title" <<'PY'
+          import json,os,sys
+          report_path,summary_path,status,title=sys.argv[1:]
+          report=json.load(open(report_path)) if os.path.isfile(report_path) else {}
+          tests=[]
+          for file in report.get('testResults',[]):
+              for case in file.get('assertionResults',[]):
+                  tests.append({'file':file.get('name'),'fullName':case.get('fullName'),'status':case.get('status')})
+          selected=[x for x in tests if x['fullName']==title]
+          summary={'expectedIdentity':{'fileSuffix':'packages/db/src/memory-witness-135-role-qualification.test.ts','fullName':title},
+                   'selected':selected,'observedTestCases':len(tests),'passed':report.get('numPassedTests',0),
+                   'failed':report.get('numFailedTests',0),'skipped':report.get('numPendingTests',0),
+                   'todo':report.get('numTodoTests',0),'testFiles':len(report.get('testResults',[])),
+                   'testExitCode':int(status),'passedExactSelection':False}
+          ok=(len(report.get('testResults',[]))==1 and len(tests)==1 and len(selected)==1
+              and selected[0]['file'].endswith(summary['expectedIdentity']['fileSuffix'])
+              and selected[0]['status']=='passed' and report.get('numTotalTests')==1
+              and report.get('numPassedTests')==1 and report.get('numFailedTests')==0
+              and report.get('numPendingTests')==0 and report.get('numTodoTests')==0
+              and int(status)==0)
+          summary['passedExactSelection']=ok
+          with open(summary_path,'w') as f: json.dump(summary,f,sort_keys=True); f.write('\n')
+          if not ok: raise SystemExit('Vitest did not execute exactly the intended qualification test successfully')
+          PY
+      - name: Drain registered qualification containers before PostgreSQL cleanup
+        if: always()
+        timeout-minutes: 4
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p -m 700 "$PROOF"
+          python3 - "$PROOF/owned-runtime-containers.json" "$PROOF/role-images.json" "$PROOF/runtime-container-cleanup.json" "$SOURCE_SHA" "${{ steps.schema135_populated_test.outcome }}" <<'PY'
+          import json,os,re,subprocess,sys
+          registry_path,images_path,receipt_path,source_sha,test_outcome=sys.argv[1:]
+          registry=json.load(open(registry_path)) if os.path.isfile(registry_path) else {'containers':[]}
+          images=json.load(open(images_path)) if os.path.isfile(images_path) else {'images':{}}
+          records=registry.get('containers',[])
+          if test_outcome=='success' and len(records)!=4:
+              raise SystemExit('successful qualification did not register exactly two migration and two runtime containers')
+          if os.path.isfile(registry_path) and registry.get('sourceSha')!=source_sha:
+              raise SystemExit('runtime container registry source pin mismatch; refusing container mutations')
+          allowed={'agent','web','migration'}
+          results=[]
+          def run(args,timeout): return subprocess.run(args,capture_output=True,text=True,timeout=timeout)
+          def rows(value): return run(['docker','container','ls','--all','--no-trunc','--filter',value,'--format','{{.ID}} {{.Names}}'],5)
+          for record in records:
+              role=record['role'];name=record['name'];image=record['imageId'];cid=record.get('cid')
+              expected_name=rf'memory-witness-{role}-[0-9a-f]{{8}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{12}}'
+              if (role not in allowed or not re.fullmatch(expected_name,name) or record.get('ownerLabel')!=name
+                  or image!=images.get('images',{}).get(role) or not re.fullmatch(r'sha256:[0-9a-f]{64}',image)
+                  or (cid is not None and not re.fullmatch(r'[0-9a-f]{64}',cid))):
+                  raise SystemExit('runtime container registry identity is malformed; refusing container mutations')
+              result={'role':role,'name':name,'imageId':image,'containerId':cid,'removed':False,'absenceVerified':False}
+              try:
+                  inspected=run(['docker','container','inspect',name],5)
+                  if inspected.returncode==0:
+                      actual=json.loads(inspected.stdout)[0]
+                      actual_id=actual['Id']
+                      if (actual['Name']!=f'/{name}' or actual['Image']!=image
+                          or actual['Config']['Labels'].get('com.assistant.memory-witness.owner')!=name
+                          or (cid and cid!=actual_id)):
+                          raise RuntimeError('registered name resolved to a different container identity; refusing removal')
+                      result['containerId']=actual_id
+                      removed=run(['docker','container','rm','--force',name],15)
+                      if removed.returncode: raise RuntimeError(removed.stderr[-2000:] or 'exact owned container remove failed')
+                      result['removed']=True
+                  elif inspected.returncode not in (1,125):
+                      raise RuntimeError(f'inspect failed with status {inspected.returncode}: {inspected.stderr[-1000:]}')
+                  by_name=rows(f'name=^/{name}$')
+                  if by_name.returncode: raise RuntimeError(f'name absence query failed: {by_name.stderr[-1000:]}')
+                  by_id=rows(f'id={cid}') if cid else None
+                  if by_id and by_id.returncode: raise RuntimeError(f'ID absence query failed: {by_id.stderr[-1000:]}')
+                  result['absenceVerified']=not by_name.stdout.strip() and (by_id is None or not by_id.stdout.strip())
+                  if not result['absenceVerified']: raise RuntimeError('registered runtime container remains after cleanup')
+              except Exception as error:
+                  result['error']=str(error)[:2000]
+              results.append(result)
+          closure_complete=(test_outcome!='success' or all(record.get('lifecycle')=='closed' and (record.get('closure') or {}).get('absenceVerified') is True for record in records))
+          value={'sourceSha':source_sha,'testStepOutcome':test_outcome,'registeredCount':len(records),'completeContainerSet':len(records)==4,'allRegisteredAbsent':all(x['absenceVerified'] for x in results),'helperClosureComplete':closure_complete,'containers':results}
+          with open(receipt_path,'w') as f: json.dump(value,f,sort_keys=True);f.write('\n')
+          if not value['allRegisteredAbsent'] or not closure_complete: raise SystemExit('registered runtime container cleanup is incomplete or unknown')
+          PY
+      - name: Remove the owned PostgreSQL test service
+        if: always()
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p -m 700 "$PROOF"
+          set +e
+          bash infra/ci/postgres-service.sh cleanup > "$PROOF/postgres-cleanup.log" 2>&1
+          cleanup_status=$?
+          set -e
+          owned_root="/tmp/assistant-pg17-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT:-1}-${GITHUB_JOB}"
+          if [[ ! -e "$owned_root" ]]; then absent=true; else absent=false; fi
+          python3 - "$PROOF/postgres-service-cleanup.json" "$cleanup_status" "$absent" <<'PY'
+          import json,sys
+          path,status,absent=sys.argv[1:]
+          value={'cleanupExitCode':int(status),'ownedRootAbsent':absent=='true','complete':int(status)==0 and absent=='true'}
+          with open(path,'w') as f: json.dump(value,f,sort_keys=True);f.write('\n')
+          if not value['complete']: raise SystemExit('owned PostgreSQL service cleanup is unverified')
+          PY
+      - uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        if: always()
+        timeout-minutes: 2
+        with:
+          name: memory-witness-135-populated-upgrade-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/memory-witness-135-db-proof/
+          retention-days: 7
+          if-no-files-found: warn

@@ -44,6 +44,20 @@ export function filterPortableMaintenanceCursorRows(
   return rows.filter((row) => !isOwnerEditorRuntimeCursorName(row.name));
 }
 
+/** Memory write witnesses are installation-local and must never enter a portable bundle. */
+export function omitInstallationLocalMemoryWitnessColumns(
+  table: string,
+  row: Record<string, unknown>,
+): Record<string, unknown> {
+  if (table !== 'memories') return row;
+  const {
+    memory_write_witness: _snakeCaseWitness,
+    memoryWriteWitness: _camelCaseWitness,
+    ...portable
+  } = row;
+  return portable;
+}
+
 // PostgreSQL column names do not always encode the TypeScript field's acronym
 // spelling. Firestore records must use the same keys as the live repositories.
 const FIELD_NAME_OVERRIDES: Partial<Record<MigrationTable, Record<string, string>>> = {
@@ -247,15 +261,16 @@ export async function exportWorkspaceSnapshot(
         }
         if (table === 'maintenance_cursors') rows = filterPortableMaintenanceCursorRows(rows);
         for (const row of rows) {
-          const rawId = row[definition.id];
+          const portableRow = omitInstallationLocalMemoryWitnessColumns(table, row);
+          const rawId = portableRow[definition.id];
           if (rawId === undefined || rawId === null)
             throw new Error(`Missing ${table}.${definition.id}`);
           const data = Object.fromEntries(
-            Object.entries(row)
+            Object.entries(portableRow)
               .filter(([key]) => !key.startsWith(TIMESTAMP_PREFIX))
               .sort(([a], [b]) => deterministicMigrationCompare(a, b))
               .map(([key, value]) => {
-                const timestamp = row[`${TIMESTAMP_PREFIX}${key}`];
+                const timestamp = portableRow[`${TIMESTAMP_PREFIX}${key}`];
                 if (typeof timestamp === 'string')
                   return [
                     migrationColumnFieldName(table, key),

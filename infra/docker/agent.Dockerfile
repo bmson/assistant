@@ -35,6 +35,7 @@ ENV ASSISTANT_REPO_ROOT=/app
 ARG GIT_SHA=unknown
 ENV BUILD_SHA=${GIT_SHA}
 WORKDIR /app
+COPY infra/gcp/release-contracts.json /app/infra/gcp/release-contracts.json
 
 COPY --from=build --chown=node:node /src/apps/agent/dist/index.mjs ./index.mjs
 COPY --from=build --chown=node:node /src/apps/agent/dist/index.mjs.map ./index.mjs.map

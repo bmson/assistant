@@ -18,6 +18,7 @@ RUN pnpm install --frozen-lockfile --filter @assistant/browser-job... \
 # Chromium and its matched Playwright package are installed in the final image.
 FROM mirror.gcr.io/library/node:26-slim
 WORKDIR /app
+COPY infra/gcp/release-contracts.json /app/infra/gcp/release-contracts.json
 RUN apt-get update \
   && apt-get upgrade -y --no-install-recommends \
   && rm -rf /var/lib/apt/lists/*

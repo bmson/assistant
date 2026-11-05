@@ -28,7 +28,9 @@ const nextConfig: NextConfig = {
   // channel. On React 19.2 stable the flag is accepted but the router never
   // calls document.startViewTransition, so it buys nothing. Route entry stays
   // with the CSS animation in template.tsx.
-  experimental: { authInterrupts: true },
+  // The extensionAlias hook disables Next's default webpack build worker.
+  // Isolate compilation so its heap can be released before TypeScript checking.
+  experimental: { authInterrupts: true, webpackBuildWorker: true },
   async redirects() {
     return [{ source: '/', destination: '/settings', permanent: false }];
   },

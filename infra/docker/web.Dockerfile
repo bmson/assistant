@@ -34,6 +34,7 @@ ENV HOSTNAME=0.0.0.0
 ENV PORT=8080
 ENV ASSISTANT_REPO_ROOT=/app
 WORKDIR /app
+COPY infra/gcp/release-contracts.json /app/infra/gcp/release-contracts.json
 
 COPY --from=build --chown=node:node /src/apps/web/.next/standalone ./
 COPY --from=build --chown=node:node /src/apps/web/.next/static ./apps/web/.next/static
