@@ -2276,6 +2276,85 @@ final class NativeVisualReviewTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testBriefingLongSourceQualificationsAndMetadata() async throws {
+        enum BudgetError: Error { case exceeded, imageUnavailable }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(90))
+        var retainedBytes = 0
+        let byteLimit = 32 * 1024 * 1024
+        let fixture = try NativeReviewFixture()
+        NativeReviewProtocol.install(fixture.responses)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [NativeReviewProtocol.self]
+        let client = APIClient(configuration: .init(baseURL: URL(string: "https://native-review.test")!, token: "fixture-only"), session: URLSession(configuration: configuration))
+        let suite = "assistant.briefing-full-detail-review"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defaults.removePersistentDomain(forName: suite)
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = AppModel(apiClient: client, defaults: defaults)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let previous = scene.keyWindow
+        defer { previous?.makeKey() }
+        let qualification = "The phone calendar was not checked, and permission was denied for the shared family calendar. These checked sources therefore cannot establish the complete household schedule. The two returned listings retain their original times and time zones; matching titles do not prove that they are the same occurrence. An accepted RSVP does not establish physical attendance or driving responsibility. FINAL SOURCE QUALIFICATION: confirm the missing sources before relying on this plan."
+        let metadata = "America/Los_Angeles versus Europe/London · source freshness unavailable · exact source scope remains incomplete"
+        for agenda in [false, true] {
+            let card = try XCTUnwrap(MessageResponseCard.BriefingCard(data: [
+                "id": .string("synthetic-full-source-detail"), "title": .string("Checked calendar sources"),
+                "date": .string("Synthetic review"), "lead": .string("Coverage is incomplete; original source facts remain visible."),
+                "presentation": agenda ? .string("calendar-agenda") : .null,
+                "sections": .array([.object(["type": .string("coverage"), "title": .string("Calendar read coverage"),
+                    "items": .array([.object(["title": .string("Phone and shared calendars unavailable"),
+                        "detail": .string(qualification), "meta": .string(metadata)])])])])
+            ]))
+            for scheme in [ColorScheme.light, .dark] {
+                for (width, size) in [(CGFloat(320), DynamicTypeSize.large), (CGFloat(320), .accessibility5), (CGFloat(390), .large)] {
+                    guard ContinuousClock.now < deadline else { throw BudgetError.exceeded }
+                    let window = UIWindow(windowScene: scene)
+                    window.frame = CGRect(x: 0, y: 0, width: width, height: 700)
+                    window.overrideUserInterfaceStyle = scheme == .light ? .light : .dark
+                    let host = UIHostingController(rootView: ScrollView {
+                        BriefingCardView(card: card).padding(16)
+                    }.environment(model).environment(\.colorScheme, scheme).environment(\.dynamicTypeSize, size)
+                        .transaction { $0.animation = nil; $0.disablesAnimations = true })
+                    window.rootViewController = host
+                    window.makeKeyAndVisible()
+                    defer { window.isHidden = true; window.rootViewController = nil }
+                    try await Task.sleep(for: .milliseconds(500))
+                    window.layoutIfNeeded()
+                    func scrolls(_ view: UIView) -> [UIScrollView] {
+                        ((view as? UIScrollView).map { [$0] } ?? []) + view.subviews.flatMap(scrolls)
+                    }
+                    let scroll = try XCTUnwrap(scrolls(window).max { $0.bounds.height < $1.bounds.height })
+                    let key = "briefing-full-\(agenda ? "agenda" : "legacy")-\(scheme == .light ? "light" : "dark")-\(Int(width))-\(size.isAccessibilitySize ? "AX5" : "default")"
+                    for step in 0..<20 {
+                        guard ContinuousClock.now < deadline else { throw BudgetError.exceeded }
+                        let png: Data = try autoreleasepool {
+                            let format = UIGraphicsImageRendererFormat(); format.scale = 1
+                            let image = UIGraphicsImageRenderer(bounds: window.bounds, format: format).image { _ in
+                                XCTAssertTrue(window.drawHierarchy(in: window.bounds, afterScreenUpdates: true))
+                            }
+                            guard let data = image.pngData(), data.count > 5_000 else { throw BudgetError.imageUnavailable }
+                            return data
+                        }
+                        guard png.count <= byteLimit - retainedBytes else { throw BudgetError.exceeded }
+                        retainedBytes += png.count
+                        let attachment = XCTAttachment(data: png, uniformTypeIdentifier: "public.png")
+                        attachment.name = key + "-scroll-\(step)"; attachment.lifetime = .keepAlways; add(attachment)
+                        let bottom = max(-scroll.adjustedContentInset.top, scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom)
+                        if scroll.contentOffset.y >= bottom - 1 { break }
+                        scroll.setContentOffset(CGPoint(x: 0, y: min(bottom, scroll.contentOffset.y + scroll.bounds.height * 0.75)), animated: false)
+                        try await Task.sleep(for: .milliseconds(80))
+                        window.layoutIfNeeded()
+                    }
+                    XCTAssertGreaterThanOrEqual(scroll.contentOffset.y + 1, max(-scroll.adjustedContentInset.top, scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom), "All qualifications must be captured through the bottom")
+                    window.isHidden = true; window.rootViewController = nil
+                }
+            }
+        }
+        XCTAssertTrue(NativeReviewProtocol.externalRequests.isEmpty)
+        XCTAssertTrue(NativeReviewProtocol.mutations.isEmpty)
+    }
+
     /// Focused actual SwiftUI fixture renders. Forced viewport/size class is
     /// explicit: this does not establish physical rotation, keyboard or VoiceOver.
     @MainActor
