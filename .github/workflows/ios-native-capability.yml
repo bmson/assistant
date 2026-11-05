@@ -146,7 +146,7 @@ jobs:
               save('binary-pins.json', {'xctestrunSHA':hashlib.sha256(runs[0].read_bytes()).hexdigest(),'bundles':binaries})
               if any(hashlib.sha256(Path(p).read_bytes()).hexdigest()!=h for p,h in pins.items()): raise RuntimeError('Source drift')
               result = root / 'capability.xcresult'
-              output = run('test', ['xcodebuild','test-without-building','-xctestrun',str(runs[0]),'-destination','id='+udid,'-destination-timeout','30','-parallel-testing-enabled','NO','-maximum-concurrent-test-simulator-destinations','1','-test-iterations','1','-test-timeouts-enabled','YES','-default-test-execution-time-allowance','60','-maximum-test-execution-time-allowance','60','-only-testing:AssistantUITests/MobileControlsUITests/testNativeControlsCapability','-resultBundlePath',str(result)], 180)
+              output = run('test', ['xcodebuild','test-without-building','-xctestrun',str(runs[0]),'-destination','id='+udid,'-destination-timeout','30','-parallel-testing-enabled','NO','-maximum-concurrent-test-simulator-destinations','1','-test-timeouts-enabled','YES','-default-test-execution-time-allowance','60','-maximum-test-execution-time-allowance','60','-only-testing:AssistantUITests/MobileControlsUITests/testNativeControlsCapability','-resultBundlePath',str(result)], 180)
               summary = json.loads(run('summary', ['xcrun','xcresulttool','get','test-results','summary','--path',str(result)], 10))
               tests = json.loads(run('named-tests', ['xcrun','xcresulttool','get','test-results','tests','--path',str(result)], 10))
               named = re.search(r'MobileControlsUITests[^\n]{0,160}testNativeControlsCapability[^\n]{0,80}\bpassed\b', output, re.I)
