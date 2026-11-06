@@ -11,6 +11,24 @@ import { webhooks } from './routes/webhooks.js';
 export function createApp() {
   const app = new Hono();
 
+  if (loadConfig().ASSISTANT_RELEASE_WRITES_PAUSED) {
+    // Match the web release pause: keep probes available while refusing new
+    // work, including GET routes which can dispatch or acknowledge work.
+    app.use('*', async (c, next) => {
+      if (
+        (c.req.path === '/health' || c.req.path === '/ready') &&
+        (c.req.method === 'GET' || c.req.method === 'HEAD')
+      )
+        return next();
+      c.header('retry-after', '5');
+      c.header('cache-control', 'no-store');
+      return c.json(
+        { error: 'Assistant is being updated. Please try again shortly.', code: 'updating' },
+        503,
+      );
+    });
+  }
+
   if (loadConfig().RESTORE_REHEARSAL) {
     // The rehearsal exposes only health/readiness. Restored tasks, callbacks,
     // provider probes, and application APIs cannot be dispatched by request.
