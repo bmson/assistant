@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { type BriefingCalendarEvent, findConflicts } from './briefing.js';
+import {
+  type BriefingCalendarEvent,
+  calendarOverlapBriefingItems,
+  findConflicts,
+} from './briefing.js';
 import { agendaSection } from './briefing-card.js';
 import {
   calendarArrivalLead,
@@ -197,6 +201,48 @@ describe('source-preserving probable match presentation', () => {
 });
 
 describe('advisory calendar relationships', () => {
+  it('keeps the accepted invitation and unconfirmed attendance qualifier attached to the named pair', () => {
+    const conflicts = findConflicts(
+      [
+        {
+          calendarId: 'home',
+          eventId: 'dentist',
+          calendar: 'Home',
+          summary: 'Dentist',
+          start: '2026-09-22T09:00:00Z',
+          end: '2026-09-22T10:00:00Z',
+          allDay: false,
+          blocksTime: true,
+          ownerParticipation: {
+            status: 'accepted',
+            identityVerified: true,
+            basis: 'attendee-email',
+          },
+        },
+        {
+          calendarId: 'work',
+          eventId: 'interview',
+          calendar: 'Work',
+          summary: 'Interview',
+          start: '2026-09-22T09:30:00Z',
+          end: '2026-09-22T10:30:00Z',
+          allDay: false,
+          blocksTime: true,
+        },
+      ],
+      'UTC',
+    );
+    const realConflicts = conflicts.filter(
+      (conflict) => conflict.relationship !== 'probable_duplicate',
+    );
+    const [item] = calendarOverlapBriefingItems(realConflicts, conflicts.conflictCount, 'UTC');
+
+    expect(item?.title).toBe('Dentist (Home) overlaps Interview (Work)');
+    expect(item?.detail).toContain(
+      'You accepted one invitation; attendance at the other is unconfirmed.',
+    );
+  });
+
   it('keeps UID bridges with same-calendar ID collisions separate in every input order', () => {
     const a = {
       calendarId: 'work',

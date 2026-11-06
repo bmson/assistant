@@ -88,7 +88,7 @@ describe('R15 retrieved versus displayed calendar coverage', () => {
       expect(section).toMatchObject({
         type: 'agenda',
         complete: true,
-        title: `Schedule (10 of ${count} events)`,
+        title: `Schedule (10 of ${count} activities)`,
         omittedCount: count - 10,
       });
       if (section?.type !== 'agenda') throw new Error('Missing agenda');
@@ -100,7 +100,7 @@ describe('R15 retrieved versus displayed calendar coverage', () => {
         ]),
       );
       expect(briefingMarkdown('Briefing', [section])).toContain(
-        `${count - 10} other retrieved events are omitted`,
+        `${count - 10} other calendar activities are omitted from this briefing preview`,
       );
     },
   );

@@ -1471,9 +1471,6 @@ describe('runBriefing — richer inputs', () => {
     }>;
     expect(cards.filter((part) => part.data?.kind === 'briefing')).toHaveLength(1);
     expect(cards.some((part) => part.data?.kind === 'calendar-conflicts')).toBe(false);
-    expect(JSON.stringify(posted?.parts)).toContain(
-      `You accepted ${MARKER} Dentist (primary). Your attendance at ${MARKER} Interview (primary) isn’t confirmed.`,
-    );
     // The briefing card leads, and its schedule marks both overlapping events.
     const briefing = ((posted?.parts ?? []) as Array<{ data?: Record<string, unknown> }>).find(
       (part) => part.data?.kind === 'briefing',
@@ -1497,7 +1494,12 @@ describe('runBriefing — richer inputs', () => {
         .map((item) => item.note),
     ).toEqual([undefined, undefined]);
     expect(overlaps?.items).toHaveLength(1);
-    expect(overlaps?.items?.[0]?.title).toContain(`${MARKER} Dentist`);
+    expect(overlaps?.items?.[0]?.title).toBe(
+      `${MARKER} Dentist (primary) overlaps ${MARKER} Interview (primary)`,
+    );
+    expect(overlaps?.items?.[0]?.detail).toContain(
+      'You accepted one invitation; attendance at the other is unconfirmed.',
+    );
   });
 
   it('preserves uncertain match listings from family and team calendars', () => {

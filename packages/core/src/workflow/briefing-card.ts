@@ -320,7 +320,7 @@ export function briefingMarkdown(lead: string, sections: BriefingSection[]): str
         blocks.push('Some calendars could not be read, so this may be incomplete.');
       if (section.omittedCount)
         blocks.push(
-          `${section.omittedCount} other retrieved events are omitted from this briefing preview.`,
+          `${section.omittedCount} other calendar activities are omitted from this briefing preview.`,
         );
       continue;
     }
