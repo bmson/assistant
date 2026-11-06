@@ -2282,7 +2282,7 @@ final class NativeVisualReviewTests: XCTestCase {
     func testMobileApprovalAndProactiveDisclosureAccessibilityLayouts() async throws {
         enum CaptureBudgetError: Error { case exceeded, invalidImage, attachmentBytesExceeded }
         let deadline = ContinuousClock.now.advanced(by: .seconds(120))
-        var retainedPNGBytes = 0
+        var retainedCaptureBytes = 0
         let maximumPNGBytes = 64 * 1024 * 1024
         func checkBudget() throws {
             guard ContinuousClock.now < deadline else { throw CaptureBudgetError.exceeded }
@@ -2338,6 +2338,17 @@ final class NativeVisualReviewTests: XCTestCase {
                 return result
             }
             return walk(root, depth: 0)
+        }
+        func identifier(_ value: NSObject) -> String? {
+            if let identified = value as? UIAccessibilityIdentification { return identified.accessibilityIdentifier }
+            let getter = NSSelectorFromString("accessibilityIdentifier")
+            guard value.responds(to: getter) else { return nil }
+            return value.perform(getter)?.takeUnretainedValue() as? String
+        }
+        func number(_ value: CGFloat) -> Any { value.isFinite ? Double(value) : "nonfinite" }
+        func frameValues(_ frame: CGRect) -> [String: Any] {
+            ["x": number(frame.minX), "y": number(frame.minY),
+             "width": number(frame.width), "height": number(frame.height)]
         }
         for scheme in [ColorScheme.light, .dark] {
             for (name, bounds, textSize, verticalClass) in layouts {
@@ -2405,12 +2416,41 @@ final class NativeVisualReviewTests: XCTestCase {
                             return data
                         }
                         try checkBudget()
-                        guard png.count <= maximumPNGBytes - retainedPNGBytes else {
+                        guard png.count <= maximumPNGBytes - retainedCaptureBytes else {
                             throw CaptureBudgetError.attachmentBytesExceeded
                         }
-                        retainedPNGBytes += png.count
+                        retainedCaptureBytes += png.count
                         let attachment = XCTAttachment(data: png, uniformTypeIdentifier: "public.png")
                         attachment.name = key + "-" + state; attachment.lifetime = .keepAlways; add(attachment)
+                        // Preserve the observed tree before any existing assertion can throw.
+                        // The original action matcher and acceptance assertions stay unchanged.
+                        let nodes = nativeElements.map { value -> [String: Any] in
+                            let rawFrame = value.accessibilityFrame
+                            let converted = window.screen.coordinateSpace.convert(rawFrame, to: window)
+                            return ["identifier": identifier(value) ?? "", "class": String(describing: type(of: value)),
+                                    "isAccessibilityElement": value.isAccessibilityElement,
+                                    "label": value.accessibilityLabel ?? "", "value": value.accessibilityValue ?? "",
+                                    "buttonTrait": value.accessibilityTraits.contains(.button),
+                                    "traits": value.accessibilityTraits.rawValue,
+                                    "rawFrame": frameValues(rawFrame), "windowFrame": frameValues(converted),
+                                    "passesExistingFrameGate": converted.height > 0 && converted.intersects(window.bounds)]
+                        }
+                        let approvalID = model.overview?.approvals.pending.first?.id ?? "missing-fixture"
+                        let diagnostic: [String: Any] = ["case": key, "state": state,
+                            "pendingCountAtRender": model.overview?.approvals.pending.count ?? 0,
+                            "expectedApprovalIDs": ["assistant.approvals.\(approvalID).approved", "assistant.approvals.\(approvalID).denied"],
+                            "primaryScrollOffsetX": number(offset.x), "primaryScrollOffsetY": number(offset.y),
+                            "nodes": nodes, "nodeCount": nodes.count,
+                            "enumerationScope": "Original accessibility-element walk only; omitted non-accessibility containers are not observed",
+                            "scope": "Pre-assertion diagnostic only; painted controls do not prove accessibility exposure or physical hit behavior"]
+                        let diagnosticData = try JSONSerialization.data(withJSONObject: diagnostic, options: [.sortedKeys])
+                        guard diagnosticData.count <= maximumPNGBytes - retainedCaptureBytes else {
+                            throw CaptureBudgetError.attachmentBytesExceeded
+                        }
+                        retainedCaptureBytes += diagnosticData.count
+                        let diagnosticAttachment = XCTAttachment(data: diagnosticData, uniformTypeIdentifier: "public.json")
+                        diagnosticAttachment.name = key + "-" + state + "-native-tree"
+                        diagnosticAttachment.lifetime = .keepAlways; add(diagnosticAttachment)
                     }
                     try record("collapsed-top")
                     if surface == "proactive" {
@@ -2469,7 +2509,8 @@ final class NativeVisualReviewTests: XCTestCase {
                     }
                     let receipt: [String: Any] = ["case": key, "viewport": ["width": bounds.width, "height": bounds.height],
                         "forcedCompactVertical": verticalClass == .compact, "accessibilitySize": textSize.isAccessibilitySize,
-                        "capturePixelsPerPoint": 1, "retainedPNGBytes": retainedPNGBytes, "maximumPNGBytes": maximumPNGBytes,
+                        "capturePixelsPerPoint": 1, "retainedCaptureBytes": retainedCaptureBytes, "maximumCaptureBytes": maximumPNGBytes,
+                        "captureBudgetScope": "PNGs plus pre-assertion native-tree JSON; original 64MiB ceiling unchanged",
                         "actionFramesCoordinateSpace": "window point coordinates plus primary scroll content offset; one pending approval",
                         "actionContentFrames": actionFrames.map { label, frame in
                             ["label": label, "x": frame.minX, "y": frame.minY, "width": frame.width, "height": frame.height] as [String: Any]
