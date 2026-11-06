@@ -711,7 +711,7 @@ describe('protected read-only release inventory', () => {
     await expect(read(`https://firestore.googleapis.com/v1/${DATABASE}`)).rejects.toThrow();
     expect(calls).toBe(0);
   });
-  it.each(['bound', 'unbound', 'mismatched', 'revision-mismatch'] as const)(
+  it.each(['bound', 'bound-local586', 'unbound', 'mismatched', 'revision-mismatch'] as const)(
     'collects and redacts editor target state: %s',
     async (mode) => {
       const target = {
@@ -813,7 +813,14 @@ describe('protected read-only release inventory', () => {
         }
         return svc;
       };
-      const lists = { composites, fields, evidence: 'pinned-gcloud-576-complete-lists' as const };
+      const lists = {
+        composites,
+        fields,
+        evidence:
+          mode === 'bound-local586'
+            ? ('reviewed-local-gcloud-586-complete-lists' as const)
+            : ('pinned-gcloud-576-complete-lists' as const),
+      };
       const observe = async (observed: typeof target) => {
         observations++;
         expect(observed).toEqual(target);
@@ -827,9 +834,9 @@ describe('protected read-only release inventory', () => {
         return;
       }
       const result = await collectInventory(read, manifest, now, lists, observe);
-      expect(observations).toBe(mode === 'bound' ? 1 : 0);
+      expect(observations).toBe(mode.startsWith('bound') ? 1 : 0);
       expect(result.editorReadiness).toEqual(
-        mode === 'bound'
+        mode.startsWith('bound')
           ? { status: 'missing', reason: 'editor_epoch_missing' }
           : { status: 'unknown', reason: 'editor_target_unbound_or_not_collected' },
       );

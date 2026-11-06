@@ -356,7 +356,7 @@ function strictServiceFacts(raw: unknown, service: 'agent' | 'web') {
 export interface GlobalIndexLists {
   composites: unknown[];
   fields: unknown[];
-  evidence: 'pinned-gcloud-576-complete-lists';
+  evidence: 'pinned-gcloud-576-complete-lists' | 'reviewed-local-gcloud-586-complete-lists';
 }
 export async function collectInventory(
   read: ReadJson,
@@ -387,8 +387,10 @@ export async function collectInventory(
         )),
       );
   // REST scope cannot prove global coverage. The production path uses the audited,
-  // version-pinned CLI global commands with no filters/limit added by this script.
-  const complete = global?.evidence === 'pinned-gcloud-576-complete-lists';
+  // version-pinned CLI global commands with no filters/limit added by these entrypoints.
+  const complete =
+    global?.evidence === 'pinned-gcloud-576-complete-lists' ||
+    global?.evidence === 'reviewed-local-gcloud-586-complete-lists';
   mark('index_comparison');
   const indexes = await compareIndexInventory(manifest, composites, fields, {
     compositesComplete: true,
