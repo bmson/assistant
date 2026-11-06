@@ -543,28 +543,48 @@ struct BriefingCardView: View {
     }
 
     private func listRow(_ item: MessageResponseCard.BriefingCard.ListItem) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(item.title)
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(AssistantTheme.ink(for: colorScheme))
-                    .fixedSize(horizontal: false, vertical: true)
-                if !item.detail.isEmpty {
-                    Text(item.detail)
-                        .font(.caption)
-                        .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
-                        .lineLimit(3)
-                }
-            }
-            Spacer(minLength: 0)
-            if !item.meta.isEmpty {
-                Text(item.meta)
-                    .font(.caption2.monospaced().weight(.semibold))
+        let details = VStack(alignment: .leading, spacing: 2) {
+            Text(item.title)
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(AssistantTheme.ink(for: colorScheme))
+                .fixedSize(horizontal: false, vertical: true)
+            if !item.detail.isEmpty {
+                Text(item.detail)
+                    .font(.caption)
                     .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
-                    .lineLimit(1)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
-                    .background(AssistantTheme.sunken(for: colorScheme), in: Capsule())
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        let metadata = Text(item.meta)
+            .font(.caption2.monospaced().weight(.semibold))
+            .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(
+                AssistantTheme.sunken(for: colorScheme),
+                in: RoundedRectangle(cornerRadius: AssistantTheme.controlCornerRadius, style: .continuous)
+            )
+        return Group {
+            if item.meta.isEmpty {
+                details
+            } else if stacksRows {
+                VStack(alignment: .leading, spacing: 6) {
+                    details
+                    metadata
+                }
+            } else {
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        details
+                        Spacer(minLength: 0)
+                        metadata.fixedSize()
+                    }
+                    VStack(alignment: .leading, spacing: 6) {
+                        details
+                        metadata
+                    }
+                }
             }
         }
         .accessibilityElement(children: .combine)
