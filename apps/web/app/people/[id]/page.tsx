@@ -441,6 +441,7 @@ export default async function PersonPage({
               relations={relations}
               now={now}
               peopleQuery={query}
+              returnTo={mapReturnTo ?? ''}
               selectedRelationId={selectedRelation?.id.toLowerCase()}
               editControls={
                 editor
