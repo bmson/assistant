@@ -100,6 +100,7 @@ const applySchema = z.discriminatedUnion('command', [
     contactId: uuid,
     expectedContactRevision: revision,
     ...identity,
+    relationship: z.string().max(80).optional(),
   }),
   z.strictObject({ ...envelope, command: z.literal('add_family_relationship'), ...familyShape }),
   z.strictObject({
@@ -231,6 +232,8 @@ export function parseOwnerEditorRequest(value: unknown, path: string): OwnerEdit
         fieldErrors: { aliases: error instanceof Error ? error.message : 'Check the aliases.' },
       };
     }
+    if (request.command === 'update_person_identity' && request.relationship !== undefined)
+      request.relationship = request.relationship.trim();
   } else if (request.command === 'correct_owner_memory') {
     request.content = request.content.trim();
     if (request.content.length < 3 || request.content.length > 4_000)

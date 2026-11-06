@@ -1334,9 +1334,7 @@ browserTest(
       await page.getByRole('heading', { name: 'Alex Rivera', exact: true }).waitFor();
       await page.getByRole('button', { name: 'Edit details', exact: true }).click();
       const identityDialog = page.getByRole('dialog');
-      await identityDialog
-        .getByRole('heading', { name: 'Edit name and aliases', exact: true })
-        .waitFor();
+      await identityDialog.getByRole('heading', { name: 'Edit details', exact: true }).waitFor();
       await identityDialog.getByLabel('Name', { exact: true }).fill('Alex Rivera Updated');
       const identity = await saveObserved(
         'update_person_identity',

@@ -51,12 +51,13 @@ async function assertWritableOwner(
 
 function readContact(snapshot: DocumentSnapshot): Contact {
   const row = decodeRecord<Contact>(snapshot.data());
+  const relationship = row.relationship === undefined ? '' : row.relationship;
   parseContactIdentityAuthority(row.identityAuthority);
   if (
     typeof row.id !== 'string' ||
     documentKey(row.id) !== snapshot.id ||
     typeof row.name !== 'string' ||
-    typeof row.relationship !== 'string' ||
+    typeof relationship !== 'string' ||
     typeof row.trust !== 'string' ||
     !Array.isArray(row.aliases) ||
     !Array.isArray(row.emails) ||
@@ -64,7 +65,7 @@ function readContact(snapshot: DocumentSnapshot): Contact {
     typeof row.notes !== 'string'
   )
     throw new Error('Person record is malformed');
-  return row;
+  return { ...row, relationship };
 }
 
 /** Owner-scoped Firestore writes for non-destructive person profile edits. */
@@ -286,7 +287,10 @@ export class FirestoreProfilePeopleCommandRepository implements ProfilePeopleCom
       if (
         current &&
         current.name === name &&
-        JSON.stringify(current.aliases) === JSON.stringify(aliases)
+        JSON.stringify(current.aliases) === JSON.stringify(aliases) &&
+        (request.command !== 'update_person_identity' ||
+          request.relationship === undefined ||
+          current.relationship === request.relationship)
       ) {
         if (current.identityAuthority !== 'owner')
           tx.update(ref, { identityAuthority: 'owner', updatedAt: now });
@@ -299,7 +303,16 @@ export class FirestoreProfilePeopleCommandRepository implements ProfilePeopleCom
           now,
         );
       }
-      if (current) tx.update(ref, { name, aliases, identityAuthority: 'owner', updatedAt: now });
+      if (current)
+        tx.update(ref, {
+          name,
+          aliases,
+          identityAuthority: 'owner',
+          ...(request.command === 'update_person_identity' && request.relationship !== undefined
+            ? { relationship: request.relationship }
+            : {}),
+          updatedAt: now,
+        });
       else
         tx.create(
           ref,

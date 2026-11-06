@@ -16,6 +16,7 @@ export interface OwnerEditorViewSnapshot {
     name: string;
     aliases: string[];
     trust: string;
+    relationship: string;
     revision: string;
   } | null;
   people?: OwnerEditorPersonOption[];
@@ -29,6 +30,7 @@ export interface OwnerEditorDisplayedContact {
   name: string;
   aliases: string[];
   trust: string;
+  relationship: string;
   identityRevision?: string | null;
 }
 
@@ -68,6 +70,7 @@ export function buildOwnerEditorView(input: {
       identity.contactId !== displayedContact.id ||
       identity.name !== displayedContact.name ||
       identity.trust !== displayedContact.trust ||
+      identity.relationship !== displayedContact.relationship ||
       identity.revision !== displayedContact.identityRevision ||
       JSON.stringify(identity.aliases) !== JSON.stringify(displayedContact.aliases))
   )
@@ -112,6 +115,7 @@ export function buildOwnerEditorView(input: {
               contactId: identity.contactId,
               name: identity.name,
               aliases: identity.aliases,
+              relationship: identity.relationship,
               revision: displayedContact?.identityRevision ?? '',
             },
             personNoteCreate: {

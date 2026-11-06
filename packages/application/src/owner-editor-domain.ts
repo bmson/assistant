@@ -255,6 +255,18 @@ export function createOwnerEditorDomain(input: {
       }
       if (request.command === 'create_person' || request.command === 'update_person_identity') {
         let name: string, aliases: string[];
+        if (
+          request.command === 'update_person_identity' &&
+          request.relationship !== undefined &&
+          request.relationship.length > 80
+        )
+          return {
+            ok: false,
+            result: {
+              outcome: 'invalid',
+              fieldErrors: { relationship: 'Use 80 characters or fewer.' },
+            },
+          };
         try {
           name = normalizeContactName(request.name);
           aliases = normalizeContactAliases(request.aliases, name);

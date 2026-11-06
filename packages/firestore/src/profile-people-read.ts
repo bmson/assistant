@@ -17,6 +17,12 @@ import { decodeRecord, documentKey, type InstallationStore } from './store.js';
 
 const PAGE_SIZE = 200;
 
+function normalizedContactRelationship(row: Partial<ProfileContact>): string {
+  if (row.relationship === undefined) return '';
+  if (typeof row.relationship !== 'string') throw new Error('Contact relationship is malformed');
+  return row.relationship;
+}
+
 async function collect<T extends { id: string }>(
   query: Query,
   budget: ProfileReadBudget,
@@ -41,6 +47,7 @@ async function collectContactSnapshots(
     if (!doc.updateTime) throw new Error('Contact identity revision is unavailable');
     rows.push({
       ...(row as ProfileContact),
+      relationship: normalizedContactRelationship(row),
       identityRevision: profileContactIdentityRevision({
         driver: 'firestore',
         ownerId,
@@ -117,6 +124,7 @@ export class FirestoreProfilePeopleReadRepository implements ProfilePeopleReadRe
       if (!doc.updateTime) throw new Error('Contact identity revision is unavailable');
       return {
         ...row,
+        relationship: normalizedContactRelationship(row),
         identityRevision: profileContactIdentityRevision({
           driver: 'firestore',
           ownerId: this.agentId,
@@ -139,6 +147,7 @@ export class FirestoreProfilePeopleReadRepository implements ProfilePeopleReadRe
       if (!doc.updateTime) throw new Error('Contact identity revision is unavailable');
       return {
         ...row,
+        relationship: normalizedContactRelationship(row),
         identityRevision: profileContactIdentityRevision({
           driver: 'firestore',
           ownerId: this.agentId,

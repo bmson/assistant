@@ -109,6 +109,7 @@ const snapshot = {
     name: contact.name,
     aliases: contact.aliases,
     trust: contact.trust,
+    relationship: contact.relationship,
     revision: displayedRevision,
   },
   people: [{ contactId: contact.id, name: contact.name, revision: displayedRevision }],
@@ -495,7 +496,7 @@ describe('actual page + real issuance builder composition, named reader/fence po
       ports.fsSnapshot.mockResolvedValue(newerSnapshot);
       const html = renderToStaticMarkup(await dossier());
       expect(html).toContain(contact.name);
-      expect(html).not.toContain('Edit name and aliases');
+      expect(html).not.toContain('Edit details');
       expect(contact.identityRevision).toBe(displayedRevision);
       if (driver === 'firestore') expect(ports.pgRead).not.toHaveBeenCalled();
     },

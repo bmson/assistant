@@ -1,5 +1,6 @@
 import { OWNER_EDITOR_COMMANDS, type OwnerEditorApply } from '@assistant/persistence';
 import { describe, expect, it } from 'vitest';
+import { ownerEditorCanonicalApply } from './owner-editor-canonical.js';
 import { ownerEditorRequestHash } from './owner-editor-hash.js';
 import {
   isOwnerEditorCivilDay,
@@ -33,6 +34,38 @@ const add = {
 };
 
 describe('owner editor civil meaning and strict wire boundary', () => {
+  it('accepts an optional owner relationship label while preserving legacy request bytes', () => {
+    const legacy = {
+      version: 1,
+      intent: 'apply',
+      command: 'update_person_identity',
+      operationId,
+      contactId: subject,
+      expectedContactRevision: revision,
+      name: 'Sam',
+      aliases: ['Samuel'],
+    };
+    const parsedLegacy = parseOwnerEditorRequest(legacy, people);
+    expect(parsedLegacy.ok).toBe(true);
+    if (!parsedLegacy.ok || parsedLegacy.request.intent !== 'apply') return;
+    expect(parsedLegacy.request).not.toHaveProperty('relationship');
+    expect(ownerEditorCanonicalApply(parsedLegacy.request)).not.toContain('relationship');
+
+    const parsedWithRelationship = parseOwnerEditorRequest(
+      { ...legacy, relationship: '  sister  ' },
+      people,
+    );
+    expect(parsedWithRelationship.ok).toBe(true);
+    if (!parsedWithRelationship.ok || parsedWithRelationship.request.intent !== 'apply') return;
+    expect(parsedWithRelationship.request).toMatchObject({ relationship: 'sister' });
+    expect(ownerEditorRequestHash(parsedWithRelationship.request)).not.toBe(
+      ownerEditorRequestHash(parsedLegacy.request),
+    );
+    expect(parseOwnerEditorRequest({ ...legacy, relationship: 'x'.repeat(81) }, people).ok).toBe(
+      false,
+    );
+  });
+
   const memoryApply = {
     version: 1,
     intent: 'apply',

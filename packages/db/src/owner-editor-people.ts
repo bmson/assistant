@@ -106,7 +106,10 @@ export function commitPostgresOwnerEditorPerson(
     if (
       current &&
       current.name === name &&
-      JSON.stringify(current.aliases) === JSON.stringify(aliases)
+      JSON.stringify(current.aliases) === JSON.stringify(aliases) &&
+      (request.command !== 'update_person_identity' ||
+        request.relationship === undefined ||
+        current.relationship === request.relationship)
     ) {
       if (current.identityAuthority !== 'owner')
         await tx
@@ -124,7 +127,15 @@ export function commitPostgresOwnerEditorPerson(
     const [saved] = current
       ? await tx
           .update(contacts)
-          .set({ name, aliases, identityAuthority: 'owner', updatedAt: sql`now()` })
+          .set({
+            name,
+            aliases,
+            identityAuthority: 'owner',
+            ...(request.command === 'update_person_identity' && request.relationship !== undefined
+              ? { relationship: request.relationship }
+              : {}),
+            updatedAt: sql`now()`,
+          })
           .where(eq(contacts.id, current.id))
           .returning({ id: contacts.id })
       : await tx
