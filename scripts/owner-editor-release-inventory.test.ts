@@ -825,7 +825,7 @@ describe('protected read-only release inventory', () => {
       if (mode.startsWith('bound-disabled'))
         Object.assign(svc, {
           uid: `${component}-uid`,
-            terminalCondition:{state:'CONDITION_SUCCEEDED'},
+          terminalCondition: { state: 'CONDITION_SUCCEEDED' },
           scaling: { scalingMode: 'MANUAL' },
           reconciling: false,
           traffic: [
