@@ -33,6 +33,15 @@ on:
       - "infra/ios-detect-changes.sh"
       - "infra/ios-detect-changes.test.sh"
   workflow_dispatch:
+    inputs:
+      test_selection:
+        description: "Full suite or the synthetic approval accessibility diagnostic"
+        type: choice
+        required: true
+        default: full
+        options:
+          - full
+          - approval-diagnostic
 
 jobs:
   changes:
@@ -60,7 +69,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.ios == 'true'
     runs-on: macos-latest
-    timeout-minutes: 40
+    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && inputs.test_selection == 'approval-diagnostic' && 15 || 40 }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -114,8 +123,25 @@ jobs:
       - name: Build and test
         env:
           DESTINATION_UDID: ${{ steps.simulator.outputs.udid }}
+          ASSISTANT_IOS_TEST_SELECTION: ${{ inputs.test_selection || 'full' }}
         run: |
           set -o pipefail
+          ios_test_selection=full
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            ios_test_selection="$ASSISTANT_IOS_TEST_SELECTION"
+          fi
+          ios_test_arguments=()
+          case "$ios_test_selection" in
+            full) ;;
+            approval-diagnostic)
+              ios_test_arguments=(
+                -only-testing:AssistantTests/NativeVisualReviewTests/testMobileApprovalAndProactiveDisclosureAccessibilityLayouts
+                -test-timeouts-enabled YES
+                -maximum-test-execution-time-allowance 180
+              )
+              ;;
+            *) echo "::error::Unsupported iOS test selection"; exit 1 ;;
+          esac
           xcodebuild \
             -project apps/ios/Assistant.xcodeproj \
             -scheme Assistant \
@@ -131,7 +157,9 @@ jobs:
           xcrun simctl bootstatus "$DESTINATION_UDID" -b
           xcrun simctl install "$DESTINATION_UDID" \
             "${RUNNER_TEMP}/Assistant-build/Build/Products/Debug-iphonesimulator/Assistant.app"
-          xcrun simctl privacy "$DESTINATION_UDID" grant calendar com.baldvinsmarason.assistant
+          if [ "$ios_test_selection" = full ]; then
+            xcrun simctl privacy "$DESTINATION_UDID" grant calendar com.baldvinsmarason.assistant
+          fi
           xcodebuild \
             -project apps/ios/Assistant.xcodeproj \
             -scheme Assistant \
@@ -142,6 +170,7 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
+            "${ios_test_arguments[@]}" \
             test-without-building 2>&1 | tee -a "${RUNNER_TEMP}/xcodebuild.log"
           if grep -Eq 'testEventKitReadsRecurringEventsFromSelectedCalendar.*skipped' "${RUNNER_TEMP}/xcodebuild.log"; then
             echo "::error::The real EventKit read test skipped despite pre-granted calendar access."
