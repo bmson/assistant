@@ -10,6 +10,7 @@ import {
   restoreScaling,
   reviewedBootstrap,
   verifiedRestoreReceipts,
+  verifyBootstrapRevisionTemplate,
   verifyCurrentSnapshot,
 } from './owner-release-bootstrap.js';
 
@@ -113,6 +114,191 @@ function fixture(role: 'agent' | 'web' = 'web') {
   };
 }
 describe('reviewed current snapshot and bootstrap restoration', () => {
+  it.each(['agent', 'web'] as const)(
+    'accepts exact %s full and provider-shaped revision identities without mutating raw evidence',
+    (role) => {
+      const f = fixture(role);
+      const templateBefore = JSON.stringify(f.service.template);
+      const revisionBefore = JSON.stringify(f.native);
+      expect(() =>
+        verifyBootstrapRevisionTemplate(
+          f.service.name,
+          f.service.template,
+          f.native,
+          f.expected.revision,
+        ),
+      ).not.toThrow();
+
+      const providerRevision = clone(f.native);
+      providerRevision.service = `assistant-${role}`;
+      (providerRevision.containers[0] as Record<string, unknown>).name = `${role}-1`;
+      const providerTemplate = clone(f.service.template);
+      const providerRevisionHash = bootstrapDigest(providerRevision);
+      const providerTemplateHash = bootstrapDigest(providerTemplate);
+      expect(() =>
+        verifyBootstrapRevisionTemplate(
+          f.service.name,
+          providerTemplate,
+          providerRevision,
+          f.expected.revision,
+        ),
+      ).not.toThrow();
+      expect(bootstrapDigest(providerRevision)).toBe(providerRevisionHash);
+      expect(bootstrapDigest(providerTemplate)).toBe(providerTemplateHash);
+      expect(JSON.stringify(f.service.template)).toBe(templateBefore);
+      expect(JSON.stringify(f.native)).toBe(revisionBefore);
+    },
+  );
+  it.each(['agent', 'web'] as const)(
+    'rejects wrong %s resource identity and every non-name template difference',
+    (role) => {
+      const f = fixture(role);
+      const badRevision = (change: (r: Record<string, unknown>) => void) => {
+        const r = clone(f.native) as Record<string, unknown>;
+        change(r);
+        return r;
+      };
+      const cases: Array<[string, Record<string, unknown>]> = [
+        [
+          'wrong project',
+          badRevision((r) => (r.name = String(r.name).replace('bmson-assistant', 'other-project'))),
+        ],
+        [
+          'wrong region',
+          badRevision((r) => (r.name = String(r.name).replace('us-west1', 'us-east1'))),
+        ],
+        [
+          'wrong service parent',
+          badRevision(
+            (r) => (r.name = String(r.name).replace(`assistant-${role}`, 'assistant-other')),
+          ),
+        ],
+        [
+          'wrong revision',
+          badRevision(
+            (r) => (r.name = String(r.name).replace(f.expected.revision, 'assistant-wrong')),
+          ),
+        ],
+        ['wrong short service', badRevision((r) => (r.service = 'assistant-other'))],
+        [
+          'wrong container name',
+          badRevision(
+            (r) => ((r.containers as Array<Record<string, unknown>>)[0]!.name = 'other-1'),
+          ),
+        ],
+        [
+          'multiple containers',
+          badRevision(
+            (r) =>
+              (r.containers = [...(r.containers as unknown[]), ...(r.containers as unknown[])]),
+          ),
+        ],
+      ];
+      for (const [label, revision] of cases) {
+        expect(
+          () =>
+            verifyBootstrapRevisionTemplate(
+              f.service.name,
+              f.service.template,
+              revision,
+              f.expected.revision,
+            ),
+          label,
+        ).toThrow();
+      }
+
+      const mutations: Array<[string, (t: Record<string, unknown>) => void]> = [
+        [
+          'image',
+          (t) => ((t.containers as Array<Record<string, unknown>>)[0]!.image = 'other-image'),
+        ],
+        ['environment', (t) => ((t.containers as Array<Record<string, unknown>>)[0]!.env = [])],
+        ['timeout', (t) => (t.timeout = '301s')],
+        ['other template field', (t) => (t.maxInstanceRequestConcurrency = 80)],
+        [
+          'explicit conflicting container name',
+          (t) => ((t.containers as Array<Record<string, unknown>>)[0]!.name = 'other-1'),
+        ],
+      ];
+      for (const [label, mutate] of mutations) {
+        const template = clone(f.service.template) as Record<string, unknown>;
+        mutate(template);
+        expect(
+          () =>
+            verifyBootstrapRevisionTemplate(
+              f.service.name,
+              template,
+              f.native,
+              f.expected.revision,
+            ),
+          label,
+        ).toThrow();
+      }
+
+      const providerRevision = clone(f.native);
+      providerRevision.service = `assistant-${role}`;
+      (providerRevision.containers[0] as Record<string, unknown>).name = `${role}-1`;
+      const providerDrift: Array<[string, (r: Record<string, unknown>) => void]> = [
+        [
+          'provider image drift',
+          (r) => ((r.containers as Array<Record<string, unknown>>)[0]!.image = 'other-image'),
+        ],
+        [
+          'provider environment drift',
+          (r) => ((r.containers as Array<Record<string, unknown>>)[0]!.env = []),
+        ],
+        ['provider timeout drift', (r) => (r.timeout = '301s')],
+        ['provider other field drift', (r) => (r.maxInstanceRequestConcurrency = 80)],
+      ];
+      for (const [label, mutate] of providerDrift) {
+        const revision = clone(providerRevision) as Record<string, unknown>;
+        mutate(revision);
+        expect(
+          () =>
+            verifyBootstrapRevisionTemplate(
+              f.service.name,
+              f.service.template,
+              revision,
+              f.expected.revision,
+            ),
+          label,
+        ).toThrow();
+      }
+      const conflictingTemplate = clone(f.service.template) as Record<string, unknown>;
+      (conflictingTemplate.containers as Array<Record<string, unknown>>)[0]!.name = 'other-1';
+      expect(() =>
+        verifyBootstrapRevisionTemplate(
+          f.service.name,
+          conflictingTemplate,
+          providerRevision,
+          f.expected.revision,
+        ),
+      ).toThrow();
+    },
+  );
+  it('rejects a malformed provider-shaped preflight before recording intent or PATCHing', async () => {
+    const f = fixture('web');
+    const revision = clone(f.native);
+    revision.service = 'assistant-web';
+    (revision.containers[0] as Record<string, unknown>).name = 'web-1';
+    revision.timeout = '301s';
+    const calls: string[] = [];
+    const io = {
+      now: () => 0,
+      sleep: async () => {},
+      recordIntent: async () => {
+        calls.push('intent');
+      },
+      request: async (url: string, options: { method: string }) => {
+        calls.push(`${options.method}:${url.includes('/revisions/') ? 'revision' : 'service'}`);
+        return new Response(JSON.stringify(url.includes('/revisions/') ? revision : f.service), {
+          headers: { 'content-type': 'application/json' },
+        });
+      },
+    };
+    await expect(restoreScaling(io, f.receipt, 'web', f.expected)).rejects.toThrow();
+    expect(calls).toEqual(['GET:service', 'GET:revision']);
+  });
   it('requires exact reviewed source/digest and prior closure/drain/recovery references, not empty tags as drain evidence', () => {
     const f = fixture();
     expect(reviewedBootstrap(f.receipt, bootstrapDigest(f.receipt), source)).toEqual(f.receipt);
@@ -161,6 +347,12 @@ describe('reviewed current snapshot and bootstrap restoration', () => {
         etag: f.service.etag,
         scaling: f.receipt.services[role].automaticScaling,
       });
+      const providerShapedRevision = clone(f.native);
+      providerShapedRevision.service = `assistant-${role}`;
+      (providerShapedRevision.containers[0] as Record<string, unknown>).name = `${role}-1`;
+      expect(() =>
+        planScalingRestore(f.receipt, role, f.service, providerShapedRevision, f.expected),
+      ).not.toThrow();
       expect(() =>
         planScalingRestore(
           f.receipt,
@@ -171,6 +363,15 @@ describe('reviewed current snapshot and bootstrap restoration', () => {
               { ...f.service.trafficStatuses[0], revision: `assistant-${role}-old` },
             ],
           },
+          f.native,
+          f.expected,
+        ),
+      ).toThrow();
+      expect(() =>
+        planScalingRestore(
+          f.receipt,
+          role,
+          { ...f.service, uid: 'different-service-uid' },
           f.native,
           f.expected,
         ),
@@ -406,10 +607,14 @@ describe('paused agent and atomic immutable unpaused successor', () => {
     alias.traffic.push({ ...alias.traffic[0]!, tag: 'old-unpaused-alias', percent: 0 });
     expect(() => preparePausedAgentResume(f.receipt, alias, f.native, f.expected)).toThrow();
   });
-  it.each(['success', 'unknown', 'failed-startup'] as const)(
+  it.each(['success', 'unknown', 'failed-startup', 'provider-shaped'] as const)(
     'one atomic template+same-tag create handles %s without in-place unpause or blind retry',
     async (mode) => {
       const f = pausedFixture();
+      if (mode === 'provider-shaped') {
+        f.native.service = 'assistant-agent';
+        (f.native.containers[0] as Record<string, unknown>).name = 'agent-1';
+      }
       let service = clone(f.service),
         successor: unknown;
       let writes = 0;
@@ -446,10 +651,13 @@ describe('paused agent and atomic immutable unpaused successor', () => {
               observedGeneration: '3',
             };
             const { revision: _r, ...spec } = body.template;
+            const successorContainers = clone(body.template.containers);
+            if (mode === 'provider-shaped') successorContainers[0].name = 'agent-1';
             successor = {
               ...spec,
               name: `${name}/revisions/${newName}`,
-              service: name,
+              service: mode === 'provider-shaped' ? 'assistant-agent' : name,
+              containers: successorContainers,
               uid: 'different-new-uid',
               conditions: [
                 {

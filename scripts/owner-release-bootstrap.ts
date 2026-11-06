@@ -40,6 +40,38 @@ export type CandidateIdentity = {
   attempt: string;
   pausedAgentRevision?: string;
 };
+/** Verify provider aliases without changing the raw revision or its bound digest. */
+export function verifyBootstrapRevisionTemplate(
+  service: string,
+  template: unknown,
+  revision: unknown,
+  expectedRevision: string,
+) {
+  const role = service === `${SERVICE_ROOT}agent` ? 'agent' : 'web';
+  requireProof(service === `${SERVICE_ROOT}${role}`);
+  const t = object(template),
+    r = object(revision);
+  requireProof(
+    r.name === `${service}/revisions/${expectedRevision}` &&
+      (r.service === service || r.service === `assistant-${role}`),
+  );
+  const projected: Obj = {};
+  for (const key of Object.keys(t)) if (r[key] !== undefined) projected[key] = r[key];
+  projected.revision = expectedRevision;
+  const requested = t.containers,
+    actual = projected.containers;
+  requireProof(
+    Array.isArray(requested) &&
+      requested.length === 1 &&
+      Array.isArray(actual) &&
+      actual.length === 1,
+  );
+  if (same(t, projected)) return;
+  const container = object(requested[0]);
+  // Only the observed provider default for this exact service may fill an omitted name.
+  requireProof(!Object.hasOwn(container, 'name') && object(actual[0]).name === `${role}-1`);
+  requireProof(same({ ...t, containers: [{ ...container, name: `${role}-1` }] }, projected));
+}
 function validateCandidate(
   service: string,
   s: Obj,
@@ -48,7 +80,7 @@ function validateCandidate(
   paused: boolean,
   healthy: boolean,
 ) {
-  requireProof(r.name === `${service}/revisions/${expected.revision}` && r.service === service);
+  verifyBootstrapRevisionTemplate(service, s.template, r, expected.revision);
   if (healthy) {
     requireProof(s.observedGeneration === s.generation);
     requireProof(
@@ -85,10 +117,6 @@ function validateCandidate(
       literal(t, 'ASSISTANT_RELEASE_WORKFLOW_RUN_ATTEMPT') === expected.attempt,
   );
   requireProof(literal(t, 'ASSISTANT_RELEASE_WRITES_PAUSED') === String(paused));
-  const projected: Obj = {};
-  for (const key of Object.keys(t)) if (r[key] !== undefined) projected[key] = r[key];
-  projected.revision = expected.revision;
-  requireProof(same(t, projected));
 }
 export function planScalingRestore(
   receipt: BootstrapReceipt,
