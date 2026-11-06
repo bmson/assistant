@@ -12,6 +12,7 @@ import {
   HISTORICAL_WEB_TAGS,
   immutableWebRevision,
   tagHash,
+  WEB_CANONICAL_URL,
   WEB_SERVICE,
 } from './owner-web-tag-retirement.js';
 import { reconciliationDigest as digest } from './owner-web-traffic-reconciliation-model.js';
@@ -107,7 +108,7 @@ function revisionProof(raw: unknown, name: string, c: Context): NativeProof {
     );
   requireNative(
     r.name === `${WEB_SERVICE}/revisions/${name}` &&
-      r.service === WEB_SERVICE &&
+      (r.service === WEB_SERVICE || r.service === 'assistant-web') &&
       ready.length === 1 &&
       (ready[0]?.state === 'CONDITION_SUCCEEDED' ||
         (reviewedCurrent?.preclosed && retiredCurrentCondition(ready[0] as Obj))) &&
@@ -196,7 +197,8 @@ function uri(v: unknown): string {
       u.pathname === '/' &&
       !u.search &&
       !u.hash &&
-      /^(?:[a-z][a-z0-9-]{0,62}---)?assistant-web-[a-z0-9]+-uw\.a\.run\.app$/.test(u.hostname),
+      (/^(?:[a-z][a-z0-9-]{0,62}---)?assistant-web-[a-z0-9]+-uw\.a\.run\.app$/.test(u.hostname) ||
+        value === WEB_CANONICAL_URL),
   );
   return value;
 }
@@ -251,6 +253,30 @@ export function nativeStableConfigurationDigest(raw: unknown) {
     Object.fromEntries(Object.entries(nativeObject(raw)).filter(([k]) => !OUTPUT.has(k))),
   );
 }
+/** Bind the reviewed current provider default without changing either raw capture. */
+function currentSemanticTemplate(
+  t: Obj,
+  rawRevision: unknown,
+  revisionTemplateSha256: string,
+  reviewedCurrent: boolean,
+): Obj {
+  if (digest(t) === revisionTemplateSha256) return t;
+  requireNative(reviewedCurrent);
+  const requested = t.containers,
+    actual = nativeObject(rawRevision).containers;
+  requireNative(
+    Array.isArray(requested) &&
+      requested.length === 1 &&
+      Array.isArray(actual) &&
+      actual.length === 1,
+  );
+  const container = nativeObject(requested[0]);
+  requireNative(!Object.hasOwn(container, 'name') && nativeObject(actual[0]).name === 'web-1');
+  const semantic = { ...t, containers: [{ ...container, name: 'web-1' }] };
+  // Every other configuration field must still match the bound revision exactly.
+  requireNative(digest(semantic) === revisionTemplateSha256);
+  return semantic;
+}
 /** Full native revisions are consumed here; external hashes/booleans are never accepted. */
 function projectSnapshot(raw: unknown, native: Record<string, unknown>, c: Context): Snapshot {
   const s = nativeObject(raw);
@@ -295,13 +321,14 @@ function projectSnapshot(raw: unknown, native: Record<string, unknown>, c: Conte
   );
   requireNative(Array.isArray(s.urls) && s.urls.length <= 9);
   const urls = s.urls.map((v) => tagHash(uri(v))),
-    t = template(s.template),
     latestReady = nativeRevisionName(s.latestReadyRevision),
     latestCreated = nativeRevisionName(s.latestCreatedRevision);
-  requireNative(
-    latestReady === latestCreated &&
-      revisions[latestReady] &&
-      revisions[latestReady]?.templateSha256 === digest(t),
+  requireNative(latestReady === latestCreated && revisions[latestReady]);
+  const t = currentSemanticTemplate(
+    template(s.template),
+    native[latestReady],
+    revisions[latestReady].templateSha256,
+    latestReady === c.canonical && !!c.currentBinding,
   );
   const generation = text(s.generation, /^[1-9][0-9]{0,18}$/);
   requireNative(generation === s.observedGeneration);

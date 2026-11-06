@@ -1,6 +1,8 @@
 /** Fixed-service tag retirement planner. No provider calls or mutation authority. */
 import { createHash } from 'node:crypto';
 export const WEB_SERVICE = 'projects/bmson-assistant/locations/us-west1/services/assistant-web';
+/** Verified project-number endpoint for this fixed project, region and service. */
+export const WEB_CANONICAL_URL = 'https://assistant-web-83709630368.us-west1.run.app';
 const IMAGE = 'us-west1-docker.pkg.dev/bmson-assistant/assistant/web@sha256:';
 function canonical(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonical);
