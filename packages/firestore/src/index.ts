@@ -119,6 +119,7 @@ export * from './owner-editor-memory-create.js';
 export * from './owner-editor-recovery.js';
 export * from './owner-editor-repository.js';
 export * from './owner-editor-retention.js';
+export { readOwnerFamilyRejectionReview } from './owner-family-rejection.js';
 export { FirestoreOwnerKnowledgeGraphFactRepository } from './owner-knowledge-graph-fact.js';
 export { FirestoreOwnerNoticeRepository, firestoreOwnerNotices } from './owner-notices.js';
 export {

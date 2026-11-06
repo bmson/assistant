@@ -46,6 +46,8 @@ export function buildOwnerEditorView(input: {
     validFrom: string | null;
     validUntil: string | null;
   }[];
+  /** Only enabled when this persistence driver has atomic owner-editor removal adapters. */
+  removalEnabled?: boolean;
   now?: number;
 }): OwnerEditorControlsProps | null {
   const { context, snapshot, formSessionScope, secret, displayedContact } = input;
@@ -89,6 +91,16 @@ export function buildOwnerEditorView(input: {
       command: Parameters<typeof issueOwnerEditorFormGrant>[0]['command'],
       targetId: string | null,
     ) => issueOwnerEditorFormGrant({ context, session, command, targetId, secret, now: input.now });
+    const personRemoval =
+      input.removalEnabled === true &&
+      identity &&
+      snapshot.personRemoval?.contactId === identity.contactId &&
+      /^[a-f0-9]{64}$/.test(snapshot.personRemoval.revision)
+        ? {
+            grant: grant('remove_person', identity.contactId),
+            impact: snapshot.personRemoval,
+          }
+        : undefined;
     return {
       session,
       createGrant: grant('create_person', null),
@@ -111,8 +123,14 @@ export function buildOwnerEditorView(input: {
                 revision: identity.revision,
               },
             },
-            personRemovalUnavailableReason:
-              'Deleting people is not available in this release. You can still edit saved details and relationships.',
+            ...(personRemoval ? { personRemoval } : {}),
+            ...(!personRemoval
+              ? {
+                  personRemovalUnavailableReason:
+                    snapshot.personRemovalUnavailableReason ??
+                    'Deleting this person is unavailable because its current impact could not be verified.',
+                }
+              : {}),
             family: {
               grant: grant('add_family_relationship', identity.contactId),
               anchorContactId: identity.contactId,
@@ -129,6 +147,13 @@ export function buildOwnerEditorView(input: {
               grant: grant('correct_owner_family_relationship', eligibility.relationId),
               eligibility,
             })),
+            removals:
+              input.removalEnabled === true
+                ? (snapshot.corrections ?? []).map((eligibility) => ({
+                    grant: grant('remove_owner_family_relationship', eligibility.relationId),
+                    eligibility,
+                  }))
+                : [],
           }
         : {}),
     };

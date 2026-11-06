@@ -160,7 +160,7 @@ describe('one reviewed controller contextual entry points (SSR, not mounted focu
     expect(withCreate).toMatch(/<button[^>]*disabled=""[^>]*>Add person<\/button>/);
     expect(withCreate).not.toContain('private-issued-handle');
   });
-  it('keeps removal unavailable even when backlog removal capabilities are supplied', () => {
+  it('exposes removal only for supplied scoped grants and hides unknown targets', () => {
     const eligibility = editor.corrections?.[0]?.eligibility;
     if (!eligibility) throw Error('Missing eligible relationship fixture');
     const children = (
@@ -203,9 +203,10 @@ describe('one reviewed controller contextual entry points (SSR, not mounted focu
         {children}
       </OwnerEditorContextualHost>,
     );
-    expect(html).not.toContain('Delete person');
-    expect(html).not.toContain('Remove connection');
-    expect(html).not.toContain('<button');
+    expect(html).toContain('Delete person');
+    expect(html).toContain('Remove connection');
+    expect((html.match(/<button/g) ?? []).length).toBe(2);
+    expect(html).toContain('disabled');
     expect(html).not.toContain('private-issued-handle');
   });
   it('preserves exact selected map context and filters via contact-bound People destination', () => {

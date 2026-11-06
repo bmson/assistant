@@ -11,6 +11,7 @@ import {
   assertPrivacyErasureFenceUnchanged,
   firestoreOwnerEditorViewSnapshot,
   readFirestoreOwnerEditorIssuanceContext,
+  readOwnerFamilyRejectionReview,
   readPrivacyErasureFence,
 } from '@assistant/firestore';
 import { Handshake, MapPin, Sparkles } from 'lucide-react';
@@ -30,9 +31,10 @@ import type { FactView } from '@/app/profile/fact-row';
 import { MemoryNavigation } from '@/app/profile/memory-navigation';
 import { requireOwner } from '@/auth';
 import { getFirestorePersonDossier } from '@/lib/firestore-people';
-import { memoryMapReturnTo } from '@/lib/memory-editor-context';
+import { memoryMapReturnTo, memoryPersonConnectionHref } from '@/lib/memory-editor-context';
 import { memoryNoteHref, memoryNoteReturnTo } from '@/lib/memory-note-context';
 import { ownerEditorAvailability } from '@/lib/owner-editor-availability';
+import { bindSelectedFamilyRemoval } from '@/lib/owner-editor-removal-view';
 import { buildOwnerEditorView } from '@/lib/owner-editor-view';
 import { savedNoteCreatedLabel, savedNoteValidityLabel } from '@/lib/saved-note-date-display';
 import {
@@ -43,6 +45,7 @@ import {
 } from '@/lib/server';
 import {
   Badge,
+  btnSm,
   EmptyState,
   InfoGrid,
   InfoItem,
@@ -98,6 +101,7 @@ async function loadPersonDossier(
   id: string,
   now: Date,
   formSessionScope: string | undefined,
+  selectedRelationId: string | null,
 ): Promise<{
   data: PersonDossier | null;
   editor: OwnerEditorControlsProps | null;
@@ -182,12 +186,27 @@ async function loadPersonDossier(
         );
         editor = buildOwnerEditorView({
           enabled,
+          removalEnabled: true,
           context,
           snapshot,
           formSessionScope,
           secret: config.AUTH_SECRET,
           displayedContact: data.profile.contact,
           displayedRelationships: data.relations,
+        });
+        editor = await bindSelectedFamilyRemoval({
+          editor,
+          selectedRelationId,
+          secret: config.AUTH_SECRET,
+          review: (scope, eligibility) =>
+            readOwnerFamilyRejectionReview({
+              store,
+              ownerId,
+              relationId: eligibility.relationId,
+              scope,
+              expectedFamilyScopeRevision: eligibility.revision,
+              familyFields: eligibility.original,
+            }),
         });
       }
     } catch {
@@ -243,7 +262,12 @@ export default async function PersonPage({
   let editor: OwnerEditorControlsProps | null = null;
   let ownerId: string | null = null;
   try {
-    const loaded = await loadPersonDossier(id, now, session.formSessionScope);
+    const loaded = await loadPersonDossier(
+      id,
+      now,
+      session.formSessionScope,
+      requestedConnectionId,
+    );
     dossier = loaded.data;
     editor = loaded.editor;
     ownerId = loaded.ownerId;
@@ -421,8 +445,9 @@ export default async function PersonPage({
             <OwnerEditorContextTrigger entry="family" />
           </div>
           <p className="mt-2 text-sm text-muted">
-            Removing connections is not available in this release. Eligible family relationships can
-            still be edited.
+            {editor?.family && loadConfig().PERSISTENCE_DRIVER === 'firestore'
+              ? 'Review removal for a family connection before removing it. Its saved source note stays in your Library.'
+              : 'Connections supported by saved notes are shown below.'}
           </p>
           {unavailableConnectionSelection ? (
             <p role="status" className="mt-2 text-sm text-muted">
@@ -454,6 +479,34 @@ export default async function PersonPage({
                           <OwnerEditorContextTrigger
                             entry={{ correction: correction.eligibility.relationId }}
                           />
+                          {(editor.removals ?? []).some(
+                            (entry) =>
+                              entry.eligibility.relationId === correction.eligibility.relationId,
+                          ) ? (
+                            <OwnerEditorContextTrigger
+                              entry={{ removal: correction.eligibility.relationId }}
+                            />
+                          ) : loadConfig().PERSISTENCE_DRIVER === 'firestore' ? (
+                            requestedConnectionId === correction.eligibility.relationId ? (
+                              <span className="text-xs text-muted">
+                                Removal could not be reviewed. Refresh the saved details to try
+                                again.
+                              </span>
+                            ) : (
+                              <Link
+                                className={btnSm.outline}
+                                href={
+                                  memoryPersonConnectionHref(
+                                    id,
+                                    correction.eligibility.relationId,
+                                    mapReturnTo ?? '',
+                                  ) ?? `/people/${id}`
+                                }
+                              >
+                                Review removal
+                              </Link>
+                            )
+                          ) : null}
                         </div>,
                       ]),
                     )
@@ -630,7 +683,8 @@ export default async function PersonPage({
             <p className="text-sm text-muted">
               {contact.trust === 'owner'
                 ? 'Your own profile cannot be deleted here.'
-                : 'Deleting people is not available in this release. You can still edit their saved details and eligible connections.'}
+                : (editor?.personRemovalUnavailableReason ??
+                  'Deletion is unavailable in this view. Refresh the saved details before trying again.')}
             </p>
           ) : null}
         </section>
