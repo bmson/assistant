@@ -1,11 +1,16 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { ownerEditorCanonicalApply } from '@assistant/application/owner-editor-wire';
 import type { OwnerEditorApply, OwnerEditorScope } from '@assistant/persistence';
+import { FieldValue } from '@google-cloud/firestore';
 import { describe, expect, it } from 'vitest';
 import { buildFirestoreOwnerEditorEpochRecord } from './owner-editor-epoch-record.js';
-import { readFirestoreOwnerEditorContact } from './owner-editor-graph.js';
+import {
+  firestoreOwnerEditorViewSnapshot,
+  readFirestoreOwnerEditorContact,
+} from './owner-editor-graph.js';
 import { createFirestoreOwnerEditorOperationRepository } from './owner-editor-repository.js';
 import { FirestoreProfilePeopleCommandRepository } from './profile-people-command.js';
+import { FirestoreProfilePeopleReadRepository } from './profile-people-read.js';
 import { disposeStore, emulatorStore } from './test-store.js';
 
 const host = process.env.FIRESTORE_EMULATOR_HOST;
@@ -125,6 +130,61 @@ describe.skipIf(!host)('owner relationship label on actual Firestore SDK', () =>
       ).toMatchObject({ outcome: 'saved' });
       expect((await store.doc('contacts', contactId).get()).get('relationship')).toBe('');
       expect((await store.doc('contacts', contactId).get()).get('trust')).toBe('known');
+      // Legacy absence stays absent in storage. An unrelated legacy row must
+      // not disable the whole directory's editor snapshot.
+      await store.doc('contacts', contactId).update({ relationship: FieldValue.delete() });
+      const unrelatedId = randomUUID();
+      await store.doc('contacts', unrelatedId).set({
+        id: unrelatedId,
+        agentId: ownerId,
+        name: 'Unrelated legacy person',
+        aliases: [],
+        trust: 'known',
+        emails: [],
+        phones: [],
+        notes: '',
+        createdAt: now,
+        updatedAt: now,
+      });
+      const legacyView = await firestoreOwnerEditorViewSnapshot(store, ownerId, { contactId });
+      expect(legacyView.identity).toMatchObject({ contactId, relationship: '' });
+      expect(legacyView.people).toHaveLength(2);
+      const absent = await snapshot();
+      const profileContact = await new FirestoreProfilePeopleReadRepository(
+        store,
+        ownerId,
+      ).getContact(contactId);
+      expect(profileContact).toMatchObject({
+        id: contactId,
+        relationship: '',
+        identityRevision: absent.revision,
+      });
+      expect(
+        await run({
+          ...legacy,
+          operationId: randomUUID(),
+          expectedContactRevision: absent.revision,
+          name: 'Legacy renamed',
+          aliases: [],
+        }),
+      ).toMatchObject({ outcome: 'saved' });
+      expect((await store.doc('contacts', contactId).get()).get('relationship')).toBeUndefined();
+      expect((await store.doc('contacts', unrelatedId).get()).get('relationship')).toBeUndefined();
+      const beforeConcurrentChange = await snapshot();
+      await store.doc('contacts', contactId).update({ notes: 'Concurrent source change' });
+      expect(
+        await run({
+          ...legacy,
+          operationId: randomUUID(),
+          expectedContactRevision: beforeConcurrentChange.revision,
+          relationship: 'stale attempted label',
+        }),
+      ).toMatchObject({ outcome: 'conflict' });
+      expect((await store.doc('contacts', contactId).get()).get('relationship')).toBeUndefined();
+      await store.doc('contacts', unrelatedId).update({ relationship: null });
+      await expect(firestoreOwnerEditorViewSnapshot(store, ownerId, { contactId })).rejects.toThrow(
+        'Malformed editor contact',
+      );
     } finally {
       await disposeStore(store);
     }

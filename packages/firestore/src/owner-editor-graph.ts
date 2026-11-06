@@ -57,10 +57,11 @@ export async function readFirestoreOwnerEditorContact(
   if (!doc.exists) return null;
   if (!doc.updateTime) throw new Error('Editor contact revision unavailable');
   const contact = row<Records['contacts']>(doc);
+  const relationship = contact.relationship === undefined ? '' : contact.relationship;
   if (
     typeof contact.name !== 'string' ||
     !contact.name.trim() ||
-    typeof contact.relationship !== 'string' ||
+    typeof relationship !== 'string' ||
     typeof contact.trust !== 'string' ||
     !Array.isArray(contact.aliases) ||
     !contact.aliases.every((alias) => typeof alias === 'string')
@@ -69,6 +70,7 @@ export async function readFirestoreOwnerEditorContact(
   if (doc.get('agentId') !== undefined && doc.get('agentId') !== ownerId) return null;
   return {
     ...contact,
+    relationship,
     revision: ownerEditorSnapshotRevision({
       driver: 'firestore',
       ownerId,
@@ -330,11 +332,12 @@ export async function firestoreOwnerEditorViewSnapshot(
   if (contactDocs.length > 500) throw new Error('Editor snapshot read limit');
   const people = contactDocs.map((doc) => {
     const value = row<Records['contacts']>(doc);
+    const relationship = value.relationship === undefined ? '' : value.relationship;
     if (
       (doc.get('agentId') !== undefined && doc.get('agentId') !== ownerId) ||
       typeof value.name !== 'string' ||
       !value.name.trim() ||
-      typeof value.relationship !== 'string' ||
+      typeof relationship !== 'string' ||
       typeof value.trust !== 'string' ||
       !Array.isArray(value.aliases) ||
       !value.aliases.every((alias) => typeof alias === 'string')
@@ -343,6 +346,7 @@ export async function firestoreOwnerEditorViewSnapshot(
     const stamp = native(doc);
     return {
       ...value,
+      relationship,
       revision: ownerEditorSnapshotRevision({
         driver: 'firestore',
         ownerId,
