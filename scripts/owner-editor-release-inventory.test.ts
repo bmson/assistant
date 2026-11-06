@@ -20,6 +20,12 @@ import {
   verifyPrerequisitesBinding,
   verifyWifEnvironment,
 } from './owner-editor-release-inventory.js';
+import { verifyLocalAdmission } from './owner-editor-v1-local-operator.js';
+import {
+  type BootstrapReceipt,
+  bootstrapDigest,
+  reviewedBootstrap,
+} from './owner-release-current-snapshot.js';
 
 const manifest = readFileSync(
   new URL('./fixtures/owner-editor-release-indexes.json', import.meta.url),
@@ -721,158 +727,285 @@ describe('protected read-only release inventory', () => {
     await expect(read(`https://firestore.googleapis.com/v1/${DATABASE}`)).rejects.toThrow();
     expect(calls).toBe(0);
   });
-  it.each(['bound', 'bound-local586', 'unbound', 'mismatched', 'revision-mismatch'] as const)(
-    'collects and redacts editor target state: %s',
-    async (mode) => {
-      const target = {
-        workspaceId: 'private-installation',
-        ownerId: '11111111-1111-4111-8111-111111111111',
-      };
-      let observations = 0;
-      const spec = JSON.parse(manifest.toString()) as {
-        indexes: Array<{
-          collectionGroup: string;
-          queryScope: string;
-          fields: Array<Record<string, unknown>>;
-        }>;
-        fieldOverrides: Array<{ collectionGroup: string; fieldPath: string }>;
-      };
-      const prefix = `${DATABASE}/collectionGroups/`;
-      const composites = spec.indexes.map((index, n) => {
-        const fields = index.fields.map((field) => ({ ...field }));
-        if (!fields.some((field) => field.fieldPath === '__name__')) {
-          const position = fields.findIndex((field) => field.vectorConfig !== undefined);
-          const name = {
-            fieldPath: '__name__',
-            order: fields.at(-1)?.order === 'DESCENDING' ? 'DESCENDING' : 'ASCENDING',
-          };
-          if (position >= 0) fields.splice(position, 0, name);
-          else fields.push(name);
-        }
-        return {
-          name: `${prefix}${index.collectionGroup}/indexes/i${n}`,
-          fields,
-          queryScope: index.queryScope,
-          state: 'READY',
+  it.each([
+    'bound',
+    'bound-local586',
+    'bound-disabled-wif',
+    'bound-disabled-local',
+    'unbound',
+    'mismatched',
+    'revision-mismatch',
+  ] as const)('collects and redacts editor target state: %s', async (mode) => {
+    const target = {
+      workspaceId: 'private-installation',
+      ownerId: '11111111-1111-4111-8111-111111111111',
+    };
+    let observations = 0;
+    const spec = JSON.parse(manifest.toString()) as {
+      indexes: Array<{
+        collectionGroup: string;
+        queryScope: string;
+        fields: Array<Record<string, unknown>>;
+      }>;
+      fieldOverrides: Array<{ collectionGroup: string; fieldPath: string }>;
+    };
+    const prefix = `${DATABASE}/collectionGroups/`;
+    const composites = spec.indexes.map((index, n) => {
+      const fields = index.fields.map((field) => ({ ...field }));
+      if (!fields.some((field) => field.fieldPath === '__name__')) {
+        const position = fields.findIndex((field) => field.vectorConfig !== undefined);
+        const name = {
+          fieldPath: '__name__',
+          order: fields.at(-1)?.order === 'DESCENDING' ? 'DESCENDING' : 'ASCENDING',
         };
-      });
-      const fields = [
-        ...spec.fieldOverrides.map((field) => ({
-          name: `${prefix}${field.collectionGroup}/fields/${field.fieldPath}`,
-          indexConfig: {},
-        })),
-        {
-          name: `${prefix}__default__/fields/*`,
-          indexConfig: {
-            usesAncestorConfig: false,
-            reverting: false,
-            indexes: [
-              {
-                queryScope: 'COLLECTION',
-                state: 'READY',
-                fields: [{ fieldPath: '*', order: 'ASCENDING' }],
-              },
-              {
-                queryScope: 'COLLECTION',
-                state: 'READY',
-                fields: [{ fieldPath: '*', order: 'DESCENDING' }],
-              },
-              {
-                queryScope: 'COLLECTION',
-                state: 'READY',
-                fields: [{ fieldPath: '*', arrayConfig: 'CONTAINS' }],
-              },
-            ],
-          },
-        },
-      ];
-      const calls: string[] = [];
-      const read = async (url: string) => {
-        calls.push(url);
-        if (url === `https://firestore.googleapis.com/v1/${DATABASE}`) return db;
-        const component = url.includes('assistant-web') ? 'web' : 'agent';
-        const svc = JSON.parse(
-          JSON.stringify(
-            service(
-              mode === 'unbound'
-                ? undefined
-                : {
-                    ...target,
-                    workspaceId:
-                      mode === 'mismatched' && component === 'web'
-                        ? 'other-installation'
-                        : target.workspaceId,
-                  },
-            ),
-          )
-            .replaceAll('assistant-agent', `assistant-${component}`)
-            .replaceAll('/agent@', `/${component}@`),
-        ) as ReturnType<typeof service>;
-        const traffic = svc.trafficStatuses[0];
-        if (!traffic) throw new Error('missing fake traffic fixture');
-        if (url.includes('/revisions/')) {
-          if (mode === 'revision-mismatch')
-            svc.template.containers[0]?.env.push({
-              name: 'FIRESTORE_AGENT_ID',
-              value: target.ownerId,
-            });
-          return {
-            name: `${svc.name}/revisions/${traffic.revision}`,
-            ...svc.template,
-          };
-        }
-        return svc;
-      };
-      const lists = {
-        composites,
-        fields,
-        evidence:
-          mode === 'bound-local586'
-            ? ('reviewed-local-gcloud-586-complete-lists' as const)
-            : ('pinned-gcloud-576-complete-lists' as const),
-      };
-      const observe = async (observed: typeof target) => {
-        observations++;
-        expect(observed).toEqual(target);
-        return { status: 'missing', reason: 'editor_epoch_missing' };
-      };
-      if (mode === 'revision-mismatch') {
-        await expect(collectInventory(read, manifest, now, lists, observe)).rejects.toThrow(
-          'serving editor target mismatch',
-        );
-        expect(observations).toBe(0);
-        return;
+        if (position >= 0) fields.splice(position, 0, name);
+        else fields.push(name);
       }
-      const result = await collectInventory(read, manifest, now, lists, observe);
-      expect(observations).toBe(mode.startsWith('bound') ? 1 : 0);
-      expect(result.editorReadiness).toEqual(
-        mode.startsWith('bound')
-          ? { status: 'missing', reason: 'editor_epoch_missing' }
-          : { status: 'unknown', reason: 'editor_target_unbound_or_not_collected' },
+      return {
+        name: `${prefix}${index.collectionGroup}/indexes/i${n}`,
+        fields,
+        queryScope: index.queryScope,
+        state: 'READY',
+      };
+    });
+    const fields = [
+      ...spec.fieldOverrides.map((field) => ({
+        name: `${prefix}${field.collectionGroup}/fields/${field.fieldPath}`,
+        indexConfig: {},
+      })),
+      {
+        name: `${prefix}__default__/fields/*`,
+        indexConfig: {
+          usesAncestorConfig: false,
+          reverting: false,
+          indexes: [
+            {
+              queryScope: 'COLLECTION',
+              state: 'READY',
+              fields: [{ fieldPath: '*', order: 'ASCENDING' }],
+            },
+            {
+              queryScope: 'COLLECTION',
+              state: 'READY',
+              fields: [{ fieldPath: '*', order: 'DESCENDING' }],
+            },
+            {
+              queryScope: 'COLLECTION',
+              state: 'READY',
+              fields: [{ fieldPath: '*', arrayConfig: 'CONTAINS' }],
+            },
+          ],
+        },
+      },
+    ];
+    const calls: string[] = [];
+    const read = async (url: string) => {
+      calls.push(url);
+      if (url === `https://firestore.googleapis.com/v1/${DATABASE}`) return db;
+      const component = url.includes('assistant-web') ? 'web' : 'agent';
+      const svc = JSON.parse(
+        JSON.stringify(
+          service(
+            mode === 'unbound'
+              ? undefined
+              : {
+                  ...target,
+                  workspaceId:
+                    mode === 'mismatched' && component === 'web'
+                      ? 'other-installation'
+                      : target.workspaceId,
+                },
+          ),
+        )
+          .replaceAll('assistant-agent', `assistant-${component}`)
+          .replaceAll('/agent@', `/${component}@`),
+      ) as ReturnType<typeof service>;
+      const traffic = svc.trafficStatuses[0];
+      if (!traffic) throw new Error('missing fake traffic fixture');
+      if (mode.startsWith('bound-disabled'))
+        Object.assign(svc, {
+          uid: `${component}-uid`,
+          terminalCondition: { state: 'CONDITION_SUCCEEDED' },
+          scaling: { scalingMode: 'MANUAL' },
+          reconciling: false,
+          traffic: [
+            {
+              type: 'TRAFFIC_TARGET_ALLOCATION_TYPE_REVISION',
+              revision: traffic.revision,
+              percent: 100,
+            },
+          ],
+          trafficStatuses: [
+            {
+              type: 'TRAFFIC_TARGET_ALLOCATION_TYPE_REVISION',
+              revision: traffic.revision,
+              percent: 100,
+            },
+          ],
+          latestCreatedRevision: traffic.revision,
+          latestReadyRevision: traffic.revision,
+        });
+
+      if (url.includes('/revisions/')) {
+        if (mode === 'revision-mismatch')
+          svc.template.containers[0]?.env.push({
+            name: 'FIRESTORE_AGENT_ID',
+            value: target.ownerId,
+          });
+        return {
+          name: `${svc.name}/revisions/${traffic.revision}`,
+          ...svc.template,
+          ...(mode.startsWith('bound-disabled')
+            ? {
+                uid: `${component}-revision-uid`,
+                service: svc.name,
+                conditions: [
+                  { type: 'Ready', state: 'CONDITION_SUCCEEDED' },
+                  { type: 'Active', state: 'CONDITION_FAILED', revisionReason: 'RETIRED' },
+                  {
+                    type: 'ResourcesAvailable',
+                    state: 'STATE_UNSPECIFIED',
+                    revisionReason: 'RETIRED',
+                  },
+                ],
+              }
+            : {}),
+        };
+      }
+      return svc;
+    };
+    const lists = {
+      composites,
+      fields,
+      evidence:
+        mode === 'bound-local586' || mode === 'bound-disabled-local'
+          ? ('reviewed-local-gcloud-586-complete-lists' as const)
+          : ('pinned-gcloud-576-complete-lists' as const),
+    };
+    const observe = async (observed: typeof target) => {
+      observations++;
+      expect(observed).toEqual(target);
+      return mode === 'bound-disabled-wif'
+        ? {
+            status: 'ready',
+            epochReady: true,
+            ownerMatched: true,
+            privacyBound: true,
+            observationStable: true,
+            consistentSnapshot: false,
+          }
+        : { status: 'missing', reason: 'editor_epoch_missing' };
+    };
+    if (mode === 'revision-mismatch') {
+      await expect(collectInventory(read, manifest, now, lists, observe)).rejects.toThrow(
+        'serving editor target mismatch',
       );
-      expect(JSON.stringify(result)).not.toContain(target.workspaceId);
-      // Database incarnation uses a different UUID from the private owner target.
-      expect(JSON.stringify(result.services)).not.toContain(target.ownerId);
-      expect(result.indexes.status).toBe('exact_manifest_parity');
-      expect(result).toMatchObject({
-        trafficAuthorized: false,
-        maintenanceAuthorized: false,
-        mutationAuthorized: false,
-        recoveryPairQualified: false,
-      });
-      expect(result.services.every((item) => item.servingRevisionVerified)).toBe(true);
-      expect(calls).toHaveLength(5);
-      expect(JSON.stringify(result)).not.toContain('secret-do-not-retain');
-      await expect(
-        collectInventory(
-          async (url) => (url.includes('/revisions/') ? { name: 'wrong' } : read(url)),
-          manifest,
-          now,
-          { composites, fields, evidence: 'pinned-gcloud-576-complete-lists' },
+      expect(observations).toBe(0);
+      return;
+    }
+    let current: BootstrapReceipt | undefined;
+    if (mode.startsWith('bound-disabled')) {
+      const binding = async (role: 'agent' | 'web') => {
+        const serviceName = `projects/bmson-assistant/locations/us-west1/services/assistant-${role}`;
+        const svc = (await read(`https://run.googleapis.com/v2/${serviceName}`)) as ReturnType<
+          typeof service
+        > & { uid: string };
+        const revision = svc.trafficStatuses[0]?.revision ?? '';
+        const native = await read(
+          `https://run.googleapis.com/v2/${serviceName}/revisions/${revision}`,
+        );
+        const image = svc.template.containers[0]?.image ?? '';
+        return {
+          service: serviceName,
+          uid: svc.uid,
+          revision,
+          image,
+          serviceSha256: bootstrapDigest(svc),
+          revisionSha256: bootstrapDigest(native),
+          proof: {
+            uid: 'c'.repeat(64),
+            image,
+            source: 'a'.repeat(40),
+            runId: '1',
+            attempt: '1',
+            manifest: 'd'.repeat(64),
+            paused: false,
+            templateSha256: bootstrapDigest(svc.template),
+          },
+          automaticScaling: { scalingMode: 'AUTOMATIC', maxInstanceCount: 2 },
+        };
+      };
+      const raw = {
+        format: 1,
+        kind: 'disabled-bootstrap',
+        source: 'a'.repeat(40),
+        closureReceiptSha256: 'c'.repeat(64),
+        drainReceiptSha256: 'd'.repeat(64),
+        recoveryReceiptSha256: 'e'.repeat(64),
+        services: { agent: await binding('agent'), web: await binding('web') },
+      };
+      current = reviewedBootstrap(raw, bootstrapDigest(raw), raw.source);
+      calls.length = 0;
+    }
+    const result = await collectInventory(
+      read,
+      manifest,
+      now,
+      lists,
+      mode === 'bound-disabled-local' ? undefined : observe,
+      undefined,
+      current,
+    );
+    if (current) {
+      expect(
+        result.services.every(
+          (s) =>
+            s.admissionDisabled &&
+            s.currentRevisionConfigurationVerified &&
+            !s.servingRevisionVerified &&
+            !s.runtimeReadinessVerified,
         ),
-      ).rejects.toThrow();
-    },
-  );
+      ).toBe(true);
+      expect(result.reviewedCurrentSnapshotSha256).toBe(bootstrapDigest(current));
+      if (mode === 'bound-disabled-wif') {
+        expect(() => requireBasicEditorReadiness(result)).toThrow();
+        expect(() => requireBasicEditorReadiness(result, current)).not.toThrow();
+      } else {
+        expect(observations).toBe(0);
+        const svc = await read(`https://run.googleapis.com/v2/${current.services.web.service}`);
+        expect(() => verifyLocalAdmission(svc, current, 'web')).not.toThrow();
+        expect(() => verifyLocalAdmission(svc, undefined, 'web')).toThrow();
+      }
+      return;
+    }
+    expect(observations).toBe(mode.startsWith('bound') ? 1 : 0);
+    expect(result.editorReadiness).toEqual(
+      mode.startsWith('bound')
+        ? { status: 'missing', reason: 'editor_epoch_missing' }
+        : { status: 'unknown', reason: 'editor_target_unbound_or_not_collected' },
+    );
+    expect(JSON.stringify(result)).not.toContain(target.workspaceId);
+    // Database incarnation uses a different UUID from the private owner target.
+    expect(JSON.stringify(result.services)).not.toContain(target.ownerId);
+    expect(result.indexes.status).toBe('exact_manifest_parity');
+    expect(result).toMatchObject({
+      trafficAuthorized: false,
+      maintenanceAuthorized: false,
+      mutationAuthorized: false,
+      recoveryPairQualified: false,
+    });
+    expect(result.services.every((item) => item.servingRevisionVerified)).toBe(true);
+    expect(calls).toHaveLength(5);
+    expect(JSON.stringify(result)).not.toContain('secret-do-not-retain');
+    await expect(
+      collectInventory(
+        async (url) => (url.includes('/revisions/') ? { name: 'wrong' } : read(url)),
+        manifest,
+        now,
+        { composites, fields, evidence: 'pinned-gcloud-576-complete-lists' },
+      ),
+    ).rejects.toThrow();
+  });
   it('fails closed without promoting a partial collector to authority', async () => {
     await expect(
       collectInventory(async () => ({ unexpected: 'do-not-retain' }), manifest, now),

@@ -24,6 +24,13 @@ import {
   maintenancePacketDigest,
   packetRecipient,
 } from './owner-editor-v1-packet.js';
+import {
+  type BootstrapReceipt,
+  disabled,
+  object,
+  reviewedCurrentEnvironment,
+  verifyCurrentService,
+} from './owner-release-current-snapshot.js';
 
 const modes = ['prepare-initialize', 'prepare-disable', 'dry-run', 'apply'] as const;
 const account = 'bmson@bmson.com';
@@ -123,6 +130,32 @@ export function localInventoryEnvironment(env: NodeJS.ProcessEnv, token: string,
     CLOUDSDK_COMPONENT_MANAGER_DISABLE_UPDATE_CHECK: 'true',
   };
 }
+export function verifyLocalAdmission(
+  raw: unknown,
+  current: BootstrapReceipt | undefined,
+  role: 'agent' | 'web',
+) {
+  if (disabled(object(raw)) && current?.kind !== 'disabled-bootstrap')
+    throw new Error('Disabled current service requires reviewed bootstrap binding');
+  if (current)
+    verifyCurrentService(current.services[role], raw, current.kind === 'disabled-bootstrap');
+}
+export function verifyLocalPacketReview(
+  evidence: { drainSha256: string; recoverySha256: string } | null | undefined,
+  current:
+    | { kind: string; drainReceiptSha256?: string; recoveryReceiptSha256?: string }
+    | undefined,
+  mode: string | undefined,
+) {
+  if (current?.kind !== 'disabled-bootstrap') return;
+  if (
+    (mode === 'apply' && !evidence) ||
+    (evidence &&
+      (evidence.drainSha256 !== current.drainReceiptSha256 ||
+        evidence.recoverySha256 !== current.recoveryReceiptSha256))
+  )
+    throw new Error('Reviewed bootstrap and packet evidence differ');
+}
 async function main() {
   if (process.argv.length !== 2) throw new Error('Invalid arguments');
   const env = process.env;
@@ -137,6 +170,7 @@ async function main() {
     JSON.parse(readFileSync('infra/gcp/release-contracts.json', 'utf8')),
     lstatSync('apps/web/lib/owner-editor-runtime.ts').isFile(),
   );
+  const current = reviewedCurrentEnvironment(env, head);
   const mode = env.OWNER_EDITOR_MAINTENANCE_MODE;
   const isPrepare = mode === 'prepare-initialize' || mode === 'prepare-disable';
   const recipient = isPrepare
@@ -148,6 +182,7 @@ async function main() {
     : parseOwnerEditorMaintenancePacket(
         JSON.parse(privateFile(env.OWNER_EDITOR_LOCAL_PACKET_FILE ?? '', 8192)),
       );
+  verifyLocalPacketReview(packet?.evidence, current, mode);
   if (packet && maintenancePacketDigest(packet) !== env.OWNER_EDITOR_V1_REVIEWED_PACKET_SHA256)
     throw new Error('Reviewed packet digest mismatch');
   if (
@@ -211,7 +246,17 @@ async function main() {
       evidence: 'reviewed-local-gcloud-586-complete-lists' as const,
     };
     const read = createReadOnlyGet(token, started + 60000);
-    const receipt = await collectInventory(read, manifest, Date.now(), global);
+    const receipt = await collectInventory(
+      read,
+      manifest,
+      Date.now(),
+      global,
+      undefined,
+      undefined,
+      current,
+    );
+    if (receipt.services.some((s) => s.admissionDisabled) && current?.kind !== 'disabled-bootstrap')
+      throw new Error('Disabled current pair requires reviewed bootstrap binding');
     if (
       receipt.indexes.status !== 'exact_manifest_parity' ||
       !['pitr', 'backup'].includes(receipt.recoveryPoint.kind) ||
@@ -220,12 +265,11 @@ async function main() {
       throw new Error('Prerequisites unproven');
     const targets = [];
     for (const service of ['agent', 'web'] as const) {
-      const facts = serviceFacts(
-        await read(
-          `https://run.googleapis.com/v2/projects/${project}/locations/us-west1/services/assistant-${service}`,
-        ),
-        service,
+      const rawCurrent = await read(
+        `https://run.googleapis.com/v2/projects/${project}/locations/us-west1/services/assistant-${service}`,
       );
+      verifyLocalAdmission(rawCurrent, current, service);
+      const facts = serviceFacts(rawCurrent, service);
       const prior = receipt.services.find((s) => s.service === service);
       if (
         !prior ||

@@ -1,3 +1,4 @@
+import { disabled, retiredCurrentCondition } from './owner-release-current-snapshot.js';
 /** Unwired raw-response projection. No IO, credentials or supplied-proof acceptance. */
 
 import {
@@ -88,12 +89,28 @@ function revisionProof(raw: unknown, name: string, c: Context): NativeProof {
   const conditions = r.conditions;
   requireNative(Array.isArray(conditions) && conditions.length > 0 && conditions.length <= 16);
   const ready = conditions.map(nativeObject).filter((c) => c.type === 'Ready');
-  requireNative(conditions.every((c) => nativeObject(c).state === 'CONDITION_SUCCEEDED'));
+  const reviewedCurrent = name === c.canonical ? c.currentBinding : undefined;
+  requireNative(
+    conditions.every((condition) => {
+      const v = nativeObject(condition);
+      return (
+        v.state === 'CONDITION_SUCCEEDED' ||
+        (reviewedCurrent?.preclosed && retiredCurrentCondition(v))
+      );
+    }),
+  );
+  if (name !== c.canonical)
+    requireNative(
+      conditions
+        .map(nativeObject)
+        .every((v) => v.reason === undefined && v.revisionReason === undefined),
+    );
   requireNative(
     r.name === `${WEB_SERVICE}/revisions/${name}` &&
       r.service === WEB_SERVICE &&
       ready.length === 1 &&
-      ready[0]?.state === 'CONDITION_SUCCEEDED' &&
+      (ready[0]?.state === 'CONDITION_SUCCEEDED' ||
+        (reviewedCurrent?.preclosed && retiredCurrentCondition(ready[0] as Obj))) &&
       (r.reconciling === undefined || r.reconciling === false),
   );
   const uid = text(r.uid, /^[A-Za-z0-9-]{1,128}$/),
@@ -105,7 +122,19 @@ function revisionProof(raw: unknown, name: string, c: Context): NativeProof {
     attempt: string,
     manifest: string,
     paused: boolean;
-  if (pin) {
+  if (reviewedCurrent) {
+    ({ image, source, runId, attempt, manifest, paused } = reviewedCurrent.proof);
+    requireNative(tagHash(uid) === reviewedCurrent.proof.uid);
+    requireNative(env.ASSISTANT_RELEASE_MANIFEST === manifest);
+    requireNative(!env.ASSISTANT_RELEASE_SOURCE_SHA || env.ASSISTANT_RELEASE_SOURCE_SHA === source);
+    requireNative(
+      !env.ASSISTANT_RELEASE_WORKFLOW_RUN_ID || env.ASSISTANT_RELEASE_WORKFLOW_RUN_ID === runId,
+    );
+    requireNative(
+      !env.ASSISTANT_RELEASE_WORKFLOW_RUN_ATTEMPT ||
+        env.ASSISTANT_RELEASE_WORKFLOW_RUN_ATTEMPT === attempt,
+    );
+  } else if (pin) {
     image = pin.image;
     source = pin.source;
     const parts = pin.tag.split('-');
@@ -143,6 +172,8 @@ function revisionProof(raw: unknown, name: string, c: Context): NativeProof {
   for (const key of TEMPLATE_FIELDS)
     if (key !== 'revision' && r[key] !== undefined) projected[key] = r[key];
   projected.revision = name;
+  if (reviewedCurrent)
+    requireNative(digest(template(projected)) === reviewedCurrent.proof.templateSha256);
   return {
     uid: tagHash(uid),
     image,
@@ -215,13 +246,21 @@ const OUTPUT = new Set([
   'etag',
   'template',
 ]);
+export function nativeStableConfigurationDigest(raw: unknown) {
+  return digest(
+    Object.fromEntries(Object.entries(nativeObject(raw)).filter(([k]) => !OUTPUT.has(k))),
+  );
+}
 /** Full native revisions are consumed here; external hashes/booleans are never accepted. */
 function projectSnapshot(raw: unknown, native: Record<string, unknown>, c: Context): Snapshot {
   const s = nativeObject(raw);
   requireNative(
     s.name === WEB_SERVICE &&
       (s.reconciling === undefined || s.reconciling === false) &&
-      nativeObject(s.terminalCondition).state === 'CONDITION_SUCCEEDED' &&
+      (nativeObject(s.terminalCondition).state === 'CONDITION_SUCCEEDED' ||
+        (c.currentBinding?.preclosed &&
+          disabled(s) &&
+          retiredCurrentCondition(nativeObject(s.terminalCondition)))) &&
       s.deleteTime === undefined &&
       s.expireTime === undefined,
   );
@@ -273,15 +312,14 @@ function projectSnapshot(raw: unknown, native: Record<string, unknown>, c: Conte
     generation,
     observedGeneration: generation,
     reconciling: false,
-    succeeded: true,
+    succeeded: nativeObject(s.terminalCondition).state === 'CONDITION_SUCCEEDED',
+    ...(c.currentBinding?.preclosed && disabled(s) ? { admissionDisabled: true as const } : {}),
     desired,
     observed,
     latestReady,
     latestCreated,
     template: t,
-    stableConfigSha256: digest(
-      Object.fromEntries(Object.entries(s).filter(([k]) => !OUTPUT.has(k))),
-    ),
+    stableConfigSha256: nativeStableConfigurationDigest(s),
     rootUriSha256: tagHash(root),
     tagUris,
     urls,

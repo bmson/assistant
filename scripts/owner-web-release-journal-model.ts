@@ -1215,12 +1215,14 @@ export function rebaseLifecycleJournalSimulation(
       rebased,
       mode as import('./owner-web-release-lifecycle-model.js').Mode,
     ),
-    { etag: _etag, ...requestBody } = plan.request.body,
-    request: LogicalAction = {
-      method: 'PATCH',
-      updateMask: plan.request.updateMask,
-      body: requestBody,
-    };
+    { etag: _etag, ...requestBody } = plan.request.body;
+  // Historical offline journal simulation has no combined-create operation authority.
+  check(plan.request.updateMask !== 'template,traffic');
+  const request: LogicalAction = {
+    method: 'PATCH',
+    updateMask: plan.request.updateMask,
+    body: requestBody,
+  };
   check(
     digest(request) === s.head.intent.logicalDigest &&
       plan.expectedTraffic.every((row) => !s.head.retiredTags.includes(row.tag)),

@@ -11,14 +11,18 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { bootstrapDigest, scalingCheckpoint } from './owner-release-bootstrap.js';
 import { nativeWebCreationFixtureClient } from './owner-web-release-creation-client.js';
 import {
   acceptAgentReady,
   acceptCapturedRetirement,
+  acceptPreclosedBootstrap,
   beginCapturedRetirement,
+  bindAgentSuccessorReceipt,
   bindCapturedRetirementOperation,
   type Context,
   captureLifecycle,
+  markAgentAdmissionPossible,
   releaseIdentity,
   type State,
   verifyLifecycleState,
@@ -180,11 +184,34 @@ function fixture() {
         op = `projects/bmson-assistant/locations/us-west1/operations/op-${writes}`;
       expect(body.etag).toBe(service.etag);
       expect(body.name).toBe(WEB_SERVICE);
-      if (path === `${WEB_SERVICE}?updateMask=template`) {
-        expect(Object.keys(body).sort()).toEqual(['etag', 'name', 'template']);
+      if (
+        path === `${WEB_SERVICE}?updateMask=template` ||
+        path === `${WEB_SERVICE}?updateMask=template,traffic`
+      ) {
+        expect(Object.keys(body).sort()).toEqual(
+          path.endsWith('template,traffic')
+            ? ['etag', 'name', 'template', 'traffic']
+            : ['etag', 'name', 'template'],
+        );
         service.template = body.template;
         service.latestCreatedRevision = service.latestReadyRevision = body.template.revision;
         native[body.template.revision] = revision(body.template, `native-created-${writes}`);
+        if (body.traffic) {
+          service.traffic = body.traffic.map((value: Raw) => {
+            const row = copy(value);
+            if (row.percent === 0) delete row.percent;
+            if (row.tag === '') delete row.tag;
+            return row;
+          });
+          service.trafficStatuses = service.traffic.map((r: Raw) => ({
+            ...r,
+            ...(r.tag ? { uri: uri(r.tag) } : {}),
+          }));
+          service.urls = [
+            root,
+            ...body.traffic.filter((r: Raw) => r.tag).map((r: Raw) => uri(r.tag)),
+          ];
+        }
       } else {
         expect(path).toBe(`${WEB_SERVICE}?updateMask=traffic`);
         expect(Object.keys(body).sort()).toEqual(['etag', 'name', 'traffic']);
@@ -1236,5 +1263,176 @@ describe('raw proof error privacy', () => {
     expect(String(error)).toBe('Error: Native release validation held');
     expect(JSON.stringify(error)).not.toContain('PRIVATE_NATIVE_PAYLOAD');
     expect((error as Error & { input?: unknown }).input).toBeUndefined();
+  });
+});
+
+describe('reviewed zero-tag disabled capture adapter', () => {
+  function reviewed() {
+    const f = fixture(),
+      old = f.context.canonical,
+      baseline = f.state();
+    const name = 'assistant-web-reviewed-config';
+    const native = f.native[old]!;
+    delete f.native[old];
+    native.name = `${WEB_SERVICE}/revisions/${name}`;
+    native.conditions = [
+      { type: 'Ready', state: 'CONDITION_SUCCEEDED' },
+      { type: 'Active', state: 'CONDITION_FAILED', revisionReason: 'RETIRED' },
+      { type: 'ResourcesAvailable', state: 'STATE_UNSPECIFIED', revisionReason: 'RETIRED' },
+    ];
+    f.native[name] = native;
+    f.service.template.revision = name;
+    f.service.scaling = { scalingMode: 'MANUAL', manualInstanceCount: 0 };
+    f.service.traffic = [
+      { type: 'TRAFFIC_TARGET_ALLOCATION_TYPE_REVISION', revision: name, percent: 100 },
+    ];
+    f.service.trafficStatuses = copy(f.service.traffic);
+    f.service.urls = [f.service.uri];
+    f.service.latestReadyRevision =
+      f.service.latestCreatedRevision = `${WEB_SERVICE}/revisions/${name}`;
+    f.context.canonical = name;
+    f.context.currentBinding = {
+      proof: {
+        ...baseline.snapshot.revisions[old]!,
+        templateSha256: bootstrapDigest(f.service.template),
+      },
+      serviceSha256: bootstrapDigest(f.service),
+      revisionSha256: bootstrapDigest(native),
+      reviewedEvidenceSha256: 'd'.repeat(64),
+      preclosed: true,
+    };
+    return f;
+  }
+  it('captures the reviewed retained canonical without an existing tag or fabricated retirement PATCH', () => {
+    const f = reviewed();
+    let saved: State | undefined;
+    const receipts = {
+      initialize: (s: State) => {
+        saved = s;
+        return 'private-state';
+      },
+      readCurrent: () => saved!,
+      recordIntent: () => {},
+      recordCheckpoint: () => {},
+    };
+    const state = initializePairedWebLifecycle(f.context, f.service, f.native, receipts);
+    expect(state.phase).toBe('captured');
+    expect(state.snapshot.desired[0]?.tag).toBe('');
+    verifyLifecycleState(state);
+    expect(f.writes()).toBe(0);
+    const changed = copy(f.service);
+    changed.template.containers[0].resources.limits.memory = '4Gi';
+    expect(() => initializePairedWebLifecycle(f.context, changed, f.native, receipts)).toThrow(
+      'changed',
+    );
+  });
+  it('recognizes v2 retired admission only for the reviewed old canonical; unsupported reason remains held', () => {
+    const f = reviewed();
+    expect(() => f.state()).not.toThrow();
+    f.native[f.context.canonical]!.conditions[1].revisionReason = 'HEALTH_CHECK_SKIPPED';
+    expect(() => f.state()).toThrow();
+  });
+  it('requires promoted candidate-only current state before accepting externally reviewed preclosed aliases', async () => {
+    const f = reviewed();
+    let state = f.state();
+    const creation = nativeWebCreationFixtureClient(f.deps),
+      traffic = nativeWebTrafficFixtureClient(f.deps);
+    state = await creation.execute(state, 'createP', stamp);
+    state = await traffic.execute(state, 'attachP', stamp);
+    expect(() => acceptPreclosedBootstrap(state, state.snapshot)).toThrow();
+    state = await nativeWebTrafficFixtureClient(f.deps).execute(state, 'promoteP', stamp);
+    const current = acceptPreclosedBootstrap(state, state.snapshot);
+    expect(current.phase).toBe('retired');
+    verifyLifecycleState(current);
+    const changed = copy(state.snapshot);
+    changed.template.unreviewed = 'drift';
+    expect(() => acceptPreclosedBootstrap(state, changed)).toThrow();
+    // No extra traffic PATCH or invented 600second drain receipt is generated.
+    expect(f.writes()).toBe(2);
+  });
+  it('creates and attaches the exact zero-percent paused tag atomically, then attachment is read-only', async () => {
+    const f = reviewed();
+    let state = f.state();
+    state = await nativeWebCreationFixtureClient(f.deps).execute(state, 'createP', stamp);
+    const write = f.requests.find((r) => r.method === 'PATCH')!;
+    expect(write.url.endsWith('?updateMask=template,traffic')).toBe(true);
+    const body = JSON.parse(write.body!);
+    expect(body.traffic).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ revision: f.context.canonical, percent: 100 }),
+        expect.objectContaining({ revision: releaseIdentity(f.context, 'P').revision, percent: 0 }),
+      ]),
+    );
+    expect(body.template.containers[0].env).toContainEqual({
+      name: 'ASSISTANT_RELEASE_WRITES_PAUSED',
+      value: 'true',
+    });
+    const writes = f.writes();
+    state = await nativeWebTrafficFixtureClient(f.deps).execute(state, 'attachP', stamp);
+    expect(state.phase).toBe('attachedP');
+    expect(f.writes()).toBe(writes);
+  });
+  it('reconciles unknown combined creation by observing the exact healthy named revision, without another PATCH or invented LRO', async () => {
+    const f = reviewed();
+    f.setInitialReply(() => {
+      throw new Error('connection lost after commit');
+    });
+    const state = await nativeWebCreationFixtureClient(f.deps).execute(f.state(), 'createP', stamp);
+    expect(state.phase).toBe('createdP');
+    expect(state.pending).toBeNull();
+    expect(f.writes()).toBe(1);
+    expect(f.recorded.some((s) => s.pending?.outcome === 'unknown' && !s.pending.operation)).toBe(
+      true,
+    );
+  });
+  it('rejects failed new startup even when the prior canonical is legitimately retired', async () => {
+    const f = reviewed();
+    f.setInitialReply((op) => {
+      f.native[releaseIdentity(f.context, 'P').revision]!.conditions = [
+        { type: 'Ready', state: 'CONDITION_FAILED', revisionReason: 'HEALTH_CHECK_SKIPPED' },
+      ];
+      return reply(op);
+    });
+    await expect(
+      nativeWebCreationFixtureClient(f.deps).execute(f.state(), 'createP', stamp),
+    ).rejects.toBeInstanceOf(NativeReleaseHold);
+    expect(f.writes()).toBe(1);
+  });
+  it('seals possible agent admission in the existing retired phase before successor creation and forbids legacy restoration', async () => {
+    const f = reviewed();
+    let state = f.state();
+    state = await nativeWebCreationFixtureClient(f.deps).execute(state, 'createP', stamp);
+    state = await nativeWebTrafficFixtureClient(f.deps).execute(state, 'attachP', stamp);
+    state = await nativeWebTrafficFixtureClient(f.deps).execute(state, 'promoteP', stamp);
+    state = acceptPreclosedBootstrap(state, state.snapshot);
+    state = markAgentAdmissionPossible(state, state.snapshot);
+    expect(state.phase).toBe('retired');
+    expect(state.admissionPossible).toBe(true);
+    verifyLifecycleState(state);
+    await expect(
+      nativeWebTrafficFixtureClient(f.deps).execute(state, 'restoreC', stamp),
+    ).rejects.toBeInstanceOf(NativeReleaseHold);
+    state = bindAgentSuccessorReceipt(state, 'e'.repeat(64));
+    verifyLifecycleState(state);
+    expect(state.agentSuccessorReceiptSha256).toBe('e'.repeat(64));
+    expect(() => markAgentAdmissionPossible(state, state.snapshot)).toThrow();
+  });
+  it('same-phase scaling checkpoint preserves config/traffic/admission and refuses drift', async () => {
+    const f = reviewed();
+    let state = f.state();
+    state = await nativeWebCreationFixtureClient(f.deps).execute(state, 'createP', stamp);
+    state = await nativeWebTrafficFixtureClient(f.deps).execute(state, 'attachP', stamp);
+    state = await nativeWebTrafficFixtureClient(f.deps).execute(state, 'promoteP', stamp);
+    const fresh = copy(state.snapshot);
+    fresh.etag = 'scale-restored';
+    fresh.generation = fresh.observedGeneration = String(BigInt(fresh.generation) + 1n);
+    fresh.stableConfigSha256 = 'e'.repeat(64);
+    const next = scalingCheckpoint(state, fresh, fresh.stableConfigSha256);
+    expect(next.phase).toBe('promotedP');
+    expect(next.admissionPossible).toBe(false);
+    verifyLifecycleState(next);
+    const drift = copy(fresh);
+    drift.desired[0]!.revision = f.context.canonical;
+    expect(() => scalingCheckpoint(state, drift, fresh.stableConfigSha256)).toThrow();
   });
 });

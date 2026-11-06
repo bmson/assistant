@@ -1,4 +1,5 @@
 /** Protected, GET-only observations. Never authorizes traffic or maintenance. */
+
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, readFileSync, writeFileSync } from 'node:fs';
@@ -25,6 +26,13 @@ import {
   observeEditorReadiness,
 } from './owner-editor-release-readiness.js';
 import { InventoryServiceFactsError } from './owner-editor-service-facts-diagnostics.js';
+import {
+  type BootstrapReceipt,
+  bootstrapDigest,
+  disabled,
+  reviewedCurrentEnvironment,
+  verifyCurrentSnapshot,
+} from './owner-release-current-snapshot.js';
 
 export const PROJECT = 'bmson-assistant';
 export const DATABASE = `projects/${PROJECT}/databases/assistant-production`;
@@ -365,6 +373,7 @@ export async function collectInventory(
   global?: GlobalIndexLists,
   observeEditor?: (target: EditorMetadataTarget) => Promise<unknown>,
   mark: InventoryStageMarker = () => undefined,
+  current?: BootstrapReceipt,
 ) {
   mark('source_manifest');
   const { groups } = verifyManifest(manifest);
@@ -412,10 +421,10 @@ export async function collectInventory(
   const editorTargets: (EditorMetadataTarget | null)[] = [];
   for (const service of ['agent', 'web'] as const) {
     mark(service === 'agent' ? 'agent_service' : 'web_service');
-    const facts = serviceFacts(
-      await read(`https://run.googleapis.com/v2/${RUN_ROOT}/services/assistant-${service}`),
-      service,
+    const currentService = await read(
+      `https://run.googleapis.com/v2/${RUN_ROOT}/services/assistant-${service}`,
     );
+    const facts = serviceFacts(currentService, service);
     mark(service === 'agent' ? 'agent_revision' : 'web_revision');
     const revision = record(
       await read(
@@ -430,6 +439,14 @@ export async function collectInventory(
       revision.serviceAccount !== facts.account
     )
       throw new Error('serving revision mismatch');
+    if (current)
+      verifyCurrentSnapshot(
+        current.services[service],
+        currentService,
+        revision,
+        current.kind === 'disabled-bootstrap',
+      );
+    const admissionDisabled = disabled(record(currentService));
     const revisionFacts = serviceFacts(
       {
         name: `${RUN_ROOT}/services/assistant-${service}`,
@@ -451,7 +468,10 @@ export async function collectInventory(
     const { editorMetadataTarget: _privateTarget, ...publicFacts } = facts;
     services.push({
       ...publicFacts,
-      servingRevisionVerified: true,
+      servingRevisionVerified: !admissionDisabled,
+      currentRevisionConfigurationVerified: true,
+      admissionDisabled,
+      runtimeReadinessVerified: false,
       observedRevisionHash: hash(JSON.stringify(revision)),
     });
   }
@@ -474,6 +494,7 @@ export async function collectInventory(
     recoveryPoint: point,
     services,
     editorReadiness,
+    ...(current ? { reviewedCurrentSnapshotSha256: bootstrapDigest(current) } : {}),
     mutationAuthorized: false,
     trafficAuthorized: false,
     maintenanceAuthorized: false,
@@ -609,7 +630,7 @@ export function requiresBasicEditorPreflight(contract: unknown, runtimePresent: 
   return true;
 }
 /** A positive observation is only one release prerequisite, never mutation authority. */
-export function requireBasicEditorReadiness(receipt: unknown): void {
+export function requireBasicEditorReadiness(receipt: unknown, current?: BootstrapReceipt): void {
   const value = record(receipt),
     indexes = record(value.indexes),
     editor = record(value.editorReadiness);
@@ -623,7 +644,14 @@ export function requireBasicEditorReadiness(receipt: unknown): void {
     editor.consistentSnapshot !== false ||
     !Array.isArray(value.services) ||
     value.services.length !== 2 ||
-    !value.services.every((service) => record(service).servingRevisionVerified === true) ||
+    !value.services.every((service) =>
+      current?.kind === 'disabled-bootstrap'
+        ? value.reviewedCurrentSnapshotSha256 === bootstrapDigest(current) &&
+          record(service).admissionDisabled === true &&
+          record(service).currentRevisionConfigurationVerified === true &&
+          record(service).runtimeReadinessVerified === false
+        : record(service).servingRevisionVerified === true,
+    ) ||
     !['pitr', 'backup'].includes(String(record(value.recoveryPoint).kind))
   )
     throw new Error('basic editor release prerequisites unproven');
@@ -660,6 +688,7 @@ async function main(mark: InventoryStageMarker) {
     verifyPrerequisitesBinding(process.env);
     return;
   }
+  const current = reviewedCurrentEnvironment(process.env, process.env.GITHUB_SHA ?? '');
   const started = Date.now();
   mark('credential_file');
   const identity = verifyWifEnvironment(process.env, (file) => {
@@ -748,6 +777,7 @@ async function main(mark: InventoryStageMarker) {
         target,
       ),
     mark,
+    current,
   );
   mark('receipt_serialization');
   const output = JSON.stringify({
@@ -765,7 +795,7 @@ async function main(mark: InventoryStageMarker) {
   writeFileSync('owner-editor-release-inventory.json', `${output}\n`, { flag: 'wx', mode: 0o600 });
   if (releasePreflight) {
     mark('release_readiness');
-    requireBasicEditorReadiness(receipt);
+    requireBasicEditorReadiness(receipt, current);
   }
 }
 if (process.argv[1]?.endsWith('/owner-editor-release-inventory.ts')) {
