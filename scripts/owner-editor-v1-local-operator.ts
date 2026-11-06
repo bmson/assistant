@@ -1,5 +1,5 @@
 /** Explicit existing-user transport; never a fallback from the protected WIF entrypoint. */
-import { execFileSync } from 'node:child_process';
+import { execFileSync, type SpawnSyncReturns, spawnSync } from 'node:child_process';
 import { lstatSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -73,9 +73,22 @@ export function verifyLocalOperatorSource(
   )
     throw new Error('Untrusted local operator source');
 }
-export function verifyLocalAccount(active: unknown, impersonation: string) {
+export function verifyLocalAccount(
+  active: unknown,
+  impersonation: Pick<
+    SpawnSyncReturns<string>,
+    'status' | 'signal' | 'error' | 'stdout' | 'stderr'
+  >,
+) {
+  const unset =
+    impersonation.status === 0 &&
+    impersonation.signal === null &&
+    impersonation.error === undefined &&
+    (((impersonation.stdout === '(unset)' || impersonation.stdout === '(unset)\n') &&
+      impersonation.stderr === '') ||
+      (impersonation.stdout === '' && impersonation.stderr === '(unset)\n'));
   if (
-    impersonation.trim() !== '(unset)' ||
+    !unset ||
     !Array.isArray(active) ||
     active.length !== 1 ||
     active[0]?.account !== account ||
@@ -220,10 +233,30 @@ async function main() {
     if (bytes > 8 * 1024 * 1024) throw new Error('Operator output bound');
     return value;
   };
-  verifyLocalAccount(
-    JSON.parse(command(['auth', 'list', '--filter=status:ACTIVE', '--format=json'], 32768)),
-    command(['config', 'get-value', 'auth/impersonate_service_account'], 32768),
+  const active = JSON.parse(
+    command(['auth', 'list', '--filter=status:ACTIVE', '--format=json'], 32768),
   );
+  const remaining = started + 60000 - Date.now();
+  if (remaining <= 0) throw new Error('Operator collection deadline');
+  // Only this local config read accepts the SDK's exact stderr-unset profile.
+  // Retain both streams and process status; never synthesize successful output.
+  const impersonation = spawnSync(
+    'gcloud',
+    ['config', 'get-value', 'auth/impersonate_service_account'],
+    {
+      encoding: 'utf8',
+      timeout: Math.min(8000, remaining),
+      maxBuffer: 32768,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env,
+    },
+  );
+  const impersonationBytes =
+    Buffer.byteLength(impersonation.stdout ?? '') + Buffer.byteLength(impersonation.stderr ?? '');
+  bytes += impersonationBytes;
+  if (impersonationBytes > 32768 || bytes > 8 * 1024 * 1024)
+    throw new Error('Operator output bound');
+  verifyLocalAccount(active, impersonation);
   if (JSON.parse(command(['version', '--format=json'], 32768))['Google Cloud SDK'] !== '586.0.0')
     throw new Error('Unaudited local CLI');
   const token = command(
