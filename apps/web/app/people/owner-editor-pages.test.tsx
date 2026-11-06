@@ -682,6 +682,9 @@ it('selects only the exact loaded connection without adding an edit or removal g
   expect(html).toContain(`id="person-connection-${relationId}"`);
   expect(html).toContain('aria-current="location"');
   expect(html).toContain('Sam Rivera is Alex’s friend.');
+  expect(html).toContain(
+    `href="/people/${ownerId}?returnTo=${encodeURIComponent('/profile/knowledge?view=connections&q=Alex')}&amp;connectionId=${relationId}#person-connection-${relationId}"`,
+  );
   expect(html).not.toContain('Remove connection');
   expect(html).not.toContain('Edit relationship');
   expect(ports.pgEditor.mock.calls[0]?.[1]).toMatchObject({

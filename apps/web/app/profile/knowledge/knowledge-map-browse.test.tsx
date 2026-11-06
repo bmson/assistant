@@ -47,6 +47,29 @@ const snapshot: KnowledgeMapSnapshot = {
   },
 };
 describe('Knowledge map browse presentation', () => {
+  it('links each parallel source claim to its exact relationship in People', () => {
+    const contactId = '22222222-2222-4222-8222-222222222222';
+    const ids = ['33333333-3333-4333-8333-333333333333', '44444444-4444-4444-8444-444444444444'];
+    const html = renderToStaticMarkup(
+      <KnowledgeMap
+        snapshot={{
+          ...snapshot,
+          nodes: snapshot.nodes.map((node) => (node.id === 'a' ? { ...node, contactId } : node)),
+          edges: ids.map((id, index) => ({
+            ...snapshot.edges[0],
+            id,
+            sourceMemoryId: `source-${index}`,
+          })),
+        }}
+        initialSelectedId="a"
+        contextHref="/profile/knowledge?view=map&family=family"
+      />,
+    );
+    for (const id of ids) expect(html).toContain(`connectionId=${id}#person-connection-${id}`);
+    expect(html).toContain('returnTo=%2Fprofile%2Fknowledge%3Fview%3Dmap');
+    expect(html).toContain('Review this connection in Alex Full Name');
+  });
+
   it('renders loaded relationship sentence, status and local source note without action controls', () => {
     const html = renderToStaticMarkup(
       <KnowledgeMap
