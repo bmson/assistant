@@ -27,6 +27,11 @@ on:
     branches: [main]
   workflow_dispatch:
     inputs:
+      build_only:
+        description: Build and sign a recovery image pair without release, guard or cleanup
+        required: false
+        default: false
+        type: boolean
       native_web_qualification:
         description: Read-only native web qualification; no image, release, delivery hold or cleanup
         required: false
@@ -143,6 +148,18 @@ jobs:
           repository: ${{ github.repository }}
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
+      - name: Validate build-only scope before source verification or authentication
+        if: inputs.build_only == true
+        env:
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+          BUILD_ONLY: ${{ inputs.build_only }}
+          REQUESTED_COMPONENTS: ${{ inputs.components }}
+          REQUESTED_PERSISTENCE: ${{ inputs.persistence }}
+          NATIVE_WEB_QUALIFICATION: ${{ inputs.native_web_qualification }}
+          BREAK_GLASS: ${{ inputs.break_glass }}
+          BOOTSTRAP_SNAPSHOT: ${{ inputs.bootstrap_snapshot }}
+          BOOTSTRAP_SNAPSHOT_SHA256: ${{ inputs.bootstrap_snapshot_sha256 }}
+        run: bash infra/gcp/verify-build-only-context.sh
       # Manual releases use the same exact-source gate as automatic releases.
       # The explicit, audited break-glass input is only for a deliberate
       # exception; dispatching this privileged workflow from another branch is
@@ -340,26 +357,42 @@ jobs:
           syft "${IMAGE_ROOT}/${IMAGE_NAME}:${RELEASE_SHA}" \
             -o "spdx-json=sbom/${IMAGE_NAME}.spdx.json"
           ref="${IMAGE_ROOT}/${IMAGE_NAME}:${RELEASE_SHA}"
+          push_log="$RUNNER_TEMP/image-push.log"
+          pre_push_local_id="$(timeout --signal=TERM --kill-after=2s 10s docker image inspect --format '{{.Id}}' "$ref")"
           if [[ "$IMAGE_NAME" == agent ]]; then
-            push_log="$RUNNER_TEMP/agent-image-push.log"
             smoked_id="$(jq -er '.localImageId' "$RUNNER_TEMP/agent-image-smoke.json")"
-            pre_push_local_id="$(timeout --signal=TERM --kill-after=2s 10s docker image inspect --format '{{.Id}}' "$ref")"
             [[ "$pre_push_local_id" == "$smoked_id" ]] || { echo 'agent tag changed after smoke and before push' >&2; exit 1; }
-            docker push "$ref" >"$push_log" 2>&1
-            tail -n 8 "$push_log"
-            mapfile -t push_digests < <(sed -nE 's/.*digest: (sha256:[a-f0-9]{64}) size:.*/\1/p' "$push_log")
-            [[ "${#push_digests[@]}" -eq 1 ]] || { echo 'agent push did not return one immutable digest' >&2; exit 1; }
-            push_digest="${push_digests[0]}"
-            local_id="$(timeout --signal=TERM --kill-after=2s 10s docker image inspect --format '{{.Id}}' "$ref")"
-            [[ "$local_id" == "$smoked_id" ]] || { echo 'agent tag no longer identifies the smoke-tested image' >&2; exit 1; }
-            registry_digest="$(timeout --signal=TERM --kill-after=2s 20s gcloud artifacts docker images describe "$ref" \
-              --project "$GCP_PROJECT" --format='value(image_summary.digest)')"
-            [[ "$registry_digest" == "$push_digest" ]] || { echo 'Artifact Registry digest differs from docker push receipt' >&2; exit 1; }
+          fi
+          docker push "$ref" >"$push_log" 2>&1
+          tail -n 8 "$push_log"
+          push_digest="$(sed -nE 's/.*digest: (sha256:[a-f0-9]{64}) size:.*/\1/p' "$push_log")"
+          [[ "$push_digest" =~ ^sha256:[a-f0-9]{64}$ ]] || { echo 'image push did not return one immutable digest' >&2; exit 1; }
+          local_id="$(timeout --signal=TERM --kill-after=2s 10s docker image inspect --format '{{.Id}}' "$ref")"
+          [[ "$local_id" == "$pre_push_local_id" ]] || { echo 'image tag changed during push' >&2; exit 1; }
+          registry_digest="$(timeout --signal=TERM --kill-after=2s 20s gcloud artifacts docker images describe "$ref" \
+            --project "$GCP_PROJECT" --format='value(image_summary.digest)')"
+          [[ "$registry_digest" == "$push_digest" ]] || { echo 'Artifact Registry digest differs from docker push receipt' >&2; exit 1; }
+          if [[ "$IMAGE_NAME" == agent ]]; then
             jq --arg digest "$push_digest" '. + {registryManifestDigest: $digest}' \
               "$RUNNER_TEMP/agent-image-smoke.json" > sbom/agent-image-smoke-receipt.json
-          else
-            docker push "$ref"
           fi
+          sbom_sha="$(sha256sum "sbom/${IMAGE_NAME}.spdx.json" | cut -d ' ' -f 1)"
+          jq -n --arg image "${IMAGE_ROOT}/${IMAGE_NAME}" --arg digest "$push_digest" \
+            --arg source "$RELEASE_SHA" --arg localImageId "$local_id" --arg sbomSha256 "$sbom_sha" \
+            --arg workflowRef "$GITHUB_WORKFLOW_REF" --arg workflowSha "$GITHUB_WORKFLOW_SHA" \
+            --arg runId "$GITHUB_RUN_ID" --arg runAttempt "$GITHUB_RUN_ATTEMPT" \
+            '{format:1,image:$image,registryManifestDigest:$digest,source:$source,localImageId:$localImageId,sbomSha256:$sbomSha256,workflowRef:$workflowRef,workflowSha:$workflowSha,runId:$runId,runAttempt:$runAttempt}' \
+            > "sbom/${IMAGE_NAME}-build-receipt.json"
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Sign the image and attach its SBOM attestation
+        run: |
+          IMAGE_ROOT="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT}/${ARTIFACT_REPOSITORY}"
+          digest="$(jq -er '.registryManifestDigest' "sbom/${IMAGE_NAME}-build-receipt.json")"
+          ref="${IMAGE_ROOT}/${IMAGE_NAME}@${digest}"
+          cosign sign --yes --bundle "sbom/${IMAGE_NAME}-signature.sigstore.json" "$ref"
+          cosign attest --yes --type spdxjson --predicate "sbom/${IMAGE_NAME}.spdx.json" \
+            --bundle "sbom/${IMAGE_NAME}-sbom.sigstore.json" "$ref"
       # One artifact per image rather than one for the release: a matrix job
       # cannot append to a shared artifact name, and merging them would mean
       # adding an action this repo has not pinned. They carry the same content
@@ -370,18 +403,6 @@ jobs:
           name: release-sboms-${{ needs.plan.outputs.sha }}-${{ matrix.entry.name }}
           path: sbom/*
           retention-days: 90
-      - name: Install Cosign
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
-      - name: Sign the image and attach its SBOM attestation
-        run: |
-          IMAGE_ROOT="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT}/${ARTIFACT_REPOSITORY}"
-          ref="${IMAGE_ROOT}/${IMAGE_NAME}:${RELEASE_SHA}"
-          if [[ "$IMAGE_NAME" == agent ]]; then
-            digest="$(jq -er '.registryManifestDigest' sbom/agent-image-smoke-receipt.json)"
-            ref="${IMAGE_ROOT}/agent@${digest}"
-          fi
-          cosign sign --yes "$ref"
-          cosign attest --yes --type spdxjson --predicate "sbom/${IMAGE_NAME}.spdx.json" "$ref"
 
   # ── release ────────────────────────────────────────────────────────────────
   # The only job that changes production. release.sh picks the PostgreSQL or
@@ -395,7 +416,9 @@ jobs:
       actions: read
       contents: read
       id-token: write
-    if: inputs.native_web_qualification == '' || inputs.native_web_qualification == 'off'
+    if: >-
+      inputs.build_only != true &&
+      (inputs.native_web_qualification == '' || inputs.native_web_qualification == 'off')
     needs: [plan, image]
     runs-on: ubuntu-latest
     environment: production
@@ -617,7 +640,7 @@ jobs:
   native_web_qualification:
     if: >-
       github.event_name == 'workflow_dispatch' &&
-      inputs.native_web_qualification == 'read_only' &&
+      inputs.native_web_qualification == 'read_only' && inputs.build_only != true &&
       github.ref == 'refs/heads/main' && github.run_attempt == '1' &&
       github.workflow_ref == 'bmson/assistant/.github/workflows/deploy.yml@refs/heads/main' &&
       github.workflow_sha == github.sha &&
