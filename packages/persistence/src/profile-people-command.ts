@@ -53,6 +53,7 @@ export interface OwnerEditorPeopleReadSnapshot {
     name: string;
     aliases: string[];
     trust: string;
+    relationship: string;
     revision: string;
   } | null;
   corrections: import('./owner-editor.js').OwnerEditorCorrectionEligibility[];

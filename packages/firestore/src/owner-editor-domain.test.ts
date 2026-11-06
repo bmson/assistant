@@ -148,7 +148,11 @@ describe('actual FS domain + actual canonical writer + actual claim/receipt tran
       contactId: f.left,
       relationIds: [saved.ids.relationId],
     });
-    expect(snapshot.identity).toMatchObject({ contactId: f.left, trust: 'unknown' });
+    expect(snapshot.identity).toMatchObject({
+      contactId: f.left,
+      trust: 'unknown',
+      relationship: '',
+    });
     expect(snapshot.people).toHaveLength(2);
     expect(snapshot.corrections).toEqual([
       {
@@ -179,6 +183,7 @@ describe('actual FS domain + actual canonical writer + actual claim/receipt tran
         agentId: f.ownerId,
         name: `Person ${i}`,
         aliases: [],
+        relationship: '',
         trust: i === 0 ? 'owner' : 'unknown',
       });
     }
@@ -373,16 +378,63 @@ describe('actual FS domain + actual canonical writer + actual claim/receipt tran
       expectedContactRevision: before!.revision,
       name: 'Alex New',
       aliases: ['Al'],
+      relationship: 'sister',
     };
     expect(await f.run(request)).toMatchObject({ outcome: 'saved' });
     expect(f.rows('contacts').find((row) => row.id === f.left)).toMatchObject({
       name: 'Alex New',
       trust: 'unknown',
       aliases: ['Al', 'Alex'],
+      relationship: 'sister',
     });
     expect(f.embed).not.toHaveBeenCalled();
     expect(f.stats.readsAfterWrites).toBe(0);
     expect(f.stats.unboundedQueries).toEqual([]);
+  });
+  it('preserves the saved owner relationship when an older identity request omits it', async () => {
+    const f = fixture();
+    const original = f.rows('contacts').find((row) => row.id === f.left);
+    if (!original) throw new Error('Missing contact');
+    f.seed('contacts', f.left, { ...original, relationship: 'daughter' });
+    const before = await readFirestoreOwnerEditorContact(f.store, f.ownerId, f.left);
+    const result = await f.run({
+      version: 1,
+      intent: 'apply',
+      command: 'update_person_identity',
+      operationId: randomUUID(),
+      contactId: f.left,
+      expectedContactRevision: before!.revision,
+      name: 'Alex Updated',
+      aliases: [],
+    });
+    expect(result).toMatchObject({ outcome: 'saved', authority: 'operation_receipt' });
+    expect(f.rows('contacts').find((row) => row.id === f.left)).toMatchObject({
+      name: 'Alex Updated',
+      relationship: 'daughter',
+    });
+  });
+  it('saves a relationship-only edit through the same identity receipt', async () => {
+    const f = fixture();
+    const original = f.rows('contacts').find((row) => row.id === f.left);
+    if (!original) throw new Error('Missing contact');
+    f.seed('contacts', f.left, { ...original, relationship: 'daughter' });
+    const before = await readFirestoreOwnerEditorContact(f.store, f.ownerId, f.left);
+    const result = await f.run({
+      version: 1,
+      intent: 'apply',
+      command: 'update_person_identity',
+      operationId: randomUUID(),
+      contactId: f.left,
+      expectedContactRevision: before!.revision,
+      name: before!.name,
+      aliases: before!.aliases,
+      relationship: 'sister',
+    });
+    expect(result).toMatchObject({ outcome: 'saved', authority: 'operation_receipt' });
+    expect(f.rows('contacts').find((row) => row.id === f.left)).toMatchObject({
+      name: 'Alex',
+      relationship: 'sister',
+    });
   });
   it('rechecks native person updateTime after preparation and before primary mutation', async () => {
     const f = fixture(),
@@ -414,6 +466,67 @@ describe('actual FS domain + actual canonical writer + actual claim/receipt tran
     });
     expect(f.rows('contacts').find((row) => row.id === f.left)?.name).toBe('Alex');
     expect(f.embed).not.toHaveBeenCalled();
+  });
+  it('displays missing legacy relationships as empty without backfill and keeps stale native CAS', async () => {
+    const f = fixture();
+    const legacyTarget = f.rows('contacts').find((row) => row.id === f.left);
+    if (!legacyTarget) throw new Error('Missing target contact');
+    delete legacyTarget.relationship;
+    f.seed('contacts', f.left, legacyTarget);
+    const unrelatedId = randomUUID();
+    f.seed('contacts', unrelatedId, {
+      id: unrelatedId,
+      agentId: f.ownerId,
+      name: 'Unrelated legacy person',
+      trust: 'known',
+      aliases: [],
+      emails: [],
+      phones: [],
+      notes: '',
+    });
+
+    const before = await readFirestoreOwnerEditorContact(f.store, f.ownerId, f.left);
+    expect(before?.relationship).toBe('');
+    const view = await firestoreOwnerEditorViewSnapshot(f.store, f.ownerId, {
+      contactId: f.left,
+    });
+    expect(view.identity).toMatchObject({ contactId: f.left, relationship: '' });
+    expect(view.people.map((person) => person.contactId)).toContain(unrelatedId);
+    expect(
+      Object.hasOwn(f.rows('contacts').find((row) => row.id === f.left)!, 'relationship'),
+    ).toBe(false);
+
+    const request: OwnerEditorApply = {
+      version: 1,
+      intent: 'apply',
+      command: 'update_person_identity',
+      operationId: randomUUID(),
+      contactId: f.left,
+      expectedContactRevision: before!.revision,
+      name: 'Changed legacy draft',
+      aliases: [],
+      relationship: 'daughter',
+    };
+    const scope = f.scope(request);
+    const reservation = await f.operations.reserve(
+      scope,
+      ownerEditorRequestHash(request),
+      new Date(),
+    );
+    if (reservation.kind !== 'claimed') throw new Error('Claim not granted');
+    const prepared = await f.domain.prepare(request, scope);
+    if (!prepared.ok) throw new Error('Preparation not granted');
+
+    const changedTarget = f.rows('contacts').find((row) => row.id === f.left);
+    if (!changedTarget) throw new Error('Missing target contact');
+    f.seed('contacts', f.left, { ...changedTarget, notes: 'intervening native change' });
+    expect(await f.domain.commit(reservation.claim, prepared.prepared, new Date())).toMatchObject({
+      outcome: 'conflict',
+      authority: 'operation_receipt',
+    });
+    const after = f.rows('contacts').find((row) => row.id === f.left);
+    expect(after?.name).toBe('Alex');
+    expect(Object.hasOwn(after ?? {}, 'relationship')).toBe(false);
   });
   it('counts the complete duplicate-contact sentinel before decoding malformed rows', async () => {
     const f = fixture();

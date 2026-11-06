@@ -27,6 +27,7 @@ const editor: OwnerEditorControlsProps = {
     contactId: contact,
     name: 'Sam',
     aliases: ['Sam, Jr.'],
+    relationship: 'sister',
     revision: 'a'.repeat(64),
     grant: { ...grant, command: 'update_person_identity' },
   },

@@ -1,3 +1,4 @@
+import { profileContactIdentityRevision } from '@assistant/persistence';
 import { type Query, type QueryDocumentSnapshot, Timestamp } from '@google-cloud/firestore';
 import { describe, expect, it } from 'vitest';
 import { FirestoreProfileLibraryRepository } from './profile-library.js';
@@ -226,6 +227,42 @@ describe('bounded actual profile repository reads (offline)', () => {
       new FirestoreProfilePeopleReadRepository(f.store, 'owner').listContacts(),
     ).rejects.toThrow('Contact identity revision is unavailable');
     expect(f.calls).toHaveLength(1);
+  });
+
+  it('normalizes only absent legacy relationship fields in list and point contact reads', async () => {
+    const f = fixture({
+      contacts: [
+        { id: 'legacy-target', name: 'Legacy target', trust: 'known' },
+        { id: 'unrelated-legacy', name: 'Unrelated legacy', trust: 'known' },
+      ],
+    });
+    const repository = new FirestoreProfilePeopleReadRepository(f.store, 'owner');
+    const listed = await repository.listContacts();
+    expect(listed.map((contact) => [contact.id, contact.relationship])).toEqual([
+      ['legacy-target', ''],
+      ['unrelated-legacy', ''],
+    ]);
+    expect(listed[0]?.identityRevision).toBe(
+      profileContactIdentityRevision({
+        driver: 'firestore',
+        ownerId: 'owner',
+        id: documentKey('legacy-target'),
+        updateTime: { seconds: 1_798_000_000, nanoseconds: 123_456_789 },
+      }),
+    );
+    const point = await repository.getContact('legacy-target');
+    expect(point?.relationship).toBe('');
+    expect(point?.identityRevision).toBe(listed[0]?.identityRevision);
+    expect(f.pointDocuments.contacts).toBe(1);
+  });
+
+  it('keeps explicit null relationship metadata malformed', async () => {
+    const f = fixture({
+      contacts: [{ id: 'null-relationship', name: 'Invalid', relationship: null }],
+    });
+    await expect(
+      new FirestoreProfilePeopleReadRepository(f.store, 'owner').listContacts(),
+    ).rejects.toThrow('Contact relationship is malformed');
   });
 
   it.each([199, 200, 9999, 10000])(
