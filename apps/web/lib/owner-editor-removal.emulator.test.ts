@@ -562,6 +562,7 @@ describe.skipIf(!enabled)('person removal on actual Firestore emulator', () => {
         id: identity.contactId,
         name: identity.name,
         aliases: identity.aliases,
+        relationship: identity.relationship,
         trust: identity.trust,
         identityRevision: identity.revision,
       },
