@@ -75,7 +75,14 @@ it('keeps portable record types compatible with all PostgreSQL tables', () => {
   >();
   // Historical portable rows may omit the additive marker; native SQL rows
   // always expose its nullable column after schema 131.
-  expectTypeOf<Omit<Records['memories'], 'ownerCorrection' | 'memoryWriteWitness'>>().toEqualTypeOf<
+  // Firestore keeps the source rejection fence as additive portable metadata;
+  // it is not a PostgreSQL column. All actual SQL fields still match exactly.
+  expectTypeOf<
+    Omit<
+      Records['memories'],
+      'ownerCorrection' | 'memoryWriteWitness' | 'ownerFamilyRejectedContentHash'
+    >
+  >().toEqualTypeOf<
     Omit<typeof schema.memories.$inferSelect, 'ownerCorrection' | 'memoryWriteWitness'>
   >();
   expectTypeOf<NonNullable<Records['memories']['ownerCorrection']> | null>().toEqualTypeOf<

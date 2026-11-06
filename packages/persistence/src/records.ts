@@ -486,6 +486,8 @@ export interface Records {
     confidence: string;
     contentHash: string;
     ownerCorrection?: OwnerCorrection | null;
+    /** Unchanged retained family evidence rejected by the owner; Firestore only. */
+    ownerFamilyRejectedContentHash?: string | null;
     /** Durable identity of one memory write; absent/null is legacy unknown. */
     memoryWriteWitness?: OwnerMemoryWriteWitness | null;
     goalId: string | null;

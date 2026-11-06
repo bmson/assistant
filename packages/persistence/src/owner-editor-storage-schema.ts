@@ -78,6 +78,21 @@ function refineOperation(v: z.infer<typeof operationBase>, ctx: z.RefinementCtx)
     (Object.keys(v.result.ids).length !== 1 || !v.result.ids.memoryId)
   )
     ctx.addIssue({ code: 'custom', message: 'Memory receipt identity is invalid' });
+  if (v.result && (v.result.outcome === 'saved' || v.result.outcome === 'unchanged')) {
+    if (
+      v.command === 'remove_person' &&
+      (Object.keys(v.result.ids).length !== 1 || !v.result.ids.contactId)
+    )
+      ctx.addIssue({ code: 'custom', message: 'Person removal receipt identity is invalid' });
+    if (
+      v.command === 'remove_owner_family_relationship' &&
+      (Object.keys(v.result.ids).length !== 3 ||
+        !v.result.ids.relationId ||
+        !v.result.ids.memoryId ||
+        !v.result.ids.assertionId)
+    )
+      ctx.addIssue({ code: 'custom', message: 'Family removal receipt identity is invalid' });
+  }
   if (v.command === 'create_owner_memory' && v.result?.outcome === 'unchanged')
     ctx.addIssue({ code: 'custom', message: 'Memory creation cannot have an unchanged receipt' });
 }

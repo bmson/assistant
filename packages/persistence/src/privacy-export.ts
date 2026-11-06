@@ -14,6 +14,7 @@ type MemoryExportRow = Pick<
   | 'domain'
   | 'ownerConfirmed'
   | 'ownerCorrection'
+  | 'ownerFamilyRejectedContentHash'
   | 'pinned'
   | 'source'
   | 'createdAt'

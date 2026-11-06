@@ -306,7 +306,7 @@ describe('owner editor civil meaning and strict wire boundary', () => {
     expect(parseOwnerEditorRequest(reconcile, people).ok).toBe(false);
   });
 
-  it('keeps UI removal names outside the operation parser and scope admission', () => {
+  it('admits scoped removal commands with strict revision preconditions', () => {
     expect(OWNER_EDITOR_COMMANDS).toEqual([
       'create_person',
       'update_person_identity',
@@ -314,6 +314,8 @@ describe('owner editor civil meaning and strict wire boundary', () => {
       'correct_owner_family_relationship',
       'correct_owner_memory',
       'create_owner_memory',
+      'remove_person',
+      'remove_owner_family_relationship',
     ]);
     const removals: OwnerEditorApply[] = [
       {
@@ -349,8 +351,15 @@ describe('owner editor civil meaning and strict wire boundary', () => {
         expiresAt: 2,
       };
       expect(route).toBe(request.command === 'remove_person' ? people : family);
-      expect(parseOwnerEditorRequest(request, route).ok).toBe(false);
-      expect(ownerEditorApplyMatchesScope(request, scope)).toBe(false);
+      expect(parseOwnerEditorRequest(request, route).ok).toBe(true);
+      expect(ownerEditorApplyMatchesScope(request, scope)).toBe(true);
+      expect(ownerEditorApplyMatchesScope(request, { ...scope, targetId: object })).toBe(false);
+      expect(parseOwnerEditorRequest({ ...request, unexpected: true }, route).ok).toBe(false);
+      const missingRevision: Record<string, unknown> = { ...request };
+      delete missingRevision[
+        request.command === 'remove_person' ? 'expectedImpactRevision' : 'expectedTargetRevision'
+      ];
+      expect(parseOwnerEditorRequest(missingRevision, route).ok).toBe(false);
     }
   });
 });

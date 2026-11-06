@@ -73,6 +73,7 @@ const MEMORY_FIELDS = [
   'quarantined',
   'expiresAt',
   'contentHash',
+  'ownerFamilyRejectedContentHash',
   'subjectContactId',
   'ownerConfirmed',
   'lastConsolidatedAt',
