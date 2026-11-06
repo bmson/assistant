@@ -64,6 +64,12 @@ const TIMELINE_LIMIT = 20;
 const LOCATION_PREDICATE = 'lives_in';
 const ORIGIN_PREDICATES = new Set(['met', 'met_at', 'met_during']);
 
+function projectDirectoryAliases(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((alias): alias is string => typeof alias === 'string')
+    : [];
+}
+
 export interface PersonSummary {
   id: string;
   name: string;
@@ -97,7 +103,7 @@ export function personSummaryFromStoredRow(
   return {
     id: contact.id,
     name: contact.name,
-    aliases: contact.aliases,
+    aliases: projectDirectoryAliases(contact.aliases),
     relationship: contact.relationship,
     trust: contact.trust,
     group: derivePersonGroup(contact),
@@ -617,7 +623,7 @@ async function summarizePeopleDirectory(
     return {
       id: person.id,
       name: person.name,
-      aliases: person.aliases,
+      aliases: projectDirectoryAliases(person.aliases),
       relationship: person.relationship,
       trust: person.trust,
       group: derivePersonGroup({ relationship: person.relationship }),
@@ -640,7 +646,9 @@ export function matchesPersonSearch(
     person.name.toLocaleLowerCase().includes(needle) ||
     person.relationship.toLocaleLowerCase().includes(needle) ||
     (person.location?.toLocaleLowerCase().includes(needle) ?? false) ||
-    (person.aliases ?? []).some((alias) => alias.toLocaleLowerCase().includes(needle))
+    projectDirectoryAliases(person.aliases).some((alias) =>
+      alias.toLocaleLowerCase().includes(needle),
+    )
   );
 }
 
