@@ -32,7 +32,15 @@ import {
 import { OwnerEditorOperation, type OwnerEditorOperationState } from '@/lib/owner-editor-operation';
 import { isBasicOwnerEditorCommand } from '@/lib/owner-editor-release-policy';
 import { OwnerEditorDialogStatus, type OwnerEditorDisplayScope } from '@/lib/owner-editor-status';
-import { btn, btnSm, inputClass, labelClass, selectClass, textareaClass } from '@/lib/ui';
+import {
+  btn,
+  btnSm,
+  focusRing,
+  inputClass,
+  labelClass,
+  selectClass,
+  textareaClass,
+} from '@/lib/ui';
 import { Modal } from '@/lib/ui-client';
 
 export interface OwnerEditorControlsProps {
@@ -111,6 +119,34 @@ export const ownerEditorIdentityRequestFields = (
 const emptyPerson = { name: '', aliases: '', relationship: '' };
 export const ownerEditorTimingHelpText =
   'Choose how this relationship is described. This choice is separate from the dates below.';
+
+/** Optional context stays available without competing with the connection sentence. */
+export function OwnerEditorOptionalDetails({
+  summary,
+  hasErrors = false,
+  children,
+}: {
+  summary: string;
+  hasErrors?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <details
+      open={hasErrors || undefined}
+      onInvalidCapture={(event) => {
+        event.currentTarget.open = true;
+      }}
+      className="rounded-xl border border-edge p-3"
+    >
+      <summary
+        className={`cursor-pointer rounded-lg py-2 text-sm font-medium text-strong ${focusRing}`}
+      >
+        {summary}
+      </summary>
+      <div className="mt-3 flex min-w-0 flex-col gap-3">{children}</div>
+    </details>
+  );
+}
 
 export function OwnerEditorTimingHelp() {
   return <p className="text-sm text-muted">{ownerEditorTimingHelpText}</p>;
@@ -524,8 +560,8 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
       : active === 'identity'
         ? 'Edit details'
         : active === 'family'
-          ? 'Add family relationship'
-          : 'Correct family relationship';
+          ? 'Add connection'
+          : 'Edit connection';
   const openContextual = (entry: OwnerEditorEntryPoint, element: HTMLElement) => {
     if (locked || state.busy) return;
     if (entry === 'remove-person') {
@@ -635,7 +671,7 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
                   disabled={locked}
                   onClick={(e) => beginFamily(e.currentTarget)}
                 >
-                  Add family relationship
+                  Add connection
                 </button>
               ) : null}
             </div>
@@ -783,6 +819,9 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
         ) : active ? (
           <Modal label={title} onClose={close} dismissible={!state.busy}>
             <h2 className="text-lg font-semibold text-strong">{title}</h2>
+            {familyMode ? (
+              <p className="text-sm text-muted">Connect two people with a family relationship.</p>
+            ) : null}
             <OwnerEditorCloseGuidance state={state} grant={grant} targetId={displayedTargetId} />
             {conflictReview}
             <form
@@ -841,7 +880,7 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
                 ) : familyDraft && displayedFamily ? (
                   <>
                     {correctionSnapshot ? (
-                      <div className="rounded-xl bg-sunken p-3 text-sm">
+                      <OwnerEditorOptionalDetails summary="Earlier saved statement">
                         <p>Original owner-authored statement: {correctionSnapshot.sourceText}</p>
                         <p>
                           Relationship dates:{' '}
@@ -849,11 +888,12 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
                           {correctionSnapshot.original.validity.validUntil ?? 'End not recorded'}{' '}
                           (end inclusive when recorded).
                         </p>
-                        <p>
-                          Saving replaces this statement in saved memory and records its correction
-                          history.
-                        </p>
-                      </div>
+                      </OwnerEditorOptionalDetails>
+                    ) : null}
+                    {correctionSnapshot ? (
+                      <p className="text-sm text-muted">
+                        Saving replaces this saved statement and keeps its correction history.
+                      </p>
                     ) : null}
                     <OwnerEditorPeopleSelectors
                       idPrefix={uid}
@@ -903,64 +943,74 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
                       ))}
                     </select>
                     {fieldError('predicate')}
-                    <label className={labelClass} htmlFor={id('timing')}>
-                      How this relationship is described
-                    </label>
-                    <select
-                      {...fieldProps('timing')}
-                      className={selectClass}
-                      value={familyDraft.timing}
-                      onChange={(e) =>
-                        setFamilyDraft({
-                          ...familyDraft,
-                          timing: e.target.value as FamilyDraft['timing'],
-                        })
-                      }
-                    >
-                      <option value="unspecified">Not specified</option>
-                      <option value="present">Present</option>
-                      <option value="past">Past</option>
-                    </select>
-                    <OwnerEditorTimingHelp />
-                    {fieldError('timing')}
-                    <p className="text-sm font-medium">Relationship dates (optional)</p>
-                    <p className="text-sm text-muted">
-                      Dates when this relationship applies, as you know them—not when you saved it.
-                      Leave unknown dates blank.
-                    </p>
-                    {(['from', 'until'] as const).map((part) => (
-                      <div key={part} className="flex flex-col gap-1">
-                        <label className={labelClass} htmlFor={id(part)}>
-                          {part === 'from' ? 'From' : 'Through (inclusive)'}
-                        </label>
-                        <input
-                          {...fieldProps(
-                            `validity.${part === 'from' ? 'validFrom' : 'validUntil'}`,
-                          )}
-                          id={id(part)}
-                          type="date"
-                          className={inputClass}
-                          value={familyDraft[part]}
-                          onChange={(e) =>
-                            setFamilyDraft({ ...familyDraft, [part]: e.target.value })
-                          }
-                        />
-                        {fieldError(`validity.${part === 'from' ? 'validFrom' : 'validUntil'}`)}
-                      </div>
-                    ))}
-                    <label className={labelClass} htmlFor={id('note')}>
-                      Note (optional)
-                    </label>
-                    <textarea
-                      {...fieldProps('note')}
-                      className={textareaClass}
-                      value={familyDraft.note}
-                      onChange={(e) => setFamilyDraft({ ...familyDraft, note: e.target.value })}
-                    />
-                    {fieldError('note')}
                     <p className="rounded-xl bg-sunken p-3 text-sm" aria-live="polite">
                       {preview}
                     </p>
+                    <OwnerEditorOptionalDetails
+                      summary="Dates and context (optional)"
+                      hasErrors={Boolean(
+                        error('timing') ||
+                          error('validity.validFrom') ||
+                          error('validity.validUntil') ||
+                          error('note'),
+                      )}
+                    >
+                      <label className={labelClass} htmlFor={id('timing')}>
+                        How this relationship is described
+                      </label>
+                      <select
+                        {...fieldProps('timing')}
+                        className={selectClass}
+                        value={familyDraft.timing}
+                        onChange={(e) =>
+                          setFamilyDraft({
+                            ...familyDraft,
+                            timing: e.target.value as FamilyDraft['timing'],
+                          })
+                        }
+                      >
+                        <option value="unspecified">Not specified</option>
+                        <option value="present">Present</option>
+                        <option value="past">Past</option>
+                      </select>
+                      <OwnerEditorTimingHelp />
+                      {fieldError('timing')}
+                      <p className="text-sm font-medium">Relationship dates (optional)</p>
+                      <p className="text-sm text-muted">
+                        Dates when this relationship applies, as you know them—not when you saved
+                        it. Leave unknown dates blank.
+                      </p>
+                      {(['from', 'until'] as const).map((part) => (
+                        <div key={part} className="flex flex-col gap-1">
+                          <label className={labelClass} htmlFor={id(part)}>
+                            {part === 'from' ? 'From' : 'Through (inclusive)'}
+                          </label>
+                          <input
+                            {...fieldProps(
+                              `validity.${part === 'from' ? 'validFrom' : 'validUntil'}`,
+                            )}
+                            id={id(part)}
+                            type="date"
+                            className={inputClass}
+                            value={familyDraft[part]}
+                            onChange={(e) =>
+                              setFamilyDraft({ ...familyDraft, [part]: e.target.value })
+                            }
+                          />
+                          {fieldError(`validity.${part === 'from' ? 'validFrom' : 'validUntil'}`)}
+                        </div>
+                      ))}
+                      <label className={labelClass} htmlFor={id('note')}>
+                        Note (optional)
+                      </label>
+                      <textarea
+                        {...fieldProps('note')}
+                        className={textareaClass}
+                        value={familyDraft.note}
+                        onChange={(e) => setFamilyDraft({ ...familyDraft, note: e.target.value })}
+                      />
+                      {fieldError('note')}
+                    </OwnerEditorOptionalDetails>
                   </>
                 ) : null}
               </fieldset>
@@ -1018,8 +1068,8 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
                       ? 'Saving…'
                       : active === 'create'
                         ? 'Add person'
-                        : correctionSnapshot && familyMode
-                          ? 'Save correction'
+                        : familyMode
+                          ? 'Save connection'
                           : 'Save'}
                   </button>
                 ) : null}
@@ -1038,7 +1088,7 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
                       setSelectCreatedId(null);
                     }}
                   >
-                    Return to family relationship
+                    Return to connection
                   </button>
                 ) : null}
                 <button type="button" className={btn.outline} disabled={state.busy} onClick={close}>
@@ -1436,8 +1486,8 @@ export function OwnerEditorContextTrigger({ entry }: { entry: OwnerEditorEntryPo
             : entry === 'identity'
               ? 'Edit details'
               : entry === 'family'
-                ? 'Add family relationship'
-                : 'Edit relationship'}
+                ? 'Add connection'
+                : 'Edit connection'}
     </button>
   );
 }

@@ -421,7 +421,7 @@ export default async function PersonPage({
       <OwnerEditorContextualHost editor={editor ? { ...editor, personReturnTo: backHref } : null}>
         <div className="mt-4 flex flex-wrap gap-2">
           <OwnerEditorContextTrigger entry="identity" />
-          <OwnerEditorContextTrigger entry="create" />
+          <OwnerEditorContextTrigger entry={editor?.family ? 'family' : 'create'} />
         </div>
         {!detailEditingAvailable && contact.trust !== 'owner' ? (
           <p className="mt-3 text-sm text-muted">
@@ -441,12 +441,11 @@ export default async function PersonPage({
             look this person up again. */}
         <section id="person-connections" tabIndex={-1} className="mt-8">
           <div className="flex flex-wrap items-end justify-between gap-3">
-            <SectionHeading title="Connections between people" count={relations.length} />
-            <OwnerEditorContextTrigger entry="family" />
+            <SectionHeading title="Connections" count={relations.length} />
           </div>
           <p className="mt-2 text-sm text-muted">
             {editor?.family && loadConfig().PERSISTENCE_DRIVER === 'firestore'
-              ? 'Review removal for a family connection before removing it. Its saved source note stays in your Library.'
+              ? 'Edit a connection below, or review it before removing it. Both people and the saved source note stay saved.'
               : 'Connections supported by saved notes are shown below.'}
           </p>
           {unavailableConnectionSelection ? (
@@ -458,7 +457,7 @@ export default async function PersonPage({
           {relations.length === 0 ? (
             <EmptyState>
               {editor?.family
-                ? 'No connections are recorded yet. Add a family relationship to connect this person with someone else.'
+                ? 'No connections are recorded yet. Choose Add connection to connect this person with someone else.'
                 : 'No connections to other people are recorded yet.'}
             </EmptyState>
           ) : (
@@ -504,7 +503,7 @@ export default async function PersonPage({
                                   ) ?? `/people/${id}`
                                 }
                               >
-                                Review removal
+                                Review removal…
                               </Link>
                             )
                           ) : null}

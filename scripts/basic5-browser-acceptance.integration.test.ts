@@ -467,9 +467,12 @@ async function saveWithReceipt(
             saveEnabled: button ? !button.matches(':disabled') : null,
           };
         },
-        operation === 'correct_owner_family_relationship' || operation === 'correct_owner_memory'
+        operation === 'correct_owner_memory'
           ? 'Save correction'
-          : 'Save',
+          : operation === 'correct_owner_family_relationship' ||
+              operation === 'add_family_relationship'
+            ? 'Save connection'
+            : 'Save',
       ),
     parse: async (response) => {
       // Headers remain independently observed. The app itself must consume and
@@ -1381,7 +1384,7 @@ browserTest(
       checkpointFreshPageReadbackCount += 1;
       setCheckpoint('identity_fresh_page_readback_complete');
 
-      await page.getByRole('button', { name: 'Add family relationship', exact: true }).click();
+      await page.getByRole('button', { name: 'Add connection', exact: true }).click();
       const familyAddDialog = page.getByRole('dialog');
       // The page's person is intentionally the fixed subject, not an editable choice.
       const firstPerson = familyAddDialog.getByLabel('First person', { exact: true });
@@ -1395,12 +1398,13 @@ browserTest(
       await familyAddDialog
         .getByLabel('Relationship of the first person to the second', { exact: true })
         .selectOption('sibling_of');
+      await familyAddDialog.getByText('Dates and context (optional)', { exact: true }).click();
       await familyAddDialog
         .getByLabel('Note (optional)', { exact: true })
         .fill('Synthetic family statement one.');
       const familyAdd = await saveObserved(
         'add_family_relationship',
-        familyAddDialog.getByRole('button', { name: 'Save', exact: true }),
+        familyAddDialog.getByRole('button', { name: 'Save connection', exact: true }),
       );
       ownerPosts.push(familyAdd.observed);
       receipts.push(familyAdd.receipt);
@@ -1455,19 +1459,16 @@ browserTest(
       journeyFacts.reopenedPageReadbacks.familyAdd = true;
       checkpointFreshPageReadbackCount += 1;
       setCheckpoint('family_add_fresh_page_readback_complete');
-      await addedRelationRow
-        .getByRole('button', { name: 'Edit relationship', exact: true })
-        .click();
+      await addedRelationRow.getByRole('button', { name: 'Edit connection', exact: true }).click();
       const familyDialog = page.getByRole('dialog');
-      await familyDialog
-        .getByRole('heading', { name: 'Correct family relationship', exact: true })
-        .waitFor();
+      await familyDialog.getByRole('heading', { name: 'Edit connection', exact: true }).waitFor();
+      await familyDialog.getByText('Dates and context (optional)', { exact: true }).click();
       await familyDialog
         .getByLabel('Note (optional)', { exact: true })
         .fill('Synthetic family statement corrected.');
       const familyCorrection = await saveObserved(
         'correct_owner_family_relationship',
-        familyDialog.getByRole('button', { name: 'Save correction', exact: true }),
+        familyDialog.getByRole('button', { name: 'Save connection', exact: true }),
       );
       ownerPosts.push(familyCorrection.observed);
       receipts.push(familyCorrection.receipt);
