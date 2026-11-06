@@ -204,6 +204,13 @@ export function probableCalendarMatchEvidence(
     !/T/.test(sourceText(right.start))
   )
     return;
+  // Reject ordinary unrelated events before parsing timestamps. This matcher
+  // also sits in the calendar overlap pair loop, where dense calendars can
+  // produce millions of candidates with no venue or matchup evidence.
+  const venue = venueName(left);
+  if (venue.split(' ').filter((word) => word.length >= 3).length < 2 || venue !== venueName(right))
+    return;
+  if (!sameMatchup(left, right)) return;
   if (
     (left.originalStartTime || right.originalStartTime) &&
     (!left.originalStartTime ||
@@ -220,10 +227,6 @@ export function probableCalendarMatchEvidence(
   const distance = Math.abs(startLeft - startRight);
   if (distance > 90 * 60_000 || endLeft !== endRight || endLeft <= Math.max(startLeft, startRight))
     return;
-  const venue = venueName(left);
-  if (venue.split(' ').filter((word) => word.length >= 3).length < 2 || venue !== venueName(right))
-    return;
-  if (!sameMatchup(left, right)) return;
   if (
     distance > 0 &&
     !titleClockMatches(

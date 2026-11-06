@@ -57,7 +57,7 @@ describe('agendaSection', () => {
       section && 'items' in section && section.items.some((item) => item.title === 'Event 20'),
     ).toBe(true);
     expect(briefingMarkdown('Your briefing', [section!])).toContain(
-      '11 other retrieved events are omitted',
+      '11 other calendar activities are omitted from this briefing preview.',
     );
   });
   it('labels days and clock ranges in the owner zone and flags conflicts and salient events', () => {
