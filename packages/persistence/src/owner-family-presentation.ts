@@ -193,3 +193,19 @@ export function presentOwnerFamilyFact(
   const note = input.note?.replace(/\s+/g, ' ').trim();
   return `Recorded statement: ${statement} ${timing} Recorded dates: ${dates}${note ? ` Owner note: ${note}` : ''}`;
 }
+
+/** Compact owner-facing sentence; the canonical saved statement remains unchanged. */
+export function presentOwnerFamilySentence(
+  input: Parameters<typeof presentOwnerFamilyFact>[0],
+): string {
+  // Keep predicate, tense and validity validation identical to the saved statement.
+  presentOwnerFamilyFact(input);
+  const grammar = OWNER_FAMILY_GRAMMAR[input.predicate];
+  if (!grammar) throw new Error('Unsupported family predicate');
+  if (input.timing === 'unspecified') {
+    return grammar.kind === 'symmetric'
+      ? `${input.subjectLabel} and ${input.objectLabel} are recorded as ${grammar.pluralRole}.`
+      : `${input.subjectLabel} is recorded as ${possessive(input.objectLabel)} ${grammar.role}.`;
+  }
+  return `${ownerFamilyClause(input.subjectLabel, input.objectLabel, grammar, input.timing)}.`;
+}

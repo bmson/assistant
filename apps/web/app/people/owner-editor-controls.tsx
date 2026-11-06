@@ -3,6 +3,7 @@
 import {
   PREDICATE_VOCABULARY,
   presentOwnerFamilyFact,
+  presentOwnerFamilySentence,
 } from '@assistant/application/relationship-presentation';
 import type {
   OwnerEditorCanonicalExpectation,
@@ -404,6 +405,7 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
       </span>
     ) : null;
   let preview = 'Choose two named people and a relationship to preview the statement.';
+  let connectionPreview = preview;
   if (familyDraft && displayedFamily) {
     const subject = displayedFamily.people.find((p) => p.contactId === familyDraft.subject);
     const object = displayedFamily.people.find((p) => p.contactId === familyDraft.object);
@@ -417,8 +419,17 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
           validity: { validFrom: familyDraft.from || null, validUntil: familyDraft.until || null },
           note: familyDraft.note,
         });
+        connectionPreview = presentOwnerFamilySentence({
+          subjectLabel: subject.name,
+          objectLabel: object.name,
+          predicate: familyDraft.predicate,
+          timing: familyDraft.timing,
+          validity: { validFrom: familyDraft.from || null, validUntil: familyDraft.until || null },
+          note: familyDraft.note,
+        });
       } catch {
         preview = 'Check the relationship timing and recorded dates to preview this statement.';
+        connectionPreview = preview;
       }
     }
   }
@@ -879,22 +890,6 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
                   </>
                 ) : familyDraft && displayedFamily ? (
                   <>
-                    {correctionSnapshot ? (
-                      <OwnerEditorOptionalDetails summary="Earlier saved statement">
-                        <p>Original owner-authored statement: {correctionSnapshot.sourceText}</p>
-                        <p>
-                          Relationship dates:{' '}
-                          {correctionSnapshot.original.validity.validFrom ?? 'Start not recorded'} —{' '}
-                          {correctionSnapshot.original.validity.validUntil ?? 'End not recorded'}{' '}
-                          (end inclusive when recorded).
-                        </p>
-                      </OwnerEditorOptionalDetails>
-                    ) : null}
-                    {correctionSnapshot ? (
-                      <p className="text-sm text-muted">
-                        Saving replaces this saved statement and keeps its correction history.
-                      </p>
-                    ) : null}
                     <OwnerEditorPeopleSelectors
                       idPrefix={uid}
                       draft={familyDraft}
@@ -944,8 +939,24 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
                     </select>
                     {fieldError('predicate')}
                     <p className="rounded-xl bg-sunken p-3 text-sm" aria-live="polite">
-                      {preview}
+                      {connectionPreview}
                     </p>
+                    {correctionSnapshot ? (
+                      <OwnerEditorOptionalDetails summary="Earlier saved statement">
+                        <p>Original owner-authored statement: {correctionSnapshot.sourceText}</p>
+                        <p>
+                          Relationship dates:{' '}
+                          {correctionSnapshot.original.validity.validFrom ?? 'Start not recorded'} —{' '}
+                          {correctionSnapshot.original.validity.validUntil ?? 'End not recorded'}{' '}
+                          (end inclusive when recorded).
+                        </p>
+                      </OwnerEditorOptionalDetails>
+                    ) : null}
+                    {correctionSnapshot ? (
+                      <p className="text-sm text-muted">
+                        Saving replaces this saved statement and keeps its correction history.
+                      </p>
+                    ) : null}
                     <OwnerEditorOptionalDetails
                       summary="Dates and context (optional)"
                       hasErrors={Boolean(
