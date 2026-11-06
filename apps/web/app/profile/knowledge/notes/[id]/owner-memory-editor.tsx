@@ -16,7 +16,7 @@ import {
   ownerEditorOutcomeMessage,
 } from '@/lib/owner-editor-operation';
 import type { OwnerMemoryEditorView } from '@/lib/owner-memory-editor-view';
-import { btn, textareaClass } from '@/lib/ui';
+import { Badge, btn, cardShellClass, textareaClass } from '@/lib/ui';
 import { Modal } from '@/lib/ui-client';
 
 type Capture = { snapshot: OwnerMemoryEditorView['snapshot']; grant: OwnerEditorFormGrant };
@@ -78,17 +78,17 @@ export function ownerMemoryRecoveryPresentation(
   };
 }
 
-export function ownerMemoryResolvedReturnHref(
-  reply: OwnerEditorReply,
+export function ownerMemoryRemovalReceiptConfirmed(
+  reply: OwnerEditorReply | null,
   memoryId: string,
-  returnHref: string,
-): string | null {
-  return reply.authority === 'operation_receipt' &&
+) {
+  return (
+    reply !== null &&
+    reply.authority === 'operation_receipt' &&
     reply.command === 'remove_owner_memory' &&
     reply.outcome === 'saved' &&
     reply.ids.memoryId === memoryId
-    ? returnHref
-    : null;
+  );
 }
 
 export function missingSavedNoteRecoveryPresentation(
@@ -145,42 +145,95 @@ export function missingSavedNoteRecoveryPresentation(
 export function OwnerMemoryEditor({
   view,
   returnHref,
+  sourceHref,
+  readOnlyMessage,
 }: {
   view: OwnerMemoryEditorView;
   returnHref: string;
+  sourceHref: string | null;
+  readOnlyMessage: string;
 }) {
   const [session, setSession] = useState(view.session);
+  const controller = useMemo(
+    () => (session ? new OwnerEditorOperation(session, () => window.sessionStorage) : null),
+    [session],
+  );
+  const state = useSyncExternalStore(
+    controller?.subscribe ?? NOOP_SUBSCRIBE,
+    controller?.getSnapshot ?? EMPTY_MISSING_RECOVERY_STATE,
+    controller?.getServerSnapshot ?? EMPTY_MISSING_RECOVERY_STATE,
+  );
   useEffect(() => {
     // There is no draft/controller to preserve before first admission. Once
     // admitted, a session change cannot silently replace an in-flight edit.
     if (!session && view.session) setSession(view.session);
   }, [session, view.session]);
-  return session ? (
-    <EditableSavedNote view={view} session={session} returnHref={returnHref} />
-  ) : null;
+  useEffect(() => {
+    controller?.initialize();
+  }, [controller]);
+  if (ownerMemoryRemovalReceiptConfirmed(state.reply, view.snapshot.memoryId))
+    return (
+      <article className={`${cardShellClass} mt-5 grid gap-3 p-4 sm:p-5`}>
+        <p role="status" className="text-sm text-muted">
+          The receipt confirms this saved note was removed.
+        </p>
+        <Link href={returnHref} className={`${btn.outline} w-fit`}>
+          Back to Memory
+        </Link>
+      </article>
+    );
+  return (
+    <article className={`${cardShellClass} mt-5 p-4 sm:p-5`}>
+      {view.snapshot.ownerCorrection ? (
+        <Badge tone="accent" size="xs">
+          Owner-corrected saved note
+        </Badge>
+      ) : null}
+      <p className="mt-3 whitespace-pre-wrap break-words text-sm leading-6 text-strong">
+        {view.snapshot.content}
+      </p>
+      <p className="mt-3 text-sm text-muted">{view.snapshot.sourceLabel}</p>
+      {view.snapshot.ownerCorrection ? (
+        <p className="mt-2 text-sm text-muted">
+          The saved provenance records where this note came from. It does not mean the original
+          source contains your corrected wording.
+        </p>
+      ) : null}
+      {sourceHref ? (
+        <Link href={sourceHref} className="mt-3 inline-block text-sm text-accent underline">
+          Open source
+        </Link>
+      ) : (
+        <p className="mt-3 text-sm text-muted">
+          A direct source link is unavailable for this saved note.
+        </p>
+      )}
+      {!view.grant ? (
+        <p role="status" className="mt-4 text-sm text-muted">
+          {readOnlyMessage}
+        </p>
+      ) : null}
+      {session && controller ? (
+        <EditableSavedNote view={view} session={session} controller={controller} state={state} />
+      ) : null}
+    </article>
+  );
 }
 
 function EditableSavedNote({
   view,
   session,
-  returnHref,
+  controller,
+  state,
 }: {
   view: OwnerMemoryEditorView;
   session: OwnerEditorSessionView;
-  returnHref: string;
+  controller: OwnerEditorOperation;
+  state: OwnerEditorOperationState;
 }) {
   const router = useRouter();
   const fieldId = useId();
   const trigger = useRef<HTMLButtonElement>(null);
-  const controller = useMemo(
-    () => new OwnerEditorOperation(session, () => window.sessionStorage),
-    [session],
-  );
-  const state = useSyncExternalStore(
-    controller.subscribe,
-    controller.getSnapshot,
-    controller.getServerSnapshot,
-  );
   const [open, setOpen] = useState(false);
   const [capture, setCapture] = useState<Capture | null>(null);
   const [removalCapture, setRemovalCapture] = useState<RemovalCapture | null>(null);
@@ -212,24 +265,12 @@ function EditableSavedNote({
   );
   const review = state.reviewRequired || localReview;
   useEffect(() => {
-    controller.initialize();
-  }, [controller]);
-  useEffect(() => {
     if (state.phase !== 'resolved' || !state.reply || refreshed.current === state.reply) return;
     refreshed.current = state.reply;
-    const returnAfterRemoval = ownerMemoryResolvedReturnHref(
-      state.reply,
-      view.snapshot.memoryId,
-      returnHref,
-    );
-    if (returnAfterRemoval) {
-      router.replace(returnAfterRemoval);
-      return;
-    }
     resolvedView.current = view;
     setAwaitingReadback(true);
     router.refresh();
-  }, [state.phase, state.reply, router, returnHref, view]);
+  }, [state.phase, state.reply, router, view]);
   useEffect(() => {
     if (state.phase !== 'resolved') return;
     // A grant already on a reloaded page is not readback of its earlier save.

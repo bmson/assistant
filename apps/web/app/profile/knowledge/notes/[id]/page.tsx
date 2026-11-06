@@ -9,7 +9,7 @@ import {
   loadOwnerMemoryEditorView,
 } from '@/lib/owner-memory-editor-server';
 import { ownerMemoryReadOnlyMessage } from '@/lib/owner-memory-editor-view';
-import { Badge, btn, cardShellClass, PageHeader, PageShell } from '@/lib/ui';
+import { btn, cardShellClass, PageHeader, PageShell } from '@/lib/ui';
 import { MissingSavedNoteRecovery, OwnerMemoryEditor } from './owner-memory-editor';
 
 export const dynamic = 'force-dynamic';
@@ -83,44 +83,17 @@ export default async function SavedNotePage({
         intro="Review the saved information and its source before making a correction."
       />
       <MemoryNavigation current="notes" />
-      <article className={`${cardShellClass} mt-5 p-4 sm:p-5`}>
-        {snapshot.ownerCorrection ? (
-          <Badge tone="accent" size="xs">
-            Owner-corrected saved note
-          </Badge>
-        ) : null}
-        <p className="mt-3 whitespace-pre-wrap break-words text-sm leading-6 text-strong">
-          {snapshot.content}
-        </p>
-        <p className="mt-3 text-sm text-muted">{snapshot.sourceLabel}</p>
-        {snapshot.ownerCorrection ? (
-          <p className="mt-2 text-sm text-muted">
-            The saved provenance records where this note came from. It does not mean the original
-            source contains your corrected wording.
-          </p>
-        ) : null}
-        {sourceHref ? (
-          <Link href={sourceHref} className="mt-3 inline-block text-sm text-accent underline">
-            Open source
-          </Link>
-        ) : (
-          <p className="mt-3 text-sm text-muted">
-            A direct source link is unavailable for this saved note.
-          </p>
-        )}
-        {!view.grant ? (
-          <p role="status" className="mt-4 text-sm text-muted">
-            {editorAvailability.kind === 'sign_in_again'
-              ? editorAvailability.message
-              : ownerMemoryReadOnlyMessage(view.unavailableReason)}
-          </p>
-        ) : null}
-        <OwnerMemoryEditor
-          key={`${snapshot.ownerId}:${snapshot.memoryId}`}
-          view={view}
-          returnHref={back}
-        />
-      </article>
+      <OwnerMemoryEditor
+        key={`${snapshot.ownerId}:${snapshot.memoryId}`}
+        view={view}
+        returnHref={back}
+        sourceHref={sourceHref}
+        readOnlyMessage={
+          editorAvailability.kind === 'sign_in_again'
+            ? editorAvailability.message
+            : ownerMemoryReadOnlyMessage(view.unavailableReason)
+        }
+      />
     </PageShell>
   );
 }

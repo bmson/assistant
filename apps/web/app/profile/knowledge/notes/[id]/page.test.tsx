@@ -19,7 +19,7 @@ vi.mock('next/navigation', () => ({
 import {
   MissingSavedNoteRecovery,
   missingSavedNoteRecoveryPresentation,
-  ownerMemoryResolvedReturnHref,
+  ownerMemoryRemovalReceiptConfirmed,
 } from './owner-memory-editor';
 import SavedNotePage from './page';
 
@@ -245,26 +245,21 @@ describe('saved note page and actual editor controls', () => {
       kind: 'removed',
       message: 'The receipt confirms this saved note was removed.',
     });
-    expect(ownerMemoryResolvedReturnHref(savedReply, id, '/profile/knowledge?view=library')).toBe(
-      '/profile/knowledge?view=library',
-    );
+    expect(ownerMemoryRemovalReceiptConfirmed(savedReply, id)).toBe(true);
     const otherNoteReply = {
       ...savedReply,
       ids: { memoryId: '55555555-5555-4555-8555-555555555555' },
     };
-    expect(
-      ownerMemoryResolvedReturnHref(otherNoteReply, id, '/profile/knowledge?view=library'),
-    ).toBeNull();
+    expect(ownerMemoryRemovalReceiptConfirmed(otherNoteReply, id)).toBe(false);
     expect(
       missingSavedNoteRecoveryPresentation({ ...confirmed, reply: otherNoteReply }, id).kind,
     ).toBe('not_confirmed');
     expect(
-      ownerMemoryResolvedReturnHref(
+      ownerMemoryRemovalReceiptConfirmed(
         { ...savedReply, command: 'correct_owner_memory' as const },
         id,
-        '/profile/knowledge?view=library',
       ),
-    ).toBeNull();
+    ).toBe(false);
 
     const retired = {
       version: 1 as const,
