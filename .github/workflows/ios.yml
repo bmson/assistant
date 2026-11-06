@@ -42,6 +42,7 @@ on:
         options:
           - full
           - controls-capability
+          - controls-layout-delta
 
 jobs:
   changes:
@@ -69,7 +70,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.ios == 'true'
     runs-on: macos-latest
-    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && inputs.test_selection == 'controls-capability' && 15 || 40 }}
+    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && (inputs.test_selection == 'controls-capability' || inputs.test_selection == 'controls-layout-delta') && 15 || 40 }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -138,6 +139,16 @@ jobs:
               ios_scheme=AssistantUIFixtures
               ios_test_arguments=(
                 -only-testing:AssistantUITests/MobileControlsUITests/testNativeControlsCapability
+                -test-timeouts-enabled YES
+                -maximum-test-execution-time-allowance 180
+              )
+              ;;
+            controls-layout-delta)
+              ios_scheme=AssistantUIFixtures
+              ios_test_arguments=(
+                -only-testing:AssistantUITests/MobileControlsUITests/testApprovalsLandscapeAccessibility5Light
+                -only-testing:AssistantUITests/MobileControlsUITests/testApprovalsLandscapeAccessibility5Dark
+                -only-testing:AssistantUITests/MobileControlsUITests/testProactivePortraitDefaultDarkDetails
                 -test-timeouts-enabled YES
                 -maximum-test-execution-time-allowance 180
               )

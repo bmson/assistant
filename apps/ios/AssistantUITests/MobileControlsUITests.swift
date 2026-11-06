@@ -6,6 +6,7 @@ import XCTest
 final class MobileControlsUITests: XCTestCase {
     private enum CapabilityFailure: Error { case assertion, budget }
     private var deadline = ContinuousClock.now
+    private var caseBudgetSeconds = 60
     private var attachmentCount = 0
     private var retainedPNGBytes = 0
     private var surfaceSwipes: [String: Int] = [:]
@@ -16,6 +17,7 @@ final class MobileControlsUITests: XCTestCase {
     func testNativeControlsCapability() throws {
         continueAfterFailure = true
         executionTimeAllowance = 60
+        caseBudgetSeconds = 60
         deadline = ContinuousClock.now.advanced(by: .seconds(60))
         attachmentCount = 0
         retainedPNGBytes = 0
@@ -95,10 +97,143 @@ final class MobileControlsUITests: XCTestCase {
         try checkBudget()
     }
 
-    private func launch(_ app: XCUIApplication, fixture: String) throws {
+    func testApprovalsLandscapeAccessibility5Light() throws {
+        beginExtendedCase()
+        let app = XCUIApplication()
+        defer {
+            app.terminate()
+            XCUIDevice.shared.orientation = .portrait
+        }
+        try launch(app, fixture: "approvals", theme: "light", textSize: "accessibility5", orientation: .landscapeLeft)
+        try assertLandscapeAccessibilityApprovalLayout(app)
+    }
+
+    func testApprovalsLandscapeAccessibility5Dark() throws {
+        beginExtendedCase()
+        let app = XCUIApplication()
+        defer {
+            app.terminate()
+            XCUIDevice.shared.orientation = .portrait
+        }
+        try launch(app, fixture: "approvals", theme: "dark", textSize: "accessibility5", orientation: .landscapeLeft)
+        try assertLandscapeAccessibilityApprovalLayout(app)
+    }
+
+    func testProactivePortraitDefaultDarkDetails() throws {
+        beginExtendedCase()
+        let app = XCUIApplication()
+        defer {
+            app.terminate()
+            XCUIDevice.shared.orientation = .portrait
+        }
+        try launch(app, fixture: "proactive", theme: "dark", textSize: "default", orientation: .portrait)
+        let proactiveSurface = app.descendants(matching: .any)
+            .matching(identifier: "fixture.surface.proactive").firstMatch
+        try require(proactiveSurface.waitForExistence(timeout: waitBudget()), "Proactive surface unavailable", app)
+        let disclosureQuery = proactiveSurface.buttons.matching(NSPredicate(format: "label == %@", "Details"))
+        let details = disclosureQuery.firstMatch
+        try require(details.waitForExistence(timeout: waitBudget()), "Details absent from native automation tree", app)
+        try require(disclosureQuery.count == 1, "Details must identify exactly one real button", app)
+        let facts = proactiveSurface.staticTexts.matching(NSPredicate(format: "label == %@", sourceFact))
+        let summaries = proactiveSurface.staticTexts.matching(NSPredicate(format: "label == %@", actionSummary))
+        try capture(app, "dark-proactive-collapsed-before-assertions")
+        try require(facts.count == 0 && summaries.count == 0, "Expanded-only source facts and summary must start absent", app)
+        try revealTogether([details], surface: proactiveSurface, app: app)
+        try require(details.frame.height >= 44 && details.isHittable && app.frame.contains(details.frame),
+                    "Details must expose a visible 44pt native frame and be hittable", app)
+        details.tap()
+        try require(facts.firstMatch.waitForExistence(timeout: waitBudget()), "Details tap must reveal the exact source qualification", app)
+        try require(summaries.firstMatch.waitForExistence(timeout: waitBudget()), "Details tap must reveal the exact action summary", app)
+        try require(facts.count == 1 && summaries.count == 1, "Expanded facts and action summary must each appear once", app)
+        try revealTogether([facts.firstMatch, summaries.firstMatch], surface: proactiveSurface, app: app)
+        try capture(app, "dark-proactive-expanded-visible-source-and-summary")
+        try revealTogether([details], surface: proactiveSurface, app: app, upwards: false)
+        details.tap()
+        let collapsed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            facts.count == 0 && summaries.count == 0
+        }, object: nil)
+        try require(XCTWaiter.wait(for: [collapsed], timeout: waitBudget()) == .completed,
+                    "Second Details tap must remove expanded-only source facts and summary", app)
+        try capture(app, "dark-proactive-after-collapse")
+        try assertTransport(app)
+    }
+
+    private func beginExtendedCase() {
+        continueAfterFailure = true
+        caseBudgetSeconds = 90
+        executionTimeAllowance = 90
+        deadline = ContinuousClock.now.advanced(by: .seconds(caseBudgetSeconds))
+        attachmentCount = 0
+        retainedPNGBytes = 0
+        surfaceSwipes = [:]
+    }
+
+    private func assertLandscapeAccessibilityApprovalLayout(_ app: XCUIApplication) throws {
+        let approvalSurface = app.descendants(matching: .any)
+            .matching(identifier: "fixture.surface.approvals").firstMatch
+        try require(approvalSurface.waitForExistence(timeout: waitBudget()), "Approval surface unavailable", app)
+        let approveQuery = approvalSurface.buttons.matching(identifier: "assistant.approvals.approval.approved")
+        let denyQuery = approvalSurface.buttons.matching(identifier: "assistant.approvals.approval.denied")
+        let moreQuery = approvalSurface.buttons.matching(NSPredicate(format: "label == %@", "More"))
+        let approve = approveQuery.firstMatch
+        let deny = denyQuery.firstMatch
+        let more = moreQuery.firstMatch
+        let requestedQuery = approvalSurface.staticTexts.matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Requested ")
+        )
+        let requested = requestedQuery.firstMatch
+        try require(approve.waitForExistence(timeout: waitBudget()), "Approve absent from native automation tree", app)
+        try require(deny.waitForExistence(timeout: waitBudget()), "Deny absent from native automation tree", app)
+        try require(more.waitForExistence(timeout: waitBudget()), "More absent from native automation tree", app)
+        try require(requested.waitForExistence(timeout: waitBudget()), "Last approval detail text absent from native tree", app)
+        try require(approveQuery.count == 1 && denyQuery.count == 1 && moreQuery.count == 1 && requestedQuery.count == 1,
+                    "Approval actions and last detail text must each be unique", app)
+
+        // The metadata tail and Approve must be measured together. This fails if
+        // landscape puts actions in the old side column beside approval details.
+        try revealTogether([requested, approve], surface: approvalSurface, app: app)
+        try capture(app, "landscape-ax5-requested-and-approve-same-viewport")
+        try require(requested.elementType == .staticText && approve.elementType == .button,
+                    "Requested detail and Approve must retain their native element roles", app)
+        try require(requested.isHittable && approve.isHittable && app.frame.contains(requested.frame) && app.frame.contains(approve.frame),
+                    "Requested detail and Approve must share a visible viewport", app)
+        try require(approve.frame.minY >= requested.frame.maxY,
+                    "Landscape AX5 approval actions must begin below the final details text", app)
+
+        try require(approve.elementType == .button && approve.frame.height >= 44,
+                    "Approve must be a native button at least 44pt high", app)
+
+        try revealTogether([approve, deny], surface: approvalSurface, app: app)
+        try capture(app, "landscape-ax5-approve-deny-same-viewport")
+        try require(approve.elementType == .button && deny.elementType == .button &&
+                    approve.frame.height >= 44 && deny.frame.height >= 44,
+                    "Approve and Deny must be native buttons at least 44pt high", app)
+        try require(approve.isHittable && deny.isHittable && app.frame.contains(approve.frame) && app.frame.contains(deny.frame),
+                    "Approve and Deny must share a visible viewport", app)
+        try require(approve.frame.minY < deny.frame.minY && approve.frame.maxY <= deny.frame.minY + 1,
+                    "Approve must precede Deny vertically", app)
+
+        try revealTogether([deny, more], surface: approvalSurface, app: app)
+        try capture(app, "landscape-ax5-deny-more-same-viewport")
+        try require(deny.elementType == .button && more.elementType == .button &&
+                    deny.frame.height >= 44 && more.frame.height >= 44,
+                    "Deny and More must be native buttons at least 44pt high", app)
+        try require(deny.isHittable && more.isHittable && app.frame.contains(deny.frame) && app.frame.contains(more.frame),
+                    "Deny and More must share a visible viewport", app)
+        try require(deny.frame.minY < more.frame.minY && deny.frame.maxY <= more.frame.minY + 1,
+                    "Deny must precede More vertically", app)
+        try assertTransport(app)
         try checkBudget()
-        app.launchArguments = ["--fixture-case", fixture, "--fixture-theme", "light",
-                               "--fixture-text-size", "default", "--fixture-nonce", UUID().uuidString]
+    }
+
+    private func launch(_ app: XCUIApplication, fixture: String, theme: String = "light",
+                        textSize: String = "default", orientation: UIDeviceOrientation = .portrait) throws {
+        try checkBudget()
+        XCUIDevice.shared.orientation = orientation
+        let expectedOrientation = orientation.isLandscape ? "landscape" : "portrait"
+        app.launchArguments = ["--fixture-case", fixture, "--fixture-theme", theme,
+                               "--fixture-text-size", textSize, "--fixture-orientation", expectedOrientation,
+                               "--fixture-nonce", UUID().uuidString]
         app.launch()
         try capture(app, "\(fixture)-launch-before-ready-assertion")
         let ready = app.staticTexts["fixture.ready"]
@@ -106,6 +241,20 @@ final class MobileControlsUITests: XCTestCase {
                     "Synthetic fixture failed to become ready", app)
         try require(!app.descendants(matching: .any).matching(identifier: "fixture.error").firstMatch.exists,
                     "Host reported fixture.error", app)
+        let vertical = expectedOrientation == "landscape" ? "compact" : "regular"
+        let expectedEnvironment = "theme=\(theme);size=\(textSize);vertical=\(vertical);requestedOrientation=\(expectedOrientation);windowOrientation=\(expectedOrientation)"
+        let environment = app.staticTexts["fixture.host.environment"]
+        try require(environment.waitForExistence(timeout: waitBudget()), "Fixture host environment report unavailable", app)
+        let environmentExpectation = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", expectedEnvironment), object: environment
+        )
+        try require(XCTWaiter.wait(for: [environmentExpectation], timeout: waitBudget()) == .completed,
+                    "Observed SwiftUI environment and UIKit window orientation must match requested fixture parameters", app)
+        if expectedOrientation == "landscape" {
+            try require(app.frame.width > app.frame.height, "Native app frame must be landscape", app)
+        } else {
+            try require(app.frame.height > app.frame.width, "Native app frame must be portrait", app)
+        }
         try assertTransport(app)
     }
 
@@ -144,7 +293,7 @@ final class MobileControlsUITests: XCTestCase {
 
     private func checkBudget() throws {
         guard ContinuousClock.now < deadline else {
-            XCTFail("Native capability exceeded its 60-second monotonic budget")
+            XCTFail("Native capability exceeded its \(caseBudgetSeconds)-second monotonic budget")
             throw CapabilityFailure.budget
         }
     }
