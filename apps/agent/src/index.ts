@@ -57,7 +57,9 @@ if (deps.firestoreStore) {
   await assertPostgresInstallationOwner(deps.db);
 }
 
-if (config.QUEUE_DRIVER === 'local') {
+if (config.ASSISTANT_RELEASE_WRITES_PAUSED) {
+  console.log('release pause: background dispatch is disabled');
+} else if (config.QUEUE_DRIVER === 'local') {
   startPoller(deps);
   console.log('local queue poller started (2s interval)');
 } else if (config.QUEUE_DRIVER === 'inert') {
@@ -80,5 +82,5 @@ const server = serve(
 
 // Live phone calls: Twilio media streams arrive as WebSocket upgrades.
 const callBridge = deps.modules.exportsOf(callsModule);
-if (!config.RESTORE_REHEARSAL && callBridge)
+if (!config.RESTORE_REHEARSAL && !config.ASSISTANT_RELEASE_WRITES_PAUSED && callBridge)
   attachCallStream(server as Server, callBridge, () => agentServices(deps));
