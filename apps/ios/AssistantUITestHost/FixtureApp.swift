@@ -150,20 +150,24 @@ private struct FixtureEnvironmentReadout: View {
     let requestedOrientation: String
     let windowOrientation: String
 
+    private var textSize: String {
+        switch dynamicTypeSize {
+        case .large: return "default"
+        case .accessibility5: return "accessibility5"
+        default: return "unknown"
+        }
+    }
+
+    private var vertical: String {
+        switch verticalSizeClass {
+        case .compact?: return "compact"
+        case .regular?: return "regular"
+        default: return "unknown"
+        }
+    }
+
     var body: some View {
         let theme = colorScheme == .dark ? "dark" : "light"
-        let textSize: String
-        switch dynamicTypeSize {
-        case .large: textSize = "default"
-        case .accessibility5: textSize = "accessibility5"
-        default: textSize = "unknown"
-        }
-        let vertical: String
-        switch verticalSizeClass {
-        case .compact?: vertical = "compact"
-        case .regular?: vertical = "regular"
-        default: vertical = "unknown"
-        }
         Text("theme=\(theme);size=\(textSize);vertical=\(vertical);requestedOrientation=\(requestedOrientation);windowOrientation=\(windowOrientation)")
             .font(.system(size: 10))
             .lineLimit(1)
