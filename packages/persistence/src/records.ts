@@ -160,6 +160,8 @@ export interface Records {
     taintedOrigin: boolean;
     autonomy: boolean;
     archivedAt: Date | null;
+    /** Versioned research-only assignment state; absent/NULL for ordinary goals. */
+    researchAssignment: import('./research-assignment.js').ResearchAssignmentState | null;
   };
   conversations: {
     id: string;

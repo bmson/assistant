@@ -8,7 +8,7 @@ import {
 import { loadConfig, validateAgentPersistenceConfig } from '@assistant/config';
 import { FirestoreGoalReadRepository } from '@assistant/firestore';
 import Link from 'next/link';
-import { GoalCard, type GoalView } from '@/app/goals/goal-card';
+import { GoalCard, type GoalView, type ResearchAssignmentSummary } from '@/app/goals/goal-card';
 import { GoalCreateForm } from '@/app/goals/goal-create-form';
 import { requireOwner } from '@/auth';
 import { relativeTime } from '@/lib/format';
@@ -58,6 +58,67 @@ function timelinePct(goal: GoalSnapshot, now: Date): number | null {
   const span = goal.targetDate.getTime() - start;
   if (span <= 0) return null;
   return Math.min(100, Math.max(0, Math.round(((now.getTime() - start) / span) * 100)));
+}
+
+function researchAssignmentSummary(
+  goal: GoalSnapshot,
+  dashboardConversationId: string | undefined,
+  lastTaskId: string | undefined,
+  taskStatus: string | null,
+): ResearchAssignmentSummary | undefined {
+  const assignment = goal.researchAssignment;
+  if (!assignment) return undefined;
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  const primaryHref =
+    assignment.conversationId &&
+    assignment.taskId &&
+    assignment.conversationId === dashboardConversationId &&
+    assignment.taskId === lastTaskId &&
+    uuid.test(assignment.conversationId) &&
+    uuid.test(assignment.taskId)
+      ? `/chat/${assignment.conversationId}?${new URLSearchParams({ task: assignment.taskId }).toString()}`
+      : null;
+  return {
+    kind: 'research_assignment',
+    assignmentId: assignment.assignmentId,
+    outcome: assignment.outcome,
+    brief: {
+      completionCondition: assignment.completionCondition,
+      interests: assignment.interests,
+      exclusions: assignment.exclusions,
+      allowedSources: assignment.allowedSources,
+    },
+    briefRevision: assignment.briefRevision,
+    resultBriefRevision: assignment.resultBriefRevision,
+    status: assignment.status,
+    stateReason: assignment.stateReason,
+    currentness: assignment.currentness,
+    lastConfirmedAt: assignment.lastConfirmedAt,
+    recipient: { name: assignment.recipient.name, contactHref: null },
+    budget: assignment.budget,
+    deadline: assignment.deadline,
+    scope: {
+      label: 'Research only · no contact or purchase',
+      contactAllowed: false,
+      purchaseAllowed: false,
+    },
+    progress: goal.progress,
+    briefContext: assignment.acceptedContext,
+    work: {
+      taskId: assignment.taskId,
+      taskStatus,
+      conversationId: assignment.conversationId,
+    },
+    evidence: assignment.evidence,
+    completion: assignment.completion
+      ? { kind: 'shortlist_accepted', ...assignment.completion }
+      : null,
+    primaryHref,
+    currentWorkHref:
+      dashboardConversationId && uuid.test(dashboardConversationId)
+        ? `/chat/${dashboardConversationId}`
+        : null,
+  };
 }
 
 function toGoalView(
@@ -114,6 +175,12 @@ function toGoalView(
     mirrorToPrimary: goal.mirrorToPrimary,
     autonomy: goal.autonomy,
     taintedOrigin: goal.taintedOrigin,
+    researchAssignment: researchAssignmentSummary(
+      goal,
+      conversationId,
+      lastSession?.id,
+      lastSession && lastSession.id === goal.researchAssignment?.taskId ? lastSession.status : null,
+    ),
   };
 }
 
@@ -148,7 +215,15 @@ export default async function GoalsPage({
   }
   const cards = items.map((item: GoalDashboardItem) => ({
     key: `${item.goal.id}:${item.goal.updatedAt.getTime()}`,
-    status: item.goal.status,
+    status: item.goal.researchAssignment
+      ? item.goal.researchAssignment.status === 'completed'
+        ? 'done'
+        : item.goal.researchAssignment.status === 'cancelled'
+          ? 'abandoned'
+          : item.goal.researchAssignment.status === 'paused'
+            ? 'paused'
+            : 'active'
+      : item.goal.status,
     view: toGoalView(
       item.goal,
       now,
@@ -177,7 +252,9 @@ export default async function GoalsPage({
 
   // One-line digest: what needs the owner, what runs on its own, when the
   // assistant looks at any of it next.
-  const activeCards = archived ? [] : cards.filter((card) => card.status === 'active');
+  const activeCards = archived
+    ? []
+    : cards.filter((card) => card.status === 'active' && !card.view.researchAssignment);
   const blockedCount = activeCards.filter((card) => card.view.blockedLabel !== '').length;
   const selfRunningCount = activeCards.length - blockedCount;
   const nextCheckIns = activeCards
@@ -199,7 +276,7 @@ export default async function GoalsPage({
         intro={
           archived
             ? 'Archived goals keep their work chats, tasks, and evidence. Restore one whenever you want to continue.'
-            : 'Give the assistant an outcome to keep moving forward. Each goal has its own chat for updates and direction.'
+            : 'Give the assistant an outcome to keep moving forward. Goals can run ongoing work or hold a bounded research assignment for your review.'
         }
         actions={
           archived ? (

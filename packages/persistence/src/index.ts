@@ -145,6 +145,7 @@ export * from './records.js';
 export * from './reminders.js';
 export { repairPathBlocked } from './repair-guard.js';
 export * from './repair-outcome.js';
+export * from './research-assignment.js';
 export * from './schedules.js';
 export * from './security-incidents.js';
 export * from './self-improvement.js';

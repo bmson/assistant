@@ -155,6 +155,7 @@ export { FirestoreRecallFeedbackRepository } from './recall-feedback.js';
 export { FirestoreRecallMetricsRepository } from './recall-metrics.js';
 export { FirestoreRecallSurfacingRepository } from './recall-surfacing.js';
 export { FirestoreReminderDeliveryRepository, FirestoreReminderRepository } from './reminders.js';
+export { FirestoreResearchAssignmentRepository } from './research-assignments.js';
 export {
   checkFirestoreRuntimeData,
   type RuntimeDataIssue,

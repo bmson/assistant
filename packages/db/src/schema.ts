@@ -234,6 +234,9 @@ export const goals = pgTable(
     autonomy: boolean('autonomy').notNull().default(false),
     /** Owner-hidden goal history. Linked chats, tasks, and evidence stay intact. */
     archivedAt: timestamp('archived_at', { withTimezone: true }),
+    /** Bounded research assignment state; null for ordinary goals. */
+    researchAssignment:
+      jsonb('research_assignment').$type<Records['goals']['researchAssignment']>(),
     ...timestamps,
   },
   (t) => [

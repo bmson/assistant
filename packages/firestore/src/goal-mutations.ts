@@ -85,7 +85,7 @@ function ownerScheduleQuery(store: InstallationStore, agentId: string, name: str
 function decodeGoal(doc: DocumentSnapshot, id: string, agentId: string): Goal {
   const goal = decodeRecord<Goal>(doc.data());
   identity(doc, goal, id, agentId);
-  return goal;
+  return { ...goal, researchAssignment: goal.researchAssignment ?? null };
 }
 
 function decodeGoalSchedules(
@@ -179,11 +179,14 @@ export class FirestoreGoalMutationRepository {
           taintedOrigin: input.taintedOrigin ?? false,
           autonomy: false,
           archivedAt: null,
+          researchAssignment: null,
         };
       } else {
         if (!goalDoc.exists) throw new Error('goal not found');
         goal = decodeGoal(goalDoc, goalId, this.configuredAgentId);
         if (goal.archivedAt) throw new Error('goal not found or is archived');
+        if (goal.researchAssignment)
+          throw new Error('Research assignments cannot use generic goal work or automation');
       }
       const active = goal.status === 'active' && !goal.archivedAt;
       const automation = active ? automationFor(goal) : null;
@@ -417,7 +420,9 @@ export class FirestoreGoalMutationRepository {
     input: GoalSettings,
     scheduleUpdate: { cron: string; instruction: string },
   ): Promise<void> {
-    await this.mutate(id, async ({ tx, goalDoc, schedule, now }) => {
+    await this.mutate(id, async ({ tx, goalDoc, goal, schedule, now }) => {
+      if (goal.researchAssignment)
+        throw new Error('Research assignments cannot use generic goal settings or automation');
       if (!Number.isInteger(input.priority) || input.priority < 1 || input.priority > 5)
         throw new Error('invalid goal priority');
       tx.update(goalDoc.ref, encodeRecord({ ...input, updatedAt: now }));
@@ -439,6 +444,8 @@ export class FirestoreGoalMutationRepository {
 
   async setStatus(id: string, status: 'active' | 'paused' | 'done' | 'abandoned'): Promise<void> {
     await this.mutate(id, async ({ tx, goalDoc, goal, schedule, now }) => {
+      if (goal.researchAssignment)
+        throw new Error('Research assignments cannot use generic goal status changes');
       if (!['active', 'paused', 'done', 'abandoned'].includes(status))
         throw new Error('invalid goal status');
       const activeStatus = status === 'active' && !goal.archivedAt;
@@ -520,6 +527,11 @@ export class FirestoreGoalMutationRepository {
 
   async restore(id: string): Promise<void> {
     await this.mutate(id, async ({ tx, goalDoc, goal, schedule, now }) => {
+      if (goal.researchAssignment) {
+        if (goal.archivedAt)
+          tx.update(goalDoc.ref, encodeRecord({ archivedAt: null, updatedAt: now }));
+        return;
+      }
       if (goal.status === 'active' && !schedule)
         throw new Error('Goal automation is unavailable for this goal');
       if (!goal.archivedAt) return;
@@ -531,6 +543,8 @@ export class FirestoreGoalMutationRepository {
 
   async setAutonomy(id: string, enabled: boolean): Promise<void> {
     await this.mutate(id, async ({ tx, goalDoc, goal, now }) => {
+      if (goal.researchAssignment)
+        throw new Error('Research assignments cannot use generic goal autonomy');
       if (enabled && goal.taintedOrigin)
         throw new Error('a goal created from external content cannot be given free-range autonomy');
       tx.update(goalDoc.ref, encodeRecord({ autonomy: enabled, updatedAt: now }));
