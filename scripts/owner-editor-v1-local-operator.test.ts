@@ -60,11 +60,27 @@ describe('explicit existing operator maintenance transport', () => {
   });
   it('rejects configured impersonation, ambiguous active accounts and mismatched token identity', () => {
     const active = [{ account: 'bmson@bmson.com', status: 'ACTIVE' }];
-    expect(() => verifyLocalAccount(active, '(unset)\n')).not.toThrow();
-    expect(() => verifyLocalAccount(active, 'service@project.iam.gserviceaccount.com')).toThrow();
-    expect(() => verifyLocalAccount([...active, ...active], '(unset)')).toThrow();
+    const unsetFromStdout = {
+      status: 0,
+      signal: null,
+      stdout: '(unset)\n',
+      stderr: '',
+    };
+    expect(() => verifyLocalAccount(active, unsetFromStdout)).not.toThrow();
     expect(() =>
-      verifyLocalAccount([{ account: 'other@example.com', status: 'ACTIVE' }], '(unset)'),
+      verifyLocalAccount(active, { ...unsetFromStdout, stdout: '(unset)' }),
+    ).not.toThrow();
+    expect(() =>
+      verifyLocalAccount(active, {
+        status: 0,
+        signal: null,
+        stdout: 'service@project.iam.gserviceaccount.com\n',
+        stderr: '',
+      }),
+    ).toThrow();
+    expect(() => verifyLocalAccount([...active, ...active], unsetFromStdout)).toThrow();
+    expect(() =>
+      verifyLocalAccount([{ account: 'other@example.com', status: 'ACTIVE' }], unsetFromStdout),
     ).toThrow();
     expect(() =>
       verifyTokenIdentity({ email: 'bmson@bmson.com', verified_email: true }),
@@ -76,6 +92,36 @@ describe('explicit existing operator maintenance transport', () => {
       verifyTokenIdentity({ email: 'other@example.com', verified_email: true }),
     ).toThrow();
     expect(() => verifyTokenIdentity(null)).toThrow();
+  });
+  it('accepts the captured Cloud SDK 586 unset profile on stderr with successful exit status', () => {
+    const active = [{ account: 'bmson@bmson.com', status: 'ACTIVE' }];
+    expect(() =>
+      verifyLocalAccount(active, {
+        status: 0,
+        signal: null,
+        stdout: '',
+        stderr: '(unset)\n',
+      }),
+    ).not.toThrow();
+  });
+  it('rejects ambiguous, configured, noisy, or unsuccessful impersonation profiles', () => {
+    const active = [{ account: 'bmson@bmson.com', status: 'ACTIVE' }];
+    const base = { status: 0, signal: null, stdout: '', stderr: '' };
+    for (const profile of [
+      base,
+      { ...base, stdout: '(unset)\n', stderr: '(unset)\n' },
+      { ...base, stdout: 'service@project.iam.gserviceaccount.com\n' },
+      { ...base, stderr: 'service@project.iam.gserviceaccount.com\n' },
+      { ...base, stdout: '(unset)\n', stderr: 'warning\n' },
+      { ...base, stdout: '(unset) \n' },
+      { ...base, stderr: '(unset)' },
+      { ...base, status: 1, stderr: '(unset)\n' },
+      { ...base, status: null, stderr: '(unset)\n' },
+      { ...base, status: null, stdout: '(unset)\n' },
+      { ...base, signal: 'SIGTERM' as const, stderr: '(unset)\n' },
+      { ...base, stderr: '(unset)\n', error: new Error('spawn failed') },
+    ])
+      expect(() => verifyLocalAccount(active, profile)).toThrow();
   });
   it('isolates verified-token CLI reads from configured endpoint, universe and credential overrides', () => {
     const inherited = {
