@@ -64,9 +64,17 @@ const TIMELINE_LIMIT = 20;
 const LOCATION_PREDICATE = 'lives_in';
 const ORIGIN_PREDICATES = new Set(['met', 'met_at', 'met_during']);
 
+function projectDirectoryAliases(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((alias): alias is string => typeof alias === 'string')
+    : [];
+}
+
 export interface PersonSummary {
   id: string;
   name: string;
+  /** Owner-entered lookup names; kept in the server-side directory projection. */
+  aliases?: string[];
   /** Free text the owner typed; '' when unset. */
   relationship: string;
   trust: string;
@@ -95,6 +103,7 @@ export function personSummaryFromStoredRow(
   return {
     id: contact.id,
     name: contact.name,
+    aliases: projectDirectoryAliases(contact.aliases),
     relationship: contact.relationship,
     trust: contact.trust,
     group: derivePersonGroup(contact),
@@ -614,6 +623,7 @@ async function summarizePeopleDirectory(
     return {
       id: person.id,
       name: person.name,
+      aliases: projectDirectoryAliases(person.aliases),
       relationship: person.relationship,
       trust: person.trust,
       group: derivePersonGroup({ relationship: person.relationship }),
@@ -623,6 +633,23 @@ async function summarizePeopleDirectory(
       lastContactAt: lastContact.get(person.id) ?? null,
     };
   });
+}
+
+/** Search only current directory fields, including aliases saved by the owner. */
+export function matchesPersonSearch(
+  person: Pick<PersonSummary, 'name' | 'relationship' | 'location' | 'aliases'>,
+  query: string,
+): boolean {
+  if (!query) return true;
+  const needle = query.toLocaleLowerCase();
+  return (
+    person.name.toLocaleLowerCase().includes(needle) ||
+    person.relationship.toLocaleLowerCase().includes(needle) ||
+    (person.location?.toLocaleLowerCase().includes(needle) ?? false) ||
+    projectDirectoryAliases(person.aliases).some((alias) =>
+      alias.toLocaleLowerCase().includes(needle),
+    )
+  );
 }
 
 interface DirectoryEdges {
