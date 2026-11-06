@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Scheme LastUpgradeVersion="2660" version="1.7">
+   <BuildAction parallelizeBuildables="NO" buildImplicitDependencies="NO">
+      <BuildActionEntries>
+         <BuildActionEntry buildForTesting="YES" buildForRunning="NO" buildForProfiling="NO" buildForArchiving="NO" buildForAnalyzing="NO">
+            <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="A10000000000000000000010" BuildableName="AssistantUITestHost.app" BlueprintName="AssistantUITestHost" ReferencedContainer="container:Assistant.xcodeproj"/>
+         </BuildActionEntry>
+         <BuildActionEntry buildForTesting="YES" buildForRunning="NO" buildForProfiling="NO" buildForArchiving="NO" buildForAnalyzing="NO">
+            <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="A10000000000000000000020" BuildableName="AssistantUITests.xctest" BlueprintName="AssistantUITests" ReferencedContainer="container:Assistant.xcodeproj"/>
+         </BuildActionEntry>
+      </BuildActionEntries>
+   </BuildAction>
+   <TestAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.DebuggerFoundation.Launcher.LLDB" shouldUseLaunchSchemeArgsEnv="YES">
+      <Testables>
+         <TestableReference skipped="NO" parallelizable="NO">
+            <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="A10000000000000000000020" BuildableName="AssistantUITests.xctest" BlueprintName="AssistantUITests" ReferencedContainer="container:Assistant.xcodeproj"/>
+         </TestableReference>
+      </Testables>
+      <MacroExpansion>
+         <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="A10000000000000000000010" BuildableName="AssistantUITestHost.app" BlueprintName="AssistantUITestHost" ReferencedContainer="container:Assistant.xcodeproj"/>
+      </MacroExpansion>
+   </TestAction>
+   <AnalyzeAction buildConfiguration="Debug"/>
+</Scheme>
