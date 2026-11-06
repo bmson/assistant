@@ -9,6 +9,7 @@ import { decodeMemoryRecord } from './memory-record.js';
 import { assertPrivacyErasureFenceUnchanged, readPrivacyErasureFence } from './privacy-erasure.js';
 import {
   collectProfileDocuments,
+  iterateProfileDocuments,
   type ProfileReadBudget,
   ProfileReadWave,
 } from './profile-read-budget.js';
@@ -179,7 +180,7 @@ export class FirestoreProfileLibraryRepository implements ProfileLibraryReposito
 
   private async readMemories(agentId: string, budget: ProfileReadBudget): Promise<MemoryRow[]> {
     const rows: MemoryRow[] = [];
-    for (const doc of await collectProfileDocuments(
+    for await (const doc of iterateProfileDocuments(
       this.store.collection('memories').where('agentId', '==', agentId),
       400,
       budget,

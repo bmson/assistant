@@ -62,12 +62,12 @@ export class ProfileReadWave {
   }
 }
 
-export async function collectProfileDocuments(
+// Yield validated pages so decoders need not retain raw snapshots for the full scan.
+export async function* iterateProfileDocuments(
   query: Query,
   pageSize: number,
   budget: ProfileReadBudget,
-): Promise<QueryDocumentSnapshot[]> {
-  const rows: QueryDocumentSnapshot[] = [];
+): AsyncGenerator<QueryDocumentSnapshot> {
   let cursor: QueryDocumentSnapshot | undefined;
   for (;;) {
     let requested = 0;
@@ -85,10 +85,23 @@ export async function collectProfileDocuments(
         throw new Error('Profile read cursor did not advance');
       }
       previous = doc.id;
-      rows.push(doc);
     }
-    if (docs.length < requested) return rows;
-    cursor = docs.at(-1);
-    if (!cursor) throw new Error('Empty full profile read page');
+    const isLastPage = docs.length < requested;
+    if (!isLastPage) {
+      cursor = docs.at(-1);
+      if (!cursor) throw new Error('Empty full profile read page');
+    }
+    for (const doc of docs) yield doc;
+    if (isLastPage) return;
   }
+}
+
+export async function collectProfileDocuments(
+  query: Query,
+  pageSize: number,
+  budget: ProfileReadBudget,
+): Promise<QueryDocumentSnapshot[]> {
+  const rows: QueryDocumentSnapshot[] = [];
+  for await (const doc of iterateProfileDocuments(query, pageSize, budget)) rows.push(doc);
+  return rows;
 }
