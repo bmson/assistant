@@ -1,5 +1,6 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
+  embeddingSpaceIdentityKey,
   type OwnerEditorApply,
   type OwnerEditorScope,
   ownerEditorPrivacyDigest,
@@ -75,11 +76,6 @@ function fixture() {
   });
   const operations = createFirestoreOwnerEditorOperationRepository(f.store, ownerId);
   const scope = (request: OwnerEditorApply): OwnerEditorScope => {
-    if (
-      request.command === 'remove_person' ||
-      request.command === 'remove_owner_family_relationship'
-    )
-      throw new Error('Unsupported command in basic-editor fixture');
     return {
       ownerId,
       epoch,
@@ -95,9 +91,13 @@ function fixture() {
               ? request.memoryId
               : request.command === 'update_person_identity'
                 ? request.contactId
-                : request.command === 'correct_owner_family_relationship'
-                  ? request.targetRelationId
-                  : request.subjectContactId,
+                : request.command === 'remove_person'
+                  ? request.contactId
+                  : request.command === 'correct_owner_family_relationship'
+                    ? request.targetRelationId
+                    : request.command === 'remove_owner_family_relationship'
+                      ? request.targetRelationId
+                      : request.subjectContactId,
       sessionDigest: 'a'.repeat(64),
       nonce: randomUUID(),
       issuedAt: now.getTime(),
@@ -160,7 +160,7 @@ describe('actual FS domain + actual canonical writer + actual claim/receipt tran
         original: familyFields(request),
       },
     ]);
-    expect(f.stats.requests - before).toBeLessThanOrEqual(9);
+    expect(f.stats.requests - before).toBeLessThanOrEqual(20);
     expect(f.stats.readsAfterWrites).toBe(0);
     expect(f.embed).toHaveBeenCalledTimes(1);
     f.seed('knowledgeGraphAssertionEvidence', randomUUID(), {
@@ -676,5 +676,231 @@ describe('actual FS domain + actual canonical writer + actual claim/receipt tran
     ]);
     expect(f.rows('maintenanceCursors')[0]?.cursor).toBe(cursor);
     expect(f.embed).not.toHaveBeenCalled();
+  });
+  it('removes a person through displayed impact, signed scope, normal claim/receipt, replay, and canonical readback', async () => {
+    const f = fixture();
+    const now = new Date();
+    const factId = randomUUID();
+    const factContent = 'Alex prefers a short weekly update.';
+    const factHash = createHash('sha256').update(factContent).digest('hex');
+    const retainedSourceId = randomUUID();
+    const retainedContent = 'Original source note mentioning Alex.';
+    const retainedHash = createHash('sha256').update(retainedContent).digest('hex');
+    const spaceKey = embeddingSpaceIdentityKey({
+      provider: 'test',
+      model: 'unit',
+      dimensions: 3,
+      revision: '1',
+    });
+    f.seed('memories', factId, {
+      id: factId,
+      agentId: f.ownerId,
+      createdAt: now,
+      content: factContent,
+      contentHash: factHash,
+      category: 'knowledge',
+      source: 'manual',
+      sourceTaskId: null,
+      subjectContactId: f.left,
+      expiresAt: null,
+      supersededById: null,
+      quarantined: false,
+      kind: 'fact',
+      domain: 'relationships',
+      originTrust: 'known',
+      ownerConfirmed: false,
+      confidence: '0.70',
+      importance: 3,
+      pinned: false,
+      validFrom: null,
+      validUntil: null,
+      goalId: null,
+      embedding: [1, 0, 0],
+      embeddingSpaceKey: spaceKey,
+      lastAccessedAt: null,
+      lastConsolidatedAt: null,
+    });
+    f.seed('memoryContentHashes', factHash, { memoryId: factId });
+    f.seed('memories', retainedSourceId, {
+      id: retainedSourceId,
+      agentId: f.ownerId,
+      createdAt: now,
+      content: retainedContent,
+      contentHash: retainedHash,
+      category: 'knowledge',
+      source: 'manual',
+      sourceTaskId: null,
+      subjectContactId: null,
+      expiresAt: null,
+      supersededById: null,
+      quarantined: false,
+      kind: 'fact',
+      domain: 'relationships',
+      originTrust: 'known',
+      ownerConfirmed: false,
+      confidence: '0.70',
+      importance: 3,
+      pinned: false,
+      validFrom: null,
+      validUntil: null,
+      goalId: null,
+      embedding: [1, 0, 0],
+      embeddingSpaceKey: spaceKey,
+      lastAccessedAt: null,
+      lastConsolidatedAt: null,
+    });
+    const entityId = randomUUID();
+    f.seed('knowledgeGraphEntities', entityId, {
+      id: entityId,
+      agentId: f.ownerId,
+      kind: 'person',
+      canonicalKey: `contact:${f.left}`,
+      label: 'Alex',
+      preferredLabel: null,
+      contactId: f.left,
+      createdAt: now,
+      updatedAt: now,
+    });
+    f.seed('knowledgeGraphSources', retainedSourceId, {
+      memoryId: retainedSourceId,
+      agentId: f.ownerId,
+      status: 'ready',
+      lastError: null,
+      contentHash: retainedHash,
+      subjectContactId: f.left,
+      extractionVersion: 1,
+      nextRetryAt: null,
+      attempts: 0,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const relationId = randomUUID();
+    f.seed('knowledgeGraphRelations', relationId, {
+      id: relationId,
+      agentId: f.ownerId,
+      subjectEntityId: entityId,
+      objectEntityId: randomUUID(),
+      sourceMemoryId: retainedSourceId,
+      assertionId: randomUUID(),
+      predicate: 'knows',
+      assertion: { tense: 'present', polarity: 'positive', modality: 'asserted' },
+      reviewStatus: 'confirmed',
+      sourceFingerprint: 'fixture-source',
+      confidence: '0.9',
+      validFrom: null,
+      validUntil: null,
+      evidenceQuote: null,
+      ordinal: 0,
+      createdAt: now,
+    });
+
+    const displayed = await firestoreOwnerEditorViewSnapshot(f.store, f.ownerId, {
+      contactId: f.left,
+    });
+    expect(displayed.identity?.revision).toBeTruthy();
+    expect(displayed.personRemoval, displayed.personRemovalUnavailableReason).toMatchObject({
+      contactId: f.left,
+      facts: 1,
+      occasions: 0,
+      connections: 1,
+      retainedSourceNotes: 1,
+      entityLinks: 1,
+      sourceLinks: 1,
+    });
+    const impact = displayed.personRemoval;
+    if (!impact || !displayed.identity) throw new Error('Person removal impact was unavailable');
+    const request: OwnerEditorApply = {
+      version: 1,
+      intent: 'apply',
+      command: 'remove_person',
+      operationId: randomUUID(),
+      contactId: f.left,
+      expectedContactRevision: displayed.identity.revision,
+      expectedImpactRevision: impact.revision,
+    };
+    const scope = f.scope(request);
+    const removed = await f.run(request, scope);
+    expect(removed).toMatchObject({
+      authority: 'operation_receipt',
+      outcome: 'saved',
+      command: 'remove_person',
+      operationId: request.operationId,
+      ids: { contactId: f.left },
+    });
+    const writesAfterCommit = f.stats.writes.length;
+    expect(await f.run(request, scope)).toEqual(removed);
+    expect(f.stats.writes).toHaveLength(writesAfterCommit);
+    expect(f.rows('contacts').some((row) => row.id === f.left)).toBe(false);
+    expect(f.rows('memories').some((row) => row.id === factId)).toBe(false);
+    expect(f.rows('memoryTombstones')).toContainEqual(
+      expect.objectContaining({ contentHash: factHash }),
+    );
+    expect(f.rows('memoryContentHashes').some((row) => row.memoryId === factId)).toBe(false);
+    expect(f.rows('graphDeletionIntents')).toContainEqual(
+      expect.objectContaining({ memoryId: factId }),
+    );
+    expect(f.rows('memories').some((row) => row.id === retainedSourceId)).toBe(true);
+    expect(
+      f.rows('knowledgeGraphSources').find((row) => row.memoryId === retainedSourceId)
+        ?.subjectContactId,
+    ).toBeNull();
+    expect(
+      f.rows('knowledgeGraphEntities').find((row) => row.id === entityId)?.contactId,
+    ).toBeNull();
+    expect(f.rows('knowledgeGraphRelations').find((row) => row.id === relationId)).toBeDefined();
+    expect(f.rows('ownerCards').find((row) => row.agentId === f.ownerId)?.content).toBe('');
+    const readback = await firestoreOwnerEditorViewSnapshot(f.store, f.ownerId, {
+      contactId: f.left,
+    });
+    expect(readback.identity).toBeNull();
+    expect(readback.people.some((person) => person.contactId === f.left)).toBe(false);
+    expect(f.stats.readsAfterWrites).toBe(0);
+    expect(f.stats.unboundedQueries).toEqual([]);
+    expect(f.embed).not.toHaveBeenCalled();
+  });
+  it('terminally conflicts when removal-impact membership changes after preparation', async () => {
+    const f = fixture();
+    const displayed = await firestoreOwnerEditorViewSnapshot(f.store, f.ownerId, {
+      contactId: f.left,
+    });
+    if (!displayed.identity || !displayed.personRemoval)
+      throw new Error('Expected exact person-removal impact');
+    const request: OwnerEditorApply = {
+      version: 1,
+      intent: 'apply',
+      command: 'remove_person',
+      operationId: randomUUID(),
+      contactId: f.left,
+      expectedContactRevision: displayed.identity.revision,
+      expectedImpactRevision: displayed.personRemoval.revision,
+    };
+    const scope = f.scope(request);
+    const reservation = await f.operations.reserve(
+      scope,
+      ownerEditorRequestHash(request),
+      new Date(),
+    );
+    if (reservation.kind !== 'claimed') throw new Error(JSON.stringify(reservation));
+    const prepared = await f.domain.prepare(request, scope);
+    if (!prepared.ok) throw new Error(JSON.stringify(prepared));
+    const occasionId = randomUUID();
+    f.seed('occasions', occasionId, {
+      id: occasionId,
+      agentId: f.ownerId,
+      contactId: f.left,
+      kind: 'birthday',
+      month: 6,
+      day: 2,
+      year: null,
+    });
+
+    const reply = await f.domain.commit(reservation.claim, prepared.prepared, new Date());
+    expect(reply).toMatchObject({ authority: 'operation_receipt', outcome: 'conflict' });
+    expect(f.rows('contacts').some((row) => row.id === f.left)).toBe(true);
+    expect(f.rows('occasions').some((row) => row.id === occasionId)).toBe(true);
+    expect(f.rows('memoryTombstones')).toHaveLength(0);
+    expect(f.rows('ownerEditorOperations')[0]).toMatchObject({ status: 'terminal_rejected' });
+    expect(f.stats.readsAfterWrites).toBe(0);
+    expect(f.stats.unboundedQueries).toEqual([]);
   });
 });

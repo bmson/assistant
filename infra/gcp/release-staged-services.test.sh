@@ -826,12 +826,12 @@ mkdir -p "$CAP_FIXTURE_ROOT/infra/gcp" "$CAP_FIXTURE_ROOT/apps/web/lib"
 cp "$ROOT/release-staged-services.sh" "$CAP_FIXTURE_ROOT/infra/gcp/release-staged-services.sh"
 cp "$ROOT/release-contracts.json" "$CAP_FIXTURE_ROOT/infra/gcp/release-contracts.json"
 : >"$CAP_FIXTURE_ROOT/apps/web/lib/owner-editor-runtime.ts"
-[[ "$(bash -c 'source "$1"; release_basic_editor_forward_only' -- "$CAP_FIXTURE_ROOT/infra/gcp/release-staged-services.sh")" == true ]] || fail 'intrinsic person-note source capability not detected'
+[[ "$(bash -c 'source "$1"; release_basic_editor_forward_only' -- "$CAP_FIXTURE_ROOT/infra/gcp/release-staged-services.sh")" == true ]] || fail 'intrinsic reviewed editor source capability not detected'
 python3 - "$CAP_FIXTURE_ROOT/infra/gcp/release-contracts.json" <<'PYCASE'
 import json,sys
 p=sys.argv[1]; c=json.load(open(p)); c['components']['web']['ownerEditorV1'].append('remove_person'); open(p,'w').write(json.dumps(c))
 PYCASE
-if bash -c 'source "$1"; release_basic_editor_forward_only' -- "$CAP_FIXTURE_ROOT/infra/gcp/release-staged-services.sh"; then fail 'broadened capability must fail closed'; fi
+if bash -c 'source "$1"; release_basic_editor_forward_only' -- "$CAP_FIXTURE_ROOT/infra/gcp/release-staged-services.sh"; then fail 'duplicate capability must fail closed'; fi
 python3 - "$CAP_FIXTURE_ROOT/infra/gcp/release-contracts.json" <<'PYCASE'
 import json,sys
 p=sys.argv[1]; c=json.load(open(p)); del c['components']['web']['ownerEditorV1']; open(p,'w').write(json.dumps(c))

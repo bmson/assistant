@@ -16,6 +16,8 @@ describe('basic owner-editor release policy', () => {
       'correct_owner_memory',
       'remove_owner_memory',
       'create_owner_memory',
+      'remove_person',
+      'remove_owner_family_relationship',
     ]);
     for (const command of BASIC_OWNER_EDITOR_COMMANDS)
       expect(isBasicOwnerEditorCommand(command)).toBe(true);
@@ -26,18 +28,12 @@ describe('basic owner-editor release policy', () => {
     }
   });
 
-  it.each([
-    'remove_person',
-    'remove_owner_family_relationship',
-    'unknown_command',
-    '',
-    null,
-    undefined,
-    1,
-    {},
-  ])('rejects unsupported command values (%s)', (value) => {
-    expect(isBasicOwnerEditorCommand(value)).toBe(false);
-  });
+  it.each(['unknown_command', '', null, undefined, 1, {}])(
+    'rejects unsupported command values (%s)',
+    (value) => {
+      expect(isBasicOwnerEditorCommand(value)).toBe(false);
+    },
+  );
 
   it('declares the same commands for deployment readiness', () => {
     expect(releaseContracts.components.web.ownerEditorV1).toEqual(BASIC_OWNER_EDITOR_COMMANDS);

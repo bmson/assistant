@@ -1210,6 +1210,13 @@ export function validateMigrationReferences(
       requireReference(record, 'agentId', 'agents', true);
     if (record.table === 'memories') {
       parseOwnerCorrection(record.data.ownerCorrection, String(record.data.contentHash));
+      const rejectedHash = record.data.ownerFamilyRejectedContentHash;
+      if (
+        rejectedHash !== undefined &&
+        rejectedHash !== null &&
+        (typeof rejectedHash !== 'string' || !/^[a-f0-9]{64}$/.test(rejectedHash))
+      )
+        throw new Error(`Invalid memories/${record.id} owner family rejection hash`);
       requireReference(record, 'subjectContactId', 'contacts');
       requireReference(record, 'sourceTaskId', 'tasks');
       requireReference(record, 'goalId', 'goals');

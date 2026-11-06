@@ -259,7 +259,7 @@ describe.skipIf(!localEmulator)('Firestore person detail with PostgreSQL offline
     expect(html).not.toContain('Save changes');
     expect(html).not.toContain('merge into…');
     expect(html).not.toContain('Delete person…');
-    expect(html).toContain('Deleting people is not available in this release.');
+    expect(html).toContain('Deletion is unavailable in this view.');
   });
 
   it('edits the person and adds an occasion through the shared Server Actions', async () => {

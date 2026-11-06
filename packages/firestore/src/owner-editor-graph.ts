@@ -1,4 +1,7 @@
-import type { OwnerEditorPeopleReadSnapshot } from '@assistant/persistence';
+import type {
+  OwnerEditorPeopleReadSnapshot,
+  OwnerEditorPersonRemovalImpact,
+} from '@assistant/persistence';
 import {
   canonicalizeKnowledgeAssertionDirection,
   knowledgeAssertionId,
@@ -14,7 +17,304 @@ import {
 import { type DocumentSnapshot, Timestamp, type Transaction } from '@google-cloud/firestore';
 import { assertConfiguredOwner } from './knowledge-graph-read.js';
 import { decodeMemoryRecord } from './memory-record.js';
+import { occasionDateKeyId } from './occasion-identity.js';
 import { decodeRecord, documentKey, type InstallationStore } from './store.js';
+
+const PERSON_REMOVAL_LIMITS = Object.freeze({
+  facts: 25,
+  occasions: 25,
+  entities: 25,
+  sources: 25,
+  connections: 50,
+});
+
+export interface FirestoreOwnerEditorPersonRemovalSnapshot {
+  impact: OwnerEditorPersonRemovalImpact;
+  contactRevision: string;
+  contact: DocumentSnapshot;
+  facts: DocumentSnapshot[];
+  factSupport: { tombstone: DocumentSnapshot; hash: DocumentSnapshot; intent: DocumentSnapshot }[];
+  occasions: DocumentSnapshot[];
+  occasionKeys: DocumentSnapshot[];
+  entities: DocumentSnapshot[];
+  sources: DocumentSnapshot[];
+  connections: DocumentSnapshot[];
+}
+
+function nativeRevision(snapshot: DocumentSnapshot, ownerId: string) {
+  if (!snapshot.exists || !snapshot.updateTime)
+    throw new Error('Person removal native revision unavailable');
+  return ownerEditorSnapshotRevision({
+    driver: 'firestore',
+    ownerId,
+    id: snapshot.id,
+    updateTime: {
+      seconds: snapshot.updateTime.seconds,
+      nanoseconds: snapshot.updateTime.nanoseconds,
+    },
+  });
+}
+
+function removalNativeRow(snapshot: DocumentSnapshot) {
+  return {
+    path: snapshot.ref.path,
+    exists: snapshot.exists,
+    updateTime: snapshot.updateTime
+      ? { seconds: snapshot.updateTime.seconds, nanoseconds: snapshot.updateTime.nanoseconds }
+      : null,
+  };
+}
+
+/** One bounded impact snapshot is reused by the editor view and the claim transaction. */
+export async function readFirestoreOwnerEditorPersonRemovalSnapshot(
+  store: InstallationStore,
+  ownerId: string,
+  contactId: string,
+  tx?: Transaction,
+): Promise<FirestoreOwnerEditorPersonRemovalSnapshot> {
+  if (!tx) {
+    await assertConfiguredOwner(store, ownerId);
+    return store.db.runTransaction((transaction) =>
+      readFirestoreOwnerEditorPersonRemovalSnapshot(store, ownerId, contactId, transaction),
+    );
+  }
+
+  const contact = await tx.get(store.doc('contacts', contactId));
+  if (!contact.exists) throw new Error('Person removal contact unavailable');
+  const person = row<Records['contacts']>(contact);
+  if (
+    (contact.get('agentId') !== undefined && contact.get('agentId') !== ownerId) ||
+    person.trust === 'owner' ||
+    typeof person.name !== 'string' ||
+    !person.name.trim()
+  )
+    throw new Error('Person removal contact unavailable');
+  const contactRevision = nativeRevision(contact, ownerId);
+
+  const bounded = async (
+    collection: string,
+    field: string,
+    value: string,
+    limit: number,
+  ): Promise<DocumentSnapshot[]> => {
+    const page = await tx.get(
+      store
+        .collection(collection)
+        .where(field, '==', value)
+        .limit(limit + 1),
+    );
+    if (page.size !== page.docs.length || page.size > limit)
+      throw new Error('Person removal impact exceeds its safe bound');
+    return page.docs;
+  };
+  const [facts, occasions, entities, sources] = await Promise.all([
+    bounded('memories', 'subjectContactId', contactId, PERSON_REMOVAL_LIMITS.facts),
+    bounded('occasions', 'contactId', contactId, PERSON_REMOVAL_LIMITS.occasions),
+    bounded('knowledgeGraphEntities', 'contactId', contactId, PERSON_REMOVAL_LIMITS.entities),
+    bounded('knowledgeGraphSources', 'subjectContactId', contactId, PERSON_REMOVAL_LIMITS.sources),
+  ]);
+
+  for (const fact of facts) {
+    const memory = decodeMemoryRecord(fact.data());
+    if (
+      documentKey(memory.id) !== fact.id ||
+      memory.agentId !== ownerId ||
+      memory.subjectContactId !== contactId ||
+      typeof memory.contentHash !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(memory.contentHash)
+    )
+      throw new Error('Person removal fact scope unavailable');
+  }
+  for (const occasion of occasions) {
+    const value = row<Records['occasions']>(occasion);
+    if (value.agentId !== ownerId || value.contactId !== contactId)
+      throw new Error('Person removal occasion scope unavailable');
+  }
+  for (const entity of entities) {
+    const value = row<Records['knowledgeGraphEntities']>(entity);
+    if (value.agentId !== ownerId || value.contactId !== contactId || value.kind !== 'person')
+      throw new Error('Person removal entity scope unavailable');
+  }
+  for (const source of sources) {
+    const value = decodeRecord<Records['knowledgeGraphSources'] & { agentId?: string }>(
+      source.data(),
+    );
+    if (
+      !value ||
+      documentKey(value.memoryId) !== source.id ||
+      value.agentId !== ownerId ||
+      value.subjectContactId !== contactId
+    )
+      throw new Error('Person removal source scope unavailable');
+  }
+
+  const factRows = facts.map((fact) => decodeMemoryRecord(fact.data()));
+  const factSupportRefs = factRows.flatMap((fact) => [
+    store.doc('memoryTombstones', fact.contentHash),
+    store.doc('memoryContentHashes', fact.contentHash),
+    store.doc('graphDeletionIntents', fact.id),
+  ]);
+  const factSupportSnapshots = factSupportRefs.length ? await tx.getAll(...factSupportRefs) : [];
+  if (factSupportSnapshots.length !== factSupportRefs.length)
+    throw new Error('Person removal fact support snapshot unavailable');
+  const factSupport = factRows.map((fact, index) => {
+    const tombstone = factSupportSnapshots[index * 3];
+    const hash = factSupportSnapshots[index * 3 + 1];
+    const intent = factSupportSnapshots[index * 3 + 2];
+    if (!tombstone || !hash || !intent)
+      throw new Error('Person removal fact support snapshot unavailable');
+    if (hash.exists && hash.get('memoryId') !== fact.id)
+      throw new Error('Person removal content hash index is inconsistent');
+    if (
+      intent.exists &&
+      (intent.get('memoryId') !== fact.id ||
+        intent.get('agentId') !== ownerId ||
+        intent.get('contentHash') !== fact.contentHash)
+    )
+      throw new Error('Person removal graph deletion intent is inconsistent');
+    return { tombstone, hash, intent };
+  });
+
+  const occasionKeys: DocumentSnapshot[] = occasions.length
+    ? await tx.getAll(
+        ...occasions.map((occasion) =>
+          store.doc(
+            'occasionDateKeys',
+            // The removal repository uses this same deterministic key for cleanup.
+            occasionDateKeyId(ownerId, {
+              contactId,
+              kind: String(occasion.get('kind')),
+              month: Number(occasion.get('month')),
+              day: Number(occasion.get('day')),
+            }),
+          ),
+        ),
+      )
+    : [];
+  if (occasionKeys.length !== occasions.length)
+    throw new Error('Person removal occasion marker snapshot unavailable');
+  for (let index = 0; index < occasions.length; index += 1) {
+    const occasion = occasions[index];
+    const marker = occasionKeys[index];
+    if (!occasion || !marker) throw new Error('Person removal occasion marker unavailable');
+    if (marker.exists && marker.get('occasionId') !== occasion.get('id'))
+      throw new Error('Person removal occasion marker is inconsistent');
+  }
+
+  const sourceMemoryIds = sources.map((source) => String(source.get('memoryId')));
+  if (sourceMemoryIds.some((id) => !id || id === 'undefined'))
+    throw new Error('Person removal source memory identity unavailable');
+  const sourceMemoryDocs = sourceMemoryIds.length
+    ? await tx.getAll(...sourceMemoryIds.map((id) => store.doc('memories', id)))
+    : [];
+  if (sourceMemoryDocs.length !== sources.length)
+    throw new Error('Person removal source memory snapshot unavailable');
+  const factsById = new Set(factRows.map((fact) => fact.id));
+  for (let index = 0; index < sourceMemoryDocs.length; index += 1) {
+    const source = sources[index];
+    const memory = sourceMemoryDocs[index];
+    if (!source || !memory?.exists) throw new Error('Retained person source note unavailable');
+    const value = decodeMemoryRecord(memory.data());
+    if (
+      value.id !== sourceMemoryIds[index] ||
+      value.agentId !== ownerId ||
+      documentKey(value.id) !== memory.id
+    )
+      throw new Error('Retained person source note scope unavailable');
+  }
+
+  const entityIds = entities.map((entity) => {
+    const value = row<Records['knowledgeGraphEntities']>(entity);
+    if (documentKey(value.id) !== entity.id || value.agentId !== ownerId)
+      throw new Error('Person removal entity identity unavailable');
+    return value.id;
+  });
+  let connections: DocumentSnapshot[] = [];
+  if (entityIds.length > 0) {
+    const [subjects, objects] = await Promise.all([
+      tx.get(
+        store
+          .collection('knowledgeGraphRelations')
+          .where('subjectEntityId', 'in', entityIds)
+          .limit(PERSON_REMOVAL_LIMITS.connections + 1),
+      ),
+      tx.get(
+        store
+          .collection('knowledgeGraphRelations')
+          .where('objectEntityId', 'in', entityIds)
+          .limit(PERSON_REMOVAL_LIMITS.connections + 1),
+      ),
+    ]);
+    if (
+      subjects.size !== subjects.docs.length ||
+      objects.size !== objects.docs.length ||
+      subjects.size > PERSON_REMOVAL_LIMITS.connections ||
+      objects.size > PERSON_REMOVAL_LIMITS.connections
+    )
+      throw new Error('Person removal connection impact exceeds its safe bound');
+    const byPath = new Map([...subjects.docs, ...objects.docs].map((doc) => [doc.ref.path, doc]));
+    connections = [...byPath.values()].sort((left, right) =>
+      left.ref.path.localeCompare(right.ref.path),
+    );
+    if (connections.length > PERSON_REMOVAL_LIMITS.connections)
+      throw new Error('Person removal connection impact exceeds its safe bound');
+    for (const connection of connections) {
+      const value = row<Records['knowledgeGraphRelations']>(connection);
+      if (
+        value.agentId !== ownerId ||
+        (!entityIds.includes(value.subjectEntityId) && !entityIds.includes(value.objectEntityId))
+      )
+        throw new Error('Person removal connection scope unavailable');
+    }
+  }
+
+  const nativeRows = [
+    contact,
+    ...facts,
+    ...factSupport.flatMap((item) => [item.tombstone, item.hash, item.intent]),
+    ...occasions,
+    ...occasionKeys,
+    ...entities,
+    ...sources,
+    ...sourceMemoryDocs,
+    ...connections,
+  ].map(removalNativeRow);
+  const membership = {
+    facts: facts.map((doc) => doc.ref.path).sort(),
+    occasions: occasions.map((doc) => doc.ref.path).sort(),
+    entities: entities.map((doc) => doc.ref.path).sort(),
+    sources: sources.map((doc) => doc.ref.path).sort(),
+    connections: connections.map((doc) => doc.ref.path).sort(),
+  };
+  const impact: OwnerEditorPersonRemovalImpact = {
+    contactId,
+    revision: ownerEditorSnapshotRevision({
+      protocol: 'owner-editor-person-removal-impact-v1',
+      ownerId,
+      contactRevision,
+      nativeRows: nativeRows.sort((left, right) => left.path.localeCompare(right.path)),
+      membership,
+    }),
+    facts: facts.length,
+    occasions: occasions.length,
+    connections: connections.length,
+    retainedSourceNotes: sourceMemoryIds.filter((id) => !factsById.has(id)).length,
+    entityLinks: entities.length,
+    sourceLinks: sources.length,
+  };
+  return {
+    impact,
+    contactRevision,
+    contact,
+    facts,
+    factSupport,
+    occasions,
+    occasionKeys,
+    entities,
+    sources,
+    connections,
+  };
+}
 
 function native(snapshot: DocumentSnapshot) {
   if (!snapshot.exists || !snapshot.updateTime)
@@ -366,6 +666,20 @@ export async function firestoreOwnerEditorViewSnapshot(
       trust: identity.trust,
       revision: identity.revision,
     };
+  if (identity && input.contactId) {
+    try {
+      const removal = await readFirestoreOwnerEditorPersonRemovalSnapshot(
+        store,
+        ownerId,
+        input.contactId,
+        tx,
+      );
+      result.personRemoval = removal.impact;
+    } catch {
+      result.personRemovalUnavailableReason =
+        'Deleting this person is unavailable because its current impact could not be fully verified.';
+    }
+  }
   const targetDocs = (await get('knowledgeGraphRelations', ids)).filter((doc) => doc.exists);
   const targets = targetDocs.map((doc) => row<Records['knowledgeGraphRelations']>(doc));
   if (targets.some((t) => t.agentId !== ownerId)) throw new Error('Foreign editor relation');

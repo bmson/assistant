@@ -375,7 +375,7 @@ release_basic_editor_forward_only() {
     const capability=JSON.parse(fs.readFileSync(path.join(root,"release-contracts.json"),"utf8")).components?.web?.ownerEditorV1;
     const runtime=fs.existsSync(path.resolve(root,"../../apps/web/lib/owner-editor-runtime.ts"));
     if(capability===undefined&&!runtime){process.stdout.write("false");process.exit(0)}
-    const expected=["create_person","update_person_identity","add_family_relationship","correct_owner_family_relationship","correct_owner_memory","remove_owner_memory","create_owner_memory"].sort();
+    const expected=["create_person","update_person_identity","add_family_relationship","correct_owner_family_relationship","correct_owner_memory","remove_owner_memory","create_owner_memory","remove_person","remove_owner_family_relationship"].sort();
     if(!runtime||!Array.isArray(capability)||JSON.stringify([...capability].sort())!==JSON.stringify(expected))process.exit(2);
     process.stdout.write("true");
   ' "${BASH_SOURCE[0]%/*}"

@@ -80,6 +80,19 @@ const family = z.strictObject(familyShape).superRefine((v, ctx) => {
 const envelope = { version: z.literal(1), intent: z.literal('apply'), operationId: uuid };
 const identity = { name: z.string().max(4_000), aliases: z.array(z.string().max(4_000)).max(20) };
 const applySchema = z.discriminatedUnion('command', [
+  z.strictObject({
+    ...envelope,
+    command: z.literal('remove_person'),
+    contactId: uuid,
+    expectedContactRevision: revision,
+    expectedImpactRevision: revision,
+  }),
+  z.strictObject({
+    ...envelope,
+    command: z.literal('remove_owner_family_relationship'),
+    targetRelationId: uuid,
+    expectedTargetRevision: revision,
+  }),
   z.strictObject({ ...envelope, command: z.literal('create_person'), ...identity }),
   z.strictObject({
     ...envelope,
@@ -178,8 +191,9 @@ export function ownerEditorApplyMatchesScope(
       case 'create_owner_memory':
         return scope.targetId === request.subjectContactId;
       case 'remove_person':
+        return scope.targetId === request.contactId;
       case 'remove_owner_family_relationship':
-        return false;
+        return scope.targetId === request.targetRelationId;
     }
   })();
   return (
@@ -243,7 +257,10 @@ export function parseOwnerEditorRequest(value: unknown, path: string): OwnerEdit
       };
   } else if (request.command === 'remove_owner_memory') {
     return { ok: true, request };
-  } else {
+  } else if (
+    request.command === 'add_family_relationship' ||
+    request.command === 'correct_owner_family_relationship'
+  ) {
     const fields = request.command === 'add_family_relationship' ? request : request.replacement;
     const checked = family.safeParse({
       subjectContactId: fields.subjectContactId,

@@ -7,6 +7,7 @@ import {
   type OwnerEditorClaim,
   type OwnerEditorFamilyFields,
   type OwnerEditorGraphExpectations,
+  type OwnerEditorPersonRemovalImpact,
   type OwnerEditorReply,
   type OwnerEditorScope,
   type OwnerGraphCorrectionTarget,
@@ -43,6 +44,10 @@ export interface OwnerEditorFamilySnapshot {
   canonicalRevision: string | null;
   canonicalIds?: { assertionId: string; relationId: string; memoryId: string };
   target?: { revision: string; assertionId: string; correction: OwnerGraphCorrectionTarget };
+}
+export interface OwnerEditorPersonRemovalSnapshot {
+  impact: OwnerEditorPersonRemovalImpact;
+  contactRevision: string;
 }
 /** Bounded snapshot adapters on the existing driver; commit rechecks these under its claim lock. */
 export interface OwnerEditorDomainStorage {
@@ -95,6 +100,28 @@ export interface OwnerEditorDomainStorage {
     prepared: Extract<PreparedOwnerEditor, { kind: 'person' }>,
     now: Date,
   ): Promise<OwnerEditorReply>;
+  /** Exact bounded impact and native contact CAS used by preview and commit. */
+  personRemovalSnapshot?(
+    ownerId: string,
+    contactId: string,
+    scope: OwnerEditorScope,
+  ): Promise<OwnerEditorPersonRemovalSnapshot | null>;
+  commitPersonRemoval?(
+    claim: OwnerEditorClaim,
+    prepared: Extract<PreparedOwnerEditor, { kind: 'person-removal' }>,
+    now: Date,
+  ): Promise<OwnerEditorReply>;
+  /** Operation-scoped source/evidence closure revision for one relationship. */
+  familyRemovalRevision?(
+    ownerId: string,
+    relationId: string,
+    scope: OwnerEditorScope,
+  ): Promise<string | null>;
+  commitFamilyRemoval?(
+    claim: OwnerEditorClaim,
+    request: Extract<OwnerEditorApply, { command: 'remove_owner_family_relationship' }>,
+    now: Date,
+  ): Promise<OwnerEditorReply>;
   commitUnchangedFamily(
     claim: OwnerEditorClaim,
     fields: OwnerEditorFamilyFields,
@@ -116,6 +143,15 @@ export type PreparedOwnerEditor =
       name: string;
       aliases: string[];
     }
+  | {
+      kind: 'person-removal';
+      request: Extract<OwnerEditorApply, { command: 'remove_person' }>;
+      impact: OwnerEditorPersonRemovalImpact;
+    }
+  | {
+      kind: 'family-removal';
+      request: Extract<OwnerEditorApply, { command: 'remove_owner_family_relationship' }>;
+    }
   | { kind: 'family-unchanged'; fields: OwnerEditorFamilyFields }
   | {
       kind: 'family';
@@ -134,14 +170,6 @@ export function createOwnerEditorDomain(input: {
       request: OwnerEditorApply,
       scope: OwnerEditorScope,
     ): ReturnType<OwnerEditorDomainPort<PreparedOwnerEditor>['prepare']> {
-      if (
-        request.command === 'remove_person' ||
-        request.command === 'remove_owner_family_relationship'
-      )
-        return {
-          ok: false,
-          result: { outcome: 'unavailable', reason: 'editor_command_unavailable' },
-        };
       if (request.command === 'create_owner_memory') {
         if (!storage.memoryCreationTarget || !storage.commitCreateMemory)
           return {
@@ -180,16 +208,67 @@ export function createOwnerEditorDomain(input: {
             ? scope.targetId === request.memoryId
             : request.command === 'update_person_identity'
               ? scope.targetId === request.contactId
-              : request.command === 'correct_owner_family_relationship'
-                ? scope.targetId === request.targetRelationId
-                : scope.targetId === request.subjectContactId ||
-                  scope.targetId === request.objectContactId;
+              : request.command === 'remove_person'
+                ? scope.targetId === request.contactId
+                : request.command === 'correct_owner_family_relationship'
+                  ? scope.targetId === request.targetRelationId
+                  : request.command === 'remove_owner_family_relationship'
+                    ? scope.targetId === request.targetRelationId
+                    : scope.targetId === request.subjectContactId ||
+                      scope.targetId === request.objectContactId;
       if (
         !targetMatches ||
         scope.operationId !== request.operationId ||
         scope.command !== request.command
       )
         return { ok: false, result: { outcome: 'conflict', reason: 'issuance_target_changed' } };
+      if (request.command === 'remove_person') {
+        if (!storage.personRemovalSnapshot || !storage.commitPersonRemoval)
+          return {
+            ok: false,
+            result: { outcome: 'unavailable', reason: 'person_removal_unavailable' },
+          };
+        const snapshot = await storage.personRemovalSnapshot(
+          scope.ownerId,
+          request.contactId,
+          scope,
+        );
+        if (!snapshot)
+          return {
+            ok: false,
+            result: { outcome: 'unavailable', reason: 'person_removal_unavailable' },
+          };
+        if (
+          snapshot.contactRevision !== request.expectedContactRevision ||
+          snapshot.impact.contactId !== request.contactId ||
+          snapshot.impact.revision !== request.expectedImpactRevision
+        )
+          return { ok: false, result: { outcome: 'conflict', reason: 'person_impact_changed' } };
+        return {
+          ok: true,
+          prepared: { kind: 'person-removal', request, impact: snapshot.impact },
+        };
+      }
+      if (request.command === 'remove_owner_family_relationship') {
+        if (!storage.familyRemovalRevision || !storage.commitFamilyRemoval)
+          return {
+            ok: false,
+            result: { outcome: 'unavailable', reason: 'family_removal_unavailable' },
+          };
+        const revision = await storage.familyRemovalRevision(
+          scope.ownerId,
+          request.targetRelationId,
+          scope,
+        );
+        if (!revision)
+          return {
+            ok: false,
+            result: { outcome: 'unavailable', reason: 'family_removal_unavailable' },
+          };
+        if (revision !== request.expectedTargetRevision)
+          return { ok: false, result: { outcome: 'conflict', reason: 'family_target_changed' } };
+        return { ok: true, prepared: { kind: 'family-removal', request } };
+      }
       if (request.command === 'correct_owner_memory') {
         if (!storage.memory || !storage.commitMemory)
           return {
@@ -378,13 +457,17 @@ export function createOwnerEditorDomain(input: {
       }
       return prepared.kind === 'family-unchanged'
         ? storage.commitUnchangedFamily(claim, prepared.fields, now)
-        : prepared.kind === 'person'
-          ? storage.commitPerson(claim, prepared, now)
-          : storage.commitFamily(
-              claim,
-              { ...prepared.atomic, editor: { claim, expected: prepared.expected } },
-              now,
-            );
+        : prepared.kind === 'person-removal'
+          ? storage.commitPersonRemoval!(claim, prepared, now)
+          : prepared.kind === 'family-removal'
+            ? storage.commitFamilyRemoval!(claim, prepared.request, now)
+            : prepared.kind === 'person'
+              ? storage.commitPerson(claim, prepared, now)
+              : storage.commitFamily(
+                  claim,
+                  { ...prepared.atomic, editor: { claim, expected: prepared.expected } },
+                  now,
+                );
     },
   };
 }
