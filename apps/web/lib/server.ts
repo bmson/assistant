@@ -208,6 +208,7 @@ import {
 import { and, asc, desc, eq, gt, lt, or } from 'drizzle-orm';
 import { unstable_cache } from 'next/cache';
 import { cache } from 'react';
+import { isValidFormSessionScope } from '../app/auth-form-session-scope';
 import {
   decodeMobileDocumentCursor,
   encodeMobileDocumentCursor,
@@ -1891,7 +1892,11 @@ export async function loadOwnerMemoryEditorView(
 ) {
   const [
     { readPostgresOwnerEditorIssuanceContext, readPostgresOwnerMemoryEditorSnapshot },
-    { readFirestoreOwnerEditorIssuanceContext, readFirestoreOwnerMemoryRemovalSnapshot },
+    {
+      readFirestoreOwnerEditorIssuanceContext,
+      readFirestoreOwnerMemoryEditorSnapshot,
+      readFirestoreOwnerMemoryRemovalSnapshot,
+    },
     { buildOwnerMemoryEditorView },
   ] = await Promise.all([
     import('@assistant/db'),
@@ -1927,20 +1932,39 @@ export async function loadOwnerMemoryEditorView(
   if (validateAgentPersistenceConfig(config).length)
     throw new Error('Memory persistence is unavailable');
   const store = getFirestoreInstallationStore();
+  const canReviewRemovalImpact =
+    enabled && Boolean(config.AUTH_SECRET) && isValidFormSessionScope(formSessionScope);
   return store.db.runTransaction(async (tx) => {
-    const removal = await readFirestoreOwnerMemoryRemovalSnapshot(
+    const snapshot = await readFirestoreOwnerMemoryEditorSnapshot(
       store,
       config.FIRESTORE_AGENT_ID,
       memoryId,
       tx,
     );
-    if (!removal) return null;
-    const context = await readFirestoreOwnerEditorIssuanceContext(
-      store,
-      config.FIRESTORE_AGENT_ID,
-      tx,
-    );
-    return finish(removal.snapshot, context, removal.impact);
+    if (!snapshot) return null;
+    let context: Awaited<ReturnType<typeof readFirestoreOwnerEditorIssuanceContext>> = null;
+    if (snapshot.eligible && canReviewRemovalImpact)
+      context = await readFirestoreOwnerEditorIssuanceContext(store, config.FIRESTORE_AGENT_ID, tx);
+    let impact: import('@assistant/persistence').OwnerEditorMemoryRemovalImpact | null = null;
+    if (snapshot.eligible && context && canReviewRemovalImpact) {
+      try {
+        const removal = await readFirestoreOwnerMemoryRemovalSnapshot(
+          store,
+          config.FIRESTORE_AGENT_ID,
+          memoryId,
+          tx,
+        );
+        if (
+          removal &&
+          removal.snapshot.revision === snapshot.revision &&
+          removal.snapshot.contentHash === snapshot.contentHash
+        )
+          impact = removal.impact;
+      } catch {
+        // Impact-read failures disable only note removal; correction remains available.
+      }
+    }
+    return finish(snapshot, context, impact);
   });
 }
 

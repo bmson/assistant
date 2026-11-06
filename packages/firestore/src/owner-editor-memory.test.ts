@@ -133,6 +133,66 @@ function fixture() {
   };
 }
 describe('actual FS saved-note domain + claim + legacy correction primitive offline', () => {
+  it('preserves the valid note snapshot when its optional graph impact is malformed', async () => {
+    const f = fixture();
+    f.rawSeed('knowledgeGraphRelations', randomUUID(), {
+      id: 'wrong-physical-identity',
+      agentId: f.ownerId,
+      sourceMemoryId: f.memoryId,
+      subjectEntityId: randomUUID(),
+      objectEntityId: randomUUID(),
+      predicate: 'lives_in',
+    });
+    const result = await readFirestoreOwnerMemoryRemovalSnapshot(f.store, f.ownerId, f.memoryId);
+    expect(result?.snapshot).toMatchObject({
+      memoryId: f.memoryId,
+      ownerId: f.ownerId,
+      eligible: true,
+    });
+    expect(result?.impact).toBeNull();
+  });
+
+  it('stops graph impact reads at aggregate document and request bounds', async () => {
+    const f = fixture();
+    const endpoints = Array.from({ length: 8 }, () => randomUUID());
+    for (const endpointId of endpoints)
+      f.rawSeed('knowledgeGraphEntities', endpointId, {
+        id: endpointId,
+        agentId: f.ownerId,
+        label: 'Synthetic graph endpoint',
+        kind: 'topic',
+      });
+    for (let index = 0; index < endpoints.length; index += 2) {
+      const relationId = randomUUID();
+      f.rawSeed('knowledgeGraphRelations', relationId, {
+        id: relationId,
+        agentId: f.ownerId,
+        sourceMemoryId: f.memoryId,
+        subjectEntityId: endpoints[index],
+        objectEntityId: endpoints[index + 1],
+        predicate: 'connected_to',
+      });
+    }
+    for (const endpointId of endpoints)
+      for (let index = 0; index < 450; index += 1) {
+        const aliasId = randomUUID();
+        f.rawSeed('knowledgeGraphEntityAliases', aliasId, {
+          id: aliasId,
+          agentId: f.ownerId,
+          entityId: endpointId,
+          alias: `Synthetic alias ${index}`,
+        });
+      }
+
+    const result = await readFirestoreOwnerMemoryRemovalSnapshot(f.store, f.ownerId, f.memoryId);
+    expect(result?.snapshot.eligible).toBe(true);
+    expect(result?.impact).toBeNull();
+    // The impact scan itself is capped at 2,048 docs / 64 RPCs; base-snapshot
+    // reads add at most eight requests and four raw documents in this fixture.
+    expect(f.stats.requests).toBeLessThanOrEqual(72);
+    expect(f.stats.raw).toBeLessThanOrEqual(2_052);
+  });
+
   it('reviews exact graph impact and atomically tombstones the note with its operation receipt', async () => {
     const f = fixture();
     const relationId = randomUUID(),

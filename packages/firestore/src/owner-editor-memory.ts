@@ -13,7 +13,12 @@ import {
   type Records,
   validSingleOwnerMemoryImportUnit,
 } from '@assistant/persistence';
-import type { DocumentSnapshot, Query, Transaction } from '@google-cloud/firestore';
+import type {
+  DocumentReference,
+  DocumentSnapshot,
+  Query,
+  Transaction,
+} from '@google-cloud/firestore';
 import { decodeMemoryRecord } from './memory-record.js';
 import {
   beginFirestoreOwnerEditorWrite,
@@ -245,6 +250,50 @@ export async function readFirestoreOwnerMemoryEditorSnapshot(
 const MEMORY_REMOVAL_RELATION_LIMIT = 100;
 const MEMORY_REMOVAL_EVIDENCE_LIMIT = 500;
 const MEMORY_REMOVAL_ALIAS_LIMIT = 450;
+const MEMORY_REMOVAL_GRAPH_DOCUMENT_LIMIT = 2_048;
+const MEMORY_REMOVAL_GRAPH_REQUEST_LIMIT = 64;
+
+interface MemoryRemovalReadBudget {
+  documents: number;
+  requests: number;
+}
+
+async function readMemoryRemovalDoc(
+  tx: Transaction,
+  ref: DocumentReference,
+  budget: MemoryRemovalReadBudget,
+) {
+  if (
+    budget.requests >= MEMORY_REMOVAL_GRAPH_REQUEST_LIMIT ||
+    budget.documents >= MEMORY_REMOVAL_GRAPH_DOCUMENT_LIMIT
+  )
+    throw new Error('Memory removal graph scan budget exceeded');
+  budget.requests += 1;
+  // Count absent document reads too, so the budget is conservative.
+  budget.documents += 1;
+  return tx.get(ref);
+}
+
+async function readMemoryRemovalQuery(
+  tx: Transaction,
+  query: Query,
+  requestedLimit: number,
+  budget: MemoryRemovalReadBudget,
+) {
+  if (
+    budget.requests >= MEMORY_REMOVAL_GRAPH_REQUEST_LIMIT ||
+    budget.documents >= MEMORY_REMOVAL_GRAPH_DOCUMENT_LIMIT
+  )
+    throw new Error('Memory removal graph scan budget exceeded');
+  const remainingDocuments = MEMORY_REMOVAL_GRAPH_DOCUMENT_LIMIT - budget.documents;
+  const effectiveLimit = Math.min(requestedLimit, remainingDocuments);
+  budget.requests += 1;
+  const result = await tx.get(query.limit(effectiveLimit));
+  budget.documents += result.size;
+  if (result.size === effectiveLimit && effectiveLimit < requestedLimit)
+    throw new Error('Memory removal graph scan budget exceeded');
+  return result;
+}
 
 function nativeRevision(doc: DocumentSnapshot) {
   if (!doc.exists) return null;
@@ -281,6 +330,7 @@ async function readMemoryRemovalImpact(
   contentHash: string,
   memorySnapshotRevision: string,
 ): Promise<OwnerEditorMemoryRemovalImpact> {
+  const budget: MemoryRemovalReadBudget = { documents: 0, requests: 0 };
   const intentRef = store.doc('graphDeletionIntents', memoryId);
   const sourceRef = store.doc('knowledgeGraphSources', memoryId);
   const tombstoneRef = store.doc('memoryTombstones', contentHash);
@@ -293,15 +343,22 @@ async function readMemoryRemovalImpact(
     .collection('knowledgeGraphAssertionEvidence')
     .where('sourceMemoryId', '==', memoryId)
     .limit(MEMORY_REMOVAL_EVIDENCE_LIMIT + 1);
-  const [intentDoc, sourceDoc, tombstoneDoc, hashDoc, relationPage, evidencePage] =
-    await Promise.all([
-      tx.get(intentRef),
-      tx.get(sourceRef),
-      tx.get(tombstoneRef),
-      tx.get(hashRef),
-      tx.get(relationQuery),
-      tx.get(evidenceQuery),
-    ]);
+  const intentDoc = await readMemoryRemovalDoc(tx, intentRef, budget);
+  const sourceDoc = await readMemoryRemovalDoc(tx, sourceRef, budget);
+  const tombstoneDoc = await readMemoryRemovalDoc(tx, tombstoneRef, budget);
+  const hashDoc = await readMemoryRemovalDoc(tx, hashRef, budget);
+  const relationPage = await readMemoryRemovalQuery(
+    tx,
+    relationQuery,
+    MEMORY_REMOVAL_RELATION_LIMIT + 1,
+    budget,
+  );
+  const evidencePage = await readMemoryRemovalQuery(
+    tx,
+    evidenceQuery,
+    MEMORY_REMOVAL_EVIDENCE_LIMIT + 1,
+    budget,
+  );
   if (intentDoc.exists) throw new Error('Memory removal already has a graph deletion intent');
   if (tombstoneDoc.exists) throw new Error('Memory removal content is already tombstoned');
   if (
@@ -334,91 +391,85 @@ async function readMemoryRemovalImpact(
   const endpointIds = [
     ...new Set(relations.flatMap((row) => [row.subjectEntityId, row.objectEntityId])),
   ].sort();
-  const endpointProofs = await Promise.all(
-    endpointIds.map(async (entityId) => {
-      const entityRef = store.doc('knowledgeGraphEntities', entityId);
-      const [entityDoc, subjectPage, objectPage, assertionsAsSubject, assertionsAsObject, aliases] =
-        await Promise.all([
-          tx.get(entityRef),
-          tx.get(
-            store
-              .collection('knowledgeGraphRelations')
-              .where('subjectEntityId', '==', entityId)
-              .limit(MEMORY_REMOVAL_RELATION_LIMIT + 1),
-          ),
-          tx.get(
-            store
-              .collection('knowledgeGraphRelations')
-              .where('objectEntityId', '==', entityId)
-              .limit(MEMORY_REMOVAL_RELATION_LIMIT + 1),
-          ),
-          tx.get(
-            store
-              .collection('knowledgeGraphAssertions')
-              .where('subjectEntityId', '==', entityId)
-              .limit(1),
-          ),
-          tx.get(
-            store
-              .collection('knowledgeGraphAssertions')
-              .where('objectEntityId', '==', entityId)
-              .limit(1),
-          ),
-          tx.get(
-            store
-              .collection('knowledgeGraphEntityAliases')
-              .where('entityId', '==', entityId)
-              .limit(MEMORY_REMOVAL_ALIAS_LIMIT + 1),
-          ),
-        ]);
-      if (
-        !entityDoc.exists ||
-        entityDoc.get('id') !== entityId ||
-        entityDoc.get('agentId') !== ownerId
-      )
-        throw new Error('Memory removal graph endpoint is unavailable');
-      if (
-        subjectPage.size > MEMORY_REMOVAL_RELATION_LIMIT ||
-        objectPage.size > MEMORY_REMOVAL_RELATION_LIMIT ||
-        aliases.size > MEMORY_REMOVAL_ALIAS_LIMIT
-      )
-        throw new Error('Memory removal graph endpoint impact exceeds its bound');
-      for (const alias of aliases.docs) {
-        if (alias.get('agentId') !== ownerId || alias.get('entityId') !== entityId)
-          throw new Error('Memory removal graph alias is foreign or malformed');
-      }
-      const incident = new Map<string, ReturnType<typeof memoryRemovalRelation>>();
-      for (const doc of [...subjectPage.docs, ...objectPage.docs])
-        incident.set(doc.id, memoryRemovalRelation(doc, ownerId));
-      const assertionDocs = [...assertionsAsSubject.docs, ...assertionsAsObject.docs];
-      if (assertionDocs.some((doc) => doc.get('agentId') !== ownerId))
-        throw new Error('Memory removal graph assertion is foreign or malformed');
-      const hasOtherRelation = [...incident.values()].some(
-        (row) => row.sourceMemoryId !== memoryId,
-      );
-      const orphaned = !hasOtherRelation && assertionDocs.length === 0;
-      const preferredLabel = entityDoc.get('preferredLabel');
-      const label =
-        typeof preferredLabel === 'string' && preferredLabel.trim()
-          ? preferredLabel
-          : entityDoc.get('label');
-      if (typeof label !== 'string' || !label.trim())
-        throw new Error('Memory removal graph endpoint label is unavailable');
-      return {
-        id: entityId,
-        label,
-        native: nativeRevision(entityDoc),
-        incident: [...incident.values()].sort((a, b) => a.id.localeCompare(b.id)),
-        assertions: assertionDocs
-          .map(nativeRevision)
-          .sort((a, b) => (a?.id ?? '').localeCompare(b?.id ?? '')),
-        aliases: aliases.docs
-          .map(nativeRevision)
-          .sort((a, b) => (a?.id ?? '').localeCompare(b?.id ?? '')),
-        orphaned,
-      };
-    }),
-  );
+  const endpointProofs = [];
+  for (const entityId of endpointIds) {
+    const entityRef = store.doc('knowledgeGraphEntities', entityId);
+    const entityDoc = await readMemoryRemovalDoc(tx, entityRef, budget);
+    const subjectPage = await readMemoryRemovalQuery(
+      tx,
+      store.collection('knowledgeGraphRelations').where('subjectEntityId', '==', entityId),
+      MEMORY_REMOVAL_RELATION_LIMIT + 1,
+      budget,
+    );
+    const objectPage = await readMemoryRemovalQuery(
+      tx,
+      store.collection('knowledgeGraphRelations').where('objectEntityId', '==', entityId),
+      MEMORY_REMOVAL_RELATION_LIMIT + 1,
+      budget,
+    );
+    const assertionsAsSubject = await readMemoryRemovalQuery(
+      tx,
+      store.collection('knowledgeGraphAssertions').where('subjectEntityId', '==', entityId),
+      1,
+      budget,
+    );
+    const assertionsAsObject = await readMemoryRemovalQuery(
+      tx,
+      store.collection('knowledgeGraphAssertions').where('objectEntityId', '==', entityId),
+      1,
+      budget,
+    );
+    const aliases = await readMemoryRemovalQuery(
+      tx,
+      store.collection('knowledgeGraphEntityAliases').where('entityId', '==', entityId),
+      MEMORY_REMOVAL_ALIAS_LIMIT + 1,
+      budget,
+    );
+    if (
+      !entityDoc.exists ||
+      entityDoc.get('id') !== entityId ||
+      entityDoc.get('agentId') !== ownerId
+    )
+      throw new Error('Memory removal graph endpoint is unavailable');
+    if (
+      subjectPage.size > MEMORY_REMOVAL_RELATION_LIMIT ||
+      objectPage.size > MEMORY_REMOVAL_RELATION_LIMIT ||
+      aliases.size > MEMORY_REMOVAL_ALIAS_LIMIT
+    )
+      throw new Error('Memory removal graph endpoint impact exceeds its bound');
+    for (const alias of aliases.docs) {
+      if (alias.get('agentId') !== ownerId || alias.get('entityId') !== entityId)
+        throw new Error('Memory removal graph alias is foreign or malformed');
+    }
+    const incident = new Map<string, ReturnType<typeof memoryRemovalRelation>>();
+    for (const doc of [...subjectPage.docs, ...objectPage.docs])
+      incident.set(doc.id, memoryRemovalRelation(doc, ownerId));
+    const assertionDocs = [...assertionsAsSubject.docs, ...assertionsAsObject.docs];
+    if (assertionDocs.some((doc) => doc.get('agentId') !== ownerId))
+      throw new Error('Memory removal graph assertion is foreign or malformed');
+    const hasOtherRelation = [...incident.values()].some((row) => row.sourceMemoryId !== memoryId);
+    const orphaned = !hasOtherRelation && assertionDocs.length === 0;
+    const preferredLabel = entityDoc.get('preferredLabel');
+    const label =
+      typeof preferredLabel === 'string' && preferredLabel.trim()
+        ? preferredLabel
+        : entityDoc.get('label');
+    if (typeof label !== 'string' || !label.trim())
+      throw new Error('Memory removal graph endpoint label is unavailable');
+    endpointProofs.push({
+      id: entityId,
+      label,
+      native: nativeRevision(entityDoc),
+      incident: [...incident.values()].sort((a, b) => a.id.localeCompare(b.id)),
+      assertions: assertionDocs
+        .map(nativeRevision)
+        .sort((a, b) => (a?.id ?? '').localeCompare(b?.id ?? '')),
+      aliases: aliases.docs
+        .map(nativeRevision)
+        .sort((a, b) => (a?.id ?? '').localeCompare(b?.id ?? '')),
+      orphaned,
+    });
+  }
   const orphanedItems = endpointProofs
     .filter((row) => row.orphaned)
     .map(({ id, label }) => ({ id, label }))
@@ -466,14 +517,20 @@ export async function readFirestoreOwnerMemoryRemovalSnapshot(
     const current = await readScope(store, tx, ownerId, memoryId);
     if (!current) return null;
     if (!current.snapshot.eligible) return { snapshot: current.snapshot, impact: null };
-    const impact = await readMemoryRemovalImpact(
-      store,
-      tx,
-      ownerId,
-      memoryId,
-      current.memory.contentHash,
-      current.snapshot.revision,
-    );
+    let impact: OwnerEditorMemoryRemovalImpact | null = null;
+    try {
+      impact = await readMemoryRemovalImpact(
+        store,
+        tx,
+        ownerId,
+        memoryId,
+        current.memory.contentHash,
+        current.snapshot.revision,
+      );
+    } catch {
+      // Graph-review unavailability removes only the forget control. The base note
+      // remains readable/correctable; commit independently rechecks and fails closed.
+    }
     return { snapshot: current.snapshot, impact };
   };
   return transaction ? read(transaction) : store.db.runTransaction(read);

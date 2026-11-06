@@ -60,6 +60,14 @@ describe('owner memory editor view admission', () => {
     expect(malformed.removalGrant).toBeNull();
   });
 
+  it('keeps a valid note correctable when optional removal impact is unavailable', () => {
+    const view = buildOwnerMemoryEditorView(input({ removalImpact: null }));
+    expect(view.snapshot).toBe(snapshot);
+    expect(view.grant).toMatchObject({ command: 'correct_owner_memory' });
+    expect(view.removalImpact).toBeNull();
+    expect(view.removalGrant).toBeNull();
+  });
+
   it.each([
     ['maintenance', { enabled: false }, 'Editing is temporarily paused for maintenance.'],
     [
