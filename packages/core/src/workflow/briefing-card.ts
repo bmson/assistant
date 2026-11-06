@@ -144,7 +144,7 @@ export function agendaSection(input: {
   timeZone: string;
   now: Date;
 }): BriefingSection | undefined {
-  if (!input.events.length) return undefined;
+  if (!input.events.length && input.complete) return undefined;
   const conflicting = new Set(
     input.conflicts.flatMap((conflict) => [...conflict.a, ...conflict.b].map(eventKey)),
   );

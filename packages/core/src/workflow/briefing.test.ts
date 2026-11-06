@@ -41,7 +41,7 @@ import {
   findConflicts,
   runBriefing,
 } from './briefing.js';
-import { agendaSection } from './briefing-card.js';
+import { agendaSection, briefingMarkdown } from './briefing-card.js';
 import { dismissSuggestion } from './suggestions.js';
 
 const DATABASE_URL =
@@ -1531,7 +1531,7 @@ describe('runBriefing — richer inputs', () => {
       calendarId: 'home',
       eventId: 'home-game',
       calendar: 'Home',
-      summary: '⚽ Harbor United v Bay City (5:10PM)',
+      summary: '⚽ Harbor v Bay City (5:10PM)',
       location: 'Cedar Estuary Soccer Fields, 100 North Gate, Bay City',
       start: '2026-11-07T16:25:00-08:00',
       end: '2026-11-07T18:30:00-08:00',
@@ -1541,8 +1541,8 @@ describe('runBriefing — richer inputs', () => {
       calendarId: 'team',
       eventId: 'team-game',
       calendar: 'Harbor Soccer',
-      summary: '27/28 U13B Harbor United vs Bay City SC 13/14B Gold',
-      location: 'Cedar Estuary Soccer Fields, 200 South Gate, Bay City',
+      summary: '27/28 U13B Azure vs Bay City SC 13/14B Gold',
+      location: 'Cedar Estuary, 200 South Gate, Bay City',
       start: '2026-11-07T17:10:00-08:00',
       end: familyMatch.end,
       allDay: false,
@@ -1551,7 +1551,7 @@ describe('runBriefing — richer inputs', () => {
       calendarId: 'team',
       eventId: 'gala',
       calendar: 'Harbor Soccer',
-      summary: 'Harbor United Club Fundraiser Night',
+      summary: 'Harbor Club Fundraiser Night',
       location: 'Founders Pavilion Hall, 5051 Harbor Ave',
       start: '2026-11-07T17:00:00-08:00',
       end: '2026-11-07T22:30:00-08:00',
@@ -1589,8 +1589,8 @@ describe('runBriefing — richer inputs', () => {
     expect(agenda?.type === 'agenda' ? agenda.items : []).toHaveLength(2);
     expect(briefingCalendarPromptLines(agenda, 36, true)).toEqual([
       'On the calendar (2 schedule items shown in the next 36h):',
-      '- Tomorrow 4:25 PM – 6:30 PM: ⚽ Harbor United v Bay City (5:10PM) at Cedar Estuary Soccer Fields, 100 North Gate, Bay City — Likely the same match: Home 4:25 PM; Harbor Soccer 5:10 PM; source locations differ.',
-      '- Tomorrow 5:00 PM – 10:30 PM: Harbor United Club Fundraiser Night at Founders Pavilion Hall, 5051 Harbor Ave',
+      '- Tomorrow 4:25 PM – 6:30 PM: ⚽ Harbor v Bay City (5:10PM) at Cedar Estuary Soccer Fields, 100 North Gate, Bay City — Likely the same match: Home 4:25 PM; Harbor Soccer 5:10 PM; source locations differ.',
+      '- Tomorrow 5:00 PM – 10:30 PM: Harbor Club Fundraiser Night at Founders Pavilion Hall, 5051 Harbor Ave',
     ]);
   });
 
@@ -1638,11 +1638,11 @@ describe('runBriefing — richer inputs', () => {
     const denseEvents = Array.from({ length: 5 }, (_, index) => ({
       calendarId: 'work',
       eventId: `dense-${index + 1}`,
-        summary: `Event ${index + 1}`,
-        start: '2026-10-07T09:00:00Z',
-        end: '2026-10-07T10:00:00Z',
-        calendar: 'Work',
-        allDay: false,
+      summary: `Event ${index + 1}`,
+      start: '2026-10-07T09:00:00Z',
+      end: '2026-10-07T10:00:00Z',
+      calendar: 'Work',
+      allDay: false,
     }));
     const phoneCopy = {
       calendarId: 'iphone:home',
@@ -1663,10 +1663,12 @@ describe('runBriefing — richer inputs', () => {
     const overlaps = findConflicts([...denseEvents, phoneCopy, providerCopy]);
     const conflicts = overlaps.filter((conflict) => conflict.relationship !== 'probable_duplicate');
     expect(conflicts).toHaveLength(4);
-    expect(overlaps).toHaveLength(5);
+    expect(overlaps).toHaveLength(4);
     expect(overlaps.totalCount).toBe(11);
     expect(overlaps.conflictCount).toBe(10);
-    expect(overlaps.filter((conflict) => conflict.relationship === 'probable_duplicate')).toHaveLength(1);
+    expect(
+      overlaps.filter((conflict) => conflict.relationship === 'probable_duplicate'),
+    ).toHaveLength(0);
     expect(overlaps.detailsOmitted).toBe(true);
     expect(calendarOverlapBriefingItems(conflicts, overlaps.conflictCount, 'UTC').at(-1)).toEqual({
       title: '6 more overlaps not shown',
@@ -2093,9 +2095,69 @@ describe('runBriefing — richer inputs', () => {
       expect(prompts[0] ?? '').not.toContain('On the calendar');
     }
   });
+
+  it('shows partial empty calendar coverage without emitting an empty agenda section', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    await addFlightMail({
+      id: 'partial-empty-calendar-news',
+      importance: 5,
+      category: 'work',
+      subject: `${MARKER} synthetic scheduling update`,
+    });
+    const digest = `${MARKER} partial calendar digest`;
+    const { router, prompts } = recordingRouter(digest);
+    const result = await runBriefing({
+      db,
+      router,
+      calendarReader: async () => ({ events: [], complete: false }),
+    });
+    expect(result.delivered).toBe(true);
+    expect(result.calendarEvents).toBe(0);
+    expect(prompts[0] ?? '').toContain(
+      'Calendar coverage is partial; no activities were returned in the next 36h.',
+    );
+    const [posted] = await db
+      .select({ parts: messages.parts })
+      .from(messages)
+      .where(like(messages.text, `${digest}%`));
+    const briefing = ((posted?.parts ?? []) as Array<{ data?: Record<string, unknown> }>).find(
+      (part) => part.data?.kind === 'briefing',
+    )?.data as { sections: Array<{ type: string; title?: string; items?: unknown[] }> } | undefined;
+    expect(briefing).toBeDefined();
+    expect(briefing?.sections.some((section) => section.type === 'agenda')).toBe(false);
+    expect(
+      briefing?.sections.find((section) => section.title === 'Calendar coverage'),
+    ).toMatchObject({
+      type: 'attention',
+      items: [
+        {
+          title: 'Some calendars could not be read',
+          detail: 'No activities were returned in the next 36h.',
+        },
+      ],
+    });
+  });
 });
 
 describe('briefing substance', () => {
+  it('keeps partial calendar coverage explicit when no activities were returned', () => {
+    const section = agendaSection({
+      events: [],
+      complete: false,
+      conflicts: [],
+      salient: [],
+      timeZone: 'America/Los_Angeles',
+      now: new Date('2026-11-06T14:00:00-08:00'),
+    });
+    expect(section).toMatchObject({ type: 'agenda', complete: false, items: [] });
+    expect(briefingCalendarPromptLines(section, 36, false)).toEqual([
+      'Calendar coverage is partial; no activities were returned in the next 36h.',
+    ]);
+    expect(briefingMarkdown('Calendar check.', section ? [section] : [])).toContain(
+      'Some calendars could not be read, so this may be incomplete.',
+    );
+  });
+
   it.each(['', 'Here is your daily briefing in Assistant’s voice based on the provided notes:'])(
     'falls back to gathered facts for meta-only output',
     (draft) => {

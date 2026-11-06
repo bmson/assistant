@@ -42,7 +42,6 @@ import {
   isOwnerFacingTask,
   ownerDate,
   ownerDateTime,
-  ownerEventWhen,
   readableSender,
   truncateAtBoundary,
 } from '../owner-text.js';
@@ -55,8 +54,8 @@ import { isFlightLikeCalendarEvent } from '../proactive/flight-calendar.js';
 import { type ProactiveNotifier, pingOwner } from '../proactive/notify.js';
 import {
   agendaSection,
-  type BriefingListItem,
   type BriefingCard,
+  type BriefingListItem,
   type BriefingSection,
   briefingMarkdown,
   listSection,
@@ -422,7 +421,10 @@ export interface CalendarConflict {
   sourceIdentityDisagreement?: boolean;
 }
 export type CalendarConflictResults = CalendarConflict[] & {
+  /** All timed overlap pairs after presentation grouping, including possible copies. */
   totalCount: number;
+  /** Distinct overlap pairs kept as actionable conflicts after copy filtering. */
+  conflictCount: number;
   detailsOmitted: boolean;
 };
 
@@ -465,7 +467,7 @@ function calendarConflictAttendanceSummary(conflict: CalendarConflict): string {
 
 export function calendarOverlapBriefingItems(
   conflicts: CalendarConflict[],
-  totalCount: number,
+  conflictCount: number,
   timeZone: string,
 ): BriefingListItem[] {
   const items = conflicts.map((conflict) => ({
@@ -480,14 +482,34 @@ export function calendarOverlapBriefingItems(
       .filter(Boolean)
       .join(' · '),
   }));
-  const omittedCount = Math.max(0, totalCount - conflicts.length);
+  const omittedCount = Math.max(0, conflictCount - conflicts.length);
   if (omittedCount > 0) {
     items.push({
       title: `${omittedCount} more overlaps not shown`,
-      detail: `Showing ${conflicts.length} of ${totalCount} possible overlaps.`,
+      detail: `Showing ${conflicts.length} of ${conflictCount} calendar overlaps.`,
     });
   }
   return items;
+}
+
+export function briefingCalendarPromptLines(
+  section: BriefingSection | undefined,
+  windowHours: number,
+  complete: boolean,
+): string[] {
+  if (section?.type !== 'agenda') return [];
+  if (section.items.length === 0) {
+    return complete
+      ? []
+      : [`Calendar coverage is partial; no activities were returned in the next ${windowHours}h.`];
+  }
+  return [
+    `On the calendar (${section.items.length} schedule item${section.items.length === 1 ? '' : 's'} shown in the next ${windowHours}h${section.omittedCount ? `; ${section.omittedCount} more retrieved activities omitted` : ''}${complete ? '' : '; coverage partial'}):`,
+    ...section.items.map(
+      (item) =>
+        `- ${item.day} ${item.time}: ${collapseWhitespace(item.title)}${item.location ? ` at ${collapseWhitespace(item.location)}` : ''}${item.note ? ` — ${item.note}` : ''}`,
+    ),
+  ];
 }
 
 function calendarConflictAttendanceNote(conflict: CalendarConflict): string {
@@ -546,7 +568,9 @@ export function findConflicts(
     }))
     .sort((a, b) => a.startMs - b.startMs);
   const conflicts: CalendarConflict[] = [];
+  const duplicateListings: CalendarConflict[] = [];
   let totalCount = 0;
+  let conflictCount = 0;
   for (let i = 0; i < groups.length; i++) {
     const earlier = groups[i];
     if (!earlier) continue;
@@ -554,7 +578,21 @@ export function findConflicts(
       const later = groups[j];
       if (!later || later.startMs >= earlier.endMs) break;
       totalCount += 1;
-      if (conflicts.length >= MAX_CONFLICTS) continue;
+      const relationship =
+        earlier.events.length === 1 && later.events.length === 1
+          ? calendarRelationship(
+              earlier.events[0] as BriefingCalendarEvent,
+              later.events[0] as BriefingCalendarEvent,
+            )
+          : 'unresolved';
+      const isDuplicateListing = relationship === 'probable_duplicate';
+      if (!isDuplicateListing) conflictCount += 1;
+      if (
+        isDuplicateListing
+          ? duplicateListings.length >= MAX_CONFLICTS
+          : conflicts.length >= MAX_CONFLICTS
+      )
+        continue;
       const sourceIdentityDisagreement = earlier.events.some((left) =>
         later.events.some((right) =>
           possibleCalendarIdentityDisagreement(left as CalendarOccurrenceIdentity, right),
@@ -571,29 +609,30 @@ export function findConflicts(
       const classification = sourceIdentityDisagreement
         ? 'attendance_unconfirmed'
         : classifyCalendarOverlap(aggregate(earlier.events), aggregate(later.events));
-      conflicts.push({
+      const detail: CalendarConflict = {
         a: earlier.events,
         b: later.events,
-        relationship:
-          earlier.events.length === 1 && later.events.length === 1
-            ? calendarRelationship(
-                earlier.events[0] as BriefingCalendarEvent,
-                later.events[0] as BriefingCalendarEvent,
-              )
-            : 'unresolved',
+        relationship,
         attendance: classification === 'personal_commitment_conflict' ? 'confirmed' : 'unresolved',
         classification,
         ...(sourceIdentityDisagreement ? { sourceIdentityDisagreement: true } : {}),
         overlapStart: new Date(Math.max(earlier.startMs, later.startMs)).toISOString(),
         overlapEnd: new Date(Math.min(earlier.endMs, later.endMs)).toISOString(),
-      });
+      };
+      if (isDuplicateListing) duplicateListings.push(detail);
+      else conflicts.push(detail);
     }
   }
-  Object.defineProperties(conflicts, {
+  const details = [...conflicts, ...duplicateListings].slice(
+    0,
+    MAX_CONFLICTS,
+  ) as CalendarConflictResults;
+  Object.defineProperties(details, {
     totalCount: { value: totalCount, enumerable: false },
-    detailsOmitted: { value: totalCount > conflicts.length, enumerable: false },
+    conflictCount: { value: conflictCount, enumerable: false },
+    detailsOmitted: { value: totalCount > details.length, enumerable: false },
   });
-  return conflicts as CalendarConflictResults;
+  return details;
 }
 
 function localDateTime(value: string, timeZone: string): string {
@@ -1146,6 +1185,16 @@ export async function runBriefing(
           );
         })
       : [];
+    const briefingAgenda = calendar
+      ? agendaSection({
+          events: calendar.events,
+          complete: calendar.complete,
+          conflicts,
+          salient,
+          timeZone: agent.timezone,
+          now,
+        })
+      : undefined;
     result.mailScanned = mail.length;
     result.highlights = highlights.length;
     result.needsAttention = attention.length;
@@ -1153,7 +1202,7 @@ export async function runBriefing(
     result.upcoming = upcoming.length;
     result.bookingCancellations = cancelledBookingProposals.length;
     result.calendarEvents = calendar?.events.length ?? 0;
-    result.calendarConflicts = conflicts.length;
+    result.calendarConflicts = overlaps.conflictCount;
     result.calendarSalient = salient.length;
     result.goalDeltas = goalDeltas.length;
     result.watchHits = watchHits.length;
@@ -1168,7 +1217,7 @@ export async function runBriefing(
         bookingCancellations: cancelledBookingProposals.length,
         needsAttention: attention.length,
         pendingApprovals: pending.length,
-        calendarConflicts: conflicts.length,
+        calendarConflicts: overlaps.conflictCount,
         calendarSalient: salient.length,
         goalDeltas: goalDeltas.length,
         watchHits: watchHits.length,
@@ -1181,13 +1230,18 @@ export async function runBriefing(
     const lines: string[] = [];
     if (conflicts.length > 0) {
       lines.push(
-        `Calendar-entry pairs overlap in the next day or two (${overlaps.totalCount.toLocaleString('en-US')} timed pairs; showing ${conflicts.length} detail${conflicts.length === 1 ? '' : 's'}):`,
+        `Calendar overlaps in the next day or two (${overlaps.conflictCount.toLocaleString('en-US')} distinct conflict pair${overlaps.conflictCount === 1 ? '' : 's'}; showing ${conflicts.length} detail${conflicts.length === 1 ? '' : 's'}):`,
         ...conflicts.map((c) =>
           c.sourceIdentityDisagreement
             ? `- ${c.a[0]?.calendar ?? 'Calendar'} · "${collapseWhitespace(c.a[0]?.summary ?? 'Untitled event')}" and ${c.b[0]?.calendar ?? 'Calendar'} · "${collapseWhitespace(c.b[0]?.summary ?? 'Untitled event')}" may be copies with different times. Assistant cannot confirm whether these are the same event or which time is current. Both entries stay visible; check each invitation.`
             : `- ${c.a[0]?.calendar ?? 'Calendar'} · "${collapseWhitespace(c.a[0]?.summary ?? 'Untitled event')}" overlaps ${c.b[0]?.calendar ?? 'Calendar'} · "${collapseWhitespace(c.b[0]?.summary ?? 'Untitled event')}" (${localDateTime(c.overlapStart, agent.timezone)} to ${localDateTime(c.overlapEnd, agent.timezone)}). ${calendarConflictAttendanceNote(c)}`,
         ),
       );
+      if (overlaps.conflictCount > conflicts.length) {
+        lines.push(
+          `${overlaps.conflictCount - conflicts.length} additional calendar conflict detail${overlaps.conflictCount - conflicts.length === 1 ? '' : 's'} are omitted from this preview.`,
+        );
+      }
     }
     if (duplicateListings.length > 0) {
       lines.push(
@@ -1206,15 +1260,15 @@ export async function runBriefing(
         ...salient.slice(0, MAX_SALIENT).map((scored) => describeSalience(scored, agent.timezone)),
       );
     }
-    if (calendar && calendar.events.length > 0) {
+    const calendarPromptLines = briefingCalendarPromptLines(
+      briefingAgenda,
+      CALENDAR_WINDOW_HOURS,
+      calendar?.complete ?? false,
+    );
+    if (calendarPromptLines.length > 0) {
       lines.push(
-        `${lines.length ? '\n' : ''}On the calendar (${calendar.events.length} event(s) in the next ${CALENDAR_WINDOW_HOURS}h${calendar.complete ? '' : ', coverage partial'}):`,
-        ...calendar.events
-          .slice(0, 10)
-          .map(
-            (event) =>
-              `- ${ownerEventWhen({ start: event.start, end: event.end, allDay: event.allDay }, agent.timezone)}: ${collapseWhitespace(event.summary)}`,
-          ),
+        `${lines.length ? '\n' : ''}${calendarPromptLines[0]}`,
+        ...calendarPromptLines.slice(1),
       );
     }
     if (highlights.length > 0) {
@@ -1329,7 +1383,7 @@ export async function runBriefing(
         bookingCancellations: cancelledBookingProposals.length,
         needsAttention: attention.length,
         pendingApprovals: pending.length,
-        calendarConflicts: conflicts.length,
+        calendarConflicts: overlaps.conflictCount,
         calendarSalient: salient.length,
         goalDeltas: goalDeltas.length,
         watchHits: watchHits.length,
@@ -1415,15 +1469,16 @@ export async function runBriefing(
     );
     const buildSections = () =>
       [
-        calendar
-          ? agendaSection({
-              events: calendar.events,
-              complete: calendar.complete,
-              conflicts,
-              salient,
-              timeZone: agent.timezone,
-              now,
-            })
+        briefingAgenda?.type === 'agenda' && briefingAgenda.items.length > 0
+          ? briefingAgenda
+          : undefined,
+        calendar && !calendar.complete && calendar.events.length === 0
+          ? listSection('attention', 'Calendar coverage', [
+              {
+                title: 'Some calendars could not be read',
+                detail: `No activities were returned in the next ${CALENDAR_WINDOW_HOURS}h.`,
+              },
+            ])
           : undefined,
         conflicts.length > 0
           ? listSection(
@@ -1433,7 +1488,7 @@ export async function runBriefing(
               )
                 ? 'Accepted commitments overlap'
                 : 'Possible calendar overlaps',
-              calendarOverlapBriefingItems(conflicts, overlaps.totalCount, agent.timezone),
+              calendarOverlapBriefingItems(conflicts, overlaps.conflictCount, agent.timezone),
             )
           : undefined,
         weatherSection(weatherResponseCards(ambient)[0]),
