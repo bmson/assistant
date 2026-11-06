@@ -89,6 +89,26 @@ afterEach(() => {
 });
 
 describe('startPoller', () => {
+  it('does not admit local tasks, ticks or maintenance while release-paused', async () => {
+    const providerTick = vi.fn();
+    const pausedDeps = {
+      db: {},
+      config: { PERSISTENCE_DRIVER: 'firestore', ASSISTANT_RELEASE_WRITES_PAUSED: true },
+      modules: {
+        sweepSteps: [],
+        ticks: [{ name: 'provider', everyTicks: 1, portable: true, run: providerTick }],
+      },
+    } as never;
+    expect(() => startPoller(pausedDeps)).toThrow(
+      'background dispatch is disabled during release pause',
+    );
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(providerTick).not.toHaveBeenCalled();
+    expect(findDueTasks).not.toHaveBeenCalled();
+    expect(executeAgentTask).not.toHaveBeenCalled();
+    expect(runFirestoreSweep).not.toHaveBeenCalled();
+  });
+
   it('refuses to drain due work or run ticks during a restore rehearsal', () => {
     const restoredWork = ['task', 'reminder', 'approval', 'schedule'] as const;
     const providerSend = vi.fn();

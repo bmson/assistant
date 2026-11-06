@@ -32,3 +32,39 @@ describe('memory person links from graph claims', () => {
     );
   });
 });
+
+describe('peer profile navigation context', () => {
+  it.each([
+    '//evil.invalid/profile/knowledge?view=map',
+    '/people/123?returnTo=/profile/knowledge?view=map',
+    '/profile/knowledge?view=library',
+    '/profile/knowledge/../people?view=map',
+    'javascript:alert(1)',
+  ])('rejects unsupported return context %s', (returnTo) => {
+    const href = memoryPersonConnectionHref(contactId, relationId, returnTo, 'Alex');
+    expect(href).toBe(
+      `/people/${contactId}?q=Alex&connectionId=${relationId}#person-connection-${relationId}`,
+    );
+  });
+
+  it('round trips a selected claim across both profiles and back to the map', () => {
+    const map = '/profile/knowledge?view=map&entity=alex&family=family#knowledge-item';
+    const peer = new URL(
+      memoryPersonConnectionHref(contactId, relationId, map, 'Alex & Sam') ?? '',
+      'https://internal.invalid',
+    );
+    const back = new URL(
+      memoryPersonConnectionHref(
+        '11111111-1111-4111-8111-111111111111',
+        peer.searchParams.get('connectionId'),
+        peer.searchParams.get('returnTo') ?? '',
+        peer.searchParams.get('q') ?? '',
+      ) ?? '',
+      'https://internal.invalid',
+    );
+    expect(back.searchParams.get('connectionId')).toBe(relationId);
+    expect(back.searchParams.get('q')).toBe('Alex & Sam');
+    expect(memoryMapReturnTo(back.searchParams.get('returnTo'))).toBe(map);
+    expect(back.hash).toBe(`#person-connection-${relationId}`);
+  });
+});
