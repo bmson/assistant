@@ -74,6 +74,8 @@ export type OwnerEditorApply = ApplyEnvelope &
         expectedContactRevision: string;
         name: string;
         aliases: string[];
+        /** Omitted by older clients: preserve the saved owner relationship label. */
+        relationship?: string;
       }
     | ({ command: 'add_family_relationship' } & OwnerEditorFamilyFields)
     | {

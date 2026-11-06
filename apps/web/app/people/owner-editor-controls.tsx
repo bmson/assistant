@@ -45,6 +45,7 @@ export interface OwnerEditorControlsProps {
     contactId: string;
     name: string;
     aliases: string[];
+    relationship: string;
     revision: string;
   };
   personNoteCreate?: {
@@ -81,6 +82,7 @@ type Active =
 interface IdentityDraft {
   name: string;
   aliases: string;
+  relationship: string;
 }
 interface FamilyDraft {
   subject: string;
@@ -101,12 +103,52 @@ export const ownerEditorAliasesFromText = (value: string) =>
     .map((v) => v.trim())
     .filter(Boolean);
 export const ownerEditorAliasesToText = (values: readonly string[]) => values.join('\n');
-const emptyPerson = { name: '', aliases: '' };
+export const ownerEditorIdentityRequestFields = (
+  name: string,
+  aliases: string,
+  relationship: string,
+) => ({ name, aliases: ownerEditorAliasesFromText(aliases), relationship });
+const emptyPerson = { name: '', aliases: '', relationship: '' };
 export const ownerEditorTimingHelpText =
   'Choose how this relationship is described. This choice is separate from the dates below.';
 
 export function OwnerEditorTimingHelp() {
   return <p className="text-sm text-muted">{ownerEditorTimingHelpText}</p>;
+}
+
+export function OwnerEditorRelationshipField({
+  fieldId,
+  value,
+  error,
+  onChange,
+}: {
+  fieldId: string;
+  value: string;
+  error?: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <>
+      <label className={labelClass} htmlFor={fieldId}>
+        Relationship to you
+      </label>
+      <input
+        id={fieldId}
+        aria-invalid={error ? true : undefined}
+        aria-describedby={error ? `${fieldId}-error` : undefined}
+        className={inputClass}
+        maxLength={80}
+        placeholder="sister, friend, colleague…"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+      />
+      {error ? (
+        <span id={`${fieldId}-error`} className="text-xs text-red-600">
+          {error}
+        </span>
+      ) : null}
+    </>
+  );
 }
 
 /** Serializable owner-bound snapshot only. No grant/record authority is minted here. */
@@ -385,8 +427,7 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
           ...envelope,
           contactId: displayedIdentity.contactId,
           expectedContactRevision: displayedIdentity.revision,
-          name: draft.name,
-          aliases: ownerEditorAliasesFromText(draft.aliases),
+          ...ownerEditorIdentityRequestFields(draft.name, draft.aliases, draft.relationship),
         },
         grant,
         displayedIdentity.contactId,
@@ -481,7 +522,7 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
     active === 'create'
       ? 'Add person'
       : active === 'identity'
-        ? 'Edit name and aliases'
+        ? 'Edit details'
         : active === 'family'
           ? 'Add family relationship'
           : 'Correct family relationship';
@@ -507,6 +548,7 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
           familyDrafts.current.identity({
             name: identity.name,
             aliases: ownerEditorAliasesToText(identity.aliases),
+            relationship: identity.relationship,
           }),
       );
       open('identity', element);
@@ -577,12 +619,13 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
                         familyDrafts.current.identity({
                           name: identity.name,
                           aliases: ownerEditorAliasesToText(identity.aliases),
+                          relationship: identity.relationship,
                         }),
                     );
                     open('identity', e.currentTarget);
                   }}
                 >
-                  Edit name and aliases
+                  Edit details
                 </button>
               ) : null}
               {family ? (
@@ -761,7 +804,8 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
                     ) : (
                       <p className="text-sm text-muted">
                         When editing began: {displayedIdentity?.name}. Aliases:{' '}
-                        {displayedIdentity?.aliases.join(', ') || 'None'}. Editing name and aliases
+                        {displayedIdentity?.aliases.join(', ') || 'None'}. Relationship to you:{' '}
+                        {displayedIdentity?.relationship || 'Not recorded'}. Editing these details
                         does not change trust.
                       </p>
                     )}
@@ -775,6 +819,14 @@ export function OwnerEditorControls(props: OwnerEditorControlsProps) {
                       onChange={(e) => setDraft({ ...draft, name: e.target.value })}
                     />
                     {fieldError('name')}
+                    {active === 'identity' ? (
+                      <OwnerEditorRelationshipField
+                        fieldId={id('relationship')}
+                        value={draft.relationship}
+                        error={error('relationship')}
+                        onChange={(relationship) => setDraft({ ...draft, relationship })}
+                      />
+                    ) : null}
                     <label className={labelClass} htmlFor={id('aliases')}>
                       Also known as (one alias per line, optional)
                     </label>
@@ -1191,8 +1243,8 @@ export function OwnerEditorPeopleSelectors(props: {
 }
 
 export function OwnerEditorConflictReview(props: {
-  latestIdentity?: { name: string; aliases: string[] };
-  intendedIdentity?: { name: string; aliases: string };
+  latestIdentity?: { name: string; aliases: string[]; relationship: string };
+  intendedIdentity?: { name: string; aliases: string; relationship?: string };
   relationships: {
     relationId: string;
     sentence: string;
@@ -1214,7 +1266,8 @@ export function OwnerEditorConflictReview(props: {
       {props.latestIdentity ? (
         <p>
           Saved name: {props.latestIdentity.name}. All saved aliases:{' '}
-          {props.latestIdentity.aliases.join(', ') || 'None'}.
+          {props.latestIdentity.aliases.join(', ') || 'None'}. Relationship to you:{' '}
+          {props.latestIdentity.relationship || 'Not recorded'}.
         </p>
       ) : null}
       {props.relationships.map((relationship) => (
@@ -1236,6 +1289,9 @@ export function OwnerEditorConflictReview(props: {
       {props.intendedIdentity ? (
         <p>
           Name: {props.intendedIdentity.name}. Aliases: {props.intendedIdentity.aliases || 'None'}.
+          {props.intendedIdentity.relationship !== undefined ? (
+            <> Relationship to you: {props.intendedIdentity.relationship || 'Not recorded'}.</>
+          ) : null}
         </p>
       ) : null}
       {props.intendedFamily ? <p>{props.intendedFamily}</p> : null}
@@ -1305,9 +1361,16 @@ export function ownerEditorConflictIntent(input: {
   createDraft: IdentityDraft | null;
   familyDraft: FamilyDraft | null;
   familyPreview: string;
-}): { intendedIdentity?: IdentityDraft; intendedFamily?: string } {
+}): {
+  intendedIdentity?: Omit<IdentityDraft, 'relationship'> & { relationship?: string };
+  intendedFamily?: string;
+} {
   if (input.command === 'create_person')
-    return { intendedIdentity: input.createDraft ?? undefined };
+    return {
+      intendedIdentity: input.createDraft
+        ? { name: input.createDraft.name, aliases: input.createDraft.aliases }
+        : undefined,
+    };
   if (input.command === 'update_person_identity')
     return { intendedIdentity: input.identityDraft ?? undefined };
   if (input.command === 'remove_person' || input.command === 'remove_owner_family_relationship')

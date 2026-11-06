@@ -16,12 +16,14 @@ import {
   type OwnerEditorControlsProps,
   OwnerEditorDraftCache,
   OwnerEditorPeopleSelectors,
+  OwnerEditorRelationshipField,
   OwnerEditorRemovalActions,
   OwnerEditorRemovalSummary,
   OwnerEditorTimingHelp,
   ownerEditorAliasesFromText,
   ownerEditorAliasesToText,
   ownerEditorConflictIntent,
+  ownerEditorIdentityRequestFields,
   selectCreatedFamilyPerson,
 } from './owner-editor-controls';
 
@@ -296,6 +298,7 @@ describe('actual owner editor controls server boundary (not mounted browser proo
           contactId: contact,
           name: 'Sam',
           aliases: [],
+          relationship: 'sister',
           revision: 'a'.repeat(64),
           grant: { ...createGrant, command: 'update_person_identity' },
         }}
@@ -308,7 +311,7 @@ describe('actual owner editor controls server boundary (not mounted browser proo
       />,
     );
     expect(html).toContain('Add person');
-    expect(html).toContain('Edit name and aliases');
+    expect(html).toContain('Edit details');
     expect(html).toContain('Add family relationship');
     expect((html.match(/disabled=""/g) ?? []).length).toBe(3);
     expect(html).not.toContain('issued-test-handle'); // Not a hidden writable action/form ID.
@@ -321,6 +324,32 @@ describe('actual owner editor controls server boundary (not mounted browser proo
     expect(html).not.toContain('Add person');
     expect(html).not.toContain('Correct');
     expect(html).not.toContain('<form');
+  });
+});
+
+describe('owner relationship label control', () => {
+  it('renders the owner-facing relationship field as a bounded text value with validation feedback', () => {
+    const html = renderToStaticMarkup(
+      <OwnerEditorRelationshipField
+        fieldId="person-relationship"
+        value="daughter"
+        error="Use 80 characters or fewer."
+        onChange={() => {}}
+      />,
+    );
+    expect(html).toContain('for="person-relationship"');
+    expect(html).toContain('Relationship to you');
+    expect(html).toContain('maxLength="80"');
+    expect(html).toContain('value="daughter"');
+    expect(html).toContain('aria-invalid="true"');
+    expect(html).toContain('Use 80 characters or fewer.');
+  });
+  it('includes the relationship with the existing identity mutation fields', () => {
+    expect(ownerEditorIdentityRequestFields('Sam Rivera', 'Sam, Jr.\nSamuel', 'daughter')).toEqual({
+      name: 'Sam Rivera',
+      aliases: ['Sam, Jr.', 'Samuel'],
+      relationship: 'daughter',
+    });
   });
 });
 
@@ -451,8 +480,12 @@ describe('actual selector and memory-only draft lifecycle regressions', () => {
   it('shows latest ALL aliases separately from intended aliases before explicit review', () => {
     const html = renderToStaticMarkup(
       <OwnerEditorConflictReview
-        latestIdentity={{ name: 'New saved name', aliases: ['Old name', 'Another alias'] }}
-        intendedIdentity={{ name: 'My intended name', aliases: 'My alias' }}
+        latestIdentity={{
+          name: 'New saved name',
+          aliases: ['Old name', 'Another alias'],
+          relationship: 'sister',
+        }}
+        intendedIdentity={{ name: 'My intended name', aliases: 'My alias', relationship: 'friend' }}
         relationships={[]}
         missing={false}
         canReview={true}
@@ -464,8 +497,10 @@ describe('actual selector and memory-only draft lifecycle regressions', () => {
       'Your draft',
       'New saved name',
       'Old name, Another alias',
+      'Relationship to you: sister',
       'My intended name',
       'My alias',
+      'Relationship to you: friend',
       'I reviewed the latest values — keep my draft for editing',
     ])
       expect(html).toContain(text);
@@ -473,7 +508,7 @@ describe('actual selector and memory-only draft lifecycle regressions', () => {
   });
   it('successful identity clears only completed draft; next open includes backend retained old-name alias', () => {
     const cache = new OwnerEditorDraftCache();
-    cache.setIdentity({ name: 'Intended', aliases: 'Local' });
+    cache.setIdentity({ name: 'Intended', aliases: 'Local', relationship: 'friend' });
     const family = {
       subject: contact,
       object: other,
@@ -497,15 +532,24 @@ describe('actual selector and memory-only draft lifecycle regressions', () => {
       revision: 'b'.repeat(64),
     };
     expect(cache.complete(reply, null)).toBe('update_person_identity');
-    expect(cache.identity({ name: 'Saved', aliases: 'Local, Previous saved name' })).toEqual({
+    expect(
+      cache.identity({
+        name: 'Saved',
+        aliases: 'Local, Previous saved name',
+        relationship: 'sister',
+      }),
+    ).toEqual({
       name: 'Saved',
       aliases: 'Local, Previous saved name',
+      relationship: 'sister',
     });
     expect(cache.family('family')).toEqual(family);
     expect(cache.family('correction:one')).toEqual(family);
-    cache.setIdentity({ name: 'New intent', aliases: 'Preserved' });
+    cache.setIdentity({ name: 'New intent', aliases: 'Preserved', relationship: 'friend' });
     cache.complete({ ...reply, outcome: 'conflict', reason: 'contact_changed' }, contact);
-    expect(cache.identity({ name: 'Latest', aliases: 'Different' }).name).toBe('New intent');
+    expect(
+      cache.identity({ name: 'Latest', aliases: 'Different', relationship: 'colleague' }).name,
+    ).toBe('New intent');
     cache.complete({ ...reply, command: 'correct_owner_family_relationship' }, 'one');
     expect(cache.family('correction:one')).toBeUndefined();
     expect(cache.family('family')).toEqual(family);
@@ -557,7 +601,7 @@ it('actual caller intent helper distinguishes missing family draft from placehol
   const live = ownerEditorConflictIntent({
     ...input,
     command: 'create_person',
-    createDraft: { name: 'Private intended name', aliases: 'Sam, Jr.' },
+    createDraft: { name: 'Private intended name', aliases: 'Sam, Jr.', relationship: '' },
   });
   const liveHTML = renderToStaticMarkup(
     <OwnerEditorConflictReview
@@ -585,7 +629,11 @@ it('actual alias codec preserves commas on name-only edit and freshly reopened b
   expect(ownerEditorAliasesFromText(ownerEditorAliasesToText(saved))).toEqual(saved);
   expect(ownerEditorAliasesFromText('Sam, Jr.\r\n Another alias \r\n')).toEqual(saved);
   const cache = new OwnerEditorDraftCache();
-  cache.setIdentity({ name: 'Intended rename', aliases: ownerEditorAliasesToText(saved) });
+  cache.setIdentity({
+    name: 'Intended rename',
+    aliases: ownerEditorAliasesToText(saved),
+    relationship: 'friend',
+  });
   cache.complete(
     {
       version: 1,
@@ -603,6 +651,7 @@ it('actual alias codec preserves commas on name-only edit and freshly reopened b
   const fresh = cache.identity({
     name: 'Saved rename',
     aliases: ownerEditorAliasesToText([...saved, 'Previous, Name']),
+    relationship: 'sister',
   });
   expect(ownerEditorAliasesFromText(fresh.aliases)).toEqual([...saved, 'Previous, Name']);
 });

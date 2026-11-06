@@ -60,6 +60,7 @@ export async function readFirestoreOwnerEditorContact(
   if (
     typeof contact.name !== 'string' ||
     !contact.name.trim() ||
+    typeof contact.relationship !== 'string' ||
     typeof contact.trust !== 'string' ||
     !Array.isArray(contact.aliases) ||
     !contact.aliases.every((alias) => typeof alias === 'string')
@@ -333,6 +334,7 @@ export async function firestoreOwnerEditorViewSnapshot(
       (doc.get('agentId') !== undefined && doc.get('agentId') !== ownerId) ||
       typeof value.name !== 'string' ||
       !value.name.trim() ||
+      typeof value.relationship !== 'string' ||
       typeof value.trust !== 'string' ||
       !Array.isArray(value.aliases) ||
       !value.aliases.every((alias) => typeof alias === 'string')
@@ -364,6 +366,7 @@ export async function firestoreOwnerEditorViewSnapshot(
       name: identity.name,
       aliases: identity.aliases,
       trust: identity.trust,
+      relationship: identity.relationship,
       revision: identity.revision,
     };
   const targetDocs = (await get('knowledgeGraphRelations', ids)).filter((doc) => doc.exists);

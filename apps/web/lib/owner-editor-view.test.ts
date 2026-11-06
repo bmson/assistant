@@ -19,6 +19,7 @@ const displayedContact = {
   name: 'Sam',
   aliases: ['Samuel'],
   trust: 'unknown',
+  relationship: 'sister',
   identityRevision: revision,
 };
 const identitySnapshot = {
@@ -26,11 +27,19 @@ const identitySnapshot = {
   name: 'Sam',
   aliases: ['Samuel'],
   trust: 'unknown',
+  relationship: 'sister',
   revision,
 };
 const snapshot: OwnerEditorViewSnapshot = {
   ownerId,
-  identity: { contactId, name: 'Sam', aliases: ['Samuel'], trust: 'unknown', revision },
+  identity: {
+    contactId,
+    name: 'Sam',
+    aliases: ['Samuel'],
+    trust: 'unknown',
+    relationship: 'sister',
+    revision,
+  },
   people: [
     { contactId, name: 'Sam', revision },
     { contactId: otherId, name: 'Alex', revision },
@@ -93,6 +102,7 @@ describe('server editor view builds real grants only for the same displayed nati
       contactId,
       name: 'Sam',
       aliases: ['Samuel'],
+      relationship: 'sister',
       revision,
     });
     expect(props?.personNoteCreate).toMatchObject({
@@ -143,6 +153,7 @@ describe('server editor view builds real grants only for the same displayed nati
     { ...displayedContact, name: 'Old saved name' },
     { ...displayedContact, aliases: [] },
     { ...displayedContact, trust: 'known' },
+    { ...displayedContact, relationship: 'friend' },
     { ...displayedContact, id: otherId },
     { ...displayedContact, identityRevision: 'b'.repeat(64) },
     { ...displayedContact, identityRevision: undefined },
