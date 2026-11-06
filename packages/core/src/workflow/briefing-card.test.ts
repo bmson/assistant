@@ -51,7 +51,7 @@ describe('agendaSection', () => {
     expect(section).toMatchObject({
       complete: true,
       omittedCount: 11,
-      title: 'Schedule (10 of 21 events)',
+      title: 'Schedule (10 of 21 activities)',
     });
     expect(
       section && 'items' in section && section.items.some((item) => item.title === 'Event 20'),

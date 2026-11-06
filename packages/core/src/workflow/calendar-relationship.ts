@@ -58,6 +58,13 @@ export function possibleCalendarIdentityDisagreement(
 export function canonicalOccurrenceGroups<T extends CalendarOccurrenceIdentity>(
   events: readonly T[],
 ): T[][] {
+  return occurrenceGroups(events, sameCalendarOccurrence);
+}
+
+function occurrenceGroups<T>(
+  events: readonly T[],
+  equivalent: (left: T, right: T) => boolean,
+): T[][] {
   const visited = new Set<number>();
   const groups: Array<{ first: number; values: T[][] }> = [];
   for (let index = 0; index < events.length; index += 1) {
@@ -72,7 +79,7 @@ export function canonicalOccurrenceGroups<T extends CalendarOccurrenceIdentity>(
       for (let candidateIndex = 0; candidateIndex < events.length; candidateIndex += 1) {
         if (visited.has(candidateIndex)) continue;
         const candidate = events[candidateIndex];
-        if (candidate && sameCalendarOccurrence(event, candidate)) {
+        if (candidate && equivalent(event, candidate)) {
           visited.add(candidateIndex);
           component.add(candidateIndex);
           queue.push(candidateIndex);
@@ -85,13 +92,174 @@ export function canonicalOccurrenceGroups<T extends CalendarOccurrenceIdentity>(
       return event ? [event] : [];
     });
     const isClique = values.every((left, leftIndex) =>
-      values.every(
-        (right, rightIndex) => leftIndex === rightIndex || sameCalendarOccurrence(left, right),
-      ),
+      values.every((right, rightIndex) => leftIndex === rightIndex || equivalent(left, right)),
     );
     groups.push({ first: index, values: isClique ? [values] : values.map((value) => [value]) });
   }
   return groups.sort((left, right) => left.first - right.first).flatMap((group) => group.values);
+}
+
+type PresentationOccurrence = CalendarOccurrenceIdentity & {
+  summary?: unknown;
+  calendar?: unknown;
+  calendarTimeZone?: unknown;
+  location?: unknown;
+  allDay?: unknown;
+  status?: unknown;
+};
+
+export interface ProbableCalendarMatchEvidence {
+  kind: 'probable-match';
+  basis: 'matchup-venue-and-time';
+  /** Source start difference; this does not establish an arrival instruction. */
+  earlierStartMinutes: number;
+}
+
+const sourceText = (value: unknown): string => (typeof value === 'string' ? value : '');
+
+function matchup(event: PresentationOccurrence): string[] | undefined {
+  const parts = sourceText(event.summary)
+    .replace(/\(\d{1,2}:\d{2}\s*(?:am|pm)\)/gi, '')
+    .split(/\s+v(?:s\.?)?\s+/i)
+    .map(normalized);
+  return parts.length === 2 && parts.every(Boolean) ? parts : undefined;
+}
+
+function sameMatchup(left: PresentationOccurrence, right: PresentationOccurrence): boolean {
+  const a = matchup(left);
+  const b = matchup(right);
+  if (!a || !b) return false;
+  const contains = (short: string, long: string) =>
+    short.split(' ').every((word) => long.split(' ').includes(word));
+  // Calendar names can clarify the home team abbreviation, but never the opponent.
+  const matches = (short: string[], long: string[], calendar: unknown) =>
+    contains(short[0] ?? '', `${long[0]} ${normalized(sourceText(calendar))}`) &&
+    contains(short[1] ?? '', long[1] ?? '') &&
+    (short[1] ?? '').split(' ').filter((word) => word.length >= 3).length >= 2;
+  return matches(a, b, right.calendar) || matches(b, a, left.calendar);
+}
+
+function venueName(event: PresentationOccurrence): string {
+  // Compare literal venue names, without treating different street addresses as equal.
+  // The remaining independent matchup and time signals are also required.
+  return normalized(sourceText(event.location).split(/[,\n]/)[0] ?? '')
+    .split(' ')
+    .filter((word) => !['soccer', 'field', 'fields', 'parking', 'lot', 'and'].includes(word))
+    .join(' ');
+}
+
+function titleClockMatches(
+  earlier: PresentationOccurrence,
+  later: PresentationOccurrence,
+  timeZone?: string,
+): boolean {
+  const clock = /\((\d{1,2}):(\d{2})\s*(am|pm)\)/i.exec(sourceText(earlier.summary));
+  if (!clock || Number(clock[1]) < 1 || Number(clock[1]) > 12 || Number(clock[2]) > 59)
+    return false;
+  const hours = (Number(clock[1]) % 12) + (clock[3]?.toLowerCase() === 'pm' ? 12 : 0);
+  const start = sourceText(later.start);
+  const zone = sourceText(earlier.calendarTimeZone) || timeZone;
+  if (zone) {
+    try {
+      const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: zone,
+        hour: '2-digit',
+        minute: '2-digit',
+        hourCycle: 'h23',
+      }).formatToParts(new Date(start));
+      return (
+        Number(parts.find((part) => part.type === 'hour')?.value) === hours &&
+        Number(parts.find((part) => part.type === 'minute')?.value) === Number(clock[2])
+      );
+    } catch {
+      return false;
+    }
+  }
+  const local = /T(\d{2}):(\d{2}).*([+-]\d{2}:\d{2})$/.exec(start);
+  const earlierOffset = /([+-]\d{2}:\d{2})$/.exec(sourceText(earlier.start))?.[1];
+  return (
+    !!local &&
+    !!earlierOffset &&
+    earlierOffset === local[3] &&
+    Number(local[1]) === hours &&
+    Number(local[2]) === Number(clock[2])
+  );
+}
+
+/** Advisory presentation evidence only; never provider identity, attendance or write authority. */
+export function probableCalendarMatchEvidence(
+  left: PresentationOccurrence,
+  right: PresentationOccurrence,
+  timeZone?: string,
+): ProbableCalendarMatchEvidence | undefined {
+  if (
+    !sourceText(left.calendarId) ||
+    !sourceText(right.calendarId) ||
+    left.calendarId === right.calendarId ||
+    left.allDay === true ||
+    right.allDay === true ||
+    left.status === 'cancelled' ||
+    right.status === 'cancelled' ||
+    !/T/.test(sourceText(left.start)) ||
+    !/T/.test(sourceText(right.start))
+  )
+    return;
+  if (
+    (left.originalStartTime || right.originalStartTime) &&
+    (!left.originalStartTime ||
+      !right.originalStartTime ||
+      Date.parse(sourceText(left.originalStartTime)) !==
+        Date.parse(sourceText(right.originalStartTime)))
+  )
+    return;
+  const startLeft = Date.parse(sourceText(left.start));
+  const startRight = Date.parse(sourceText(right.start));
+  const endLeft = Date.parse(sourceText(left.end));
+  const endRight = Date.parse(sourceText(right.end));
+  if (![startLeft, startRight, endLeft, endRight].every(Number.isFinite)) return;
+  const distance = Math.abs(startLeft - startRight);
+  if (distance > 90 * 60_000 || endLeft !== endRight || endLeft <= Math.max(startLeft, startRight))
+    return;
+  const venue = venueName(left);
+  if (venue.split(' ').filter((word) => word.length >= 3).length < 2 || venue !== venueName(right))
+    return;
+  if (!sameMatchup(left, right)) return;
+  if (
+    distance > 0 &&
+    !titleClockMatches(
+      startLeft < startRight ? left : right,
+      startLeft < startRight ? right : left,
+      timeZone,
+    )
+  )
+    return;
+  return {
+    kind: 'probable-match',
+    basis: 'matchup-venue-and-time',
+    earlierStartMinutes: distance / 60_000,
+  };
+}
+
+/** Group only for presentation. Every source remains intact; ambiguous bridges stay separate. */
+export function presentationOccurrenceGroups<T extends PresentationOccurrence>(
+  events: readonly T[],
+  timeZone?: string,
+): T[][] {
+  const canonical = canonicalOccurrenceGroups(events);
+  const probable = (left: T, right: T) => !!probableCalendarMatchEvidence(left, right, timeZone);
+  // Canonical blocks are indivisible. Partial probable bridges must never split
+  // trusted identity, nor allow one variant to hide a conflicting source.
+  const components = occurrenceGroups(canonical, (left, right) =>
+    left.some((a) => right.some((b) => probable(a, b))),
+  );
+  return components.flatMap((blocks) => {
+    const compatible = blocks.every((left, index) =>
+      blocks.every(
+        (right, other) => index === other || left.every((a) => right.every((b) => probable(a, b))),
+      ),
+    );
+    return compatible ? [blocks.flat()] : blocks;
+  });
 }
 
 export function parseCalendarOwnerParticipation(
@@ -335,6 +503,7 @@ export function calendarRelationship(
     left.originalStartTime !== right.originalStartTime
   )
     return 'unresolved';
+  if (probableCalendarMatchEvidence(left, right)) return 'probable_duplicate';
   const name = title(left);
   const phoneMirror =
     left.calendarId.startsWith('iphone:') || right.calendarId.startsWith('iphone:');
