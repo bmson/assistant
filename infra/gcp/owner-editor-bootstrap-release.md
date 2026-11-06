@@ -1,0 +1,32 @@
+# Reviewed disabled-service handoff
+
+This adapts the existing paired release for a separately reviewed pre-initialization maintenance window. It does not initialize the epoch, hold services, retire aliases, pause queues/triggers, observe old processes, qualify recovery, or grant permissions. The ordinary exact-source, main CI, immutable image, protected identity, operator hold and READY gates remain in place. Source publication is not operational approval.
+
+Before initialization, the manager must review the actual relevant ingress closure, old request/process/job settlement, uncertain-operation reconciliation and compatible retained recovery evidence. Service scaling0 is desired admission configuration; it is not a process settlement receipt. No tags, an empty queue, elapsed request timeout, health, and three evidence hashes cannot establish drain. Preserve the existing hold owners and before/after/restoration receipts. Do not create a 30-minute initialization packet while a potentially hour-long agent request is still draining.
+
+After the reviewed hold/settlement and initialization, use the existing manual protected deployment with `bootstrap_snapshot` and `bootstrap_snapshot_sha256`. Both inputs default off. The JSON is bounded to32KiB; its SHA256 is the repository's canonical JSON `reconciliationDigest`. It binds exact release source and fresh native Cloud Run v2 service/revision snapshots. Use owner-controlled private files for raw snapshots; no secret values, tokens, owner records or private packets belong in workflow inputs.
+
+The receipt shape is the exported `BootstrapReceipt` in `scripts/owner-release-bootstrap.ts`:
+
+- `format:1`, `kind:"disabled-bootstrap"`, `source:<exact qualified release SHA>`.
+- `closureReceiptSha256`, `drainReceiptSha256`, `recoveryReceiptSha256`: hashes of the separately retained material actually reviewed by the manager. The adapter checks their binding and format, not the underlying operational truth. They are never labeled automatically observed settlement.
+- `services.web` and `.agent`: fixed service resource name, UID, current canonical revision, immutable image, full native service/revision canonical JSON digests, native immutable proof fields, and the prior reviewed automatic scaling configuration. `proof` uses the existing native projection's UID hash, source/creation identity, manifest/pause metadata and template hash. It is a current configuration binding; it does not independently attest old image source or recovery compatibility.
+- `automaticScaling` records the prior min/max settings and explicit `scalingMode:"AUTOMATIC"`. The provider defaults an omitted mode to automatic; make that normalization explicit in the reviewed record. Do not turn a deliberately manual service into automatic mode through this path.
+
+Native fresh capture must match both service and revision hashes, exact UID/image and canonical revision, explicit manual scaling0, and one untagged100% target with no other alias. Proto3 may omit the numeric zero `manualInstanceCount`; this denotes desired zero only when `scalingMode` is explicitly `MANUAL`. It is not evidence that a process has stopped. The reviewed current canonical may carry v2 `revisionReason:RETIRED` on its admission/resource conditions. Ready remains required; this exception never supplies startup proof for a new candidate. New candidate conditions, image, source, run/attempt, manifest, revision/template and canonical traffic must all qualify before automatic scaling is restored.
+
+The existing phase order is retained:
+
+1. Capture the reviewed disabled current pair, then stage and probe the new tagged revisions through the existing release path.
+2. After accepted `promoteP`, restore web automatic scaling by one etag-conditioned scaling-only PATCH. Verify exact observed configuration and checkpoint the same `promotedP` phase before canonical web probes.
+3. Accept the preclosed-alias binding only against the fresh paused-candidate-only native snapshot. This reuses `retired`; it fabricates neither a tag-retirement PATCH nor a600-second drain receipt.
+4. After the new agent's successful canonical promotion, restore only that positively bound new agent's automatic scaling, before canonical probes/agent readiness acceptance.
+5. Continue the existing R creation/admission/promotion and forward recovery rules. No unpaused revision is admitted early.
+
+Scaling attempts/completions/unknown outcomes are private immutable receipts. One PATCH is attempted, with bounded operation polling and fresh readback. An unknown result is not retried or treated as a failed no-op. A pre-admission failure re-establishes manual0 on the known new revisions before any legacy traffic restoration. Recovery must parse and bind the attempted/completed receipts; a corrupt/partial receipt, wrong source/role, any unknown receipt, changed revision or changed configuration stops without resuming old code. Once R may have admitted edits, the existing marker-aware forward recovery rule continues; this adapter does not roll back user data or enable a legacy runtime.
+
+Ordinary future deployments use the actual current canonical's existing protected creation/log/manifest proof to construct the same fresh current binding; they no longer initialize the native lifecycle from a fixed historical revision. An optional `kind:"current-snapshot"` reviewed binding can pin that snapshot without invoking bootstrap scaling or preclosed-alias acceptance. Its normal owned-tag provenance and actual retirement/drain path remain required. Historical test cases remain supported; unsupported aliases, unproven creation/configuration or drift still stop.
+
+The incident relief template's memory, concurrency and heap configuration are preserved by template cloning. Reconcile them deliberately for the final release; do not invoke provisioning as a substitute for the paired release.
+
+Provider contracts: [Cloud Run v2 conditions](https://docs.cloud.google.com/run/docs/reference/rest/v2/Condition), [service scaling](https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.services#ServiceScaling), and [manual scaling](https://docs.cloud.google.com/run/docs/configuring/services/manual-scaling). Tests use synthetic native responses and stubbed transport. They do not qualify a live hold, identity, provider response, initialization, serving revision or editing/removal durability.

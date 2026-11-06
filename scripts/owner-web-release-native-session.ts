@@ -247,7 +247,10 @@ export function nativeFixtureSession(deps: FixtureDependencies, modes: readonly 
         requireNative(modes.includes(selected));
         age(reviewedAt, deps.now());
         const plan = planLifecycleAction(input, selected);
-        requireNative(input.context.canonical === HISTORICAL_WEB_TAGS[1]?.revision);
+        requireNative(
+          input.context.canonical === HISTORICAL_WEB_TAGS[1]?.revision ||
+            input.context.currentBinding !== undefined,
+        );
         original = copy(input);
         mode = selected;
         phase = 'raw_read_refused';

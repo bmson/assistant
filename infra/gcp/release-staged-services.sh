@@ -193,7 +193,7 @@ release_owner_web_tag_admission_command() {
   local mode="$1" source_sha="$2" manifest_path="$3" manifest_digest="$4" staging_tag="$5" native_phase="${6:-}"
   local repository_root
   case "$mode" in
-    --capture|--retire-after-paused|--verify-admission|--record-candidate|--record-resume|--native-init|--verify-native-hold|--certify-native-terminal|--accept-agent-ready) ;;
+    --capture|--retire-after-paused|--verify-admission|--record-candidate|--record-resume|--native-init|--verify-native-hold|--certify-native-terminal|--accept-agent-ready|--bootstrap-restore|--bootstrap-hold) ;;
     --native-phase)
       case "$native_phase" in createP|attachP|promoteP|createR|attachR|promoteR|closeP|restoreC|repauseP|closeR) ;; *) return 2 ;; esac
       ;;
@@ -210,6 +210,31 @@ release_owner_web_tag_admission_command() {
       OWNER_NATIVE_REVIEWED_AT="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" \
       pnpm exec tsx scripts/owner-web-tag-admission.ts "$mode"
   )
+}
+
+# Pure input shape/source check; full reviewed digest/native checks run in the adapter.
+release_reviewed_snapshot_kind() {
+  OWNER_RELEASE_EXPECTED_SOURCE="$1" node -e '
+    try {
+      const raw=process.env.OWNER_RELEASE_BOOTSTRAP_RECEIPT;
+      if(Buffer.byteLength(raw??"")>32768) throw new Error();
+      const value=JSON.parse(raw);
+      if(value.format!==1 || value.source!==process.env.OWNER_RELEASE_EXPECTED_SOURCE || !["disabled-bootstrap","current-snapshot"].includes(value.kind) || !/^[a-f0-9]{64}$/.test(process.env.OWNER_RELEASE_BOOTSTRAP_SHA256??"")) throw new Error();
+      process.stdout.write(value.kind);
+    } catch { process.stderr.write("Invalid reviewed current snapshot input.\n"); process.exit(2); }
+  '
+}
+
+# Default-off reviewed bootstrap only; ordinary release flow is unchanged.
+release_bootstrap_scaling() {
+  local mode="$1" role="$2" revision="$3"
+  shift 3
+  [[ -n "${OWNER_RELEASE_BOOTSTRAP_RECEIPT:-}" ]] || return 0
+  local reviewed_kind
+  reviewed_kind="$(release_reviewed_snapshot_kind "$1")" || return 2
+  [[ "$reviewed_kind" == disabled-bootstrap ]] || return 0
+  OWNER_BOOTSTRAP_ROLE="$role" OWNER_BOOTSTRAP_REVISION="$revision" \
+    release_owner_web_tag_admission_command "$mode" "$@"
 }
 
 release_initialize_basic_web_lifecycle() {
@@ -386,6 +411,7 @@ release_basic_editor_forward_only() {
 release_validate_basic_editor_preflight_context() {
   local selected="$1" source_sha="$2" basic_editor
   basic_editor="$(release_basic_editor_forward_only)" || return 1
+  if [[ -n "${OWNER_RELEASE_BOOTSTRAP_RECEIPT:-}" ]]; then release_reviewed_snapshot_kind "$source_sha" >/dev/null || return 2; fi
   [[ "$basic_editor" == true ]] || return 0
   case "$selected" in full|agent,web|web,agent) selected=agent,web ;; esac
   if [[ "$selected" != agent,web ]]; then
@@ -415,6 +441,10 @@ release_validate_basic_editor_context() {
   basic_editor="$(release_basic_editor_forward_only)" || return 1
   if [[ "$basic_editor" == true && "$driver" != firestore ]]; then
     echo '  BASIC5 requires a paired Firestore release; refusing a non-Firestore driver.' >&2
+    return 2
+  fi
+  if [[ -n "${OWNER_RELEASE_BOOTSTRAP_RECEIPT:-}" && ( "$basic_editor" != true || "$driver" != firestore || "$selected" != agent,web ) ]]; then
+    echo 'Reviewed current snapshot requires the protected paired BASIC5 Firestore path.' >&2
     return 2
   fi
   release_validate_basic_editor_preflight_context "$selected" "$source_sha"
@@ -523,6 +553,9 @@ release_staged_services() {
   # --no-traffic and a tag expose a revision URL without moving user traffic.
   if [[ "$selected" == agent,web ]]; then
     agent_candidate_env="ASSISTANT_RELEASE_API_CONTRACT=${RELEASE_AGENT_API},ASSISTANT_RELEASE_WEB_API_MIN=${RELEASE_AGENT_PEER_MIN},ASSISTANT_RELEASE_WEB_API_MAX=${RELEASE_AGENT_PEER_MAX},ASSISTANT_RELEASE_SCHEMA_DRIVER=${RELEASE_STORAGE_DRIVER},ASSISTANT_RELEASE_SCHEMA_MIN=${RELEASE_AGENT_SCHEMA_MIN},ASSISTANT_RELEASE_SCHEMA_MAX=${RELEASE_AGENT_SCHEMA_MAX},ASSISTANT_RELEASE_SCHEMA_VERSION=${RELEASE_SCHEMA_VERSION},ASSISTANT_RELEASE_MANIFEST=${manifest_sha}"
+    if [[ "$basic_editor_forward_only" == true ]]; then
+      agent_candidate_env="${agent_candidate_env},ASSISTANT_RELEASE_SOURCE_SHA=${TAG},ASSISTANT_RELEASE_WORKFLOW_RUN_ID=${GITHUB_RUN_ID},ASSISTANT_RELEASE_WORKFLOW_RUN_ATTEMPT=${GITHUB_RUN_ATTEMPT}"
+    fi
     if [[ -n "$worker_env_override" ]]; then
       agent_candidate_env="${agent_candidate_env},EMAIL_OBSERVER_WORKER_ENABLED=${worker_env_override}"
     fi
@@ -608,6 +641,12 @@ release_staged_services() {
     done
   fi
 
+  local bootstrap_web_attempted=false bootstrap_agent_attempted=false bootstrap_disabled=false
+  if [[ -n "${OWNER_RELEASE_BOOTSTRAP_RECEIPT:-}" ]]; then
+    local reviewed_kind
+    reviewed_kind="$(release_reviewed_snapshot_kind "$TAG")" || return 2
+    [[ "$reviewed_kind" != disabled-bootstrap ]] || bootstrap_disabled=true
+  fi
   local promoted_ok=true web_paused_revision='' web_resume_revision='' web_resume_promotion_attempted=false
   if [[ "$selected" == agent,web ]]; then
     # Promote web first. Firestore full-stack upgrades keep its workspace routes
@@ -628,6 +667,10 @@ release_staged_services() {
         --project "$PROJECT" --region "$REGION" --to-revisions "${staged_web_revision}=100" --quiet; then
         promoted_ok=false
       fi
+      if [[ "$promoted_ok" == true && "$bootstrap_disabled" == true ]]; then
+        bootstrap_web_attempted=true
+        release_bootstrap_scaling --bootstrap-restore web "$staged_web_revision" "$TAG" "$manifest_path" "$manifest_sha" "$staging_tag" || promoted_ok=false
+      fi
       local live_web_url
       if [[ "$promoted_ok" == true ]]; then
         live_web_url="$(gcloud run services describe assistant-web --project "$PROJECT" --region "$REGION" --format='value(status.url)')" || promoted_ok=false
@@ -636,7 +679,7 @@ release_staged_services() {
       if [[ "$promoted_ok" == true ]] && ! release_wait_http "$live_web_url" /api/ready true ready; then promoted_ok=false; fi
       if [[ "$promoted_ok" == true ]] && ! release_wait_http "$live_web_url" /api/release-probe true ready; then promoted_ok=false; fi
       if [[ "$promoted_ok" == true ]] && ! release_wait_http "$live_web_url" /api/release-probe "$web_writes_paused" writesPaused; then promoted_ok=false; fi
-      if [[ "$promoted_ok" == true && "$web_writes_paused" == true ]] && ! release_drain_web_inflight "$web_before"; then promoted_ok=false; fi
+      if [[ "$promoted_ok" == true && "$web_writes_paused" == true && "$bootstrap_disabled" != true ]] && ! release_drain_web_inflight "$web_before"; then promoted_ok=false; fi
       if [[ "$promoted_ok" == true && "$basic_editor_forward_only" == true ]] &&
          ! release_retire_captured_web_tags "$TAG" "$manifest_path" "$manifest_sha" "$staging_tag"; then
         echo '  owned web-tag admission barrier failed; restoring canonical traffic before any agent promotion or unpaused web creation.' >&2
@@ -656,6 +699,10 @@ release_staged_services() {
       if ! gcloud run services update-traffic assistant-agent \
         --project "$PROJECT" --region "$REGION" --to-revisions "${staged_agent_revision}=100" --quiet; then
         promoted_ok=false
+      fi
+      if [[ "$promoted_ok" == true && "$bootstrap_disabled" == true ]]; then
+        bootstrap_agent_attempted=true
+        release_bootstrap_scaling --bootstrap-restore agent "$staged_agent_revision" "$TAG" "$manifest_path" "$manifest_sha" "$staging_tag" || promoted_ok=false
       fi
       # The now-live new web probes the newly promoted agent. Any failure
       # restores agent then web, reversing the promotion order.
@@ -788,6 +835,18 @@ release_staged_services() {
   fi
 
   if [[ "$promoted_ok" != true ]]; then
+    if [[ "$bootstrap_disabled" == true && "$basic_editor_admission_possible" != true ]]; then
+      # Re-establish canonical admission closure before any legacy traffic restoration.
+      # Unknown scaling outcomes stop here; no blind retry or old-runtime resume.
+      if [[ "$bootstrap_web_attempted" == true ]] && ! release_bootstrap_scaling --bootstrap-hold web "$web_paused_revision" "$TAG" "$manifest_path" "$manifest_sha" "$staging_tag"; then
+        echo '  CRITICAL: bootstrap web scaling outcome unresolved; refusing legacy traffic restoration.' >&2
+        return 1
+      fi
+      if [[ "$bootstrap_agent_attempted" == true ]] && ! release_bootstrap_scaling --bootstrap-hold agent "$agent_serving_revision" "$TAG" "$manifest_path" "$manifest_sha" "$staging_tag"; then
+        echo '  CRITICAL: bootstrap agent scaling outcome unresolved; refusing legacy traffic restoration.' >&2
+        return 1
+      fi
+    fi
     if [[ "$basic_editor_admission_possible" == true ]]; then
       # Draining stops requests, not committed owner corrections/receipts. Old
       # runtimes cannot safely take over after any possible BASIC5 admission.

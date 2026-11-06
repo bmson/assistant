@@ -839,4 +839,41 @@ PYCASE
 if bash -c 'source "$1"; release_basic_editor_forward_only' -- "$CAP_FIXTURE_ROOT/infra/gcp/release-staged-services.sh"; then fail 'runtime without capability must fail closed'; fi
 rm "$CAP_FIXTURE_ROOT/apps/web/lib/owner-editor-runtime.ts"
 [[ "$(bash -c 'source "$1"; release_basic_editor_forward_only' -- "$CAP_FIXTURE_ROOT/infra/gcp/release-staged-services.sh")" == false ]] || fail 'older source without runtime/capability must remain legacy'
+
+# Bootstrap uses the same promotion phases; no successful promotion means no admission restoration.
+release_bootstrap_scaling() {
+  printf 'bootstrap:%s:%s:%s\n' "$1" "$2" "$3" >>"$STUB_ADMISSION_CALLS"
+  if [[ "${FAIL_BOOTSTRAP_UNKNOWN:-0}" == 1 && "$2" == web ]]; then return 1; fi
+}
+reset_case; prepare_firestore_state
+export OWNER_RELEASE_BOOTSTRAP_RECEIPT='{"format":1,"kind":"disabled-bootstrap","source":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}'
+export OWNER_RELEASE_BOOTSTRAP_SHA256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+release_staged_services >/dev/null || fail 'reviewed bootstrap phase handoff should succeed'
+python3 - "$STUB_ADMISSION_CALLS" <<'PYCASE'
+import sys
+rows=open(sys.argv[1]).read().splitlines()
+def index(prefix): return next(i for i,x in enumerate(rows) if x.startswith(prefix))
+assert index('native-phase:promoteP') < index('bootstrap:--bootstrap-restore:web') < index('traffic:assistant-agent:assistant-agent-new1=100')
+assert index('traffic:assistant-agent:assistant-agent-new1=100') < index('bootstrap:--bootstrap-restore:agent') < index('agent-ready:')
+PYCASE
+reset_case; prepare_firestore_state
+export FAIL_WEB_PROMOTE=1
+if release_staged_services >/dev/null 2>&1; then fail 'failed paused web promotion must fail bootstrap'; fi
+if rg -q '^bootstrap:--bootstrap-restore:' "$STUB_ADMISSION_CALLS"; then fail 'failed promotion restored automatic scaling'; fi
+reset_case; prepare_firestore_state
+export FAIL_AGENT_PROMOTE=1
+if release_staged_services >/dev/null 2>&1; then fail 'failed agent promotion must fail bootstrap'; fi
+python3 - "$STUB_ADMISSION_CALLS" <<'PYCASE'
+import sys
+rows=open(sys.argv[1]).read().splitlines()
+assert not any(x.startswith('bootstrap:--bootstrap-restore:agent') for x in rows)
+hold=next(i for i,x in enumerate(rows) if x.startswith('bootstrap:--bootstrap-hold:web'))
+rollback=next(i for i,x in enumerate(rows) if x.startswith('native-phase:restoreC'))
+assert hold < rollback
+PYCASE
+reset_case; prepare_firestore_state
+export FAIL_BOOTSTRAP_UNKNOWN=1
+if release_staged_services >/dev/null 2>&1; then fail 'unknown scaling restoration must fail closed'; fi
+if rg -q '^native-phase:restoreC' "$STUB_ADMISSION_CALLS"; then fail 'unknown scaling outcome resumed legacy traffic'; fi
+unset FAIL_BOOTSTRAP_UNKNOWN OWNER_RELEASE_BOOTSTRAP_RECEIPT OWNER_RELEASE_BOOTSTRAP_SHA256
 echo 'staged release protocol tests passed'

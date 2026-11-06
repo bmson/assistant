@@ -1,8 +1,20 @@
 /** Fixed-service BASIC5 rollout barrier. Called only by the protected paired release. */
+
 import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { verifyPreAuthEnvironment } from './owner-editor-release-inventory.js';
+import {
+  bootstrapDigest,
+  object as bootstrapObject,
+  readBootstrapNative,
+  restoreScaling,
+  reviewedBootstrap,
+  scalingCheckpoint,
+  verifiedRestoreReceipts,
+  verifyCurrentSnapshot,
+} from './owner-release-bootstrap.js';
+import { acceptPreclosedBootstrap } from './owner-web-release-lifecycle-model.js';
 import {
   acceptPairedAgentReadiness,
   initializePairedWebLifecycle,
@@ -10,7 +22,11 @@ import {
   protectedNativeReleaseDependencies,
   runPairedWebLifecyclePhase,
 } from './owner-web-release-native-controller.js';
-import { projectNativeWebSnapshot } from './owner-web-release-native-proof.js';
+import {
+  nativeStableConfigurationDigest,
+  projectNativeWebSnapshot,
+  TEMPLATE_FIELDS,
+} from './owner-web-release-native-proof.js';
 import { verifyOperatorOwnedHold } from './owner-web-release-operator-hold.js';
 import {
   createPrivateReleasePhaseReceipts,
@@ -101,6 +117,8 @@ export async function runWebTagAdmission(mode: string | undefined) {
       '--verify-native-hold',
       '--certify-native-terminal',
       '--accept-agent-ready',
+      '--bootstrap-restore',
+      '--bootstrap-hold',
     ].includes(mode ?? '')
   )
     throw new Error('Invalid admission mode');
@@ -154,6 +172,17 @@ export async function runWebTagAdmission(mode: string | undefined) {
       renameSync(next, target);
     } else writeFileSync(target, bytes, { flag: 'wx', mode: 0o600 });
   };
+  if (Buffer.byteLength(process.env.OWNER_RELEASE_BOOTSTRAP_RECEIPT ?? '') > 32768)
+    throw new Error('Reviewed snapshot exceeds bound');
+  const bootstrap = process.env.OWNER_RELEASE_BOOTSTRAP_RECEIPT
+    ? reviewedBootstrap(
+        JSON.parse(process.env.OWNER_RELEASE_BOOTSTRAP_RECEIPT),
+        process.env.OWNER_RELEASE_BOOTSTRAP_SHA256 ?? '',
+        source,
+      )
+    : undefined;
+  const bootstrapEvidence = bootstrap ? bootstrapDigest(bootstrap) : undefined;
+  const preclosed = bootstrap?.kind === 'disabled-bootstrap';
   const io = await protectedWebTagCloud();
   const artifactCache = new Map<string, Awaited<ReturnType<typeof readProtectedWebTagArtifact>>>();
   async function priorProof(
@@ -231,7 +260,7 @@ export async function runWebTagAdmission(mode: string | undefined) {
       typeof raw.uid !== 'string' ||
       typeof raw.canonical !== 'string' ||
       !Array.isArray(raw.proofs) ||
-      raw.proofs.length < 1 ||
+      (!preclosed && raw.proofs.length < 1) ||
       raw.proofs.length > 8
     )
       throw new Error('Invalid captured release identity');
@@ -247,8 +276,48 @@ export async function runWebTagAdmission(mode: string | undefined) {
     });
     return { ...raw, proofs } as Capture;
   };
+  if (mode === '--capture' && bootstrap && preclosed) {
+    const service = await io.readService(),
+      revision = await io.readRevision(bootstrap.services.web.revision);
+    verifyCurrentSnapshot(bootstrap.services.web, service, revision);
+    const deps = await protectedNativeReleaseDependencies({
+      recordIntent: () => {},
+      initialize: () => '',
+      readCurrent: () => {
+        throw new Error('No lifecycle yet');
+      },
+      recordCheckpoint: () => {},
+    });
+    verifyCurrentSnapshot(
+      bootstrap.services.agent,
+      await readBootstrapNative(deps, bootstrap.services.agent.service),
+      await readBootstrapNative(
+        deps,
+        `${bootstrap.services.agent.service}/revisions/${bootstrap.services.agent.revision}`,
+      ),
+    );
+    save(capturePath, {
+      format: 1,
+      source,
+      runId,
+      runAttempt,
+      uid: bootstrap.services.web.uid,
+      canonical: bootstrap.services.web.revision,
+      proofs: [],
+      bootstrapEvidence,
+    });
+    return;
+  }
   if (mode === '--capture') {
-    const snapshot = webTagTrafficSnapshot(await io.readService());
+    const rawCurrent = await io.readService();
+    if (bootstrap)
+      verifyCurrentSnapshot(
+        bootstrap.services.web,
+        rawCurrent,
+        await io.readRevision(bootstrap.services.web.revision),
+        false,
+      );
+    const snapshot = webTagTrafficSnapshot(rawCurrent);
     const canonical = snapshot.rows.filter((row) => row.percent === 100);
     if (
       canonical.length !== 1 ||
@@ -304,17 +373,159 @@ export async function runWebTagAdmission(mode: string | undefined) {
   };
   if (mode === '--native-init') {
     const receipts = createPrivateReleasePhaseReceipts(temp, receiptIdentity);
+    const capture = readCapture();
+    const raw = await io.readService(),
+      native: Record<string, unknown> = {};
+    native[capture.canonical] = await io.readRevision(capture.canonical);
+    let current: Parameters<typeof pairedWebContext>[0]['current'];
+    if (bootstrap) {
+      current = {
+        revision: bootstrap.services.web.revision,
+        binding: {
+          proof: bootstrap.services.web.proof,
+          serviceSha256: bootstrap.services.web.serviceSha256,
+          revisionSha256: bootstrap.services.web.revisionSha256,
+          reviewedEvidenceSha256: bootstrapEvidence as string,
+          preclosed,
+        },
+      };
+    } else {
+      // Reuse the already verified creation/log/manifest ownership proof for the
+      // actual current revision. No historical canonical constant is adopted.
+      const owned = capture.proofs.find((p) => p.revision === capture.canonical);
+      if (!owned) throw new Error('Current canonical creation proof missing');
+      const fresh = await priorProof(capture.canonical, owned.tag, webTagTrafficSnapshot(raw).rows);
+      if (bootstrapDigest(validateOwnedProof(fresh)) !== bootstrapDigest(validateOwnedProof(owned)))
+        throw new Error('Current canonical proof changed');
+      const revision = rec(native[capture.canonical]),
+        template: Record<string, unknown> = {};
+      for (const key of TEMPLATE_FIELDS)
+        if (key !== 'revision' && revision[key] !== undefined) template[key] = revision[key];
+      template.revision = capture.canonical;
+      const tag = /^(?:candidate|resume)-([1-9][0-9]*)-([1-9][0-9]*)$/.exec(owned.tag);
+      if (!tag || typeof revision.uid !== 'string')
+        throw new Error('Current canonical native identity missing');
+      current = {
+        revision: capture.canonical,
+        binding: {
+          proof: {
+            uid: tagHash(revision.uid),
+            image: owned.image,
+            source: owned.source,
+            runId: tag[1] as string,
+            attempt: tag[2] as string,
+            manifest: literal(revision, 'ASSISTANT_RELEASE_MANIFEST'),
+            paused: owned.writesPaused,
+            templateSha256: bootstrapDigest(template),
+          },
+          serviceSha256: bootstrapDigest(raw),
+          revisionSha256: bootstrapDigest(revision),
+          reviewedEvidenceSha256: owned.provenanceSha256,
+          preclosed: false,
+        },
+      };
+    }
     const context = pairedWebContext({
       source,
       runId: String(runId),
       attempt: String(runAttempt),
       manifestDigest,
       manifest,
+      current,
     });
-    const raw = await io.readService();
-    const native: Record<string, unknown> = {};
-    native[context.canonical] = await io.readRevision(context.canonical);
     initializePairedWebLifecycle(context, raw, native, receipts);
+    return;
+  }
+  if (mode === '--bootstrap-restore' || mode === '--bootstrap-hold') {
+    if (!bootstrap || !preclosed) throw new Error('Missing reviewed bootstrap receipt');
+    const role = process.env.OWNER_BOOTSTRAP_ROLE;
+    if (role !== 'web' && role !== 'agent') throw new Error('Invalid bootstrap service');
+    const receipts = openPrivateReleasePhaseReceipts(temp, receiptIdentity),
+      state = receipts.readCurrent();
+    await verifyOperatorOwnedHold(state.context);
+    if(state.context.currentBinding?.reviewedEvidenceSha256 !== bootstrapEvidence || !state.context.currentBinding?.preclosed || state.admissionPossible) throw new Error('Bootstrap receipt or admission state changed');
+    if (
+      mode === '--bootstrap-restore' &&
+      (role === 'web' ? state.phase !== 'promotedP' : state.phase !== 'retired')
+    )
+      throw new Error('Bootstrap promotion phase not accepted');
+    const expectedRevision = process.env.OWNER_BOOTSTRAP_REVISION ?? '';
+    if (!new RegExp(`^assistant-${role}-[a-z0-9-]+$`).test(expectedRevision))
+      throw new Error('Missing promoted bootstrap revision');
+    if (
+      role === 'web' &&
+      expectedRevision !== `assistant-web-p-${runId}-${runAttempt}-${source.slice(0, 8)}`
+    )
+      throw new Error('Paused web revision identity changed');
+    let restoredConfiguration: string | undefined;
+    if (mode === '--bootstrap-hold') {
+      let unknownExists = true;
+      try {
+        lstatSync(path(`owner-bootstrap-${role}-restore-unknown.json`));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') unknownExists = false;
+        else throw new Error('Scaling unknown receipt unavailable');
+      }
+      restoredConfiguration = verifiedRestoreReceipts(
+        JSON.parse(
+          boundedFile(path(`owner-bootstrap-${role}-restore-attempted.json`)).toString('utf8'),
+        ),
+        JSON.parse(
+          boundedFile(path(`owner-bootstrap-${role}-restore-completed.json`)).toString('utf8'),
+        ),
+        unknownExists,
+        role,
+        source,
+      );
+    }
+    const dependencies = await protectedNativeReleaseDependencies(receipts);
+    const result = await restoreScaling(
+      {
+        ...dependencies,
+        recordIntent: async (value) => {
+          const outcome = bootstrapObject(value).outcome;
+          if (!['attempted', 'completed', 'unknown'].includes(String(outcome)))
+            throw new Error('Invalid scaling outcome');
+          save(
+            path(
+              `owner-bootstrap-${role}-${mode === '--bootstrap-hold' ? 'hold' : 'restore'}-${outcome}.json`,
+            ),
+            value,
+          );
+        },
+      },
+      bootstrap,
+      role,
+      {
+        revision: expectedRevision,
+        image: String(rec(rec(manifest.components)[role]).image),
+        source,
+        manifest: String(manifestDigest),
+        runId: String(runId),
+        attempt: String(runAttempt),
+      },
+      mode === '--bootstrap-hold',
+      restoredConfiguration,
+    );
+    if (role === 'web' && bootstrapDigest(result.before) !== bootstrapDigest(result.after)) {
+      const native: Record<string, unknown> = {};
+      for (const name of Object.keys(state.snapshot.revisions))
+        native[name] = await io.readRevision(name);
+      const fresh = projectNativeWebSnapshot(result.after, native, state.context);
+      receipts.recordCheckpoint(
+        scalingCheckpoint(
+          state,
+          fresh,
+          nativeStableConfigurationDigest({
+            ...result.before,
+            scaling:
+              mode === '--bootstrap-hold'
+                ? { scalingMode: 'MANUAL', manualInstanceCount: 0 }
+                : bootstrap.services.web.automaticScaling,
+          }),
+        ),
+      );
+    }
     return;
   }
   if (mode === '--native-phase') {
@@ -374,6 +585,47 @@ export async function runWebTagAdmission(mode: string | undefined) {
   const service = await io.readService(),
     snapshot = webTagTrafficSnapshot(service);
   if (snapshot.uid !== capture.uid) throw new Error('Captured service identity changed');
+  if (
+    bootstrap &&
+    preclosed &&
+    ['--retire-after-paused', '--verify-admission', '--record-resume'].includes(mode ?? '')
+  ) {
+    if (
+      (capture as Capture & { bootstrapEvidence?: string }).bootstrapEvidence !== bootstrapEvidence
+    )
+      throw new Error('Reviewed closure binding changed');
+    const receipts = openPrivateReleasePhaseReceipts(temp, receiptIdentity),
+      state = receipts.readCurrent();
+    await verifyOperatorOwnedHold(state.context);
+    const native: Record<string, unknown> = {};
+    for (const name of Object.keys(state.snapshot.revisions))
+      native[name] = await io.readRevision(name);
+    const fresh = projectNativeWebSnapshot(service, native, state.context);
+    if (mode === '--retire-after-paused') {
+      const next = acceptPreclosedBootstrap(state, fresh);
+      receipts.recordCheckpoint(next);
+      save(barrierPath, {
+        format: 1,
+        kind: 'reviewed_preclosed_bootstrap',
+        bootstrapEvidence,
+        source,
+        runId,
+        runAttempt,
+        uid: capture.uid,
+      });
+      return;
+    }
+    const barrier = rec(JSON.parse(boundedFile(barrierPath).toString('utf8')));
+    if (
+      barrier.kind !== 'reviewed_preclosed_bootstrap' ||
+      barrier.bootstrapEvidence !== bootstrapEvidence ||
+      state.phase !== (mode === '--verify-admission' ? 'agentReady' : 'attachedR') ||
+      bootstrapDigest(fresh) !== bootstrapDigest(state.snapshot)
+    )
+      throw new Error('Reviewed bootstrap admission changed');
+    if (mode === '--verify-admission') return;
+    // record-resume retains the normal creation proof path, using this separately checked barrier.
+  }
   if (mode === '--retire-after-paused') {
     const candidate = snapshot.rows.find((row) => row.tag === process.env.OWNER_TAG_STAGING_TAG);
     if (candidate?.percent !== 100 || !candidate.uri)
@@ -454,7 +706,7 @@ export async function runWebTagAdmission(mode: string | undefined) {
     return;
   }
   const kind = mode === '--record-candidate' ? 'candidate' : 'resume';
-  if (kind === 'resume') barrier();
+  if (kind === 'resume' && !preclosed) barrier();
   const tag = `${kind}-${runId}-${runAttempt}`,
     live = snapshot.rows.filter((row) => row.tag === tag);
   if (live.length !== 1 || !live[0]?.uri) throw new Error('Created alias identity unverified');

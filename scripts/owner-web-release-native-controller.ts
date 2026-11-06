@@ -86,6 +86,7 @@ export function pairedWebContext(input: {
   attempt: string;
   manifestDigest: string;
   manifest: Record<string, unknown>;
+  current?: { revision: string; binding: NonNullable<Context['currentBinding']> };
 }): Context {
   const component = input.manifest.components as Record<string, Record<string, unknown>>;
   const web = component?.web;
@@ -117,7 +118,8 @@ export function pairedWebContext(input: {
     attempt: input.attempt,
     manifest: input.manifestDigest,
     image,
-    canonical: current.revision,
+    canonical: input.current?.revision ?? current.revision,
+    ...(input.current ? { currentBinding: input.current.binding } : {}),
     releaseEnv,
     // The one-off historical 01080 retirement is a prerequisite to this fixed
     // initial inventory; any remaining unsupported alias makes projection fail.
@@ -136,7 +138,17 @@ export function initializePairedWebLifecycle(
   if (!Array.isArray(traffic) || traffic.length < 1 || traffic.length > 8)
     throw new Error('Initial native traffic inventory is unsupported');
   const rows = traffic as Array<Record<string, unknown>>;
-  if (
+  if (context.currentBinding) {
+    if (
+      reconciliationDigest(rawService) !== context.currentBinding.serviceSha256 ||
+      reconciliationDigest(nativeRevisions[context.canonical]) !==
+        context.currentBinding.revisionSha256 ||
+      rows.some((row) => row.revision !== context.canonical) ||
+      rows.filter((row) => row.percent === 100).length !== 1 ||
+      (context.currentBinding.preclosed && (rows.length !== 1 || rows[0]?.tag))
+    )
+      throw new Error('Reviewed current snapshot changed');
+  } else if (
     rows.some(
       (row) => row.tag !== HISTORICAL_WEB_TAGS[1]?.tag || row.revision !== context.canonical,
     ) ||

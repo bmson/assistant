@@ -33,6 +33,14 @@ on:
         default: "off"
         type: choice
         options: ["off", read_only]
+      bootstrap_snapshot:
+        description: Reviewed current disabled snapshot and prior closure/drain/recovery bindings (default off)
+        required: false
+        type: string
+      bootstrap_snapshot_sha256:
+        description: Exact reviewed bootstrap snapshot digest
+        required: false
+        type: string
       sha:
         description: Commit SHA to release (defaults to the tip of main)
         required: false
@@ -395,6 +403,8 @@ jobs:
       # Environment-scoped vars override repository vars; the operator hold
       # receipt binds this effective protected-job snapshot for this run.
       CURRENT_ONLY_CLEANUP: ${{ vars.CURRENT_ONLY_CLEANUP }}
+      OWNER_RELEASE_BOOTSTRAP_RECEIPT: ${{ inputs.bootstrap_snapshot }}
+      OWNER_RELEASE_BOOTSTRAP_SHA256: ${{ inputs.bootstrap_snapshot_sha256 }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:

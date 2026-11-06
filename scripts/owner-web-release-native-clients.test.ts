@@ -11,10 +11,12 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { bootstrapDigest, scalingCheckpoint } from './owner-release-bootstrap.js';
 import { nativeWebCreationFixtureClient } from './owner-web-release-creation-client.js';
 import {
   acceptAgentReady,
   acceptCapturedRetirement,
+  acceptPreclosedBootstrap,
   beginCapturedRetirement,
   bindCapturedRetirementOperation,
   type Context,
@@ -1236,5 +1238,109 @@ describe('raw proof error privacy', () => {
     expect(String(error)).toBe('Error: Native release validation held');
     expect(JSON.stringify(error)).not.toContain('PRIVATE_NATIVE_PAYLOAD');
     expect((error as Error & { input?: unknown }).input).toBeUndefined();
+  });
+});
+
+describe('reviewed zero-tag disabled capture adapter', () => {
+  function reviewed() {
+    const f = fixture(),
+      old = f.context.canonical,
+      baseline = f.state();
+    const name = 'assistant-web-reviewed-config';
+    const native = f.native[old]!;
+    delete f.native[old];
+    native.name = `${WEB_SERVICE}/revisions/${name}`;
+    native.conditions = [
+      { type: 'Ready', state: 'CONDITION_SUCCEEDED' },
+      { type: 'Active', state: 'CONDITION_FAILED', revisionReason: 'RETIRED' },
+      { type: 'ResourcesAvailable', state: 'STATE_UNSPECIFIED', revisionReason: 'RETIRED' },
+    ];
+    f.native[name] = native;
+    f.service.template.revision = name;
+    f.service.scaling = { scalingMode: 'MANUAL', manualInstanceCount: 0 };
+    f.service.traffic = [
+      { type: 'TRAFFIC_TARGET_ALLOCATION_TYPE_REVISION', revision: name, percent: 100 },
+    ];
+    f.service.trafficStatuses = copy(f.service.traffic);
+    f.service.urls = [f.service.uri];
+    f.service.latestReadyRevision =
+      f.service.latestCreatedRevision = `${WEB_SERVICE}/revisions/${name}`;
+    f.context.canonical = name;
+    f.context.currentBinding = {
+      proof: {
+        ...baseline.snapshot.revisions[old]!,
+        templateSha256: bootstrapDigest(f.service.template),
+      },
+      serviceSha256: bootstrapDigest(f.service),
+      revisionSha256: bootstrapDigest(native),
+      reviewedEvidenceSha256: 'd'.repeat(64),
+      preclosed: true,
+    };
+    return f;
+  }
+  it('captures the reviewed retained canonical without an existing tag or fabricated retirement PATCH', () => {
+    const f = reviewed();
+    let saved: State | undefined;
+    const receipts = {
+      initialize: (s: State) => {
+        saved = s;
+        return 'private-state';
+      },
+      readCurrent: () => saved!,
+      recordIntent: () => {},
+      recordCheckpoint: () => {},
+    };
+    const state = initializePairedWebLifecycle(f.context, f.service, f.native, receipts);
+    expect(state.phase).toBe('captured');
+    expect(state.snapshot.desired[0]?.tag).toBe('');
+    verifyLifecycleState(state);
+    expect(f.writes()).toBe(0);
+    const changed = copy(f.service);
+    changed.template.containers[0].resources.limits.memory = '4Gi';
+    expect(() => initializePairedWebLifecycle(f.context, changed, f.native, receipts)).toThrow(
+      'changed',
+    );
+  });
+  it('recognizes v2 retired admission only for the reviewed old canonical; unsupported reason remains held', () => {
+    const f = reviewed();
+    expect(() => f.state()).not.toThrow();
+    f.native[f.context.canonical]!.conditions[1].revisionReason = 'HEALTH_CHECK_SKIPPED';
+    expect(() => f.state()).toThrow();
+  });
+  it('requires promoted candidate-only current state before accepting externally reviewed preclosed aliases', async () => {
+    const f = reviewed();
+    let state = f.state();
+    const creation = nativeWebCreationFixtureClient(f.deps),
+      traffic = nativeWebTrafficFixtureClient(f.deps);
+    state = await creation.execute(state, 'createP', stamp);
+    state = await traffic.execute(state, 'attachP', stamp);
+    expect(() => acceptPreclosedBootstrap(state, state.snapshot)).toThrow();
+    state = await nativeWebTrafficFixtureClient(f.deps).execute(state, 'promoteP', stamp);
+    const current = acceptPreclosedBootstrap(state, state.snapshot);
+    expect(current.phase).toBe('retired');
+    verifyLifecycleState(current);
+    const changed = copy(state.snapshot);
+    changed.template.unreviewed = 'drift';
+    expect(() => acceptPreclosedBootstrap(state, changed)).toThrow();
+    // No extra traffic PATCH or invented 600second drain receipt is generated.
+    expect(f.writes()).toBe(3);
+  });
+  it('same-phase scaling checkpoint preserves config/traffic/admission and refuses drift', async () => {
+    const f = reviewed();
+    let state = f.state();
+    state = await nativeWebCreationFixtureClient(f.deps).execute(state, 'createP', stamp);
+    state = await nativeWebTrafficFixtureClient(f.deps).execute(state, 'attachP', stamp);
+    state = await nativeWebTrafficFixtureClient(f.deps).execute(state, 'promoteP', stamp);
+    const fresh = copy(state.snapshot);
+    fresh.etag = 'scale-restored';
+    fresh.generation = fresh.observedGeneration = String(BigInt(fresh.generation) + 1n);
+    fresh.stableConfigSha256 = 'e'.repeat(64);
+    const next = scalingCheckpoint(state, fresh, fresh.stableConfigSha256);
+    expect(next.phase).toBe('promotedP');
+    expect(next.admissionPossible).toBe(false);
+    verifyLifecycleState(next);
+    const drift = copy(fresh);
+    drift.desired[0]!.revision = f.context.canonical;
+    expect(() => scalingCheckpoint(state, drift, fresh.stableConfigSha256)).toThrow();
   });
 });

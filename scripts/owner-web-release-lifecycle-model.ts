@@ -59,6 +59,13 @@ export type Context = {
   canonical: string;
   releaseEnv: Record<string, string>;
   retiredTags: string[];
+  currentBinding?: {
+    proof: NativeProof;
+    serviceSha256: string;
+    revisionSha256: string;
+    reviewedEvidenceSha256: string;
+    preclosed: boolean;
+  };
 };
 export type Phase =
   | 'captured'
@@ -207,6 +214,23 @@ function context(c: Context) {
       /^[1-9][0-9]{0,5}$/.test(c.attempt),
   );
   hash(c.manifest);
+  if (c.currentBinding) {
+    hash(c.currentBinding.serviceSha256);
+    hash(c.currentBinding.revisionSha256);
+    hash(c.currentBinding.reviewedEvidenceSha256);
+    hash(c.currentBinding.proof.uid);
+    hash(c.currentBinding.proof.templateSha256);
+    assert(
+      typeof c.currentBinding.preclosed === 'boolean' &&
+        /^[a-f0-9]{40}$/.test(c.currentBinding.proof.source),
+    );
+    assert(
+      /^us-west1-docker\.pkg\.dev\/bmson-assistant\/assistant\/web@sha256:[a-f0-9]{64}$/.test(
+        c.currentBinding.proof.image,
+      ),
+    );
+  }
+
   revision(c.canonical);
   assert(
     /^us-west1-docker\.pkg\.dev\/bmson-assistant\/assistant\/web@sha256:[a-f0-9]{64}$/.test(
@@ -640,4 +664,19 @@ export function acceptUnattachedRDrain(
       !s.snapshot.desired.some((t) => t.tag === r.tag),
   );
   return advance(s, 'closedR', s.snapshot);
+}
+
+/** Pre-initialization aliases were closed and settled before capture, under a reviewed evidence binding. */
+export function acceptPreclosedBootstrap(s: State, fresh: Snapshot): State {
+  verifyLifecycleState(s);
+  assert(
+    s.context.currentBinding?.preclosed &&
+      /^[a-f0-9]{64}$/.test(s.context.currentBinding.reviewedEvidenceSha256),
+  );
+  assert(s.phase === 'promotedP' && !s.pending && !s.admissionPossible && !s.retirementAttempt);
+  assert(equal(fresh, s.snapshot));
+  const p = releaseIdentity(s.context, 'P');
+  assert(equal(rows(fresh.desired), [row(p.revision, p.tag, 100)]));
+  assert(Object.keys(fresh.tagUris).length === 1 && fresh.tagUris[p.tag]);
+  return advance(s, 'retired', fresh);
 }
