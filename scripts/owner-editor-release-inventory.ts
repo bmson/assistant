@@ -590,6 +590,7 @@ export const BASIC_EDITOR_COMMANDS = [
   'add_family_relationship',
   'correct_owner_family_relationship',
   'correct_owner_memory',
+  'remove_owner_memory',
   'create_owner_memory',
 ] as const;
 /** Source declaration, not an operator flag. A present runtime cannot omit its gate. */

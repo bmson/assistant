@@ -99,6 +99,52 @@ describe('owner editor civil meaning and strict wire boundary', () => {
     ).toBe(false);
   });
 
+  it('strictly binds saved-note removal to its reviewed content, memory, and graph impact revisions', () => {
+    const remove = {
+      version: 1,
+      intent: 'apply',
+      command: 'remove_owner_memory',
+      operationId,
+      memoryId,
+      expectedContentHash: revision,
+      expectedMemoryRevision: 'b'.repeat(64),
+      expectedImpactRevision: 'c'.repeat(64),
+    };
+    const parsed = parseOwnerEditorRequest(remove, memoryPath);
+    expect(parsed.ok).toBe(true);
+    if (
+      !parsed.ok ||
+      parsed.request.intent !== 'apply' ||
+      parsed.request.command !== 'remove_owner_memory'
+    )
+      throw new Error('Expected a parsed saved-note removal request');
+    expect(ownerEditorPath(parsed.request.command)).toBe(memoryPath);
+    const scope = {
+      ownerId: subject,
+      sessionDigest: revision,
+      epoch: object,
+      privacyGeneration: null,
+      command: 'remove_owner_memory' as const,
+      operationId,
+      targetId: memoryId,
+      nonce: object,
+      issuedAt: 1,
+      expiresAt: 2,
+    };
+    expect(ownerEditorApplyMatchesScope(parsed.request, scope)).toBe(true);
+    expect(ownerEditorApplyMatchesScope(parsed.request, { ...scope, targetId: object })).toBe(
+      false,
+    );
+    expect(ownerEditorRequestHash(parsed.request)).not.toBe(
+      ownerEditorRequestHash({ ...parsed.request, expectedImpactRevision: 'd'.repeat(64) }),
+    );
+    expect(parseOwnerEditorRequest(remove, family).ok).toBe(false);
+    expect(parseOwnerEditorRequest({ ...remove, extra: true }, memoryPath).ok).toBe(false);
+    expect(
+      parseOwnerEditorRequest({ ...remove, expectedImpactRevision: 'short' }, memoryPath).ok,
+    ).toBe(false);
+  });
+
   it('strictly binds a person note to its exact subject and displayed revision', () => {
     const create = {
       version: 1,
@@ -313,6 +359,7 @@ describe('owner editor civil meaning and strict wire boundary', () => {
       'add_family_relationship',
       'correct_owner_family_relationship',
       'correct_owner_memory',
+      'remove_owner_memory',
       'create_owner_memory',
     ]);
     const removals: OwnerEditorApply[] = [

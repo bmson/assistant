@@ -2,8 +2,11 @@
 
 import type {
   OwnerEditorFormGrant,
+  OwnerEditorMemoryRemovalImpact,
+  OwnerEditorReply,
   OwnerEditorSessionView,
 } from '@assistant/persistence/owner-editor';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useEffect, useId, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { memoryNoteHref } from '@/lib/memory-note-context';
@@ -17,6 +20,11 @@ import { btn, textareaClass } from '@/lib/ui';
 import { Modal } from '@/lib/ui-client';
 
 type Capture = { snapshot: OwnerMemoryEditorView['snapshot']; grant: OwnerEditorFormGrant };
+type RemovalCapture = {
+  snapshot: OwnerMemoryEditorView['snapshot'];
+  impact: OwnerEditorMemoryRemovalImpact;
+  grant: OwnerEditorFormGrant;
+};
 
 export function ownerMemoryRecoveryPresentation(
   state: OwnerEditorOperationState,
@@ -27,13 +35,15 @@ export function ownerMemoryRecoveryPresentation(
   const reply = state.reply;
   const ownReply =
     reply?.authority === 'operation_receipt' &&
-    reply.command === 'correct_owner_memory' &&
+    (reply.command === 'correct_owner_memory' || reply.command === 'remove_owner_memory') &&
     state.reviewTargetId === memoryId &&
     ((reply.outcome !== 'saved' && reply.outcome !== 'unchanged') ||
       reply.ids.memoryId === memoryId);
   const ordinaryPendingMessages = [
     'An earlier save could not be confirmed. Check its result before saving again.',
     'Save could not be confirmed. Check its result before saving again.',
+    'An earlier saved note removal could not be confirmed. Check its result before removing again.',
+    'Saved note removal could not be confirmed. Check its result before removing again.',
   ];
   const canUsePendingCopy =
     state.phase === 'pending' &&
@@ -61,28 +71,103 @@ export function ownerMemoryRecoveryPresentation(
     hasDraft,
     ownReply,
     message: isOwnSavedRefreshReceipt
-      ? 'Saved. Related information may still show older details.'
+      ? reply?.command === 'remove_owner_memory'
+        ? 'Saved note removed. Some map details may take a moment to update.'
+        : 'Saved. Related information may still show older details.'
       : state.message,
   };
 }
 
+export function ownerMemoryResolvedReturnHref(
+  reply: OwnerEditorReply,
+  memoryId: string,
+  returnHref: string,
+): string | null {
+  return reply.authority === 'operation_receipt' &&
+    reply.command === 'remove_owner_memory' &&
+    reply.outcome === 'saved' &&
+    reply.ids.memoryId === memoryId
+    ? returnHref
+    : null;
+}
+
+export function missingSavedNoteRecoveryPresentation(
+  state: OwnerEditorOperationState,
+  memoryId: string,
+): { kind: 'checking' | 'missing' | 'pending' | 'removed' | 'not_confirmed'; message: string } {
+  const reply = state.reply;
+  const matchingRemoval =
+    (state.marker?.command === 'remove_owner_memory' && state.marker.targetId === memoryId) ||
+    (reply?.command === 'remove_owner_memory' && state.reviewTargetId === memoryId);
+  if (
+    matchingRemoval &&
+    reply?.authority === 'operation_receipt' &&
+    reply.command === 'remove_owner_memory' &&
+    reply.outcome === 'saved' &&
+    reply.ids.memoryId === memoryId
+  )
+    return { kind: 'removed', message: 'The receipt confirms this saved note was removed.' };
+  if (
+    matchingRemoval &&
+    reply &&
+    (reply.authority === 'operation_receipt' || reply.authority === 'scope_retirement')
+  )
+    return {
+      kind: 'not_confirmed',
+      message: 'The original result did not confirm removal. This saved note is unavailable here.',
+    };
+  if (matchingRemoval && state.phase === 'pending')
+    return {
+      kind: 'pending',
+      message: 'Removal is not confirmed yet. Check the original operation before continuing.',
+    };
+  if (state.phase === 'blocked')
+    return {
+      kind: 'not_confirmed',
+      message:
+        'This browser could not safely check the original operation. A missing note alone does not confirm removal.',
+    };
+  if (matchingRemoval && reply)
+    return {
+      kind: 'not_confirmed',
+      message: 'The original removal result is not confirmed. This saved note is unavailable here.',
+    };
+  if (state.phase === 'checking')
+    return { kind: 'checking', message: 'Checking this browser for the original operation…' };
+  return {
+    kind: 'missing',
+    message:
+      'No matching pending removal in this browser. A missing note alone does not confirm removal.',
+  };
+}
+
 /** Keeps the original operation and draft mounted even if a refreshed capability disappears. */
-export function OwnerMemoryEditor({ view }: { view: OwnerMemoryEditorView }) {
+export function OwnerMemoryEditor({
+  view,
+  returnHref,
+}: {
+  view: OwnerMemoryEditorView;
+  returnHref: string;
+}) {
   const [session, setSession] = useState(view.session);
   useEffect(() => {
     // There is no draft/controller to preserve before first admission. Once
     // admitted, a session change cannot silently replace an in-flight edit.
     if (!session && view.session) setSession(view.session);
   }, [session, view.session]);
-  return session ? <EditableSavedNote view={view} session={session} /> : null;
+  return session ? (
+    <EditableSavedNote view={view} session={session} returnHref={returnHref} />
+  ) : null;
 }
 
 function EditableSavedNote({
   view,
   session,
+  returnHref,
 }: {
   view: OwnerMemoryEditorView;
   session: OwnerEditorSessionView;
+  returnHref: string;
 }) {
   const router = useRouter();
   const fieldId = useId();
@@ -98,6 +183,8 @@ function EditableSavedNote({
   );
   const [open, setOpen] = useState(false);
   const [capture, setCapture] = useState<Capture | null>(null);
+  const [removalCapture, setRemovalCapture] = useState<RemovalCapture | null>(null);
+  const [removalOpen, setRemovalOpen] = useState(false);
   const [draft, setDraft] = useState('');
   const [localReview, setLocalReview] = useState(false);
   const refreshed = useRef<unknown>(null);
@@ -130,10 +217,19 @@ function EditableSavedNote({
   useEffect(() => {
     if (state.phase !== 'resolved' || !state.reply || refreshed.current === state.reply) return;
     refreshed.current = state.reply;
+    const returnAfterRemoval = ownerMemoryResolvedReturnHref(
+      state.reply,
+      view.snapshot.memoryId,
+      returnHref,
+    );
+    if (returnAfterRemoval) {
+      router.replace(returnAfterRemoval);
+      return;
+    }
     resolvedView.current = view;
     setAwaitingReadback(true);
     router.refresh();
-  }, [state.phase, state.reply, router, view]);
+  }, [state.phase, state.reply, router, returnHref, view]);
   useEffect(() => {
     if (state.phase !== 'resolved') return;
     // A grant already on a reloaded page is not readback of its earlier save.
@@ -224,7 +320,8 @@ function EditableSavedNote({
   const otherNote =
     state.reviewTargetId &&
     state.reviewTargetId !== view.snapshot.memoryId &&
-    state.reply?.command === 'correct_owner_memory'
+    (state.reply?.command === 'correct_owner_memory' ||
+      state.reply?.command === 'remove_owner_memory')
       ? memoryNoteHref(state.reviewTargetId, '/profile/knowledge?view=library')
       : null;
   const recoveryProps = {
@@ -236,6 +333,57 @@ function EditableSavedNote({
     otherNote,
     reload: () => router.refresh(),
     checkResult: () => void checkSavedNotePendingResult(controller),
+  };
+  const startRemoval = () => {
+    if (
+      !view.removalGrant ||
+      !view.removalImpact ||
+      !view.snapshot.eligible ||
+      !sessionMatches ||
+      pending ||
+      review ||
+      awaitingReadback ||
+      state.phase !== 'ready'
+    )
+      return;
+    setRemovalCapture({
+      snapshot: view.snapshot,
+      impact: view.removalImpact,
+      grant: view.removalGrant,
+    });
+    setRemovalOpen(true);
+  };
+  const remove = async () => {
+    const captured = removalCapture;
+    if (
+      !captured ||
+      !view.removalGrant ||
+      !view.removalImpact ||
+      !view.snapshot.eligible ||
+      !sessionMatches ||
+      pending ||
+      review ||
+      awaitingReadback ||
+      captured.snapshot.revision !== view.snapshot.revision ||
+      captured.snapshot.contentHash !== view.snapshot.contentHash ||
+      captured.impact.revision !== view.removalImpact.revision ||
+      captured.grant.operationId !== view.removalGrant.operationId
+    )
+      return;
+    await controller.apply(
+      {
+        version: 1,
+        intent: 'apply',
+        command: 'remove_owner_memory',
+        operationId: captured.grant.operationId,
+        memoryId: captured.snapshot.memoryId,
+        expectedContentHash: captured.snapshot.contentHash,
+        expectedMemoryRevision: captured.snapshot.revision,
+        expectedImpactRevision: captured.impact.revision,
+      },
+      captured.grant,
+      captured.snapshot.memoryId,
+    );
   };
   return (
     <div className="mt-4 grid gap-3">
@@ -258,6 +406,64 @@ function EditableSavedNote({
         {keptDraft ? 'View kept draft' : 'Edit saved note'}
       </button>
       {!open ? <SavedNoteRecovery {...recoveryProps} /> : null}
+      {view.removalGrant && view.removalImpact ? (
+        <button
+          type="button"
+          className={`${btn.outline} w-fit`}
+          disabled={
+            !sessionMatches || pending || review || awaitingReadback || state.phase !== 'ready'
+          }
+          onClick={startRemoval}
+        >
+          Forget saved note
+        </button>
+      ) : null}
+      {removalOpen && removalCapture ? (
+        <Modal label="Forget saved note" onClose={() => setRemovalOpen(false)}>
+          <h2 className="font-display text-xl font-semibold">Forget this saved note?</h2>
+          <p className="whitespace-pre-wrap break-words rounded-lg bg-sunken/35 p-3 text-sm">
+            {removalCapture.snapshot.content}
+          </p>
+          <p className="text-sm text-muted">
+            This removes this exact saved note and {removalCapture.impact.connectionCount} map
+            connections linked to it. The original source, the person, and your other saved notes
+            stay.
+          </p>
+          {removalCapture.impact.orphanedItems.length ? (
+            <div className="rounded-lg border border-edge p-3">
+              <h3 className="text-sm font-semibold">Map items with no other connections</h3>
+              <ul className="mt-2 list-disc pl-5 text-sm text-muted">
+                {removalCapture.impact.orphanedItems.map((item) => (
+                  <li key={item.id}>{item.label}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          <p className="text-sm text-muted">
+            If this note or its connections changed since you opened this review, removal stops and
+            asks you to review it again.
+          </p>
+          <SavedNoteRecovery {...recoveryProps} />
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              className={btn.danger}
+              disabled={pending || state.phase !== 'ready' || review}
+              onClick={() => void remove()}
+            >
+              {pending ? 'Removing…' : 'Forget saved note'}
+            </button>
+            <button
+              type="button"
+              className={btn.outline}
+              disabled={pending}
+              onClick={() => setRemovalOpen(false)}
+            >
+              Cancel
+            </button>
+          </div>
+        </Modal>
+      ) : null}
       {review && ownReply && !open ? (
         <button
           type="button"
@@ -376,6 +582,71 @@ function EditableSavedNote({
     </div>
   );
 }
+
+export function MissingSavedNoteRecovery({
+  memoryId,
+  session,
+  returnHref,
+}: {
+  memoryId: string;
+  session: OwnerEditorSessionView | null;
+  returnHref: string;
+}) {
+  const controller = useMemo(
+    () => (session ? new OwnerEditorOperation(session, () => window.sessionStorage) : null),
+    [session],
+  );
+  const state = useSyncExternalStore(
+    controller?.subscribe ?? NOOP_SUBSCRIBE,
+    controller?.getSnapshot ?? EMPTY_MISSING_RECOVERY_STATE,
+    controller?.getServerSnapshot ?? EMPTY_MISSING_RECOVERY_STATE,
+  );
+  useEffect(() => {
+    controller?.initialize();
+  }, [controller]);
+  const recovery = session
+    ? missingSavedNoteRecoveryPresentation(state, memoryId)
+    : {
+        kind: 'not_confirmed' as const,
+        message:
+          'Result checking is unavailable in this session. A missing note alone does not confirm removal.',
+      };
+  return (
+    <div className="grid gap-3">
+      <p role="status" className="text-sm text-muted">
+        {recovery.message}
+      </p>
+      {(recovery.kind === 'pending' || recovery.kind === 'not_confirmed') &&
+      state.phase === 'pending' &&
+      controller ? (
+        <button
+          type="button"
+          className={btn.primary}
+          disabled={state.busy}
+          onClick={() => void checkSavedNotePendingResult(controller)}
+        >
+          Check original result
+        </button>
+      ) : null}
+      <Link href={returnHref} className={`${btn.outline} w-fit`}>
+        Return to Memory
+      </Link>
+    </div>
+  );
+}
+
+const INITIAL_MISSING_RECOVERY_STATE: OwnerEditorOperationState = {
+  phase: 'checking',
+  reviewRequired: false,
+  reviewTargetId: null,
+  marker: null,
+  busy: false,
+  reply: null,
+  fieldErrors: {},
+  message: '',
+};
+const NOOP_SUBSCRIBE = () => () => {};
+const EMPTY_MISSING_RECOVERY_STATE = () => INITIAL_MISSING_RECOVERY_STATE;
 
 /** Dispatches the existing pending-result path using proof held at click time. */
 export function checkSavedNotePendingResult(

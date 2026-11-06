@@ -15,7 +15,9 @@ import {
 } from './owner-editor-graph.js';
 import {
   commitFirestoreOwnerMemoryCorrection,
+  commitFirestoreOwnerMemoryRemoval,
   readFirestoreOwnerMemoryEditorSnapshot,
+  readFirestoreOwnerMemoryRemovalSnapshot,
 } from './owner-editor-memory.js';
 import {
   commitFirestoreOwnerMemoryCreation,
@@ -63,6 +65,28 @@ export function createFirestoreOwnerEditorDomainStorage(
       prepared: import('./owner-editor-memory.js').PreparedFirestoreOwnerMemoryCorrection,
       now: Date,
     ) => commitFirestoreOwnerMemoryCorrection(store, embeddingSpace, claim, prepared, now),
+    memoryRemovalSnapshot: (
+      expected: string,
+      id: string,
+      scope: import('@assistant/persistence').OwnerEditorScope,
+    ) => {
+      if (expected !== ownerId) throw new Error('Owner changed');
+      return store.db.runTransaction(async (tx) => {
+        const current = await readFirestoreOwnerEditorIssuanceContext(store, ownerId, tx);
+        if (
+          !current ||
+          current.epoch !== scope.epoch ||
+          current.privacyGeneration !== scope.privacyGeneration
+        )
+          return null;
+        return readFirestoreOwnerMemoryRemovalSnapshot(store, ownerId, id, tx);
+      });
+    },
+    commitMemoryRemoval: (
+      claim: OwnerEditorClaim,
+      prepared: import('./owner-editor-memory.js').PreparedFirestoreOwnerMemoryRemoval,
+      now: Date,
+    ) => commitFirestoreOwnerMemoryRemoval(store, claim, prepared, now),
     memoryCreationTarget: (
       expected: string,
       subjectContactId: string,

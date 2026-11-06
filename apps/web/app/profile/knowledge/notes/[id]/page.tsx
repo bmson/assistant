@@ -4,10 +4,13 @@ import { MemoryNavigation } from '@/app/profile/memory-navigation';
 import { requireOwner } from '@/auth';
 import { memoryNoteReturnTo } from '@/lib/memory-note-context';
 import { ownerEditorAvailability } from '@/lib/owner-editor-availability';
-import { loadOwnerMemoryEditorView } from '@/lib/owner-memory-editor-server';
+import {
+  loadOwnerMemoryEditorRecoverySession,
+  loadOwnerMemoryEditorView,
+} from '@/lib/owner-memory-editor-server';
 import { ownerMemoryReadOnlyMessage } from '@/lib/owner-memory-editor-view';
 import { Badge, btn, cardShellClass, PageHeader, PageShell } from '@/lib/ui';
-import { OwnerMemoryEditor } from './owner-memory-editor';
+import { MissingSavedNoteRecovery, OwnerMemoryEditor } from './owner-memory-editor';
 
 export const dynamic = 'force-dynamic';
 export const metadata = { title: 'Saved note' };
@@ -47,7 +50,24 @@ export default async function SavedNotePage({
       </PageShell>
     );
   }
-  if (!view) notFound();
+  if (!view) {
+    let recoverySession: Awaited<ReturnType<typeof loadOwnerMemoryEditorRecoverySession>> = null;
+    try {
+      recoverySession = await loadOwnerMemoryEditorRecoverySession(session.formSessionScope);
+    } catch {
+      // The missing-note shell remains useful even when receipt lookup is unavailable.
+    }
+    return (
+      <PageShell size="reading">
+        <PageHeader back={{ href: back, label: 'Memory' }} title="Saved note unavailable" />
+        <MemoryNavigation current="notes" />
+        <section className={`${cardShellClass} mt-5 grid gap-3 p-4 sm:p-5`}>
+          <p className="text-sm text-muted">This saved note could not be found.</p>
+          <MissingSavedNoteRecovery memoryId={id} session={recoverySession} returnHref={back} />
+        </section>
+      </PageShell>
+    );
+  }
   const { snapshot } = view;
   const editorAvailability = ownerEditorAvailability({
     formSessionScope: session.formSessionScope,
@@ -95,7 +115,11 @@ export default async function SavedNotePage({
               : ownerMemoryReadOnlyMessage(view.unavailableReason)}
           </p>
         ) : null}
-        <OwnerMemoryEditor key={`${snapshot.ownerId}:${snapshot.memoryId}`} view={view} />
+        <OwnerMemoryEditor
+          key={`${snapshot.ownerId}:${snapshot.memoryId}`}
+          view={view}
+          returnHref={back}
+        />
       </article>
     </PageShell>
   );

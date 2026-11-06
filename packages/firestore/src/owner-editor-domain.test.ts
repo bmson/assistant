@@ -91,11 +91,13 @@ function fixture() {
           ? null
           : request.command === 'correct_owner_memory'
             ? request.memoryId
-            : request.command === 'update_person_identity'
-              ? request.contactId
-              : request.command === 'correct_owner_family_relationship'
-                ? request.targetRelationId
-                : request.subjectContactId,
+            : request.command === 'remove_owner_memory'
+              ? request.memoryId
+              : request.command === 'update_person_identity'
+                ? request.contactId
+                : request.command === 'correct_owner_family_relationship'
+                  ? request.targetRelationId
+                  : request.subjectContactId,
       sessionDigest: 'a'.repeat(64),
       nonce: randomUUID(),
       issuedAt: now.getTime(),

@@ -74,12 +74,16 @@ function refineOperation(v: z.infer<typeof operationBase>, ctx: z.RefinementCtx)
   if (
     v.result &&
     (v.result.outcome === 'saved' || v.result.outcome === 'unchanged') &&
-    (v.command === 'correct_owner_memory' || v.command === 'create_owner_memory') &&
+    (v.command === 'correct_owner_memory' ||
+      v.command === 'remove_owner_memory' ||
+      v.command === 'create_owner_memory') &&
     (Object.keys(v.result.ids).length !== 1 || !v.result.ids.memoryId)
   )
     ctx.addIssue({ code: 'custom', message: 'Memory receipt identity is invalid' });
   if (v.command === 'create_owner_memory' && v.result?.outcome === 'unchanged')
     ctx.addIssue({ code: 'custom', message: 'Memory creation cannot have an unchanged receipt' });
+  if (v.command === 'remove_owner_memory' && v.result?.outcome === 'unchanged')
+    ctx.addIssue({ code: 'custom', message: 'Memory removal cannot have an unchanged receipt' });
 }
 
 export const ownerEditorOperationRecordSchema = operationBase

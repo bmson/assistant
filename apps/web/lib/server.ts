@@ -1891,7 +1891,7 @@ export async function loadOwnerMemoryEditorView(
 ) {
   const [
     { readPostgresOwnerEditorIssuanceContext, readPostgresOwnerMemoryEditorSnapshot },
-    { readFirestoreOwnerEditorIssuanceContext, readFirestoreOwnerMemoryEditorSnapshot },
+    { readFirestoreOwnerEditorIssuanceContext, readFirestoreOwnerMemoryRemovalSnapshot },
     { buildOwnerMemoryEditorView },
   ] = await Promise.all([
     import('@assistant/db'),
@@ -1906,9 +1906,11 @@ export async function loadOwnerMemoryEditorView(
   const finish = (
     snapshot: NonNullable<Awaited<ReturnType<typeof readPostgresOwnerMemoryEditorSnapshot>>>,
     context: Awaited<ReturnType<typeof readPostgresOwnerEditorIssuanceContext>>,
+    removalImpact?: import('@assistant/persistence').OwnerEditorMemoryRemovalImpact | null,
   ) =>
     buildOwnerMemoryEditorView({
       snapshot,
+      removalImpact,
       context,
       formSessionScope,
       secret: config.AUTH_SECRET,
@@ -1926,20 +1928,34 @@ export async function loadOwnerMemoryEditorView(
     throw new Error('Memory persistence is unavailable');
   const store = getFirestoreInstallationStore();
   return store.db.runTransaction(async (tx) => {
-    const snapshot = await readFirestoreOwnerMemoryEditorSnapshot(
+    const removal = await readFirestoreOwnerMemoryRemovalSnapshot(
       store,
       config.FIRESTORE_AGENT_ID,
       memoryId,
       tx,
     );
-    if (!snapshot) return null;
+    if (!removal) return null;
     const context = await readFirestoreOwnerEditorIssuanceContext(
       store,
       config.FIRESTORE_AGENT_ID,
       tx,
     );
-    return finish(snapshot, context);
+    return finish(removal.snapshot, context, removal.impact);
   });
+}
+
+/** Owner/session partition for receipt lookup when the saved row is already absent. */
+export async function loadOwnerMemoryEditorRecoverySession(formSessionScope: string | undefined) {
+  if (!formSessionScope) return null;
+  const config = loadConfig();
+  if (config.PERSISTENCE_DRIVER === 'firestore') {
+    if (validateAgentPersistenceConfig(config).length || !config.FIRESTORE_AGENT_ID) return null;
+    return { ownerId: config.FIRESTORE_AGENT_ID, formSessionScope };
+  }
+  return withPostgresMemoryBrowseRead(async (tx) => ({
+    ownerId: await assertPostgresInstallationOwner(tx),
+    formSessionScope,
+  }));
 }
 
 /** One exact owner-scoped saved-note read with no editor context or grant issuance. */

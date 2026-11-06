@@ -13,6 +13,7 @@ const COMMAND_ROUTE: Record<OwnerEditorCommand, OwnerEditorRoute> = {
   correct_owner_family_relationship: '/api/profile/knowledge/family',
   remove_owner_family_relationship: '/api/profile/knowledge/family',
   correct_owner_memory: '/api/profile/knowledge/memory',
+  remove_owner_memory: '/api/profile/knowledge/memory',
   create_owner_memory: '/api/profile/knowledge/memory',
 };
 
@@ -26,6 +27,7 @@ const COMMANDS = new Set<string>([
   'add_family_relationship',
   'correct_owner_family_relationship',
   'correct_owner_memory',
+  'remove_owner_memory',
   'create_owner_memory',
   'remove_person',
   'remove_owner_family_relationship',
@@ -64,7 +66,11 @@ export function decodeOwnerEditorReply(value: unknown): OwnerEditorReply | null 
 
   if (value.authority === 'operation_receipt') {
     // A pre-existing identical note is not this operation's successful create.
-    if (value.command === 'create_owner_memory' && value.outcome === 'unchanged') return null;
+    if (
+      (value.command === 'create_owner_memory' || value.command === 'remove_owner_memory') &&
+      value.outcome === 'unchanged'
+    )
+      return null;
     if (
       !exactKeys(value, [
         'version',
@@ -120,13 +126,17 @@ export function decodeOwnerEditorReply(value: unknown): OwnerEditorReply | null 
         value.command === 'update_person_identity' ||
         value.command === 'remove_person'
           ? ['contactId']
-          : value.command === 'correct_owner_memory' || value.command === 'create_owner_memory'
+          : value.command === 'correct_owner_memory' ||
+              value.command === 'remove_owner_memory' ||
+              value.command === 'create_owner_memory'
             ? ['memoryId']
             : ['relationId', 'memoryId', 'assertionId'];
       const ids = value.ids;
       if (requiredIds.some((key) => !uuid(ids[key]))) return null;
       if (
-        (value.command === 'correct_owner_memory' || value.command === 'create_owner_memory') &&
+        (value.command === 'correct_owner_memory' ||
+          value.command === 'remove_owner_memory' ||
+          value.command === 'create_owner_memory') &&
         Object.keys(ids).length !== 1
       )
         return null;
