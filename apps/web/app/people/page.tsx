@@ -178,7 +178,7 @@ export default async function PeoplePage({
       <PageHeader
         back={{ href: '/profile', label: 'Memory' }}
         title="People"
-        intro="Open a person to view their details and family connections."
+        intro="Find a person to edit their details and manage their connections."
       />
       <MemoryNavigation current="people" />
 

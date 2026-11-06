@@ -2,6 +2,7 @@ export {
   type OwnerFamilyMeaning,
   presentKnowledgeGraphRelation,
   presentOwnerFamilyFact,
+  presentOwnerFamilySentence,
   type RelationshipPresentation,
   readableKnowledgeLabel,
   validOwnerFamilyMeaning,

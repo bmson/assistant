@@ -125,10 +125,10 @@ describe('one reviewed controller contextual entry points (SSR, not mounted focu
       </OwnerEditorContextualHost>,
     );
     expect(html.match(/Edit details/g)).toHaveLength(1);
-    expect(html.match(/Edit relationship/g)).toHaveLength(1);
-    expect(html.match(/Add family relationship/g)).toHaveLength(1);
+    expect(html.match(/Edit connection/g)).toHaveLength(1);
+    expect(html.match(/Add connection/g)).toHaveLength(1);
     expect(html.match(/disabled=""/g)).toHaveLength(3);
-    expect(html.indexOf('Sam was Alex')).toBeLessThan(html.indexOf('Edit relationship'));
+    expect(html.indexOf('Sam was Alex')).toBeLessThan(html.indexOf('Edit connection'));
     expect(html).not.toContain('Exact owner statement');
     expect(html).not.toContain('private-issued-handle');
     expect(html).not.toContain('Correct this owner-authored');

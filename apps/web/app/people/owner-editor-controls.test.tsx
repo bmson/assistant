@@ -15,6 +15,7 @@ import {
   OwnerEditorControls,
   type OwnerEditorControlsProps,
   OwnerEditorDraftCache,
+  OwnerEditorOptionalDetails,
   OwnerEditorPeopleSelectors,
   OwnerEditorRelationshipField,
   OwnerEditorRemovalActions,
@@ -316,7 +317,7 @@ describe('actual owner editor controls server boundary (not mounted browser proo
     );
     expect(html).toContain('Add person');
     expect(html).toContain('Edit details');
-    expect(html).toContain('Add family relationship');
+    expect(html).toContain('Add connection');
     expect((html.match(/disabled=""/g) ?? []).length).toBe(3);
     expect(html).not.toContain('issued-test-handle'); // Not a hidden writable action/form ID.
     expect(html).not.toContain('updateContactRelationship');
@@ -671,4 +672,29 @@ it('describes rejecting a recorded claim without implying an end date or a visua
   );
   expect(html).toContain('rejected');
   expect(html).toContain('does not record that the relationship ended');
+});
+
+it('keeps optional context collapsed but exposes invalid fields for correction', () => {
+  const field = (
+    <label>
+      From
+      <input type="date" defaultValue="2026-01-01" />
+    </label>
+  );
+  const collapsed = renderToStaticMarkup(
+    <OwnerEditorOptionalDetails summary="Dates and context (optional)">
+      {field}
+    </OwnerEditorOptionalDetails>,
+  );
+  expect(collapsed).not.toContain('open=""');
+  expect(collapsed).toContain('<summary');
+  expect(collapsed).toContain('2026-01-01');
+  const invalid = renderToStaticMarkup(
+    <OwnerEditorOptionalDetails summary="Dates and context (optional)" hasErrors>
+      {field}
+      <p role="alert">Check the date.</p>
+    </OwnerEditorOptionalDetails>,
+  );
+  expect(invalid).toContain('open=""');
+  expect(invalid).toContain('Check the date.');
 });
