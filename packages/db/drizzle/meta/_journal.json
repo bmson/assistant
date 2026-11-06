@@ -953,6 +953,13 @@
       "when": 1793798375365,
       "tag": "0135_memory_write_witness",
       "breakpoints": true
+    },
+    {
+      "idx": 136,
+      "version": "7",
+      "when": 1793991296377,
+      "tag": "0136_research_assignment_state",
+      "breakpoints": true
     }
   ]
 }
