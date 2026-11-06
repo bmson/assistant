@@ -1,6 +1,6 @@
 /** Pure source-only BASIC5 lifecycle. No IO, transport, credentials or production caller. */
 import { operationName } from './owner-web-tag-native.js';
-import { WEB_SERVICE } from './owner-web-tag-retirement.js';
+import { tagHash, WEB_CANONICAL_URL, WEB_SERVICE } from './owner-web-tag-retirement.js';
 import { reconciliationDigest as digest } from './owner-web-traffic-reconciliation-model.js';
 
 type Obj = Record<string, unknown>;
@@ -180,12 +180,16 @@ function validateSnapshot(s: Snapshot, tombstones: string[]) {
       tombstones.every((t) => !liveTags.includes(t)),
   );
   for (const uri of Object.values(s.tagUris)) hash(uri);
+  const expectedUrls = [s.rootUriSha256, ...Object.values(s.tagUris)],
+    canonicalAlias = tagHash(WEB_CANONICAL_URL);
+  if (s.urls.includes(canonicalAlias) && !expectedUrls.includes(canonicalAlias))
+    expectedUrls.push(canonicalAlias);
   assert(
-    s.urls.length === liveTags.length + 1 &&
+    s.urls.length === expectedUrls.length &&
       new Set(s.urls).size === s.urls.length &&
       s.urls.includes(s.rootUriSha256),
   );
-  assert(equal([...s.urls].sort(), [s.rootUriSha256, ...Object.values(s.tagUris)].sort()));
+  assert(equal([...s.urls].sort(), expectedUrls.sort()));
   const native = Object.entries(s.revisions);
   assert(native.length > 0 && native.length <= 3);
   for (const [name, p] of native) {
