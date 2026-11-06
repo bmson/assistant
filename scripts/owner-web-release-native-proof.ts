@@ -1,3 +1,4 @@
+import { disabled, retiredCurrentCondition } from './owner-release-current-snapshot.js';
 /** Unwired raw-response projection. No IO, credentials or supplied-proof acceptance. */
 
 import {
@@ -94,12 +95,7 @@ function revisionProof(raw: unknown, name: string, c: Context): NativeProof {
       const v = nativeObject(condition);
       return (
         v.state === 'CONDITION_SUCCEEDED' ||
-        (reviewedCurrent?.preclosed &&
-          ['Active', 'ResourcesAvailable'].includes(String(v.type)) &&
-          v.revisionReason === 'RETIRED' &&
-          [undefined, 'STATE_UNSPECIFIED', 'CONDITION_FAILED'].includes(
-            v.state as undefined | string,
-          ))
+        (reviewedCurrent?.preclosed && retiredCurrentCondition(v))
       );
     }),
   );
@@ -113,7 +109,8 @@ function revisionProof(raw: unknown, name: string, c: Context): NativeProof {
     r.name === `${WEB_SERVICE}/revisions/${name}` &&
       r.service === WEB_SERVICE &&
       ready.length === 1 &&
-      ready[0]?.state === 'CONDITION_SUCCEEDED' &&
+      (ready[0]?.state === 'CONDITION_SUCCEEDED' ||
+        (reviewedCurrent?.preclosed && retiredCurrentCondition(ready[0] as Obj))) &&
       (r.reconciling === undefined || r.reconciling === false),
   );
   const uid = text(r.uid, /^[A-Za-z0-9-]{1,128}$/),
@@ -260,7 +257,10 @@ function projectSnapshot(raw: unknown, native: Record<string, unknown>, c: Conte
   requireNative(
     s.name === WEB_SERVICE &&
       (s.reconciling === undefined || s.reconciling === false) &&
-      nativeObject(s.terminalCondition).state === 'CONDITION_SUCCEEDED' &&
+      (nativeObject(s.terminalCondition).state === 'CONDITION_SUCCEEDED' ||
+        (c.currentBinding?.preclosed &&
+          disabled(s) &&
+          retiredCurrentCondition(nativeObject(s.terminalCondition)))) &&
       s.deleteTime === undefined &&
       s.expireTime === undefined,
   );
@@ -312,7 +312,8 @@ function projectSnapshot(raw: unknown, native: Record<string, unknown>, c: Conte
     generation,
     observedGeneration: generation,
     reconciling: false,
-    succeeded: true,
+    succeeded: nativeObject(s.terminalCondition).state === 'CONDITION_SUCCEEDED',
+    ...(c.currentBinding?.preclosed && disabled(s) ? { admissionDisabled: true as const } : {}),
     desired,
     observed,
     latestReady,

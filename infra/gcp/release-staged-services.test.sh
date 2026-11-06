@@ -55,7 +55,8 @@ if a[:3]==['run','services','describe']:
   active_revisions=set(svc['traffic'])
   traffic += [{'revisionName':x['revision'],'tag':x['tag'],'percent':0,'url':f"https://{x['tag']}-{name}.example"} for x in svc.get('tags',[]) if x['revision'] not in active_revisions]
   traffic += [{'revisionName':x['revision'],'tag':x['tag'],'percent':0,'url':f"https://{x['tag']}-{name}.example"} for x in svc.get('staged',[])]
-  print(json.dumps({'spec':{'template':{'spec':{'containers':[{'env':[{'name':k,'value':v} for k,v in svc['env'].items()]}] }}},'status':{'url':f'https://{name}.example','traffic':traffic}})); sys.exit(0)
+  latest=svc.get('staged',[])[-1] if svc.get('staged') else {'revision':svc['revision'],'image':'legacy-image'}
+  print(json.dumps({'spec':{'template':{'spec':{'containers':[{'image':latest['image'],'env':[{'name':k,'value':v} for k,v in svc['env'].items()]}] }}},'status':{'latestCreatedRevisionName':latest['revision'],'url':f'https://{name}.example','traffic':traffic}})); sys.exit(0)
  if 'value(status.url)' in ' '.join(a): print(f'https://{name}.example'); sys.exit(0)
 if a[:3]==['run','revisions','describe']:
  revision=a[3]
@@ -164,6 +165,8 @@ with open(os.environ['STUB_ADMISSION_COMMANDS'],'a') as f:
   'manifestPath':os.getenv('OWNER_TAG_MANIFEST_PATH'),
   'manifestDigest':os.getenv('OWNER_TAG_MANIFEST_DIGEST'),
   'stagingTag':os.getenv('OWNER_TAG_STAGING_TAG'),
+  'bootstrapRole':os.getenv('OWNER_BOOTSTRAP_ROLE'),
+  'bootstrapRevision':os.getenv('OWNER_BOOTSTRAP_REVISION'),
   'args':sys.argv[1:]})+'\n')
 PY
 chmod +x "$TEST_ROOT/bin/pnpm"
@@ -174,6 +177,8 @@ release_retire_captured_web_tags "$admission_source" "$RELEASE_MANIFEST_PATH" "$
 release_verify_owned_web_tag_admission "$admission_source" "$RELEASE_MANIFEST_PATH" "$admission_digest" candidate-12345-1 || fail 'verification wrapper should invoke the fixed admission command'
 release_record_owned_web_tag candidate "$admission_source" "$RELEASE_MANIFEST_PATH" "$admission_digest" candidate-12345-1 || fail 'candidate receipt wrapper should invoke the fixed record command'
 release_record_owned_web_tag resume "$admission_source" "$RELEASE_MANIFEST_PATH" "$admission_digest" candidate-12345-1 || fail 'resume receipt wrapper should invoke the fixed record command'
+OWNER_BOOTSTRAP_ROLE=agent OWNER_BOOTSTRAP_REVISION=paused-agent \
+  release_owner_web_tag_admission_command --bootstrap-agent-resume "$admission_source" "$RELEASE_MANIFEST_PATH" "$admission_digest" candidate-12345-1 || fail 'agent successor must use the protected command transport'
 python3 - "$STUB_ADMISSION_COMMANDS" "$admission_source" "$RELEASE_MANIFEST_PATH" "$admission_digest" <<'PY'
 import json,sys
 rows=[json.loads(x) for x in open(sys.argv[1])]
@@ -183,10 +188,12 @@ assert [x['args'] for x in rows]==[
  ['exec','tsx','scripts/owner-web-tag-admission.ts','--verify-admission'],
  ['exec','tsx','scripts/owner-web-tag-admission.ts','--record-candidate'],
  ['exec','tsx','scripts/owner-web-tag-admission.ts','--record-resume'],
+ ['exec','tsx','scripts/owner-web-tag-admission.ts','--bootstrap-agent-resume'],
 ], rows
 for row in rows:
  assert row['source']==sys.argv[2] and row['manifestPath']==sys.argv[3] and row['manifestDigest']==sys.argv[4], row
-assert [x['stagingTag'] for x in rows]==['candidate-12345-1']*5, rows
+assert [x['stagingTag'] for x in rows]==['candidate-12345-1']*6, rows
+assert rows[-1]['bootstrapRole']=='agent' and rows[-1]['bootstrapRevision']=='paused-agent', rows[-1]
 PY
 TEST_BASIC5_CAPABILITY=false
 release_basic_editor_forward_only() { printf '%s' "$TEST_BASIC5_CAPABILITY"; }
@@ -258,7 +265,8 @@ JSON
     FAIL_AGENT_PROMOTE FAIL_WEB_PROMOTE FAIL_REPAUSE FAIL_RESUME_DRAIN STUB_WEB_TIMEOUT_SECONDS STUB_WEB_TIMEOUT_MISSING \
     FAIL_WORKER_UPDATE STALE_WORKER_IMAGE FAIL_TAG_REMOVAL MUTATE_TRAFFIC_AFTER_TAG_REMOVAL \
     ADD_FOREIGN_TAG_TO_PROMOTED_REVISION FAIL_RESUME_STAGE_UNCERTAIN REASSIGN_RESUME_TAG_ON_REPAUSE AGENT_IMAGE_PUSH_DIGEST \
-    FAIL_ADMISSION_CAPTURE FAIL_ADMISSION_RETIRE FAIL_ADMISSION_VERIFY FAIL_CANDIDATE_RECEIPT FAIL_RESUME_RECEIPT FAIL_AGENT_READY_RECEIPT OWNED_TAGS_ALREADY_ABSENT
+    FAIL_ADMISSION_CAPTURE FAIL_ADMISSION_RETIRE FAIL_ADMISSION_VERIFY FAIL_CANDIDATE_RECEIPT FAIL_RESUME_RECEIPT FAIL_AGENT_READY_RECEIPT OWNED_TAGS_ALREADY_ABSENT \
+    FAIL_BOOTSTRAP_AGENT_RESUME FAIL_BOOTSTRAP_AGENT_STALE
  : >"$STUB_CURL_CALLS"
  : >"$STUB_RELEASE_CALLS"
  : >"$STUB_SERVICE_UPDATE_CALLS"
@@ -583,7 +591,7 @@ assert all(key in web_updates[1] for key in (
  'ASSISTANT_RELEASE_WORKFLOW_RUN_ATTEMPT=1',
  'ASSISTANT_RELEASE_SOURCE_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'))
 PY
-# Before any unpaused tagged revision exists, old-pair rollback still applies.
+# Before an unpaused web revision exists, ordinary old-pair rollback still applies.
 reset_case; prepare_firestore_state; export RELEASE_MODULES=browser FINAL_NEW_PAIR_PROBE_FAIL=1
 if release_staged_services; then fail 'paused preadmission probe failure must roll back'; fi
 assert_old_traffic
@@ -591,7 +599,7 @@ python3 - "$TEST_ROOT/state.json" "$STUB_SERVICE_UPDATE_CALLS" <<'PYCASE'
 import json,sys
 state=json.load(open(sys.argv[1])); updates=[json.loads(x) for x in open(sys.argv[2])]
 assert state['assistant-browser']['image']=='registry/old-browser', state
-assert not any('ASSISTANT_RELEASE_WRITES_PAUSED=false' in x[x.index('--update-env-vars')+1] for x in updates), updates
+assert not any(x[3]=='assistant-web' and 'ASSISTANT_RELEASE_WRITES_PAUSED=false' in x[x.index('--update-env-vars')+1] for x in updates), updates
 PYCASE
 
 # BASIC5 must never enter the staging path outside a paired Firestore release.
@@ -843,6 +851,26 @@ rm "$CAP_FIXTURE_ROOT/apps/web/lib/owner-editor-runtime.ts"
 # Bootstrap uses the same promotion phases; no successful promotion means no admission restoration.
 release_bootstrap_scaling() {
   printf 'bootstrap:%s:%s:%s\n' "$1" "$2" "$3" >>"$STUB_ADMISSION_CALLS"
+  if [[ "$1" == --bootstrap-agent-resume ]]; then
+    [[ "${basic_editor_admission_possible:-false}" == true ]] || fail 'seal admission before the reachable agent successor create'
+    printf 'bootstrap-agent-admission:true\n' >>"$STUB_ADMISSION_CALLS"
+    [[ "${FAIL_BOOTSTRAP_AGENT_STALE:-0}" != 1 ]] || return 0
+    python3 - "$STUB_ROOT/state.json" "$3" <<'PYCASE'
+import json,sys
+p=sys.argv[1]; s=json.load(open(p)); svc=s['assistant-agent']
+paused=next(x for x in svc['staged'] if x['revision']==sys.argv[2])
+assert paused['env']['ASSISTANT_RELEASE_WRITES_PAUSED']=='true'
+env=dict(paused['env']); env['ASSISTANT_RELEASE_WRITES_PAUSED']='false'
+svc['next']+=1; revision=f"assistant-agent-new{svc['next']}"
+successor={'revision':revision,'tag':paused['tag'],'image':paused['image'],'env':env}
+svc['staged']=[successor if x['tag']==paused['tag'] else x for x in svc['staged']]
+svc['env']=env
+svc['revisions'][revision]={'env':dict(env),'image':paused['image']}
+open(p,'w').write(json.dumps(s))
+PYCASE
+    [[ "${FAIL_BOOTSTRAP_AGENT_RESUME:-0}" != 1 ]] || return 1
+    return 0
+  fi
   if [[ "${FAIL_BOOTSTRAP_UNKNOWN:-0}" == 1 && "$2" == web ]]; then return 1; fi
 }
 reset_case; prepare_firestore_state
@@ -853,8 +881,21 @@ python3 - "$STUB_ADMISSION_CALLS" <<'PYCASE'
 import sys
 rows=open(sys.argv[1]).read().splitlines()
 def index(prefix): return next(i for i,x in enumerate(rows) if x.startswith(prefix))
-assert index('native-phase:promoteP') < index('bootstrap:--bootstrap-restore:web') < index('traffic:assistant-agent:assistant-agent-new1=100')
-assert index('traffic:assistant-agent:assistant-agent-new1=100') < index('bootstrap:--bootstrap-restore:agent') < index('agent-ready:')
+assert index('stage:assistant-agent:') < index('native-phase:promoteP')
+assert next(x for x in rows if x.startswith('stage:assistant-agent:')).endswith(':true')
+assert index('native-phase:promoteP') < index('bootstrap:--bootstrap-restore:web') < index('retire:')
+assert index('retire:') < index('bootstrap:--bootstrap-agent-resume:agent:assistant-agent-new1') < index('bootstrap-agent-admission:true')
+assert index('bootstrap-agent-admission:true') < index('traffic:assistant-agent:assistant-agent-new2=100')
+assert index('traffic:assistant-agent:assistant-agent-new2=100') < index('bootstrap:--bootstrap-restore:agent:assistant-agent-new2') < index('agent-ready:')
+assert index('agent-ready:') < next(i for i,x in enumerate(rows) if x.startswith('stage:assistant-web:') and x.endswith(':false'))
+PYCASE
+python3 - "$STUB_ROOT/state.json" <<'PYCASE'
+import json,sys
+s=json.load(open(sys.argv[1])); a=s['assistant-agent']; p=a['revisions']['assistant-agent-new1']; r=a['revisions']['assistant-agent-new2']
+assert p['image']==r['image']
+assert p['env']['ASSISTANT_RELEASE_WRITES_PAUSED']=='true' and r['env']['ASSISTANT_RELEASE_WRITES_PAUSED']=='false'
+assert {k:v for k,v in p['env'].items() if k!='ASSISTANT_RELEASE_WRITES_PAUSED'}=={k:v for k,v in r['env'].items() if k!='ASSISTANT_RELEASE_WRITES_PAUSED'}
+assert a['traffic']=={'assistant-agent-new2':100}
 PYCASE
 reset_case; prepare_firestore_state
 export FAIL_WEB_PROMOTE=1
@@ -867,10 +908,27 @@ python3 - "$STUB_ADMISSION_CALLS" <<'PYCASE'
 import sys
 rows=open(sys.argv[1]).read().splitlines()
 assert not any(x.startswith('bootstrap:--bootstrap-restore:agent') for x in rows)
-hold=next(i for i,x in enumerate(rows) if x.startswith('bootstrap:--bootstrap-hold:web'))
-rollback=next(i for i,x in enumerate(rows) if x.startswith('native-phase:restoreC'))
-assert hold < rollback
+assert 'bootstrap-agent-admission:true' in rows
+assert not any(x.startswith('native-phase:restoreC') for x in rows), rows
+assert not any(x=='traffic:assistant-agent:agent-old=100' for x in rows), rows
 PYCASE
+reset_case; prepare_firestore_state
+export FAIL_BOOTSTRAP_AGENT_RESUME=1
+if release_staged_services >/dev/null 2>&1; then fail 'unknown agent successor create must fail closed'; fi
+python3 - "$STUB_ADMISSION_CALLS" "$STUB_ROOT/state.json" <<'PYCASE'
+import json,sys
+rows=open(sys.argv[1]).read().splitlines(); state=json.load(open(sys.argv[2]))
+assert 'bootstrap-agent-admission:true' in rows
+assert not any(x.startswith('native-phase:restoreC') or x.startswith('bootstrap:--bootstrap-restore:agent') for x in rows), rows
+assert not any(x=='traffic:assistant-agent:agent-old=100' for x in rows)
+assert state['assistant-agent']['staged'][0]['revision']=='assistant-agent-new2'
+assert state['assistant-agent']['staged'][0]['env']['ASSISTANT_RELEASE_WRITES_PAUSED']=='false'
+PYCASE
+reset_case; prepare_firestore_state
+export FAIL_BOOTSTRAP_AGENT_STALE=1
+if release_staged_services >/dev/null 2>&1; then fail 'a successful helper without an observed new unpaused revision must stop'; fi
+if rg -q '^traffic:assistant-agent:assistant-agent-new' "$STUB_ADMISSION_CALLS"; then fail 'stale paused agent was promoted as its successor'; fi
+if rg -q '^native-phase:restoreC' "$STUB_ADMISSION_CALLS"; then fail 'unconfirmed agent successor resumed old code'; fi
 reset_case; prepare_firestore_state
 export FAIL_BOOTSTRAP_UNKNOWN=1
 if release_staged_services >/dev/null 2>&1; then fail 'unknown scaling restoration must fail closed'; fi

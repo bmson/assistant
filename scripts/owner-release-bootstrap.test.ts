@@ -1,9 +1,12 @@
+// biome-ignore-all lint/style/noNonNullAssertion: Synthetic wire fixtures explicitly populate referenced fields.
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
   type BootstrapReceipt,
   bootstrapDigest,
+  createAgentResume,
   planScalingRestore,
+  preparePausedAgentResume,
   restoreScaling,
   reviewedBootstrap,
   verifiedRestoreReceipts,
@@ -29,7 +32,7 @@ function fixture(role: 'agent' | 'web' = 'web') {
           { name: 'ASSISTANT_RELEASE_MANIFEST', value: manifest },
           { name: 'ASSISTANT_RELEASE_WORKFLOW_RUN_ID', value: '9' },
           { name: 'ASSISTANT_RELEASE_WORKFLOW_RUN_ATTEMPT', value: '1' },
-          { name: 'ASSISTANT_RELEASE_WRITES_PAUSED', value: 'true' },
+          { name: 'ASSISTANT_RELEASE_WRITES_PAUSED', value: role === 'web' ? 'true' : 'false' },
         ],
         resources: { limits: { memory: '2Gi', cpu: '1' } },
       },
@@ -51,7 +54,7 @@ function fixture(role: 'agent' | 'web' = 'web') {
     generation: '2',
     observedGeneration: '2',
     reconciling: false,
-    terminalCondition:{state:'CONDITION_SUCCEEDED'},
+    terminalCondition: { state: 'CONDITION_SUCCEEDED' },
     template,
     traffic: [
       {
@@ -364,4 +367,132 @@ describe('reviewed current snapshot and bootstrap restoration', () => {
       'agent_candidate_env="${agent_candidate_env},ASSISTANT_RELEASE_SOURCE_SHA=${TAG}',
     );
   });
+});
+
+describe('paused agent and atomic immutable unpaused successor', () => {
+  function pausedFixture() {
+    const f = fixture('agent');
+    f.service.template.containers[0]!.env.find(
+      (e) => e.name === 'ASSISTANT_RELEASE_WRITES_PAUSED',
+    )!.value = 'true';
+    f.service.traffic = [
+      {
+        type: 'TRAFFIC_TARGET_ALLOCATION_TYPE_REVISION',
+        revision: f.receipt.services.agent.revision,
+        percent: 100,
+        tag: '',
+      },
+      {
+        type: 'TRAFFIC_TARGET_ALLOCATION_TYPE_REVISION',
+        revision: f.expected.revision,
+        percent: 0,
+        tag: 'candidate-9-1',
+      },
+    ];
+    f.service.trafficStatuses = clone(f.service.traffic);
+    return f;
+  }
+  it('requires real paused P/strict startup before creating a reachable successor, with no unpaused legacy alias', () => {
+    const f = pausedFixture();
+    expect(() =>
+      preparePausedAgentResume(f.receipt, f.service, f.native, f.expected),
+    ).not.toThrow();
+    const unpaused = clone(f.service);
+    unpaused.template.containers[0]!.env.find(
+      (e) => e.name === 'ASSISTANT_RELEASE_WRITES_PAUSED',
+    )!.value = 'false';
+    expect(() => preparePausedAgentResume(f.receipt, unpaused, f.native, f.expected)).toThrow();
+    const alias = clone(f.service);
+    alias.traffic.push({ ...alias.traffic[0]!, tag: 'old-unpaused-alias', percent: 0 });
+    expect(() => preparePausedAgentResume(f.receipt, alias, f.native, f.expected)).toThrow();
+  });
+  it.each(['success', 'unknown', 'failed-startup'] as const)(
+    'one atomic template+same-tag create handles %s without in-place unpause or blind retry',
+    async (mode) => {
+      const f = pausedFixture();
+      let service = clone(f.service),
+        successor: unknown;
+      let writes = 0;
+      const records: Record<string, unknown>[] = [];
+      const name = f.service.name,
+        newName = 'assistant-agent-r-9-1-aaaaaaaa';
+      const io = {
+        now: () => 0,
+        sleep: async () => {},
+        recordIntent: async (v: unknown) => {
+          records.push(v as Record<string, unknown>);
+        },
+        request: async (url: string, o: { method: string; body?: string }) => {
+          if (o.method === 'PATCH') {
+            writes++;
+            expect(records[0]?.outcome).toBe('attempted');
+            expect(url.endsWith('?updateMask=template,traffic')).toBe(true);
+            const body = JSON.parse(o.body ?? 'null');
+            expect(body.etag).toBe(f.service.etag);
+            expect(body.template.revision).toBe(newName);
+            expect(body.traffic).toMatchObject([
+              { revision: f.receipt.services.agent.revision, percent: 100 },
+              { revision: newName, tag: 'candidate-9-1', percent: 0 },
+            ]);
+            service = {
+              ...service,
+              template: body.template,
+              traffic: body.traffic,
+              trafficStatuses: clone(body.traffic),
+              latestCreatedRevision: `${name}/revisions/${newName}`,
+              latestReadyRevision: `${name}/revisions/${newName}`,
+              etag: 'new-etag',
+              generation: '3',
+              observedGeneration: '3',
+            };
+            const { revision: _r, ...spec } = body.template;
+            successor = {
+              ...spec,
+              name: `${name}/revisions/${newName}`,
+              service: name,
+              uid: 'different-new-uid',
+              conditions: [
+                {
+                  type: 'Ready',
+                  state: mode === 'failed-startup' ? 'CONDITION_FAILED' : 'CONDITION_SUCCEEDED',
+                },
+              ],
+            };
+            if (mode === 'unknown') throw new Error('connection lost');
+            return new Response(
+              JSON.stringify({
+                name: 'projects/bmson-assistant/locations/us-west1/operations/op-r',
+                done: true,
+                response: { name },
+              }),
+            );
+          }
+          if (url === `https://run.googleapis.com/v2/${name}`)
+            return new Response(JSON.stringify(service));
+          if (url.endsWith(`/revisions/${f.expected.revision}`))
+            return new Response(JSON.stringify(f.native));
+          if (url.endsWith(`/revisions/${newName}`))
+            return successor
+              ? new Response(JSON.stringify(successor))
+              : new Response('{}', { status: 404 });
+          throw new Error('unexpected fixture read');
+        },
+      };
+      const task = createAgentResume(io, f.receipt, f.expected);
+      if (mode === 'failed-startup') await expect(task).rejects.toThrow('unresolved');
+      else {
+        const result = await task;
+        expect(result.revision).toBe(newName);
+        expect(result.disposition).toBe(
+          mode === 'unknown' ? 'read_only_reconciliation_after_unknown' : 'operation_completed',
+        );
+      }
+      expect(writes).toBe(1);
+      expect(f.native.containers[0]!.env).toContainEqual({
+        name: 'ASSISTANT_RELEASE_WRITES_PAUSED',
+        value: 'true',
+      });
+      expect(records[0]?.outcome).toBe('attempted');
+    },
+  );
 });

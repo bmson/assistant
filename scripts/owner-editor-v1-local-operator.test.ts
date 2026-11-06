@@ -5,7 +5,9 @@ import {
   localInventoryEnvironment,
   readLocalTokenIdentity,
   verifyLocalAccount,
+  verifyLocalAdmission,
   verifyLocalOperatorSource,
+  verifyLocalPacketReview,
   verifyTokenIdentity,
 } from './owner-editor-v1-local-operator.js';
 
@@ -125,4 +127,43 @@ describe('explicit existing operator maintenance transport', () => {
       expect(args.some((x) => /limit|filter|page-size/.test(x))).toBe(false);
     }
   });
+});
+
+it('binds nonempty dry-run/apply packet policy evidence to the same reviewed disabled snapshot', () => {
+  const current = {
+    kind: 'disabled-bootstrap',
+    drainReceiptSha256: 'd'.repeat(64),
+    recoveryReceiptSha256: 'e'.repeat(64),
+  };
+  const evidence = {
+    drainSha256: current.drainReceiptSha256,
+    recoverySha256: current.recoveryReceiptSha256,
+  };
+  expect(() => verifyLocalPacketReview(evidence, current, 'apply')).not.toThrow();
+  expect(() => verifyLocalPacketReview(undefined, current, 'prepare-initialize')).not.toThrow();
+  expect(() => verifyLocalPacketReview(undefined, current, 'dry-run')).not.toThrow();
+  expect(() => verifyLocalPacketReview(undefined, current, 'apply')).toThrow();
+  for (const mode of ['apply', 'dry-run'])
+    for (const drift of [
+      { ...evidence, drainSha256: 'f'.repeat(64) },
+      { ...evidence, recoverySha256: 'f'.repeat(64) },
+    ])
+      expect(() => verifyLocalPacketReview(drift, current, mode)).toThrow();
+});
+
+it('rechecks service-level admission on final reread even when legacy template/revision hashes are unchanged', () => {
+  const before = {
+    name: 'projects/bmson-assistant/locations/us-west1/services/assistant-web',
+    template: { revision: 'same-revision' },
+    trafficStatuses: [{ revision: 'same-revision', percent: 100 }],
+    scaling: { scalingMode: 'AUTOMATIC' },
+  };
+  expect(() => verifyLocalAdmission(before, undefined, 'web')).not.toThrow();
+  for (const scaling of [
+    { scalingMode: 'MANUAL', manualInstanceCount: 0 },
+    { scalingMode: 'MANUAL' },
+  ])
+    expect(() => verifyLocalAdmission({ ...before, scaling }, undefined, 'web')).toThrow(
+      'requires reviewed',
+    );
 });

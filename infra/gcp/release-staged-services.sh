@@ -193,7 +193,7 @@ release_owner_web_tag_admission_command() {
   local mode="$1" source_sha="$2" manifest_path="$3" manifest_digest="$4" staging_tag="$5" native_phase="${6:-}"
   local repository_root
   case "$mode" in
-    --capture|--retire-after-paused|--verify-admission|--record-candidate|--record-resume|--native-init|--verify-native-hold|--certify-native-terminal|--accept-agent-ready|--bootstrap-restore|--bootstrap-hold) ;;
+    --capture|--retire-after-paused|--verify-admission|--record-candidate|--record-resume|--native-init|--verify-native-hold|--certify-native-terminal|--accept-agent-ready|--bootstrap-restore|--bootstrap-hold|--bootstrap-agent-resume) ;;
     --native-phase)
       case "$native_phase" in createP|attachP|promoteP|createR|attachR|promoteR|closeP|restoreC|repauseP|closeR) ;; *) return 2 ;; esac
       ;;
@@ -461,6 +461,7 @@ release_staged_services() {
   local agent_candidate_env
   local web_candidate_env web_resume_env web_resume_tag="resume-${traffic_tag_suffix}"
   local web_writes_paused=false basic_editor_forward_only basic_editor_admission_possible=false basic_editor_resume_verified=false
+  local bootstrap_web_attempted=false bootstrap_agent_attempted=false bootstrap_disabled=false
   basic_editor_forward_only="$(release_basic_editor_forward_only)" || return 1
   local RELEASE_CHANGED_JOBS=''
   local agent_before='' web_before='' agent_old_traffic='' web_old_traffic=''
@@ -481,6 +482,15 @@ release_staged_services() {
   fi
   release_read_contract || return 1
   release_validate_basic_editor_context "$selected" "$RELEASE_STORAGE_DRIVER" "$TAG" || return $?
+  if [[ -n "${OWNER_RELEASE_BOOTSTRAP_RECEIPT:-}" ]]; then
+    local reviewed_kind
+    reviewed_kind="$(release_reviewed_snapshot_kind "$TAG")" || return 2
+    [[ "$reviewed_kind" != disabled-bootstrap ]] || bootstrap_disabled=true
+  fi
+  if [[ "$bootstrap_disabled" == true && "$basic_editor_forward_only" != true ]]; then
+    echo '  disabled bootstrap requires the protected paired BASIC5 lifecycle.' >&2
+    return 2
+  fi
   if [[ "$selected" == agent,web && "$RELEASE_STORAGE_DRIVER" == firestore ]]; then
     web_writes_paused=true
   fi
@@ -554,7 +564,7 @@ release_staged_services() {
   if [[ "$selected" == agent,web ]]; then
     agent_candidate_env="ASSISTANT_RELEASE_API_CONTRACT=${RELEASE_AGENT_API},ASSISTANT_RELEASE_WEB_API_MIN=${RELEASE_AGENT_PEER_MIN},ASSISTANT_RELEASE_WEB_API_MAX=${RELEASE_AGENT_PEER_MAX},ASSISTANT_RELEASE_SCHEMA_DRIVER=${RELEASE_STORAGE_DRIVER},ASSISTANT_RELEASE_SCHEMA_MIN=${RELEASE_AGENT_SCHEMA_MIN},ASSISTANT_RELEASE_SCHEMA_MAX=${RELEASE_AGENT_SCHEMA_MAX},ASSISTANT_RELEASE_SCHEMA_VERSION=${RELEASE_SCHEMA_VERSION},ASSISTANT_RELEASE_MANIFEST=${manifest_sha}"
     if [[ "$basic_editor_forward_only" == true ]]; then
-      agent_candidate_env="${agent_candidate_env},ASSISTANT_RELEASE_SOURCE_SHA=${TAG},ASSISTANT_RELEASE_WORKFLOW_RUN_ID=${GITHUB_RUN_ID},ASSISTANT_RELEASE_WORKFLOW_RUN_ATTEMPT=${GITHUB_RUN_ATTEMPT}"
+      agent_candidate_env="${agent_candidate_env},ASSISTANT_RELEASE_SOURCE_SHA=${TAG},ASSISTANT_RELEASE_WORKFLOW_RUN_ID=${GITHUB_RUN_ID},ASSISTANT_RELEASE_WORKFLOW_RUN_ATTEMPT=${GITHUB_RUN_ATTEMPT},ASSISTANT_RELEASE_WRITES_PAUSED=${bootstrap_disabled}"
     fi
     if [[ -n "$worker_env_override" ]]; then
       agent_candidate_env="${agent_candidate_env},EMAIL_OBSERVER_WORKER_ENABLED=${worker_env_override}"
@@ -641,12 +651,6 @@ release_staged_services() {
     done
   fi
 
-  local bootstrap_web_attempted=false bootstrap_agent_attempted=false bootstrap_disabled=false
-  if [[ -n "${OWNER_RELEASE_BOOTSTRAP_RECEIPT:-}" ]]; then
-    local reviewed_kind
-    reviewed_kind="$(release_reviewed_snapshot_kind "$TAG")" || return 2
-    [[ "$reviewed_kind" != disabled-bootstrap ]] || bootstrap_disabled=true
-  fi
   local promoted_ok=true web_paused_revision='' web_resume_revision='' web_resume_promotion_attempted=false
   if [[ "$selected" == agent,web ]]; then
     # Promote web first. Firestore full-stack upgrades keep its workspace routes
@@ -683,6 +687,34 @@ release_staged_services() {
       if [[ "$promoted_ok" == true && "$basic_editor_forward_only" == true ]] &&
          ! release_retire_captured_web_tags "$TAG" "$manifest_path" "$manifest_sha" "$staging_tag"; then
         echo '  owned web-tag admission barrier failed; restoring canonical traffic before any agent promotion or unpaused web creation.' >&2
+        promoted_ok=false
+      fi
+    fi
+  fi
+
+  if [[ "$promoted_ok" == true && "$bootstrap_disabled" == true ]]; then
+    local paused_agent_revision
+    paused_agent_revision="$(node -e 'const s=JSON.parse(process.argv[1]); const rows=(s.status?.traffic??[]).filter(t=>t.tag===process.argv[2]); if(rows.length!==1||!rows[0].revisionName)process.exit(2); process.stdout.write(rows[0].revisionName)' "$staged_agent_json" "$staging_tag")" || promoted_ok=false
+    if [[ "$promoted_ok" == true ]]; then
+      # The successor's zero-percent tag is reachable before promotion. Seal
+      # admission before its creation; an unknown result can never resume old code.
+      basic_editor_admission_possible=true
+      if ! release_bootstrap_scaling --bootstrap-agent-resume agent "$paused_agent_revision" "$TAG" "$manifest_path" "$manifest_sha" "$staging_tag"; then
+        promoted_ok=false
+      elif ! staged_agent_json="$(release_service_json assistant-agent)"; then
+        promoted_ok=false
+      elif ! node -e '
+        const s=JSON.parse(process.argv[1]), old=process.argv[2], tag=process.argv[3];
+        const rows=(s.status?.traffic??[]).filter(t=>t.tag===tag);
+        const template=s.spec?.template, container=(template?.spec?.containers??template?.containers??[])[0];
+        const literal=name=>{const e=(container?.env??[]).filter(x=>x.name===name);return e.length===1&&!e[0].valueFrom?e[0].value:undefined};
+        if(rows.length!==1||!rows[0].revisionName||rows[0].revisionName===old||
+           s.status?.latestCreatedRevisionName!==rows[0].revisionName||
+           container?.image!==process.argv[6]||literal("ASSISTANT_RELEASE_WRITES_PAUSED")!=="false"||
+           literal("ASSISTANT_RELEASE_SOURCE_SHA")!==process.argv[4]||
+           literal("ASSISTANT_RELEASE_MANIFEST")!==process.argv[5])process.exit(2);
+      ' "$staged_agent_json" "$paused_agent_revision" "$staging_tag" "$TAG" "$manifest_sha" "${IMAGE_ROOT}/agent@${agent_digest}"; then
+        echo '  new agent successor binding is unconfirmed; retaining marker-aware recovery state.' >&2
         promoted_ok=false
       fi
     fi

@@ -7,6 +7,7 @@ import { verifyPreAuthEnvironment } from './owner-editor-release-inventory.js';
 import {
   bootstrapDigest,
   object as bootstrapObject,
+  createAgentResume,
   readBootstrapNative,
   restoreScaling,
   reviewedBootstrap,
@@ -14,7 +15,11 @@ import {
   verifiedRestoreReceipts,
   verifyCurrentSnapshot,
 } from './owner-release-bootstrap.js';
-import { acceptPreclosedBootstrap } from './owner-web-release-lifecycle-model.js';
+import {
+  acceptPreclosedBootstrap,
+  bindAgentSuccessorReceipt,
+  markAgentAdmissionPossible,
+} from './owner-web-release-lifecycle-model.js';
 import {
   acceptPairedAgentReadiness,
   initializePairedWebLifecycle,
@@ -119,6 +124,7 @@ export async function runWebTagAdmission(mode: string | undefined) {
       '--accept-agent-ready',
       '--bootstrap-restore',
       '--bootstrap-hold',
+      '--bootstrap-agent-resume',
     ].includes(mode ?? '')
   )
     throw new Error('Invalid admission mode');
@@ -436,6 +442,61 @@ export async function runWebTagAdmission(mode: string | undefined) {
     initializePairedWebLifecycle(context, raw, native, receipts);
     return;
   }
+  if (mode === '--bootstrap-agent-resume') {
+    if (!bootstrap || !preclosed) throw new Error('Reviewed disabled bootstrap required');
+    const receipts = openPrivateReleasePhaseReceipts(temp, receiptIdentity),
+      state = receipts.readCurrent();
+    await verifyOperatorOwnedHold(state.context);
+    if (
+      state.context.currentBinding?.reviewedEvidenceSha256 !== bootstrapEvidence ||
+      state.phase !== 'retired' ||
+      state.admissionPossible
+    )
+      throw new Error('Agent admission phase changed');
+    const raw = await io.readService(),
+      native: Record<string, unknown> = {};
+    for (const name of Object.keys(state.snapshot.revisions))
+      native[name] = await io.readRevision(name);
+    const fresh = projectNativeWebSnapshot(raw, native, state.context);
+    if (bootstrapDigest(fresh) !== bootstrapDigest(state.snapshot))
+      throw new Error('Paused web binding changed');
+    const paused = process.env.OWNER_BOOTSTRAP_REVISION ?? '';
+    if (!/^assistant-agent-[a-z0-9-]+$/.test(paused))
+      throw new Error('Paused agent revision missing');
+    let admitted = state;
+    const dependencies = await protectedNativeReleaseDependencies(receipts);
+    const result = await createAgentResume(
+      {
+        ...dependencies,
+        recordIntent: async (value) => {
+          const row = rec(value),
+            outcome = String(row.outcome);
+          if (!['attempted', 'unknown', 'observed_exact_successor'].includes(outcome))
+            throw new Error('Invalid agent successor outcome');
+          save(path(`owner-bootstrap-agent-successor-${outcome}.json`), value);
+          if (outcome === 'attempted') {
+            admitted = markAgentAdmissionPossible(state, fresh);
+            receipts.recordCheckpoint(admitted);
+          }
+        },
+      },
+      bootstrap,
+      {
+        revision: paused,
+        image: String(rec(rec(manifest.components).agent).image),
+        source,
+        runId: String(runId),
+        attempt: String(runAttempt),
+        manifest: String(manifestDigest),
+      },
+    );
+    const accepted = bindAgentSuccessorReceipt(admitted, bootstrapDigest(result));
+    receipts.recordCheckpoint(accepted);
+    process.stdout.write(
+      `${JSON.stringify({ outcome: result.outcome, disposition: result.disposition, revision: result.revision, admissionPossible: true, stateReceipt: accepted.receipt })}\n`,
+    );
+    return;
+  }
   if (mode === '--bootstrap-restore' || mode === '--bootstrap-hold') {
     if (!bootstrap || !preclosed) throw new Error('Missing reviewed bootstrap receipt');
     const role = process.env.OWNER_BOOTSTRAP_ROLE;
@@ -443,7 +504,19 @@ export async function runWebTagAdmission(mode: string | undefined) {
     const receipts = openPrivateReleasePhaseReceipts(temp, receiptIdentity),
       state = receipts.readCurrent();
     await verifyOperatorOwnedHold(state.context);
-    if(state.context.currentBinding?.reviewedEvidenceSha256 !== bootstrapEvidence || !state.context.currentBinding?.preclosed || state.admissionPossible) throw new Error('Bootstrap receipt or admission state changed');
+    if (
+      state.context.currentBinding?.reviewedEvidenceSha256 !== bootstrapEvidence ||
+      !state.context.currentBinding?.preclosed
+    )
+      throw new Error('Bootstrap receipt or admission state changed');
+    if ((mode === '--bootstrap-hold' || role === 'web') && state.admissionPossible)
+      throw new Error('Bootstrap scaling phase changed');
+    if (
+      mode === '--bootstrap-restore' &&
+      role === 'agent' &&
+      (!state.admissionPossible || !state.agentSuccessorReceiptSha256)
+    )
+      throw new Error('Agent successor is not durably bound');
     if (
       mode === '--bootstrap-restore' &&
       (role === 'web' ? state.phase !== 'promotedP' : state.phase !== 'retired')
@@ -479,6 +552,45 @@ export async function runWebTagAdmission(mode: string | undefined) {
       );
     }
     const dependencies = await protectedNativeReleaseDependencies(receipts);
+    const beforeScaling = await readBootstrapNative(dependencies, bootstrap.services[role].service);
+    if (role === 'web') {
+      const native: Record<string, unknown> = {};
+      for (const name of Object.keys(state.snapshot.revisions))
+        native[name] = await io.readRevision(name);
+      if (
+        bootstrapDigest(projectNativeWebSnapshot(beforeScaling, native, state.context)) !==
+        bootstrapDigest(state.snapshot)
+      )
+        throw new Error('Current web state drifted');
+    } else {
+      const accepted = rec(
+        JSON.parse(
+          boundedFile(
+            path('owner-bootstrap-agent-successor-observed_exact_successor.json'),
+          ).toString('utf8'),
+        ),
+      );
+      const revision = await readBootstrapNative(
+        dependencies,
+        `${bootstrap.services.agent.service}/revisions/${expectedRevision}`,
+      );
+      if (
+        bootstrapDigest(accepted) !== state.agentSuccessorReceiptSha256 ||
+        accepted.source !== source ||
+        accepted.runId !== String(runId) ||
+        accepted.attempt !== String(runAttempt) ||
+        accepted.revision !== expectedRevision ||
+        accepted.image !== rec(rec(manifest.components).agent).image ||
+        accepted.manifest !== manifestDigest ||
+        accepted.uidSha256 !== bootstrapDigest(revision.uid) ||
+        accepted.serviceStableConfigSha256 !== nativeStableConfigurationDigest(beforeScaling)
+      )
+        throw new Error('Agent successor receipt/config changed');
+      const template = { ...rec(beforeScaling.template) };
+      delete template.revision;
+      if (bootstrapDigest(template) !== accepted.templateSha256)
+        throw new Error('Agent successor template changed');
+    }
     const result = await restoreScaling(
       {
         ...dependencies,
@@ -506,6 +618,7 @@ export async function runWebTagAdmission(mode: string | undefined) {
       },
       mode === '--bootstrap-hold',
       restoredConfiguration,
+      bootstrapDigest(beforeScaling),
     );
     if (role === 'web' && bootstrapDigest(result.before) !== bootstrapDigest(result.after)) {
       const native: Record<string, unknown> = {};
@@ -532,7 +645,7 @@ export async function runWebTagAdmission(mode: string | undefined) {
     const phase = process.env.OWNER_NATIVE_PHASE ?? '';
     const receipts = openPrivateReleasePhaseReceipts(temp, receiptIdentity);
     const dependencies = await protectedNativeReleaseDependencies(receipts);
-    await runPairedWebLifecyclePhase(
+    const completedPhase = await runPairedWebLifecyclePhase(
       phase as Parameters<typeof runPairedWebLifecyclePhase>[0],
       process.env.OWNER_NATIVE_REVIEWED_AT ?? '',
       dependencies,
@@ -541,6 +654,10 @@ export async function runWebTagAdmission(mode: string | undefined) {
         await verifyOperatorOwnedHold(state.context);
       },
     );
+    if (completedPhase.context.currentBinding && ['attachP', 'attachR'].includes(phase))
+      process.stdout.write(
+        `${JSON.stringify({ outcome: 'attachment_verified', wrote: false, phase, stateReceipt: completedPhase.receipt })}\n`,
+      );
     return;
   }
   if (mode === '--verify-native-hold') {

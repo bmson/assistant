@@ -39,6 +39,7 @@ export type Snapshot = {
   observedGeneration: string;
   reconciling: boolean;
   succeeded: boolean;
+  admissionDisabled?: true;
   desired: Row[];
   observed: Row[];
   latestReady: string;
@@ -88,7 +89,7 @@ export type Plan = {
   beforeSha256: string;
   templateSha256: string;
   expectedTraffic: Row[];
-  request: { method: 'PATCH'; updateMask: 'template' | 'traffic'; body: Obj };
+  request: { method: 'PATCH'; updateMask: 'template' | 'traffic' | 'template,traffic'; body: Obj };
 };
 export type State = {
   context: Context;
@@ -100,6 +101,7 @@ export type State = {
   ordinal: number;
   retiredTags: string[];
   admissionPossible: boolean;
+  agentSuccessorReceiptSha256?: string;
   retirementAttempt: { operation: string | null; outcome: 'attempted' | 'unknown' } | null;
   pending: null | { plan: Plan; operation: string | null; outcome: 'attempted' | 'unknown' };
 };
@@ -160,7 +162,7 @@ function validateSnapshot(s: Snapshot, tombstones: string[]) {
       BigInt(s.generation) <= 9223372036854775807n &&
       s.observedGeneration === s.generation &&
       s.reconciling === false &&
-      s.succeeded === true,
+      (s.succeeded === true || s.admissionDisabled === true),
   );
   assert(equal(rows(s.desired), rows(s.observed)));
   revision(s.latestReady);
@@ -289,6 +291,7 @@ function row(rev: string, alias: string, percent: number): Row {
 export function captureLifecycle(c: Context, s: Snapshot): State {
   context(c);
   validateSnapshot(s, c.retiredTags);
+  assert(!s.admissionDisabled || c.currentBinding?.preclosed);
   assert(
     s.desired.find((r) => r.percent === 100)?.revision === c.canonical &&
       !Object.hasOwn(s.revisions, releaseIdentity(c, 'P').revision) &&
@@ -348,6 +351,7 @@ export function planLifecycleAction(s: State, mode: Mode): Plan {
   context(s.context);
   assert(s.context.retiredTags.every((t) => s.retiredTags.includes(t)));
   validateSnapshot(s.snapshot, s.retiredTags);
+  assert(!s.snapshot.admissionDisabled || s.context.currentBinding?.preclosed);
   allowed(s, mode);
   const c = s.context,
     b = s.snapshot,
@@ -360,6 +364,7 @@ export function planLifecycleAction(s: State, mode: Mode): Plan {
       id = releaseIdentity(c, role);
     assert(!b.revisions[id.revision] && !traffic.some((t) => t.tag === id.tag));
     template = creationTemplate(b.template, c, role);
+    if (c.currentBinding) traffic.push(row(id.revision, id.tag, 0));
   } else if (mode === 'attachP' || mode === 'attachR') {
     const id = mode === 'attachP' ? p : r;
     assert(b.revisions[id.revision] && !traffic.some((t) => t.tag === id.tag));
@@ -401,11 +406,13 @@ export function planLifecycleAction(s: State, mode: Mode): Plan {
     expectedTraffic: rows(traffic),
     request: {
       method: 'PATCH',
-      updateMask: create ? 'template' : 'traffic',
+      updateMask: create ? (c.currentBinding ? 'template,traffic' : 'template') : 'traffic',
       body: {
         name: WEB_SERVICE,
         etag: b.etag,
-        ...(create ? { template: clone(template) } : { traffic: rows(traffic) }),
+        ...(create
+          ? { template: clone(template), ...(c.currentBinding ? { traffic: rows(traffic) } : {}) }
+          : { traffic: rows(traffic) }),
       },
     },
   };
@@ -470,6 +477,11 @@ export function settleLifecycleAttempt(
   const pending = s.pending;
   assert(pending && pending.operation === operation);
   operationName({ name: operation });
+  return settlePlannedSnapshot(s, after);
+}
+function settlePlannedSnapshot(s: State, after: Snapshot): State {
+  const pending = s.pending;
+  assert(pending);
   const p = pending.plan,
     b = s.snapshot,
     c = s.context;
@@ -495,11 +507,16 @@ export function settleLifecycleAttempt(
         proof.paused === (role === 'P') &&
         proof.templateSha256 === p.templateSha256,
     );
-    assert(
-      Object.keys(after.revisions).length === Object.keys(b.revisions).length + 1 &&
-        equal(after.tagUris, b.tagUris) &&
-        equal([...after.urls].sort(), [...b.urls].sort()),
-    );
+    assert(Object.keys(after.revisions).length === Object.keys(b.revisions).length + 1);
+    if (c.currentBinding) {
+      assert(
+        after.tagUris[id.tag] &&
+          Object.keys(after.tagUris).length === Object.keys(b.tagUris).length + 1,
+      );
+      for (const [tag, uri] of Object.entries(b.tagUris)) assert(after.tagUris[tag] === uri);
+      assert(equal([...after.urls].sort(), [...b.urls, after.tagUris[id.tag]].sort()));
+    } else
+      assert(equal(after.tagUris, b.tagUris) && equal([...after.urls].sort(), [...b.urls].sort()));
   } else {
     assert(
       after.latestReady === b.latestReady &&
@@ -679,4 +696,53 @@ export function acceptPreclosedBootstrap(s: State, fresh: Snapshot): State {
   assert(equal(rows(fresh.desired), [row(p.revision, p.tag, 100)]));
   assert(Object.keys(fresh.tagUris).length === 1 && fresh.tagUris[p.tag]);
   return advance(s, 'retired', fresh);
+}
+
+/** Combined creation already attached the exact named zero-percent alias; verify only, no invented PATCH. */
+export function acceptCreatedAttachment(s: State, fresh: Snapshot, role: 'P' | 'R'): State {
+  verifyLifecycleState(s);
+  assert(s.context.currentBinding && !s.pending && !s.retirementAttempt);
+  assert(s.phase === (role === 'P' ? 'createdP' : 'createdR') && equal(fresh, s.snapshot));
+  const id = releaseIdentity(s.context, role);
+  assert(
+    fresh.desired.some((r) => r.revision === id.revision && r.tag === id.tag && r.percent === 0),
+  );
+  return advance(s, role === 'P' ? 'attachedP' : 'attachedR', fresh);
+}
+/** The new agent successor's tag can dispatch before canonical promotion. Seal this before its create attempt. */
+export function markAgentAdmissionPossible(s: State, fresh: Snapshot): State {
+  verifyLifecycleState(s);
+  assert(
+    s.context.currentBinding?.preclosed &&
+      s.phase === 'retired' &&
+      !s.pending &&
+      !s.admissionPossible &&
+      equal(s.snapshot, fresh),
+  );
+  return seal(s, { admissionPossible: true });
+}
+
+/** Read-only reconciliation binds the exact new revision/config/alias; no LRO or PATCH is invented. */
+export function settleObservedCreation(s: State, after: Snapshot): State {
+  verifyLifecycleState(s);
+  assert(
+    s.context.currentBinding &&
+      s.pending?.outcome === 'unknown' &&
+      !s.pending.operation &&
+      ['createP', 'createR'].includes(s.pending.plan.mode),
+  );
+  return settlePlannedSnapshot(s, after);
+}
+
+export function bindAgentSuccessorReceipt(s: State, receiptSha256: string): State {
+  verifyLifecycleState(s);
+  hash(receiptSha256);
+  assert(
+    s.context.currentBinding?.preclosed &&
+      s.phase === 'retired' &&
+      s.admissionPossible &&
+      !s.pending &&
+      !s.agentSuccessorReceiptSha256,
+  );
+  return seal(s, { agentSuccessorReceiptSha256: receiptSha256 });
 }

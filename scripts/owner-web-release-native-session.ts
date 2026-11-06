@@ -1,6 +1,7 @@
 /** Fixture-injected, single-attempt native session. No fetch default, token or production caller. */
 
 import {
+  acceptCreatedAttachment,
   beginLifecycleAttempt,
   bindLifecycleOperation,
   type Mode,
@@ -8,6 +9,7 @@ import {
   releaseIdentity,
   type State,
   settleLifecycleAttempt,
+  settleObservedCreation,
   unknownLifecycleOutcome,
 } from './owner-web-release-lifecycle-model.js';
 import {
@@ -228,13 +230,27 @@ export function nativeFixtureSession(deps: FixtureDependencies, modes: readonly 
     }
     return copy(settled);
   }
-  async function hold(): Promise<never> {
+  async function hold(): Promise<State> {
     if (attempted && state?.pending) {
       state = unknownLifecycleOutcome(state);
       try {
         await persist();
       } catch {
-        /* Durable integration is unconfirmed; never retry a write. */
+        throw new NativeReleaseHold(phase, 'may_have_been_attempted');
+      }
+      if (
+        state.context.currentBinding &&
+        !state.pending?.operation &&
+        ['createP', 'createR'].includes(state.pending?.plan.mode ?? '')
+      ) {
+        try {
+          const observed = await snapshot(true);
+          state = settleObservedCreation(state, observed);
+          await persist();
+          return copy(state);
+        } catch {
+          /* Unknown remains held; this read-only reconciliation never retries a write. */
+        }
       }
     }
     throw new NativeReleaseHold(phase, attempted ? 'may_have_been_attempted' : 'not_attempted');
@@ -246,7 +262,6 @@ export function nativeFixtureSession(deps: FixtureDependencies, modes: readonly 
         used = true;
         requireNative(modes.includes(selected));
         age(reviewedAt, deps.now());
-        const plan = planLifecycleAction(input, selected);
         requireNative(
           input.context.canonical === HISTORICAL_WEB_TAGS[1]?.revision ||
             input.context.currentBinding !== undefined,
@@ -256,6 +271,14 @@ export function nativeFixtureSession(deps: FixtureDependencies, modes: readonly 
         phase = 'raw_read_refused';
         const fresh = await snapshot(false);
         requireNative(digest(fresh) === digest(original.snapshot));
+        if (input.context.currentBinding && (selected === 'attachP' || selected === 'attachR')) {
+          state = acceptCreatedAttachment(input, fresh, selected === 'attachP' ? 'P' : 'R');
+          phase = 'intent_unconfirmed';
+          await persist();
+          return copy(state);
+        }
+        const plan = planLifecycleAction(input, selected);
+
         if (selected === 'createP' || selected === 'createR') {
           const id = releaseIdentity(input.context, selected === 'createP' ? 'P' : 'R');
           requireNative(
@@ -270,12 +293,21 @@ export function nativeFixtureSession(deps: FixtureDependencies, modes: readonly 
         phase = 'intent_unconfirmed';
         await persist();
         age(reviewedAt, deps.now());
-        const mask = selected === 'createP' || selected === 'createR' ? 'template' : 'traffic';
+        const create = selected === 'createP' || selected === 'createR';
+        const mask = create
+          ? input.context.currentBinding
+            ? 'template,traffic'
+            : 'template'
+          : 'traffic';
         requireNative(
           plan.request.method === 'PATCH' &&
             plan.request.updateMask === mask &&
             Object.keys(plan.request.body).sort().join(',') ===
-              (mask === 'template' ? 'etag,name,template' : 'etag,name,traffic') &&
+              (mask === 'template,traffic'
+                ? 'etag,name,template,traffic'
+                : mask === 'template'
+                  ? 'etag,name,template'
+                  : 'etag,name,traffic') &&
             plan.request.body.name === WEB_SERVICE &&
             plan.request.body.etag === fresh.etag,
         );
