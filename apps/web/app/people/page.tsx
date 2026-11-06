@@ -1,4 +1,8 @@
-import { listPeopleDirectory, type PersonSummary } from '@assistant/application/people';
+import {
+  listPeopleDirectory,
+  matchesPersonSearch,
+  type PersonSummary,
+} from '@assistant/application/people';
 import {
   birthdayLabel,
   lastContactLabel,
@@ -47,16 +51,6 @@ export const dynamic = 'force-dynamic';
 
 /** Soonest-first, so an upcoming birthday is visible without opening anyone. */
 const BIRTHDAY_HORIZON_DAYS = 30;
-
-function matches(person: PersonSummary, query: string): boolean {
-  if (!query) return true;
-  const needle = query.toLocaleLowerCase();
-  return (
-    person.name.toLocaleLowerCase().includes(needle) ||
-    person.relationship.toLocaleLowerCase().includes(needle) ||
-    (person.location?.toLocaleLowerCase().includes(needle) ?? false)
-  );
-}
 
 async function loadPeopleDirectory(
   now: Date,
@@ -163,7 +157,7 @@ export default async function PeoplePage({
       </PageShell>
     );
   }
-  const people = everyone.filter((person) => matches(person, query));
+  const people = everyone.filter((person) => matchesPersonSearch(person, query));
 
   const byGroup = PERSON_GROUPS.map((group) => ({
     group,
