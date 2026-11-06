@@ -397,9 +397,11 @@ function ownerEditorActionNoun(command: OwnerEditorFormGrant['command'] | null |
     ? 'person deletion'
     : command === 'remove_owner_family_relationship'
       ? 'connection removal'
-      : command
-        ? 'save'
-        : 'operation';
+      : command === 'remove_owner_memory'
+        ? 'saved note removal'
+        : command
+          ? 'save'
+          : 'operation';
 }
 
 /** Presentation only; the command comes from the tracked original, never a new form. */
@@ -414,15 +416,17 @@ export function ownerEditorUncertaintyMessage(
       ? 'trying to delete again'
       : command === 'remove_owner_family_relationship'
         ? 'removing it again'
-        : command
-          ? 'saving again'
-          : 'trying again';
+        : command === 'remove_owner_memory'
+          ? 'removing it again'
+          : command
+            ? 'saving again'
+            : 'trying again';
   return `${subject} could not be confirmed. Check its result before ${next}.`;
 }
 
 export function ownerEditorOutcomeMessage(reply: OwnerEditorReply): string {
   if (reply.authority === 'scope_retirement')
-    return `This earlier form has expired or been retired. This does not confirm whether ${reply.command === 'remove_person' ? 'the person was deleted' : reply.command === 'remove_owner_family_relationship' ? 'the connection was removed' : 'its save happened'}. Refresh saved details before editing again.`;
+    return `This earlier form has expired or been retired. This does not confirm whether ${reply.command === 'remove_person' ? 'the person was deleted' : reply.command === 'remove_owner_family_relationship' ? 'the connection was removed' : reply.command === 'remove_owner_memory' ? 'the saved note was removed' : 'its save happened'}. Refresh saved details before editing again.`;
   if (reply.authority !== 'operation_receipt') return ownerEditorUncertaintyMessage(reply.command);
   switch (reply.outcome) {
     case 'saved':
@@ -434,6 +438,10 @@ export function ownerEditorOutcomeMessage(reply: OwnerEditorReply): string {
         return reply.refreshPending
           ? 'Connection removed. Some derived details still need to refresh.'
           : 'Connection removed.';
+      if (reply.command === 'remove_owner_memory')
+        return reply.refreshPending
+          ? 'Saved note removed. Some map details may take a moment to update.'
+          : 'Saved note removed.';
       return reply.refreshPending ? 'Saved. Some derived details still need to refresh.' : 'Saved.';
     case 'unchanged':
       return 'Already saved. No additional change was needed.';

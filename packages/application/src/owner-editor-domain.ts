@@ -23,6 +23,12 @@ import {
   prepareOwnerMemoryCorrection,
   refreshOwnerMemoryCorrection,
 } from './owner-memory-editor.js';
+import {
+  type OwnerEditorMemoryRemovalSnapshot,
+  type PreparedOwnerMemoryRemoval,
+  prepareOwnerMemoryRemoval,
+  refreshOwnerMemoryRemoval,
+} from './owner-memory-removal.js';
 import type { EmbeddingPort } from './profile/commands.js';
 
 export interface OwnerEditorContactSnapshot {
@@ -65,6 +71,16 @@ export interface OwnerEditorDomainStorage {
   commitMemory?(
     claim: OwnerEditorClaim,
     prepared: PreparedOwnerMemoryCorrection,
+    now: Date,
+  ): Promise<OwnerEditorReply>;
+  memoryRemovalSnapshot?(
+    ownerId: string,
+    memoryId: string,
+    scope: OwnerEditorScope,
+  ): Promise<OwnerEditorMemoryRemovalSnapshot | null>;
+  commitMemoryRemoval?(
+    claim: OwnerEditorClaim,
+    prepared: PreparedOwnerMemoryRemoval,
     now: Date,
   ): Promise<OwnerEditorReply>;
   memoryFollowup?: {
@@ -120,6 +136,7 @@ export interface OwnerEditorDomainStorage {
 export type PreparedOwnerEditor =
   | { kind: 'memory-create'; memory: PreparedOwnerMemoryCreation }
   | { kind: 'memory'; memory: PreparedOwnerMemoryCorrection }
+  | { kind: 'memory-remove'; memory: PreparedOwnerMemoryRemoval }
   | {
       kind: 'person';
       request: Extract<OwnerEditorApply, { command: 'create_person' | 'update_person_identity' }>;
@@ -167,6 +184,21 @@ export function createOwnerEditorDomain(input: {
         );
         return result.ok
           ? { ok: true, prepared: { kind: 'memory-create', memory: result.prepared } }
+          : result;
+      }
+      if (request.command === 'remove_owner_memory') {
+        if (!storage.memoryRemovalSnapshot || !storage.commitMemoryRemoval)
+          return {
+            ok: false,
+            result: { outcome: 'unavailable', reason: 'editor_command_unavailable' },
+          };
+        const result = await prepareOwnerMemoryRemoval(
+          request,
+          scope,
+          storage.memoryRemovalSnapshot.bind(storage),
+        );
+        return result.ok
+          ? { ok: true, prepared: { kind: 'memory-remove', memory: result.prepared } }
           : result;
       }
       const targetMatches =
@@ -414,6 +446,21 @@ export function createOwnerEditorDomain(input: {
           storage.memoryFollowup
         )
           await refreshOwnerMemoryCorrection(
+            storage.memoryFollowup,
+            claim.scope.ownerId,
+            prepared.memory.memoryId,
+          );
+        return reply;
+      }
+      if (prepared.kind === 'memory-remove') {
+        if (!storage.commitMemoryRemoval) throw new Error('Memory removal writer unavailable');
+        const reply = await storage.commitMemoryRemoval(claim, prepared.memory, now);
+        if (
+          reply.authority === 'operation_receipt' &&
+          reply.outcome === 'saved' &&
+          storage.memoryFollowup
+        )
+          await refreshOwnerMemoryRemoval(
             storage.memoryFollowup,
             claim.scope.ownerId,
             prepared.memory.memoryId,

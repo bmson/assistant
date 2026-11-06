@@ -15,7 +15,10 @@ import {
   parseOwnerEditorRequest,
 } from '../../application/src/owner-editor-wire.js';
 import { createFirestoreOwnerEditorDomainStorage } from './owner-editor-domain.js';
-import { readFirestoreOwnerMemoryEditorSnapshot } from './owner-editor-memory.js';
+import {
+  readFirestoreOwnerMemoryEditorSnapshot,
+  readFirestoreOwnerMemoryRemovalSnapshot,
+} from './owner-editor-memory.js';
 import { createFirestoreOwnerEditorOperationRepository } from './owner-editor-repository.js';
 import { ownerEditorTestStore } from './owner-editor-test-store.js';
 import { FirestoreProfileMemoryManagementRepository } from './profile-memory-management.js';
@@ -130,6 +133,193 @@ function fixture() {
   };
 }
 describe('actual FS saved-note domain + claim + legacy correction primitive offline', () => {
+  it('preserves the valid note snapshot when its optional graph impact is malformed', async () => {
+    const f = fixture();
+    f.rawSeed('knowledgeGraphRelations', randomUUID(), {
+      id: 'wrong-physical-identity',
+      agentId: f.ownerId,
+      sourceMemoryId: f.memoryId,
+      subjectEntityId: randomUUID(),
+      objectEntityId: randomUUID(),
+      predicate: 'lives_in',
+    });
+    const result = await readFirestoreOwnerMemoryRemovalSnapshot(f.store, f.ownerId, f.memoryId);
+    expect(result?.snapshot).toMatchObject({
+      memoryId: f.memoryId,
+      ownerId: f.ownerId,
+      eligible: true,
+    });
+    expect(result?.impact).toBeNull();
+  });
+
+  it('stops graph impact reads at aggregate document and request bounds', async () => {
+    const f = fixture();
+    const endpoints = Array.from({ length: 8 }, () => randomUUID());
+    for (const endpointId of endpoints)
+      f.rawSeed('knowledgeGraphEntities', endpointId, {
+        id: endpointId,
+        agentId: f.ownerId,
+        label: 'Synthetic graph endpoint',
+        kind: 'topic',
+      });
+    for (let index = 0; index < endpoints.length; index += 2) {
+      const relationId = randomUUID();
+      f.rawSeed('knowledgeGraphRelations', relationId, {
+        id: relationId,
+        agentId: f.ownerId,
+        sourceMemoryId: f.memoryId,
+        subjectEntityId: endpoints[index],
+        objectEntityId: endpoints[index + 1],
+        predicate: 'connected_to',
+      });
+    }
+    for (const endpointId of endpoints)
+      for (let index = 0; index < 450; index += 1) {
+        const aliasId = randomUUID();
+        f.rawSeed('knowledgeGraphEntityAliases', aliasId, {
+          id: aliasId,
+          agentId: f.ownerId,
+          entityId: endpointId,
+          alias: `Synthetic alias ${index}`,
+        });
+      }
+
+    const result = await readFirestoreOwnerMemoryRemovalSnapshot(f.store, f.ownerId, f.memoryId);
+    expect(result?.snapshot.eligible).toBe(true);
+    expect(result?.impact).toBeNull();
+    // The impact scan itself is capped at 2,048 docs / 64 RPCs; base-snapshot
+    // reads add at most eight requests and four raw documents in this fixture.
+    expect(f.stats.requests).toBeLessThanOrEqual(72);
+    expect(f.stats.raw).toBeLessThanOrEqual(2_052);
+  });
+
+  it('reviews exact graph impact and atomically tombstones the note with its operation receipt', async () => {
+    const f = fixture();
+    const relationId = randomUUID(),
+      leftId = randomUUID(),
+      rightId = randomUUID();
+    f.rawSeed('knowledgeGraphEntities', leftId, {
+      id: leftId,
+      agentId: f.ownerId,
+      label: 'Synthetic left item',
+      kind: 'topic',
+    });
+    f.rawSeed('knowledgeGraphEntities', rightId, {
+      id: rightId,
+      agentId: f.ownerId,
+      label: 'Synthetic right item',
+      kind: 'topic',
+    });
+    f.rawSeed('knowledgeGraphRelations', relationId, {
+      id: relationId,
+      agentId: f.ownerId,
+      sourceMemoryId: f.memoryId,
+      subjectEntityId: leftId,
+      objectEntityId: rightId,
+      predicate: 'lives_in',
+    });
+    const preview = await readFirestoreOwnerMemoryRemovalSnapshot(f.store, f.ownerId, f.memoryId);
+    expect(preview?.impact).toMatchObject({
+      memoryId: f.memoryId,
+      connectionCount: 1,
+      sourceEvidenceCount: 0,
+      orphanedItems: [
+        { id: leftId, label: 'Synthetic left item' },
+        { id: rightId, label: 'Synthetic right item' },
+      ],
+    });
+    if (!preview?.impact) throw new Error('Expected the exact note impact snapshot');
+    const request: Extract<OwnerEditorApply, { command: 'remove_owner_memory' }> = {
+      version: 1,
+      intent: 'apply',
+      command: 'remove_owner_memory',
+      operationId: randomUUID(),
+      memoryId: f.memoryId,
+      expectedContentHash: preview.snapshot.contentHash,
+      expectedMemoryRevision: preview.snapshot.revision,
+      expectedImpactRevision: preview.impact.revision,
+    };
+    const scope = f.scope(request);
+    const storage = createFirestoreOwnerEditorDomainStorage(f.store, f.ownerId, f.space);
+    const domain = createOwnerEditorDomain({
+      storage: { ...storage, memoryFollowup: undefined },
+      router: { embeddingSpace: async () => f.space, embed: f.embed },
+    });
+    const reply = await applyOwnerEditorCommand({
+      request,
+      scope,
+      operations: f.operations,
+      domain,
+    });
+    expect(reply).toMatchObject({
+      authority: 'operation_receipt',
+      command: 'remove_owner_memory',
+      outcome: 'saved',
+      ids: { memoryId: f.memoryId },
+      refreshPending: true,
+    });
+    expect(f.rows('memories')).toHaveLength(0);
+    expect(f.rows('memoryTombstones')).toMatchObject([
+      { contentHash: f.memory.contentHash, reason: 'owner_forget' },
+    ]);
+    expect(f.rows('graphDeletionIntents')).toMatchObject([
+      { memoryId: f.memoryId, agentId: f.ownerId, contentHash: f.memory.contentHash },
+    ]);
+    expect(f.rows('ownerCards')[0]?.content).toBe('');
+    expect(
+      await applyOwnerEditorCommand({ request, scope, operations: f.operations, domain }),
+    ).toEqual(reply);
+    expect(f.embed).not.toHaveBeenCalled();
+    expect(f.stats.readsAfterWrites).toBe(0);
+    expect(JSON.stringify(f.rows('ownerEditorOperations'))).not.toContain(f.memory.content);
+  });
+
+  it('rejects a changed source graph member before deleting the saved note', async () => {
+    const f = fixture();
+    const relationId = randomUUID(),
+      leftId = randomUUID(),
+      originalRightId = randomUUID(),
+      changedRightId = randomUUID();
+    for (const [id, label] of [
+      [leftId, 'Synthetic left item'],
+      [originalRightId, 'Synthetic original item'],
+      [changedRightId, 'Synthetic changed item'],
+    ] as const)
+      f.rawSeed('knowledgeGraphEntities', id, { id, agentId: f.ownerId, label, kind: 'topic' });
+    const relation = {
+      id: relationId,
+      agentId: f.ownerId,
+      sourceMemoryId: f.memoryId,
+      subjectEntityId: leftId,
+      objectEntityId: originalRightId,
+      predicate: 'lives_in',
+    };
+    f.rawSeed('knowledgeGraphRelations', relationId, relation);
+    const preview = await readFirestoreOwnerMemoryRemovalSnapshot(f.store, f.ownerId, f.memoryId);
+    if (!preview?.impact) throw new Error('Expected the exact note impact snapshot');
+    const request: Extract<OwnerEditorApply, { command: 'remove_owner_memory' }> = {
+      version: 1,
+      intent: 'apply',
+      command: 'remove_owner_memory',
+      operationId: randomUUID(),
+      memoryId: f.memoryId,
+      expectedContentHash: preview.snapshot.contentHash,
+      expectedMemoryRevision: preview.snapshot.revision,
+      expectedImpactRevision: preview.impact.revision,
+    };
+    f.rawSeed('knowledgeGraphRelations', relationId, {
+      ...relation,
+      objectEntityId: changedRightId,
+    });
+    expect(await f.run(request)).toMatchObject({
+      authority: 'operation_receipt',
+      outcome: 'conflict',
+    });
+    expect(f.rows('memories')).toHaveLength(1);
+    expect(f.rows('memoryTombstones')).toHaveLength(0);
+    expect(f.rows('graphDeletionIntents')).toHaveLength(0);
+  });
+
   it('atomically saves same ID, prior tombstone/hash binding/marker/card invalidation and compact receipt, then replays with zero extra embedding', async () => {
     const f = fixture(),
       request = await f.request(),

@@ -5,6 +5,7 @@ export const OWNER_EDITOR_COMMANDS = [
   'add_family_relationship',
   'correct_owner_family_relationship',
   'correct_owner_memory',
+  'remove_owner_memory',
   'create_owner_memory',
   'remove_person',
   'remove_owner_family_relationship',
@@ -103,6 +104,13 @@ export type OwnerEditorApply = ApplyEnvelope &
         expectedContentHash: string;
         expectedMemoryRevision: string;
         content: string;
+      }
+    | {
+        command: 'remove_owner_memory';
+        memoryId: string;
+        expectedContentHash: string;
+        expectedMemoryRevision: string;
+        expectedImpactRevision: string;
       }
     | {
         command: 'create_owner_memory';
@@ -288,4 +296,13 @@ export interface OwnerEditorPersonRemovalImpact {
   retainedSourceNotes: number;
   entityLinks: number;
   sourceLinks: number;
+}
+
+/** Bounded source-specific graph impact reviewed before removing one saved note. */
+export interface OwnerEditorMemoryRemovalImpact {
+  memoryId: string;
+  revision: string;
+  connectionCount: number;
+  sourceEvidenceCount: number;
+  orphanedItems: Array<{ id: string; label: string }>;
 }

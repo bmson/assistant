@@ -39,6 +39,35 @@ describe('owner memory editor view admission', () => {
     expect(view.unavailableReason).toBeNull();
   });
 
+  it('issues a removal grant only for a valid exact note and graph impact revision', () => {
+    const impact = {
+      memoryId: snapshot.memoryId,
+      revision: 'd'.repeat(64),
+      connectionCount: 2,
+      sourceEvidenceCount: 1,
+      orphanedItems: [{ id: 'synthetic-entity', label: 'Synthetic place' }],
+    };
+    const view = buildOwnerMemoryEditorView(input({ removalImpact: impact }));
+    expect(view.removalImpact).toEqual(impact);
+    expect(view.removalGrant).toMatchObject({
+      command: 'remove_owner_memory',
+    });
+    expect(view.removalGrant?.operationId).toMatch(/^[0-9a-f-]{36}$/i);
+    const malformed = buildOwnerMemoryEditorView(
+      input({ removalImpact: { ...impact, revision: 'short' } }),
+    );
+    expect(malformed.removalImpact).toBeNull();
+    expect(malformed.removalGrant).toBeNull();
+  });
+
+  it('keeps a valid note correctable when optional removal impact is unavailable', () => {
+    const view = buildOwnerMemoryEditorView(input({ removalImpact: null }));
+    expect(view.snapshot).toBe(snapshot);
+    expect(view.grant).toMatchObject({ command: 'correct_owner_memory' });
+    expect(view.removalImpact).toBeNull();
+    expect(view.removalGrant).toBeNull();
+  });
+
   it.each([
     ['maintenance', { enabled: false }, 'Editing is temporarily paused for maintenance.'],
     [

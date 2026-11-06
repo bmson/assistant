@@ -208,6 +208,7 @@ import {
 import { and, asc, desc, eq, gt, lt, or } from 'drizzle-orm';
 import { unstable_cache } from 'next/cache';
 import { cache } from 'react';
+import { isValidFormSessionScope } from '../app/auth-form-session-scope';
 import {
   decodeMobileDocumentCursor,
   encodeMobileDocumentCursor,
@@ -1891,7 +1892,11 @@ export async function loadOwnerMemoryEditorView(
 ) {
   const [
     { readPostgresOwnerEditorIssuanceContext, readPostgresOwnerMemoryEditorSnapshot },
-    { readFirestoreOwnerEditorIssuanceContext, readFirestoreOwnerMemoryEditorSnapshot },
+    {
+      readFirestoreOwnerEditorIssuanceContext,
+      readFirestoreOwnerMemoryEditorSnapshot,
+      readFirestoreOwnerMemoryRemovalSnapshot,
+    },
     { buildOwnerMemoryEditorView },
   ] = await Promise.all([
     import('@assistant/db'),
@@ -1906,9 +1911,11 @@ export async function loadOwnerMemoryEditorView(
   const finish = (
     snapshot: NonNullable<Awaited<ReturnType<typeof readPostgresOwnerMemoryEditorSnapshot>>>,
     context: Awaited<ReturnType<typeof readPostgresOwnerEditorIssuanceContext>>,
+    removalImpact?: import('@assistant/persistence').OwnerEditorMemoryRemovalImpact | null,
   ) =>
     buildOwnerMemoryEditorView({
       snapshot,
+      removalImpact,
       context,
       formSessionScope,
       secret: config.AUTH_SECRET,
@@ -1925,6 +1932,8 @@ export async function loadOwnerMemoryEditorView(
   if (validateAgentPersistenceConfig(config).length)
     throw new Error('Memory persistence is unavailable');
   const store = getFirestoreInstallationStore();
+  const canReviewRemovalImpact =
+    enabled && Boolean(config.AUTH_SECRET) && isValidFormSessionScope(formSessionScope);
   return store.db.runTransaction(async (tx) => {
     const snapshot = await readFirestoreOwnerMemoryEditorSnapshot(
       store,
@@ -1933,13 +1942,44 @@ export async function loadOwnerMemoryEditorView(
       tx,
     );
     if (!snapshot) return null;
-    const context = await readFirestoreOwnerEditorIssuanceContext(
-      store,
-      config.FIRESTORE_AGENT_ID,
-      tx,
-    );
-    return finish(snapshot, context);
+    let context: Awaited<ReturnType<typeof readFirestoreOwnerEditorIssuanceContext>> = null;
+    if (snapshot.eligible && canReviewRemovalImpact)
+      context = await readFirestoreOwnerEditorIssuanceContext(store, config.FIRESTORE_AGENT_ID, tx);
+    let impact: import('@assistant/persistence').OwnerEditorMemoryRemovalImpact | null = null;
+    if (snapshot.eligible && context && canReviewRemovalImpact) {
+      try {
+        const removal = await readFirestoreOwnerMemoryRemovalSnapshot(
+          store,
+          config.FIRESTORE_AGENT_ID,
+          memoryId,
+          tx,
+        );
+        if (
+          removal &&
+          removal.snapshot.revision === snapshot.revision &&
+          removal.snapshot.contentHash === snapshot.contentHash
+        )
+          impact = removal.impact;
+      } catch {
+        // Impact-read failures disable only note removal; correction remains available.
+      }
+    }
+    return finish(snapshot, context, impact);
   });
+}
+
+/** Owner/session partition for receipt lookup when the saved row is already absent. */
+export async function loadOwnerMemoryEditorRecoverySession(formSessionScope: string | undefined) {
+  if (!formSessionScope) return null;
+  const config = loadConfig();
+  if (config.PERSISTENCE_DRIVER === 'firestore') {
+    if (validateAgentPersistenceConfig(config).length || !config.FIRESTORE_AGENT_ID) return null;
+    return { ownerId: config.FIRESTORE_AGENT_ID, formSessionScope };
+  }
+  return withPostgresMemoryBrowseRead(async (tx) => ({
+    ownerId: await assertPostgresInstallationOwner(tx),
+    formSessionScope,
+  }));
 }
 
 /** One exact owner-scoped saved-note read with no editor context or grant issuance. */

@@ -123,6 +123,14 @@ const applySchema = z.discriminatedUnion('command', [
   }),
   z.strictObject({
     ...envelope,
+    command: z.literal('remove_owner_memory'),
+    memoryId: uuid,
+    expectedContentHash: revision,
+    expectedMemoryRevision: revision,
+    expectedImpactRevision: revision,
+  }),
+  z.strictObject({
+    ...envelope,
     command: z.literal('create_owner_memory'),
     subjectContactId: uuid,
     expectedSubjectRevision: revision,
@@ -152,6 +160,7 @@ export function ownerEditorPath(command: OwnerEditorCommand): string {
     case 'correct_owner_family_relationship':
       return '/api/profile/knowledge/family';
     case 'correct_owner_memory':
+    case 'remove_owner_memory':
     case 'create_owner_memory':
       return '/api/profile/knowledge/memory';
     case 'remove_person':
@@ -178,6 +187,7 @@ export function ownerEditorApplyMatchesScope(
       case 'correct_owner_family_relationship':
         return scope.targetId === request.targetRelationId;
       case 'correct_owner_memory':
+      case 'remove_owner_memory':
         return scope.targetId === request.memoryId;
       case 'create_owner_memory':
         return scope.targetId === request.subjectContactId;
@@ -248,6 +258,8 @@ export function parseOwnerEditorRequest(value: unknown, path: string): OwnerEdit
         ok: false,
         fieldErrors: { content: 'Enter a saved note between 3 and 4,000 characters.' },
       };
+  } else if (request.command === 'remove_owner_memory') {
+    return { ok: true, request };
   } else if (
     request.command === 'add_family_relationship' ||
     request.command === 'correct_owner_family_relationship'

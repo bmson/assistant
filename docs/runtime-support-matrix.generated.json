@@ -5,10 +5,10 @@
     "packages/config/src/index.ts": "1775232bbff153dc4bbfb9dc9fec659a38fd0afdce7f0e67f50d8c6c1822c6d7",
     "apps/agent/src/deps.ts": "fb30df8600bbcf24da0d5cfa9ef1c92e28700b663429cdbbe37d65ecee0ea655",
     "apps/agent/src/index.ts": "bc65b1a16ba83c6351a74e2c071189fb4288d5d3ec2c4425accc185da77fe6ab",
-    "apps/web/lib/server.ts": "cf5d46761d3154254cd0041a6686194ad723976bd731c5db35774946c1cbc51c",
+    "apps/web/lib/server.ts": "eacc054e7610578df7316e81608536fcb65a1b2ef4452d0815286464ccd91809",
     "apps/web/proxy.ts": "0d3bae71bd7a094b3e70615c89bd82db8b2fa1196e7ccde8a1d7b2e6c4872cc6",
     "packages/db/drizzle/meta/_journal.json": "fbed73a21a85cebefb245c9612f417ef82899c00d61fb167ab1840173fd000a3",
-    "infra/gcp/release-contracts.json": "94c21c97e86813af58e3c5c1b65ec89f7888db57ba28f471526f1bdbe944002f"
+    "infra/gcp/release-contracts.json": "f2d306ef0f8898c41c1ea4e701961210b825237177a6f4546d756400788efac8"
   },
   "latestPostgresMigration": "0135_memory_write_witness",
   "postgresSchemaVersion": 135,

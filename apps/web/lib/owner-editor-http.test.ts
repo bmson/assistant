@@ -49,7 +49,9 @@ function fixture(command: OwnerEditorCommand = 'create_person') {
     command === 'update_person_identity' ||
     command === 'remove_person'
       ? paths.people
-      : command === 'correct_owner_memory' || command === 'create_owner_memory'
+      : command === 'correct_owner_memory' ||
+          command === 'remove_owner_memory' ||
+          command === 'create_owner_memory'
         ? paths.memory
         : paths.family;
   const grantCommand: OwnerEditorCommand =
@@ -105,7 +107,9 @@ function fixture(command: OwnerEditorCommand = 'create_person') {
       command === 'update_person_identity' ||
       command === 'remove_person'
         ? { contactId: target }
-        : command === 'correct_owner_memory' || command === 'create_owner_memory'
+        : command === 'correct_owner_memory' ||
+            command === 'remove_owner_memory' ||
+            command === 'create_owner_memory'
           ? { memoryId: target }
           : { relationId: target, memoryId: other, assertionId: third },
     revision: 'b'.repeat(64),
@@ -197,15 +201,24 @@ function fixture(command: OwnerEditorCommand = 'create_person') {
                     expectedMemoryRevision: 'd'.repeat(64),
                     content: 'A corrected saved note',
                   }
-                : command === 'add_family_relationship'
-                  ? { ...envelope, command, ...fields }
-                  : {
+                : command === 'remove_owner_memory'
+                  ? {
                       ...envelope,
                       command,
-                      targetRelationId: target,
-                      expectedTargetRevision: hash,
-                      replacement: fields,
-                    };
+                      memoryId: target,
+                      expectedContentHash: hash,
+                      expectedMemoryRevision: hash,
+                      expectedImpactRevision: hash,
+                    }
+                  : command === 'add_family_relationship'
+                    ? { ...envelope, command, ...fields }
+                    : {
+                        ...envelope,
+                        command,
+                        targetRelationId: target,
+                        expectedTargetRevision: hash,
+                        replacement: fields,
+                      };
   function request(
     method: string,
     options: {
