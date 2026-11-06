@@ -33,12 +33,15 @@ import {
 import type { ModelRouter } from '../model-router/router.js';
 import {
   briefingBody,
+  briefingCalendarPromptLines,
   briefingHasNews,
   briefingHeadline,
   briefingTaskSummary,
+  calendarOverlapBriefingItems,
   findConflicts,
   runBriefing,
 } from './briefing.js';
+import { agendaSection, briefingMarkdown } from './briefing-card.js';
 import { dismissSuggestion } from './suggestions.js';
 
 const DATABASE_URL =
@@ -1454,61 +1457,143 @@ describe('runBriefing — richer inputs', () => {
     const prompt = prompts[0] ?? '';
     expect(prompt).toContain(`${MARKER} Dentist`);
     expect(prompt).toContain('overlaps');
+    expect(prompt).toContain(
+      'Calendar overlaps in the next day or two (1 distinct conflict pair; showing 1 detail):',
+    );
+    expect(prompt).toContain('On the calendar (2 schedule items shown in the next 36h):');
     const [posted] = await db
       .select({ parts: messages.parts })
       .from(messages)
       .where(like(messages.text, `${digest}%`));
-    expect(posted?.parts).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          type: 'data-card',
-          data: expect.objectContaining({ kind: 'calendar-conflicts' }),
-        }),
-      ]),
-    );
-    expect(JSON.stringify(posted?.parts)).toContain(
-      `You accepted ${MARKER} Dentist (primary). Your attendance at ${MARKER} Interview (primary) isn’t confirmed.`,
-    );
+    const cards = (posted?.parts ?? []) as Array<{
+      type?: string;
+      data?: Record<string, unknown>;
+    }>;
+    expect(cards.filter((part) => part.data?.kind === 'briefing')).toHaveLength(1);
+    expect(cards.some((part) => part.data?.kind === 'calendar-conflicts')).toBe(false);
     // The briefing card leads, and its schedule marks both overlapping events.
     const briefing = ((posted?.parts ?? []) as Array<{ data?: Record<string, unknown> }>).find(
       (part) => part.data?.kind === 'briefing',
     )?.data as {
       lead: string;
-      sections: Array<{ type: string; items?: Array<Record<string, unknown>> }>;
+      sections: Array<{ type: string; title?: string; items?: Array<Record<string, unknown>> }>;
     };
     expect(briefing.lead).toBe(digest);
     const agenda = briefing.sections.find((section) => section.type === 'agenda');
+    const overlaps = briefing.sections.find(
+      (section) => section.title === 'Possible calendar overlaps',
+    );
     expect(
       agenda?.items
         ?.filter((item) => String(item.title).startsWith(MARKER))
         .map((item) => item.flag),
     ).toEqual(['conflict', 'conflict']);
+    expect(
+      agenda?.items
+        ?.filter((item) => String(item.title).startsWith(MARKER))
+        .map((item) => item.note),
+    ).toEqual([undefined, undefined]);
+    expect(overlaps?.items).toHaveLength(1);
+    expect(overlaps?.items?.[0]?.title).toBe(
+      `${MARKER} Dentist (primary) overlaps ${MARKER} Interview (primary)`,
+    );
+    expect(overlaps?.items?.[0]?.detail).toContain(
+      'You accepted one invitation; attendance at the other is unconfirmed.',
+    );
   });
 
   it('preserves uncertain match listings from family and team calendars', () => {
     const conflicts = findConflicts(
       [
         {
-          summary: 'Palo Alto v United (12:00)',
+          summary: 'Bay City v Harbor United (12:00)',
           start: '2026-08-29T18:15:00Z',
           end: '2026-08-29T20:30:00Z',
-          calendar: 'Family',
+          calendar: 'Home',
           allDay: false,
-          location: 'Mayfield Soccer Complex',
+          location: 'Cedar Estuary Soccer Fields',
         },
         {
-          summary: '26/27 U13B Azul @ Palo Alto SC 13/14B Gold',
+          summary: '27/28 U13B Harbor United @ Bay City SC 13/14B Gold',
           start: '2026-08-29T19:00:00Z',
           end: '2026-08-29T20:10:00Z',
-          calendar: 'SF United Soccer',
+          calendar: 'Harbor Soccer',
           allDay: false,
-          location: 'Mayfield Soccer Complex',
+          location: 'Cedar Estuary Soccer Fields',
         },
       ],
       'America/Los_Angeles',
     );
 
     expect(conflicts).toHaveLength(1);
+  });
+
+  it('counts a probable cross-calendar fixture once against a distinct overlapping event', () => {
+    const familyMatch = {
+      calendarId: 'home',
+      eventId: 'home-game',
+      calendar: 'Home',
+      summary: '⚽ Harbor v Bay City (5:10PM)',
+      location: 'Cedar Estuary Soccer Fields, 100 North Gate, Bay City',
+      start: '2026-11-07T16:25:00-08:00',
+      end: '2026-11-07T18:30:00-08:00',
+      allDay: false,
+    };
+    const teamMatch = {
+      calendarId: 'team',
+      eventId: 'team-game',
+      calendar: 'Harbor Soccer',
+      summary: '27/28 U13B Azure vs Bay City SC 13/14B Gold',
+      location: 'Cedar Estuary, 200 South Gate, Bay City',
+      start: '2026-11-07T17:10:00-08:00',
+      end: familyMatch.end,
+      allDay: false,
+    };
+    const gala = {
+      calendarId: 'team',
+      eventId: 'gala',
+      calendar: 'Harbor Soccer',
+      summary: 'Harbor Club Fundraiser Night',
+      location: 'Founders Pavilion Hall, 5051 Harbor Ave',
+      start: '2026-11-07T17:00:00-08:00',
+      end: '2026-11-07T22:30:00-08:00',
+      allDay: false,
+    };
+
+    const conflicts = findConflicts([familyMatch, teamMatch, gala], 'America/Los_Angeles');
+
+    expect(conflicts).toHaveLength(1);
+    expect(conflicts.totalCount).toBe(1);
+    expect(conflicts[0]).toMatchObject({
+      a: [familyMatch, teamMatch],
+      b: [gala],
+    });
+    const agenda = agendaSection({
+      events: [familyMatch, teamMatch, gala],
+      complete: true,
+      conflicts,
+      salient: [],
+      timeZone: 'America/Los_Angeles',
+      now: new Date('2026-11-06T14:00:00-08:00'),
+    });
+    expect(agenda).toMatchObject({
+      type: 'agenda',
+      items: [
+        {
+          title: familyMatch.summary,
+          location: familyMatch.location,
+          flag: 'conflict',
+          note: expect.stringContaining('Home 4:25 PM; Harbor Soccer 5:10 PM'),
+        },
+        { title: gala.summary, flag: 'conflict' },
+      ],
+    });
+    expect(agenda?.type === 'agenda' ? agenda.items : []).toHaveLength(2);
+    expect(briefingCalendarPromptLines(agenda, 36, true)).toEqual([
+      'On the calendar (2 schedule items shown in the next 36h):',
+      '- Tomorrow 4:25 PM – 6:30 PM: ⚽ Harbor v Bay City (5:10PM) at Cedar Estuary Soccer Fields, 100 North Gate, Bay City — Likely the same match: Home 4:25 PM; Harbor Soccer 5:10 PM; source locations differ.',
+      '- Tomorrow 5:00 PM – 10:30 PM: Harbor Club Fundraiser Night at Founders Pavilion Hall, 5051 Harbor Ave',
+    ]);
   });
 
   it('preserves conflicts for shared-UID moved occurrences and copy bridges', () => {
@@ -1551,19 +1636,46 @@ describe('runBriefing — richer inputs', () => {
     ).toHaveLength(3);
   });
 
-  it('bounds dense conflict details while retaining the exact overlap count', () => {
-    const conflicts = findConflicts(
-      Array.from({ length: 5 }, (_, index) => ({
-        summary: `Event ${index + 1}`,
-        start: '2026-10-07T09:00:00Z',
-        end: '2026-10-07T10:00:00Z',
-        calendar: 'Work',
-        allDay: false,
-      })),
-    );
+  it('omits only excess real conflicts in mixed conflict and copy listings', () => {
+    const denseEvents = Array.from({ length: 5 }, (_, index) => ({
+      calendarId: 'work',
+      eventId: `dense-${index + 1}`,
+      summary: `Event ${index + 1}`,
+      start: '2026-10-07T09:00:00Z',
+      end: '2026-10-07T10:00:00Z',
+      calendar: 'Work',
+      allDay: false,
+    }));
+    const phoneCopy = {
+      calendarId: 'iphone:home',
+      eventId: 'phone-copy',
+      summary: 'Harbor United arrival',
+      start: '2026-10-07T12:00:00Z',
+      end: '2026-10-07T13:00:00Z',
+      calendar: 'Home',
+      location: 'Harbor Park',
+      allDay: false,
+    };
+    const providerCopy = {
+      ...phoneCopy,
+      calendarId: 'google:home',
+      eventId: 'provider-copy',
+      calendar: 'Google Home',
+    };
+    const overlaps = findConflicts([...denseEvents, phoneCopy, providerCopy]);
+    const conflicts = overlaps.filter((conflict) => conflict.relationship !== 'probable_duplicate');
     expect(conflicts).toHaveLength(4);
-    expect(conflicts.totalCount).toBe(10);
-    expect(conflicts.detailsOmitted).toBe(true);
+    expect(overlaps).toHaveLength(4);
+    expect(overlaps.totalCount).toBe(11);
+    expect(overlaps.conflictCount).toBe(10);
+    expect(
+      overlaps.filter((conflict) => conflict.relationship === 'probable_duplicate'),
+    ).toHaveLength(0);
+    expect(overlaps.detailsOmitted).toBe(true);
+    expect(calendarOverlapBriefingItems(conflicts, overlaps.conflictCount, 'UTC').at(-1)).toEqual({
+      title: '6 more overlaps not shown',
+      detail: 'Showing 4 of 10 calendar overlaps.',
+    });
   });
 
   it('keeps differing-time copies from becoming verified personal conflicts', () => {
@@ -1985,9 +2097,69 @@ describe('runBriefing — richer inputs', () => {
       expect(prompts[0] ?? '').not.toContain('On the calendar');
     }
   });
+
+  it('shows partial empty calendar coverage without emitting an empty agenda section', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    await addFlightMail({
+      id: 'partial-empty-calendar-news',
+      importance: 5,
+      category: 'work',
+      subject: `${MARKER} synthetic scheduling update`,
+    });
+    const digest = `${MARKER} partial calendar digest`;
+    const { router, prompts } = recordingRouter(digest);
+    const result = await runBriefing({
+      db,
+      router,
+      calendarReader: async () => ({ events: [], complete: false }),
+    });
+    expect(result.delivered).toBe(true);
+    expect(result.calendarEvents).toBe(0);
+    expect(prompts[0] ?? '').toContain(
+      'Calendar coverage is partial; no activities were returned in the next 36h.',
+    );
+    const [posted] = await db
+      .select({ parts: messages.parts })
+      .from(messages)
+      .where(like(messages.text, `${digest}%`));
+    const briefing = ((posted?.parts ?? []) as Array<{ data?: Record<string, unknown> }>).find(
+      (part) => part.data?.kind === 'briefing',
+    )?.data as { sections: Array<{ type: string; title?: string; items?: unknown[] }> } | undefined;
+    expect(briefing).toBeDefined();
+    expect(briefing?.sections.some((section) => section.type === 'agenda')).toBe(false);
+    expect(
+      briefing?.sections.find((section) => section.title === 'Calendar coverage'),
+    ).toMatchObject({
+      type: 'attention',
+      items: [
+        {
+          title: 'Some calendars could not be read',
+          detail: 'No activities were returned in the next 36h.',
+        },
+      ],
+    });
+  });
 });
 
 describe('briefing substance', () => {
+  it('keeps partial calendar coverage explicit when no activities were returned', () => {
+    const section = agendaSection({
+      events: [],
+      complete: false,
+      conflicts: [],
+      salient: [],
+      timeZone: 'America/Los_Angeles',
+      now: new Date('2026-11-06T14:00:00-08:00'),
+    });
+    expect(section).toMatchObject({ type: 'agenda', complete: false, items: [] });
+    expect(briefingCalendarPromptLines(section, 36, false)).toEqual([
+      'Calendar coverage is partial; no activities were returned in the next 36h.',
+    ]);
+    expect(briefingMarkdown('Calendar check.', section ? [section] : [])).toContain(
+      'Some calendars could not be read, so this may be incomplete.',
+    );
+  });
+
   it.each(['', 'Here is your daily briefing in Assistant’s voice based on the provided notes:'])(
     'falls back to gathered facts for meta-only output',
     (draft) => {

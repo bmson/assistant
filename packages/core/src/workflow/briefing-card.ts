@@ -7,7 +7,11 @@ import {
 } from '../owner-text.js';
 import type { EventSalience } from '../proactive/calendar-salience.js';
 import type { BriefingCalendarEvent, CalendarConflict } from './briefing.js';
-import { calendarRelationshipNote } from './calendar-relationship.js';
+import {
+  calendarRelationshipNote,
+  presentationOccurrenceGroups,
+  probableCalendarMatchEvidence,
+} from './calendar-relationship.js';
 
 /**
  * The daily briefing as sections rather than prose.
@@ -140,62 +144,97 @@ export function agendaSection(input: {
   timeZone: string;
   now: Date;
 }): BriefingSection | undefined {
-  if (!input.events.length) return undefined;
+  if (!input.events.length && input.complete) return undefined;
   const conflicting = new Set(
     input.conflicts.flatMap((conflict) => [...conflict.a, ...conflict.b].map(eventKey)),
   );
   const notes = new Map(
     input.salient.map((scored) => [eventKey(scored.event), tidy(scored.reasons.join('; '))]),
   );
-  const conflictNotes = new Map(
-    input.conflicts.flatMap((conflict) =>
-      [...conflict.a, ...conflict.b].map(
-        (event) =>
-          [
-            eventKey(event),
-            calendarRelationshipNote(
-              conflict.relationship ?? 'unresolved',
-              conflict.attendance ?? 'unresolved',
-            ),
-          ] as const,
+  const groups = presentationOccurrenceGroups(input.events, input.timeZone)
+    .map((events) => {
+      const ordered = [...events].sort((a, b) => Date.parse(a.start) - Date.parse(b.start));
+      return { events: ordered, representative: ordered[0] };
+    })
+    .filter(
+      (
+        group,
+      ): group is { events: BriefingCalendarEvent[]; representative: BriefingCalendarEvent } =>
+        group.representative !== undefined,
+    );
+  const conflictNotes = new Map<string, string>();
+  const addConflictNote = (event: BriefingCalendarEvent | undefined, note: string) => {
+    if (!event) return;
+    const key = eventKey(event);
+    if (!conflictNotes.has(key)) conflictNotes.set(key, note);
+  };
+  for (const { events, representative } of groups) {
+    if (
+      !events.some((event, index) =>
+        events
+          .slice(index + 1)
+          .some((other) => probableCalendarMatchEvidence(event, other, input.timeZone)),
+      )
+    )
+      continue;
+    const sourceTimes = [
+      ...new Set(
+        events.map(
+          (event) =>
+            `${tidy(event.calendar) || 'Calendar'} ${ownerTime(event.start, input.timeZone)}`,
+        ),
       ),
-    ),
-  );
-  const important = (event: BriefingCalendarEvent) =>
-    conflicting.has(eventKey(event)) || notes.has(eventKey(event));
-  const selected = [...input.events]
-    .sort((a, b) => Number(important(b)) - Number(important(a)))
+    ];
+    const locations = [...new Set(events.map((event) => tidy(event.location)).filter(Boolean))];
+    addConflictNote(
+      representative,
+      `Likely the same match: ${sourceTimes.join('; ')}${locations.length > 1 ? '; source locations differ' : ''}.`,
+    );
+  }
+  for (const conflict of input.conflicts) {
+    if (conflict.relationship === 'compatible_time_roles') {
+      addConflictNote(
+        conflict.a[0],
+        calendarRelationshipNote(conflict.relationship, conflict.attendance ?? 'unresolved'),
+      );
+    }
+  }
+  const important = (events: BriefingCalendarEvent[]) =>
+    events.some((event) => conflicting.has(eventKey(event)) || notes.has(eventKey(event)));
+  const selected = [...groups]
+    .sort((a, b) => Number(important(b.events)) - Number(important(a.events)))
     .slice(0, MAX_AGENDA)
     .sort(
       (a, b) =>
-        localDayOrder(a, input.timeZone).localeCompare(localDayOrder(b, input.timeZone)) ||
-        input.events.indexOf(a) - input.events.indexOf(b),
+        localDayOrder(a.representative, input.timeZone).localeCompare(
+          localDayOrder(b.representative, input.timeZone),
+        ) || input.events.indexOf(a.representative) - input.events.indexOf(b.representative),
     );
-  const omittedCount = input.events.length - selected.length;
+  const omittedCount = groups.length - selected.length;
   return {
     type: 'agenda',
     title:
       omittedCount > 0
-        ? `Schedule (${selected.length} of ${input.events.length} events)`
+        ? `Schedule (${selected.length} of ${groups.length} activities)`
         : 'Schedule',
     complete: input.complete,
     ...(omittedCount > 0 ? { omittedCount } : {}),
-    items: selected.map((event) => {
-      const key = eventKey(event);
-      const location = tidy(event.location);
-      const note = notes.get(key);
-      const flag = conflicting.has(key) ? 'conflict' : note ? 'salient' : undefined;
+    items: selected.map(({ events, representative }) => {
+      const key = eventKey(representative);
+      const note =
+        conflictNotes.get(key) ?? events.map((event) => notes.get(eventKey(event))).find(Boolean);
+      const flag = events.some((event) => conflicting.has(eventKey(event)))
+        ? 'conflict'
+        : note
+          ? 'salient'
+          : undefined;
       return {
-        day: eventDay(event, input.timeZone, input.now),
-        time: eventTime(event, input.timeZone, input.now),
-        title: tidy(event.summary) || 'Untitled event',
-        ...(location ? { location } : {}),
+        day: eventDay(representative, input.timeZone, input.now),
+        time: eventTime(representative, input.timeZone, input.now),
+        title: tidy(representative.summary) || 'Untitled event',
+        ...(representative.location ? { location: tidy(representative.location) } : {}),
         ...(flag ? { flag } : {}),
-        ...(flag === 'conflict'
-          ? { note: conflictNotes.get(key) ?? 'Overlaps another event; attendance is unverified.' }
-          : note
-            ? { note: truncateAtBoundary(note, DETAIL_LIMIT) }
-            : {}),
+        ...(note ? { note: truncateAtBoundary(note, DETAIL_LIMIT) } : {}),
       };
     }),
   };
@@ -281,7 +320,7 @@ export function briefingMarkdown(lead: string, sections: BriefingSection[]): str
         blocks.push('Some calendars could not be read, so this may be incomplete.');
       if (section.omittedCount)
         blocks.push(
-          `${section.omittedCount} other retrieved events are omitted from this briefing preview.`,
+          `${section.omittedCount} other calendar activities are omitted from this briefing preview.`,
         );
       continue;
     }
