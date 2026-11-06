@@ -103,7 +103,13 @@ function refineOperation(v: z.infer<typeof operationBase>, ctx: z.RefinementCtx)
 
 export const ownerEditorOperationRecordSchema = operationBase
   .extend({ command: z.enum(OWNER_EDITOR_COMMANDS) })
-  .superRefine(refineOperation);
+  .superRefine((v, ctx) => {
+    refineOperation(v, ctx);
+    if (v.command === 'remove_person' && v.result?.outcome === 'unchanged')
+      ctx.addIssue({ code: 'custom', message: 'Person removal cannot have an unchanged receipt' });
+    if (v.command === 'remove_owner_family_relationship' && v.result?.outcome === 'unchanged')
+      ctx.addIssue({ code: 'custom', message: 'Family removal cannot have an unchanged receipt' });
+  });
 
 export const inactiveOwnerFamilyRemovalOperationRecordSchema = operationBase
   .extend({ command: z.literal('remove_owner_family_relationship') })
