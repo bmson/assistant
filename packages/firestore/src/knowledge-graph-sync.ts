@@ -14,6 +14,7 @@ import {
 } from '@assistant/persistence';
 import type { DocumentSnapshot, Query, Transaction } from '@google-cloud/firestore';
 import { decodeMemoryRecord } from './memory-record.js';
+import { ownerFamilySourceIsRejected } from './owner-family-source-rejection.js';
 import { deterministicUuid } from './stable-id.js';
 import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from './store.js';
 
@@ -89,6 +90,7 @@ function ownedMemory(
       (memory.validUntil?.getTime() ?? null) !== (source.validUntil?.getTime() ?? null)) ||
     memory.category !== 'knowledge' ||
     memory.quarantined ||
+    ownerFamilySourceIsRejected(memory) ||
     (memory.expiresAt && memory.expiresAt <= now)
   )
     return null;
@@ -216,6 +218,7 @@ export class FirestoreKnowledgeGraphSyncRepository implements KnowledgeGraphSync
           (input.agentId && memory.agentId !== input.agentId) ||
           memory.category !== 'knowledge' ||
           memory.quarantined ||
+          ownerFamilySourceIsRejected(memory) ||
           (memory.expiresAt && memory.expiresAt <= input.now) ||
           typeof retrievalRevision !== 'string' ||
           !retrievalRevision

@@ -9,6 +9,7 @@ import {
 import { FieldValue } from '@google-cloud/firestore';
 import { decodeMemoryRecord } from './memory-record.js';
 import { createFirestoreGenericMemoryWriteWitness } from './memory-write-witness.js';
+import { ownerFamilySourceIsRejected } from './owner-family-source-rejection.js';
 import { privacyErasureGeneration, privacyErasureIsActive } from './privacy-erasure.js';
 import { encodeRecord, type InstallationStore } from './store.js';
 
@@ -164,6 +165,7 @@ export class FirestoreMemoryRepository {
           if (
             row.agentId !== input.agentId ||
             row.quarantined ||
+            ownerFamilySourceIsRejected(row) ||
             row.supersededById ||
             (row.expiresAt && row.expiresAt <= now) ||
             snapshot.get('embeddingSpace') !== embeddingSpaceKey(this.space)

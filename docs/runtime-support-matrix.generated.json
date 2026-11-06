@@ -8,7 +8,7 @@
     "apps/web/lib/server.ts": "cf5d46761d3154254cd0041a6686194ad723976bd731c5db35774946c1cbc51c",
     "apps/web/proxy.ts": "0d3bae71bd7a094b3e70615c89bd82db8b2fa1196e7ccde8a1d7b2e6c4872cc6",
     "packages/db/drizzle/meta/_journal.json": "fbed73a21a85cebefb245c9612f417ef82899c00d61fb167ab1840173fd000a3",
-    "infra/gcp/release-contracts.json": "45cc65420fb01d070561223bac34533afadd54f237043c1ae1ec385768b9852c"
+    "infra/gcp/release-contracts.json": "94c21c97e86813af58e3c5c1b65ec89f7888db57ba28f471526f1bdbe944002f"
   },
   "latestPostgresMigration": "0135_memory_write_witness",
   "postgresSchemaVersion": 135,

@@ -112,7 +112,7 @@ export function OwnerEditorTimingHelp() {
 /** Serializable owner-bound snapshot only. No grant/record authority is minted here. */
 export function OwnerEditorControls(props: OwnerEditorControlsProps) {
   const { session, createGrant, identity, family, corrections = [] } = props;
-  // Backlog removal props never enable controls in the basic five-command release.
+  // Only reviewed removal commands with server-issued grants enable controls.
   const removals = useMemo(
     () => (props.removals ?? []).filter((entry) => isBasicOwnerEditorCommand(entry.grant.command)),
     [props.removals],
@@ -1028,11 +1028,15 @@ export function OwnerEditorRemovalSummary({
       <ul className="list-disc space-y-1 pl-5">
         <li>{impact.facts} saved facts attributed to this person</li>
         <li>{impact.occasions} saved dates</li>
-        <li>{impact.connections} recorded connections</li>
       </ul>
       <p>
-        {impact.retainedSourceNotes} other saved source notes stay saved. Links from retained notes
-        and items to this person’s profile are cleared.
+        {impact.connections} recorded connections are affected. Connections supported only by
+        deleted facts disappear. Connections supported by retained notes stay saved with their
+        profile links cleared.
+      </p>
+      <p>
+        {impact.retainedSourceNotes} affected source notes stay saved. Links from retained notes and
+        items to this person’s profile are cleared.
       </p>
       <p>Original emails and documents are not deleted. This cannot be undone here.</p>
     </div>

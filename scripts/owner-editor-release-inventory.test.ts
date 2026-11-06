@@ -309,6 +309,16 @@ function service(target?: { workspaceId: string; ownerId: string }) {
   };
 }
 describe('protected read-only release inventory', () => {
+  it('binds the actual repository release contract to the inventory preflight', () => {
+    const actualContract = JSON.parse(
+      readFileSync(new URL('../infra/gcp/release-contracts.json', import.meta.url), 'utf8'),
+    );
+    expect(requiresBasicEditorPreflight(actualContract, true)).toBe(true);
+    expect(() => requiresBasicEditorPreflight(actualContract, false)).toThrow(
+      'capability declaration mismatch',
+    );
+  });
+
   it('requires the exact intrinsic person-note capability when the runtime exists', () => {
     const contract = (capability?: unknown) => ({
       components: { web: capability === undefined ? {} : { ownerEditorV1: capability } },

@@ -141,6 +141,7 @@ const files = [
   'apps/web/app/people/page.test.tsx',
   'apps/web/app/people/[id]/page.test.tsx',
   'apps/web/lib/firestore-mobile-workspace.test.ts',
+  'apps/web/lib/owner-editor-removal.emulator.test.ts',
   'scripts/firestore-watch-smoke.test.ts',
   'scripts/consumer-owner-claim.test.ts',
   'scripts/profile-library-parity.test.ts',

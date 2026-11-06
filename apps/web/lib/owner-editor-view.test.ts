@@ -35,9 +35,35 @@ const snapshot: OwnerEditorViewSnapshot = {
     { contactId, name: 'Sam', revision },
     { contactId: otherId, name: 'Alex', revision },
   ],
-  corrections: [],
+  corrections: [
+    {
+      relationId: '55555555-5555-4555-8555-555555555555',
+      revision: 'c'.repeat(64),
+      original: {
+        subjectContactId: contactId,
+        objectContactId: otherId,
+        expectedSubjectRevision: revision,
+        expectedObjectRevision: revision,
+        predicate: 'parent_of',
+        timing: 'present',
+        validity: { validFrom: null, validUntil: null },
+        note: '',
+        expectedCanonicalState: { kind: 'absent' },
+      },
+      sourceText: "Sam is Alex's parent.",
+    },
+  ],
 };
-const input = { enabled: true, context, snapshot, formSessionScope, secret, displayedContact, now };
+const input = {
+  enabled: true,
+  removalEnabled: true,
+  context,
+  snapshot,
+  formSessionScope,
+  secret,
+  displayedContact,
+  now,
+};
 const personRemoval = {
   contactId,
   revision,
@@ -48,23 +74,96 @@ const personRemoval = {
   entityLinks: 1,
   sourceLinks: 2,
 };
-it('keeps all basic editor grants available while never reading or issuing removal impact', () => {
+it('issues person removal only from a canonical impact matching the displayed identity', () => {
   const suppliedImpact = { ...snapshot, personRemoval };
   const view = buildOwnerEditorView({ ...input, snapshot: suppliedImpact });
   expect(view).not.toBeNull();
   expect(view?.createGrant?.command).toBe('create_person');
   expect(view?.identity?.grant.command).toBe('update_person_identity');
   expect(view?.family?.grant.command).toBe('add_family_relationship');
+  expect(view?.personRemoval).toMatchObject({
+    grant: { command: 'remove_person', operationId: expect.any(String) },
+    impact: personRemoval,
+  });
+  expect(view?.removals).toMatchObject([
+    {
+      grant: { command: 'remove_owner_family_relationship' },
+      eligibility: snapshot.corrections?.[0],
+    },
+  ]);
+  expect(view?.personRemovalUnavailableReason).toBeUndefined();
+  const removePersonGrant = verifyOwnerEditorHandle({
+    token: view?.personRemoval?.grant.issuedOperationHandle ?? '',
+    session: { ownerId, formSessionScope },
+    secret,
+    now,
+  });
+  expect(removePersonGrant).toMatchObject({
+    kind: 'verified',
+    scope: { command: 'remove_person', targetId: contactId },
+  });
+  const removeRelationGrant = verifyOwnerEditorHandle({
+    token: view?.removals?.[0]?.grant.issuedOperationHandle ?? '',
+    session: { ownerId, formSessionScope },
+    secret,
+    now,
+  });
+  expect(removeRelationGrant).toMatchObject({
+    kind: 'verified',
+    scope: {
+      command: 'remove_owner_family_relationship',
+      targetId: snapshot.corrections?.[0]?.relationId,
+    },
+  });
+});
+
+it('keeps removal unavailable when canonical impact is absent or mismatched', () => {
+  const view = buildOwnerEditorView(input);
   expect(view?.personRemoval).toBeUndefined();
-  expect(view?.removals).toBeUndefined();
-  expect(view?.personRemovalUnavailableReason).toContain('not available in this release');
+  expect(view?.personRemovalUnavailableReason).toContain('current impact could not be verified');
+  const mismatched = buildOwnerEditorView({
+    ...input,
+    snapshot: { ...snapshot, personRemoval: { ...personRemoval, contactId: otherId } },
+  });
+  expect(mismatched?.personRemoval).toBeUndefined();
+  expect(mismatched?.personRemovalUnavailableReason).toContain(
+    'current impact could not be verified',
+  );
+  const invalidRevision = buildOwnerEditorView({
+    ...input,
+    snapshot: { ...snapshot, personRemoval: { ...personRemoval, revision: 'receipt-revision' } },
+  });
+  expect(invalidRevision?.personRemoval).toBeUndefined();
+});
+
+it('does not issue any removal grants without explicit driver capability', () => {
+  const view = buildOwnerEditorView({
+    ...input,
+    removalEnabled: false,
+    snapshot: { ...snapshot, personRemoval },
+  });
+  expect(view?.personRemoval).toBeUndefined();
+  expect(view?.removals).toEqual([]);
+  expect(view?.personRemovalUnavailableReason).toBeDefined();
+});
+
+it('does not issue family-removal grants without an eligible relation snapshot', () => {
+  const noEligibility = buildOwnerEditorView({
+    ...input,
+    snapshot: { ...snapshot, corrections: [] },
+  });
+  expect(noEligibility?.removals).toEqual([]);
+  expect(noEligibility?.corrections).toEqual([]);
+});
+
+it('fails closed when the canonical removal impact cannot be read', () => {
   const unreadableImpact = {
     ...snapshot,
     get personRemoval(): typeof personRemoval {
       throw new Error('unsupported impact read');
     },
   };
-  expect(buildOwnerEditorView({ ...input, snapshot: unreadableImpact })).not.toBeNull();
+  expect(buildOwnerEditorView({ ...input, snapshot: unreadableImpact })).toBeNull();
 });
 
 describe('server editor view builds real grants only for the same displayed native snapshot', () => {

@@ -306,6 +306,8 @@ describe('actual two HTTP factories, actual crypto/parser/body guards, offline b
     'correct_owner_family_relationship',
     'correct_owner_memory',
     'create_owner_memory',
+    'remove_person',
+    'remove_owner_family_relationship',
   ] as const)(
     'dispatches exactly %s with verified owner scope on its declared route',
     async (command) => {
@@ -321,18 +323,7 @@ describe('actual two HTTP factories, actual crypto/parser/body guards, offline b
       expect(f.lookup).not.toHaveBeenCalled();
     },
   );
-  it.each(['remove_person', 'remove_owner_family_relationship'] as const)(
-    'rejects a correctly signed %s scope before GET or POST reaches the backend',
-    async (command) => {
-      const f = fixture(command);
-      await rejection(await f.handlers().POST(f.request('POST')), 403);
-      assertNoDomain(f);
-
-      await rejection(await f.handlers().GET(f.request('GET')), 403);
-      assertNoDomain(f);
-    },
-  );
-  it('strict request parsing rejects a removal command under an otherwise allowed handle before backend access', async () => {
+  it('rejects a removal command under a differently scoped signed handle before backend access', async () => {
     const f = fixture('update_person_identity');
     const response = await f.handlers().POST(
       f.request('POST', {
@@ -347,11 +338,11 @@ describe('actual two HTTP factories, actual crypto/parser/body guards, offline b
         },
       }),
     );
-    expect(response.status).toBe(422);
+    expect(response.status).toBe(409);
     expect(response.headers.get('cache-control')).toBe('no-store');
     expect(await response.json()).toMatchObject({
       authority: 'request_rejection',
-      reason: 'invalid_command',
+      reason: 'issuance_mismatch',
     });
     assertNoDomain(f);
   });

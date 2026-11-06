@@ -6,6 +6,8 @@ export const OWNER_EDITOR_COMMANDS = [
   'correct_owner_family_relationship',
   'correct_owner_memory',
   'create_owner_memory',
+  'remove_person',
+  'remove_owner_family_relationship',
 ] as const;
 /**
  * Shared command names, including commands not enabled for writing in this

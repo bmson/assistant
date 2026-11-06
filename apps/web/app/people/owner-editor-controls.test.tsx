@@ -275,8 +275,12 @@ it('distinguishes the exact person deletion impact from removing one retained-so
   const person = renderToStaticMarkup(<OwnerEditorRemovalSummary name="Sam" impact={impact} />);
   expect(person).toContain('2 saved facts');
   expect(person).toContain('3 saved dates');
-  expect(person).toContain('4 recorded connections');
-  expect(person).toContain('5 other saved source notes stay saved');
+  expect(person).toContain('4 recorded connections are affected.');
+  expect(person).toContain('supported only by deleted facts disappear');
+  expect(person).toContain(
+    'supported by retained notes stay saved with their profile links cleared',
+  );
+  expect(person).toContain('5 affected source notes stay saved');
   const connection = renderToStaticMarkup(
     <OwnerEditorRemovalSummary sentence="Sam is Alex’s parent." />,
   );
