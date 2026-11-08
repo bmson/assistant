@@ -1,10 +1,9 @@
 import type { ProactiveHealthCounts, ProactiveHealthRepository } from '@assistant/persistence';
+import { emailIngestReadable, type Records } from '@assistant/persistence';
 import type { QueryDocumentSnapshot } from '@google-cloud/firestore';
 import { FirestoreDeviceTokenRepository } from './device-tokens.js';
 import { decodeRecord, documentKey, type InstallationStore } from './store.js';
 
-/** Pings read per day; the ambient policy caps them far below this. */
-const PING_LIMIT = 2_000;
 const MAIL_SCAN_LIMIT = 10_000;
 
 /** The proactive-health counts on Firestore, through aggregation queries. */
@@ -20,7 +19,7 @@ export class FirestoreProactiveHealthRepository implements ProactiveHealthReposi
     agentId: string,
     window: { since24h: Date; since7d: Date },
   ): Promise<ProactiveHealthCounts> {
-    const [mailCounts, moments, pings, devices] = await Promise.all([
+    const [mailCounts, moments, deliveredPings, heldPings, devices] = await Promise.all([
       this.completeMailCounts(agentId, window),
       this.store
         .collection('proactiveMoments')
@@ -31,17 +30,24 @@ export class FirestoreProactiveHealthRepository implements ProactiveHealthReposi
       this.store
         .collection('proactivePings')
         .where('agentId', '==', agentId)
+        .where('delivered', '==', true)
         .where('createdAt', '>=', window.since24h)
-        .select('delivered')
-        .limit(PING_LIMIT)
+        .count()
+        .get(),
+      this.store
+        .collection('proactivePings')
+        .where('agentId', '==', agentId)
+        .where('delivered', '==', false)
+        .where('createdAt', '>=', window.since24h)
+        .count()
         .get(),
       this.devices.listActive(agentId),
     ]);
     return {
       ...mailCounts,
       momentsDelivered24h: moments.data().count,
-      pingsDelivered24h: pings.docs.filter((doc) => doc.get('delivered') === true).length,
-      pingsHeld24h: pings.docs.filter((doc) => doc.get('delivered') !== true).length,
+      pingsDelivered24h: deliveredPings.data().count,
+      pingsHeld24h: heldPings.data().count,
       pushDevices: devices.length,
     };
   }
@@ -60,23 +66,18 @@ export class FirestoreProactiveHealthRepository implements ProactiveHealthReposi
         .collection('emailIngest')
         .where('agentId', '==', agentId)
         .where('createdAt', '>=', window.since7d)
-        .orderBy('createdAt', 'asc')
+        .orderBy('createdAt', 'desc')
         .limit(Math.min(250, MAIL_SCAN_LIMIT - scanned));
       if (cursor) query = query.startAfter(cursor);
       const page = await query.get();
       for (const doc of page.docs) {
-        const row = decodeRecord<{
-          id?: unknown;
-          agentId?: unknown;
-          createdAt?: unknown;
-          pipelineStage?: unknown;
-        }>(doc.data());
+        const row = decodeRecord<Partial<Records['emailIngest']>>(doc.data());
         if (
           typeof row.id !== 'string' ||
           documentKey(row.id) !== doc.id ||
           row.agentId !== agentId ||
           !(row.createdAt instanceof Date) ||
-          (row.pipelineStage !== undefined && row.pipelineStage !== 'complete')
+          !emailIngestReadable(row)
         )
           continue;
         mailScored7d += 1;

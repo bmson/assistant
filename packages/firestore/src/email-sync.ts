@@ -27,6 +27,7 @@ import {
   emailBookingKey,
   emailBookingObservationIsNewer,
   emailBookingOccurrenceId,
+  emailIngestReadable,
   emailObserverBudgetId,
   emailObserverDeliveryKey,
   emailObserverMessageBody,
@@ -2958,11 +2959,7 @@ export class FirestoreEmailSyncRepository implements EmailSyncRepository {
       if (!prior || newer(row, prior)) latest.set(row.providerThreadId, row);
     }
     return [...latest.values()]
-      .filter(
-        (row) =>
-          row.actionable === true &&
-          (row.pipelineStage == null || row.pipelineStage === 'complete'),
-      )
+      .filter((row) => row.actionable === true && emailIngestReadable(row))
       .map((row) => ({
         id: row.id,
         channelMessageId: row.channelMessageId,
@@ -3005,7 +3002,7 @@ export class FirestoreEmailSyncRepository implements EmailSyncRepository {
         row.channelMessageId !== input.channelMessageId ||
         !row.providerThreadId ||
         row.actionable !== true ||
-        row.pipelineStage !== 'complete' ||
+        !emailIngestReadable(row) ||
         (input.decision === 'reopen'
           ? row.obligationStatus !== 'resolved'
           : row.obligationStatus === 'resolved') ||

@@ -19,6 +19,7 @@ import {
 } from '@assistant/core';
 import { FirestoreOutbox, FirestoreScheduleRepository } from '@assistant/firestore';
 import type { TaskQueue } from '@assistant/persistence';
+import { ensureAwarenessSchedule } from './awareness-schedule.js';
 import {
   type AgentDeps,
   agentServices,
@@ -112,6 +113,9 @@ export async function runFirestoreSweep(
     ),
     expiredWatches: await step('expireWatches', () =>
       persistence.watches.expire(deps.config.FIRESTORE_AGENT_ID, new Date()),
+    ),
+    awarenessSchedulesCreated: await step('ensureAwarenessSchedule', () =>
+      ensureAwarenessSchedule(store, deps.config.FIRESTORE_AGENT_ID, new Date()),
     ),
     schedulesFired: await step('runDueSchedules', async () => {
       if (deps.config.SELF_REPAIR_ENABLED)

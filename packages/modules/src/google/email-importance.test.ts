@@ -44,6 +44,33 @@ describe('bulkByHeaders', () => {
 });
 
 describe('scoreEmailImportance', () => {
+  it('anchors yearless date extraction to receipt time rather than the model’s default year', async () => {
+    const router = routerReturning({
+      ok: true,
+      object: {
+        category: 'appointment',
+        importance: 3,
+        actionable: false,
+        dates: [],
+        reason: 'School event',
+      },
+    });
+    await scoreEmailImportance(router, {
+      from: 'school@example.test',
+      subject: 'School performance',
+      body: 'Wednesday, November 18 at 8:30 AM.',
+      receivedAt: new Date('2026-11-07T18:00:00Z'),
+      contentTrust: 'known',
+      authenticated: true,
+    });
+    expect(router.object).toHaveBeenCalledWith(
+      'classify',
+      expect.objectContaining({
+        prompt: expect.stringContaining('Message received at: 2026-11-07T18:00:00.000Z'),
+        system: expect.stringContaining('never your training year'),
+      }),
+    );
+  });
   it('settles bulk mail from headers without spending a model call', async () => {
     const router = routerReturning({ ok: true, object: { importance: 5 } });
     const score = await scoreEmailImportance(router, {

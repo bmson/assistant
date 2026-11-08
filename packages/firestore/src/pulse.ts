@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import {
   commitmentDueMomentKey,
   commitmentIsActive,
+  emailIngestReadable,
   type PulseCalendarSnapshot,
   type PulseCommitment,
   type PulseMail,
@@ -256,7 +257,7 @@ export class FirestorePulseRepository implements PulseRepository {
         const row = decodeRecord<Records['emailIngest']>(doc.data());
         if (typeof row.id !== 'string' || documentKey(row.id) !== doc.id || row.agentId !== agentId)
           continue;
-        if (row.pipelineStage != null && row.pipelineStage !== 'complete') continue;
+        if (!emailIngestReadable(row)) continue;
         if (!row.providerThreadId) continue;
         if (row.obligationStatus === 'resolved' || row.obligationStatus === 'superseded') continue;
         if (
@@ -468,7 +469,7 @@ export class FirestorePulseRepository implements PulseRepository {
           current.providerMessageId !== source.providerMessageId ||
           (current.obligationVersion ?? 0) !== source.obligationVersion ||
           !current.actionable ||
-          (current.pipelineStage != null && current.pipelineStage !== 'complete') ||
+          !emailIngestReadable(current) ||
           !['unknown', 'open', 'snoozed'].includes(current.obligationStatus ?? 'unknown') ||
           (current.obligationStatus === 'snoozed' &&
             current.obligationSnoozedUntil &&

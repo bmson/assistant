@@ -20,6 +20,7 @@ export { createPostgresDeviceTokenRepository } from './device-token-repository.j
 export { createPostgresDocumentProcessorRepository } from './document-processor-repository.js';
 export { createPostgresDocumentSearchRepository } from './document-search-repository.js';
 export { createPostgresEmailAttachmentCustodyRepository } from './email-attachment-custody-repository.js';
+export * from './email-ingest-readiness.js';
 export { createPostgresEmailSyncRepository } from './email-sync-repository.js';
 export * from './entities.js';
 export { createPostgresExecutionContextRepository } from './execution-context-repository.js';

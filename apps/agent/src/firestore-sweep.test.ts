@@ -135,6 +135,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore maintenance swe
         renotifiedApprovals: 0,
         renotifiedAttention: 0,
         expiredWatches: 0,
+        awarenessSchedulesCreated: 1,
         schedulesFired: 0,
         budgetNotices: 0,
         messagesEmbedded: 0,

@@ -30,6 +30,7 @@ import {
 } from '@assistant/persistence';
 import { and, asc, desc, eq, gt, gte, inArray, isNull, lt, lte, not, or, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
+import { emailIngestReadableSql } from './email-ingest-readiness.js';
 import {
   lockPostgresPrivacyObservationFence,
   postgresPrivacyObservationFence,
@@ -648,7 +649,7 @@ export function createPostgresEmailSyncRepository(
           ${emailIngest.agentId} = ${owner.agentId}
           AND
           ${emailIngest.actionable} = true
-          AND ${emailIngest.pipelineStage} = 'complete'
+          AND ${emailIngestReadableSql()}
           AND ${emailIngest.providerThreadId} IS NOT NULL
           AND NOT EXISTS (
             SELECT 1 FROM ${emailIngest} newer
@@ -697,7 +698,7 @@ export function createPostgresEmailSyncRepository(
           AND ${emailIngest.agentId} = ${owner.agentId}
           AND ${emailIngest.obligationVersion} = ${input.expectedVersion}
           AND ${emailIngest.actionable} = true
-          AND ${emailIngest.pipelineStage} = 'complete'
+          AND ${emailIngestReadableSql()}
           AND ${allowedTransition}
           AND ${emailIngest.providerThreadId} IS NOT NULL
           AND NOT EXISTS (

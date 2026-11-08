@@ -63,6 +63,7 @@ const files = [
   'apps/agent/src/firestore-google-calendar.test.ts',
   'apps/agent/src/firestore-schedule.test.ts',
   'apps/agent/src/firestore-repair-schedule.test.ts',
+  'apps/agent/src/firestore-awareness-schedule.test.ts',
   'apps/agent/src/firestore-approval.test.ts',
   'apps/agent/src/firestore-model-routing.test.ts',
   'apps/agent/src/firestore-runtime-smoke.test.ts',
