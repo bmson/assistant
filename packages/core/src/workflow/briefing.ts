@@ -3,9 +3,12 @@ import {
   agents,
   approvals,
   createPostgresEmailSyncRepository,
+  createPostgresOccasionToolReadRepository,
+  createPostgresOwnerContextRepository,
   type Db,
   emailBookingOccurrences,
   emailIngest,
+  emailIngestReadableSql,
   goals as goalsTable,
   tasks as taskTable,
   watches,
@@ -51,6 +54,7 @@ import {
   salientEvents,
 } from '../proactive/calendar-salience.js';
 import { isFlightLikeCalendarEvent } from '../proactive/flight-calendar.js';
+import { briefingLifeContext } from '../proactive/life-context.js';
 import { type ProactiveNotifier, pingOwner } from '../proactive/notify.js';
 import {
   agendaSection,
@@ -255,6 +259,8 @@ export function briefingHasNews(counts: {
   watchHits: number;
   securityIncidents?: number;
   bookingCancellations?: number;
+  personalOccasions?: number;
+  openCommitments?: number;
 }): boolean {
   return (
     counts.highlights > 0 ||
@@ -266,7 +272,9 @@ export function briefingHasNews(counts: {
     counts.goalDeltas > 0 ||
     counts.watchHits > 0 ||
     (counts.securityIncidents ?? 0) > 0 ||
-    (counts.bookingCancellations ?? 0) > 0
+    (counts.bookingCancellations ?? 0) > 0 ||
+    (counts.personalOccasions ?? 0) > 0 ||
+    (counts.openCommitments ?? 0) > 0
   );
 }
 
@@ -407,6 +415,8 @@ export interface BriefingResult {
   watchHits: number;
   securityIncidents?: number;
   bookingCancellations?: number;
+  personalOccasions?: number;
+  openCommitments?: number;
 }
 
 export interface CalendarConflict {
@@ -878,96 +888,99 @@ async function briefingInputsFromSql(
   since: Date,
   now: Date,
 ): Promise<BriefingInputs> {
-  const [mail, bookings, attention, pending, goalDeltas, watchHits] = await Promise.all([
-    db
-      .select({
-        fromEmail: emailIngest.fromEmail,
-        // Nullable until the sender-name backfill lands; falls back to the
-        // address itself wherever it renders.
-        fromName: emailIngest.fromName,
-        subject: emailIngest.subject,
-        category: emailIngest.category,
-        importance: emailIngest.importance,
-        dates: emailIngest.dates,
-        channelMessageId: emailIngest.channelMessageId,
-        authenticated: emailIngest.authenticated,
-      })
-      .from(emailIngest)
-      .where(
-        and(
-          eq(emailIngest.agentId, agentId),
-          eq(emailIngest.pipelineStage, 'complete'),
-          gte(emailIngest.createdAt, since),
-        ),
-      )
-      .orderBy(desc(emailIngest.importance)),
-    db
-      .select({
-        bookingKey: emailBookingOccurrences.bookingKey,
-        lifecycle: emailBookingOccurrences.lifecycle,
-        dates: emailBookingOccurrences.dates,
-        sourceChannelMessageId: emailBookingOccurrences.sourceChannelMessageId,
-        sourceReceivedAt: emailBookingOccurrences.sourceReceivedAt,
-        sourceAuthenticated: emailBookingOccurrences.sourceAuthenticated,
-        version: emailBookingOccurrences.version,
-      })
-      .from(emailBookingOccurrences)
-      .where(
-        and(
-          eq(emailBookingOccurrences.agentId, agentId),
-          eq(emailBookingOccurrences.sourceAuthenticated, true),
-        ),
-      )
-      .limit(2_000),
-    db
-      .select({ title: taskTable.title, progress: taskTable.progress })
-      .from(taskTable)
-      .where(
-        and(
-          eq(taskTable.agentId, agentId),
-          eq(taskTable.status, 'needs_attention'),
-          isNull(taskTable.archivedAt),
-          gte(taskTable.updatedAt, since),
-        ),
-      )
-      .orderBy(desc(taskTable.updatedAt))
-      .limit(10),
-    db
-      .select({ shortCode: approvals.shortCode, summary: approvals.summary })
-      .from(approvals)
-      .innerJoin(taskTable, eq(approvals.taskId, taskTable.id))
-      .where(
-        and(
-          eq(taskTable.agentId, agentId),
-          eq(approvals.status, 'pending'),
-          gt(approvals.expiresAt, now),
-          isNull(taskTable.archivedAt),
-        ),
-      )
-      .limit(10),
-    // Goals that moved in the window — progress, a new next step, a status
-    // change. The standing state is on the Goals page; the digest carries only
-    // what changed.
-    db
-      .select({
-        title: goalsTable.title,
-        status: goalsTable.status,
-        nextAction: goalsTable.nextAction,
-        updatedAt: goalsTable.updatedAt,
-      })
-      .from(goalsTable)
-      .where(and(eq(goalsTable.agentId, agentId), gte(goalsTable.updatedAt, since)))
-      .orderBy(desc(goalsTable.updatedAt))
-      .limit(MAX_GOAL_DELTAS),
-    db
-      .select({ name: watches.name, summary: watchFires.summary })
-      .from(watchFires)
-      .innerJoin(watches, eq(watchFires.watchId, watches.id))
-      .where(and(eq(watchFires.agentId, agentId), gte(watchFires.createdAt, since)))
-      .orderBy(desc(watchFires.createdAt))
-      .limit(MAX_WATCH_HITS),
-  ]);
-  return { mail, bookings, attention, pending, goalDeltas, watchHits };
+  const [mail, bookings, attention, pending, goalDeltas, watchHits, occasions, commitments] =
+    await Promise.all([
+      db
+        .select({
+          fromEmail: emailIngest.fromEmail,
+          // Nullable until the sender-name backfill lands; falls back to the
+          // address itself wherever it renders.
+          fromName: emailIngest.fromName,
+          subject: emailIngest.subject,
+          category: emailIngest.category,
+          importance: emailIngest.importance,
+          dates: emailIngest.dates,
+          channelMessageId: emailIngest.channelMessageId,
+          authenticated: emailIngest.authenticated,
+        })
+        .from(emailIngest)
+        .where(
+          and(
+            eq(emailIngest.agentId, agentId),
+            emailIngestReadableSql(),
+            gte(emailIngest.createdAt, since),
+          ),
+        )
+        .orderBy(desc(emailIngest.importance)),
+      db
+        .select({
+          bookingKey: emailBookingOccurrences.bookingKey,
+          lifecycle: emailBookingOccurrences.lifecycle,
+          dates: emailBookingOccurrences.dates,
+          sourceChannelMessageId: emailBookingOccurrences.sourceChannelMessageId,
+          sourceReceivedAt: emailBookingOccurrences.sourceReceivedAt,
+          sourceAuthenticated: emailBookingOccurrences.sourceAuthenticated,
+          version: emailBookingOccurrences.version,
+        })
+        .from(emailBookingOccurrences)
+        .where(
+          and(
+            eq(emailBookingOccurrences.agentId, agentId),
+            eq(emailBookingOccurrences.sourceAuthenticated, true),
+          ),
+        )
+        .limit(2_000),
+      db
+        .select({ title: taskTable.title, progress: taskTable.progress })
+        .from(taskTable)
+        .where(
+          and(
+            eq(taskTable.agentId, agentId),
+            eq(taskTable.status, 'needs_attention'),
+            isNull(taskTable.archivedAt),
+            gte(taskTable.updatedAt, since),
+          ),
+        )
+        .orderBy(desc(taskTable.updatedAt))
+        .limit(10),
+      db
+        .select({ shortCode: approvals.shortCode, summary: approvals.summary })
+        .from(approvals)
+        .innerJoin(taskTable, eq(approvals.taskId, taskTable.id))
+        .where(
+          and(
+            eq(taskTable.agentId, agentId),
+            eq(approvals.status, 'pending'),
+            gt(approvals.expiresAt, now),
+            isNull(taskTable.archivedAt),
+          ),
+        )
+        .limit(10),
+      // Goals that moved in the window — progress, a new next step, a status
+      // change. The standing state is on the Goals page; the digest carries only
+      // what changed.
+      db
+        .select({
+          title: goalsTable.title,
+          status: goalsTable.status,
+          nextAction: goalsTable.nextAction,
+          updatedAt: goalsTable.updatedAt,
+        })
+        .from(goalsTable)
+        .where(and(eq(goalsTable.agentId, agentId), gte(goalsTable.updatedAt, since)))
+        .orderBy(desc(goalsTable.updatedAt))
+        .limit(MAX_GOAL_DELTAS),
+      db
+        .select({ name: watches.name, summary: watchFires.summary })
+        .from(watchFires)
+        .innerJoin(watches, eq(watchFires.watchId, watches.id))
+        .where(and(eq(watchFires.agentId, agentId), gte(watchFires.createdAt, since)))
+        .orderBy(desc(watchFires.createdAt))
+        .limit(MAX_WATCH_HITS),
+      createPostgresOccasionToolReadRepository(db).list(agentId),
+      createPostgresOwnerContextRepository(db).listOpenCommitments({ agentId, now, limit: 60 }),
+    ]);
+  return { mail, bookings, attention, pending, goalDeltas, watchHits, occasions, commitments };
 }
 
 /** The briefing's portable stores; without them it reads and writes PostgreSQL. */
@@ -1075,6 +1088,9 @@ export async function runBriefing(
       MAX_SECURITY_INCIDENTS,
     );
     const { mail, pending, goalDeltas, watchHits } = inputs;
+    const life = briefingLifeContext(inputs, now, agent.timezone);
+    result.personalOccasions = life.occasions.length;
+    result.openCommitments = life.commitments.length;
     // Only work the owner would recognise. A stalled scheduled job or an
     // internal maintenance task is listed on Activity, not in their morning.
     const attention = inputs.attention.filter((row) => isOwnerFacingTask(row.title));
@@ -1223,12 +1239,21 @@ export async function runBriefing(
         goalDeltas: goalDeltas.length,
         watchHits: watchHits.length,
         securityIncidents: securityCandidates.length,
+        personalOccasions: life.occasions.length,
+        openCommitments: life.commitments.length,
       })
     ) {
       return result;
     }
 
     const lines: string[] = [];
+    for (const [title, items] of [
+      ['People and important dates', life.occasions],
+      ['Commitments to follow through', life.commitments],
+    ] as const) {
+      if (items.length)
+        lines.push(title, ...items.map((item) => `- ${item.title}: ${item.detail}`));
+    }
     if (conflicts.length > 0) {
       lines.push(
         `Calendar overlaps in the next day or two (${overlaps.conflictCount.toLocaleString('en-US')} distinct conflict pair${overlaps.conflictCount === 1 ? '' : 's'}; showing ${conflicts.length} detail${conflicts.length === 1 ? '' : 's'}):`,
@@ -1389,6 +1414,8 @@ export async function runBriefing(
         goalDeltas: goalDeltas.length,
         watchHits: watchHits.length,
         securityIncidents: claimedSecurity.length,
+        personalOccasions: life.occasions.length,
+        openCommitments: life.commitments.length,
       })
     )
       return result;
@@ -1493,6 +1520,8 @@ export async function runBriefing(
             )
           : undefined,
         weatherSection(weatherResponseCards(ambient)[0]),
+        listSection('upcoming', 'People and important dates', life.occasions),
+        listSection('attention', 'Commitments to follow through', life.commitments),
         listSection('attention', 'Needs you', [
           ...pending.map((row) => ({ title: row.summary, meta: row.shortCode })),
           ...attention.map((row) => ({
@@ -1760,6 +1789,14 @@ export function briefingHeadline(result: BriefingResult): string {
   }
   if (result.upcoming > 0)
     parts.push(`${result.upcoming} date${result.upcoming === 1 ? '' : 's'} coming up`);
+  if ((result.personalOccasions ?? 0) > 0)
+    parts.push(
+      `${result.personalOccasions} personal date${result.personalOccasions === 1 ? '' : 's'} coming up`,
+    );
+  if ((result.openCommitments ?? 0) > 0)
+    parts.push(
+      `${result.openCommitments} open commitment${result.openCommitments === 1 ? '' : 's'}`,
+    );
   if ((result.bookingCancellations ?? 0) > 0) {
     const count = result.bookingCancellations ?? 0;
     parts.push(`${count} cancelled booking${count === 1 ? '' : 's'} to review`);
@@ -1787,6 +1824,7 @@ export function briefingSummary(result: BriefingResult): string {
     `${result.needsAttention} needing attention, ${result.pendingApprovals} awaiting approval, ` +
     `${result.calendarEvents} calendar event(s) (${result.calendarConflicts} conflict(s), ${result.calendarSalient} salient), ` +
     `${result.goalDeltas} goal delta(s), ${result.watchHits} watch hit(s), ` +
+    `${result.personalOccasions ?? 0} personal occasion(s), ${result.openCommitments ?? 0} open commitment(s), ` +
     `${result.bookingCancellations ?? 0} cancelled booking reconciliation(s)`
   );
 }

@@ -321,6 +321,86 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore daily briefing 
     expect(suggestions.size).toBe(1);
   });
 
+  it('delivers personal dates and older promises even without new mail or calendar news', async () => {
+    const contactId = await put('contacts', { id: randomUUID(), agentId, name: 'Family member' });
+    const date = new Date(now);
+    const occasion = {
+      agentId,
+      contactId,
+      kind: 'birthday',
+      label: '',
+      month: date.getUTCMonth() + 1,
+      day: date.getUTCDate(),
+      year: 1980,
+      recurrence: 'annual',
+      leadDays: 7,
+      notes: '',
+      originTrust: 'owner',
+      quarantined: false,
+      ownerConfirmed: true,
+    };
+    await put('occasions', { ...occasion, id: randomUUID() });
+    await put('occasions', {
+      ...occasion,
+      id: randomUUID(),
+      label: 'Unverified date',
+      quarantined: true,
+    });
+    const conversationId = await put('conversations', { id: randomUUID(), agentId, metadata: {} });
+    const promise = {
+      agentId,
+      conversationId,
+      sourceMessageId: null,
+      title: 'Return the school form',
+      kind: 'promise',
+      status: 'open',
+      resolvedAt: null,
+      snoozedUntil: null,
+      dueAt: null,
+      updatedAt: hoursAgo(24 * 10),
+      createdAt: hoursAgo(24 * 10),
+    };
+    await put('commitments', { ...promise, id: randomUUID() });
+    await put('commitments', {
+      ...promise,
+      id: randomUUID(),
+      title: 'Resolved promise',
+      status: 'resolved',
+      resolvedAt: hoursAgo(1),
+    });
+    const result = await runBriefing(deps, { agentId, now: new Date(now) });
+    expect(result).toMatchObject({ delivered: true, personalOccasions: 1, openCommitments: 1 });
+    const [notice] = await notices();
+    expect(notice?.text).toContain('Family member');
+    expect(notice?.text).toContain('Return the school form');
+    expect(notice?.text).not.toContain('Unverified date');
+    expect(notice?.text).not.toContain('Resolved promise');
+  });
+
+  it('surfaces admitted direct mail before independent observer effects finish', async () => {
+    await put('emailIngest', {
+      id: randomUUID(),
+      agentId,
+      channelMessageId: 'gmail:school-deadline',
+      subject: 'Return the school form',
+      fromEmail: 'school@example.test',
+      importance: 4,
+      category: 'commitment',
+      dates: [],
+      authenticated: true,
+      pipelineStage: 'message_persisted',
+      ingestMode: 'direct',
+      scoreStatus: 'prepared',
+      admittedSourceKind: 'automated_source',
+      admittedSourceId: randomUUID(),
+      messagePersisted: false,
+      createdAt: hoursAgo(1),
+    });
+    const result = await runBriefing(deps, { agentId, now: new Date(now) });
+    expect(result).toMatchObject({ delivered: true, mailScanned: 1, highlights: 1 });
+    expect(prompts[0]).toContain('Return the school form');
+  });
+
   it('says nothing on a quiet day', async () => {
     expect(await runJob()).toBe('briefing: nothing to report');
     expect(await notices()).toEqual([]);

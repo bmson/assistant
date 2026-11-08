@@ -6,6 +6,7 @@ import {
   createPostgresPulseAdmissionRepository,
   type Db,
   emailIngest,
+  emailIngestReadableSql,
   notificationPrefs,
   proactiveMoments,
   securityIncidentAttention,
@@ -1020,7 +1021,7 @@ export function postgresPulseRepository(db: Db): PulseRepository {
           and(
             eq(emailIngest.agentId, agentId),
             eq(emailIngest.actionable, true),
-            eq(emailIngest.pipelineStage, 'complete'),
+            emailIngestReadableSql(),
             sql`${emailIngest.providerThreadId} IS NOT NULL`,
             sql`(${emailIngest.obligationStatus} IN ('unknown','open') OR (${emailIngest.obligationStatus} = 'snoozed' AND ${emailIngest.obligationSnoozedUntil} <= ${input.now.toISOString()}::timestamptz))`,
             gte(emailIngest.importance, input.minImportance),

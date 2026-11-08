@@ -160,12 +160,11 @@ const directEmailRoutingObserver: InboundEmailObserver = {
       return { kind: 'complete' };
     }
 
-    if (!ingest.conversationId)
-      return { kind: 'unknown', errorCode: 'direct_email_ingest_unavailable' };
-
     // Automated mail remains admitted for its other durable observers, but it
     // does not create a generic conversation task.
     if (ingest.preparedClassification?.automated === true) return { kind: 'no_op' };
+    if (!ingest.conversationId)
+      return { kind: 'unknown', errorCode: 'direct_email_ingest_unavailable' };
     if (!ingest.providerThreadId || !ingest.providerMessageId || !ingest.emailContentProvenance)
       return { kind: 'unknown', errorCode: 'direct_email_task_metadata_missing' };
 

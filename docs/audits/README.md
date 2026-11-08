@@ -25,6 +25,8 @@ the living references in the parent folder instead:
 | [codebase-review-4.md](codebase-review-4.md)                              | 2026-08    | Writing and organization: naming, comments, file layout                                                                |
 | [performance-review.md](performance-review.md)                            | 2026-08    | Unbounded reads, polling cadence, per-render work, the local queue driver                                              |
 | [llm-response-quality-review.md](llm-response-quality-review.md)          | 2026-09    | Model-call inventory, grounding coverage, the `direct`-mode mail gap, unrecorded output                                |
+| [Proactive awareness](proactive-awareness-2026-11-07.md) | 2026-11-07 | Initial source audit: broader life review, archived-mail coverage, personal dates and commitments |
+| [Live proactive audit](proactive-live-audit-2026-11-07.md) | 2026-11-07 | Actual conversation review, 460 excluded admitted emails, uncertain occasions, coverage gaps and verified reader fixes |
 | [web-experience-2026-10-02.md](web-experience-2026-10-02.md)              | 2026-10-02 | All 34 browser routes, owner-console refactor, synthetic visual and interaction evidence                               |
 | [ios-experience-2026-10-02.md](ios-experience-2026-10-02.md)              | 2026-10-02 | Every reachable native surface, transcript/polling/voice/search refactor and device QA limits                          |
 | [agent-architecture-2026-10-02.md](agent-architecture-2026-10-02.md)      | 2026-10-02 | Recall bounds, recurring work backpressure, proactive/calendar fixes and remaining attention contract                  |

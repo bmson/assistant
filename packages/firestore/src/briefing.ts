@@ -4,7 +4,10 @@ import type {
   BriefingRepository,
   Records,
 } from '@assistant/persistence';
+import { emailIngestReadable } from '@assistant/persistence';
 import type { QueryDocumentSnapshot } from '@google-cloud/firestore';
+import { FirestoreOccasionToolRepository } from './occasion-tools.js';
+import { FirestoreOwnerContextRepository } from './owner-context.js';
 import { decodeRecord, documentKey, type InstallationStore } from './store.js';
 
 const PAGE = 200;
@@ -38,15 +41,22 @@ export class FirestoreBriefingRepository implements BriefingRepository {
     agentId: string,
     window: Parameters<BriefingRepository['inputs']>[1],
   ): Promise<BriefingInputs> {
-    const [mail, bookings, attention, pending, goalDeltas, watchHits] = await Promise.all([
-      this.mail(agentId, window.since),
-      this.bookings(agentId),
-      this.attention(agentId, window.since, window.attentionLimit),
-      this.pending(agentId, window.now, window.pendingLimit),
-      this.goalDeltas(agentId, window.since, window.goalLimit),
-      this.watchHits(agentId, window.since, window.watchLimit),
-    ]);
-    return { mail, bookings, attention, pending, goalDeltas, watchHits };
+    const [mail, bookings, attention, pending, goalDeltas, watchHits, occasions, commitments] =
+      await Promise.all([
+        this.mail(agentId, window.since),
+        this.bookings(agentId),
+        this.attention(agentId, window.since, window.attentionLimit),
+        this.pending(agentId, window.now, window.pendingLimit),
+        this.goalDeltas(agentId, window.since, window.goalLimit),
+        this.watchHits(agentId, window.since, window.watchLimit),
+        new FirestoreOccasionToolRepository(this.store, agentId).list(agentId),
+        new FirestoreOwnerContextRepository(this.store).listOpenCommitments({
+          agentId,
+          now: window.now,
+          limit: 60,
+        }),
+      ]);
+    return { mail, bookings, attention, pending, goalDeltas, watchHits, occasions, commitments };
   }
 
   private async bookings(agentId: string) {
@@ -75,12 +85,7 @@ export class FirestoreBriefingRepository implements BriefingRepository {
       const page = await query.get();
       for (const doc of page.docs) {
         const row = owned<Records['emailIngest']>(doc, agentId);
-        if (
-          !row ||
-          !(row.createdAt instanceof Date) ||
-          (row.pipelineStage !== undefined && row.pipelineStage !== 'complete')
-        )
-          continue;
+        if (!row || !(row.createdAt instanceof Date) || !emailIngestReadable(row)) continue;
         rows.push({
           fromEmail: row.fromEmail,
           fromName: row.fromName ?? null,

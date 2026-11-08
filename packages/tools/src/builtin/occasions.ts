@@ -90,10 +90,16 @@ export function registerPortableOccasionTools(
       // surface): a confidential read, but NOT untrusted content.
       acceptsUntrustedInput: true,
       execute: async (args, ctx) => {
-        const upcoming = selectUpcomingOccasions(await occasions.list(ctx.agentId), {
-          withinDays: args.withinDays,
-          now: ctx.now(),
-        });
+        const rows = await occasions.list(ctx.agentId);
+        const upcoming = selectUpcomingOccasions(
+          rows.filter(
+            (row) => !row.quarantined && (row.ownerConfirmed || row.originTrust === 'owner'),
+          ),
+          {
+            withinDays: args.withinDays,
+            now: ctx.now(),
+          },
+        );
         return {
           occasions: upcoming.map((o) => ({
             person: o.contactName,

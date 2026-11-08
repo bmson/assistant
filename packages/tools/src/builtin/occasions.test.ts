@@ -2,7 +2,10 @@ import type { OccasionToolRow } from '@assistant/persistence';
 import { describe, expect, it, vi } from 'vitest';
 import { ToolRegistry } from '../registry.js';
 import type { ToolContext } from '../types.js';
-import { registerPortableBirthdayOccasionTool } from './occasions.js';
+import {
+  registerPortableBirthdayOccasionTool,
+  registerPortableOccasionTools,
+} from './occasions.js';
 
 const base: OccasionToolRow = {
   id: 'occasion-a',
@@ -22,6 +25,27 @@ const base: OccasionToolRow = {
 };
 
 describe('occasions.list_birthdays', () => {
+  it('does not present unconfirmed consolidation guesses as upcoming personal dates', async () => {
+    const registry = registerPortableOccasionTools(new ToolRegistry(), {
+      save: async () => null,
+      list: async () => [
+        base,
+        {
+          ...base,
+          id: 'guess',
+          contactName: 'Inferred',
+          originTrust: 'assistant',
+          ownerConfirmed: false,
+        },
+      ],
+    });
+    const result = await registry.get('occasions.list')?.tool.execute({ withinDays: 30 }, {
+      agentId: 'owner-a',
+      now: () => new Date('2026-03-01'),
+    } as ToolContext);
+    expect(result).toMatchObject({ occasions: [{ person: 'Alex' }] });
+    expect(JSON.stringify(result)).not.toContain('Inferred');
+  });
   it('returns only confirmed annual birthdays for the exact supplied identities', async () => {
     const listBirthdays = vi.fn(async () => ({
       rows: [

@@ -7,7 +7,7 @@ import {
   occasions,
 } from '@assistant/db';
 import { occasionTrustRank } from '@assistant/persistence/occasion-trust';
-import { and, asc, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, or, sql } from 'drizzle-orm';
 
 /**
  * Occasions (Phase 17): recurring dates tied to a contact (birthdays,
@@ -183,7 +183,13 @@ export async function upcomingOccasions(
     })
     .from(occasions)
     .innerJoin(contacts, eq(contacts.id, occasions.contactId))
-    .where(and(eq(occasions.agentId, agentId), eq(occasions.quarantined, false)));
+    .where(
+      and(
+        eq(occasions.agentId, agentId),
+        eq(occasions.quarantined, false),
+        or(eq(occasions.ownerConfirmed, true), eq(occasions.originTrust, 'owner')),
+      ),
+    );
   return selectUpcomingOccasions(rows, { ...opts, now });
 }
 

@@ -667,107 +667,110 @@ describe('forwarded-ingest owner alerts', () => {
     }
   });
 
-  it('uses atomic observer admission on the forwarded message path without legacy fan-out', async (ctx) => {
-    if (!dbUp) return ctx.skip();
-    const key = randomUUID();
-    const channelMessageId = `gmail:${key}`;
-    const threadId = `thread-${key}`;
-    const body = 'The booking is confirmed for October 20.';
-    const legacyObserver = vi.fn(async () => {});
-    const score = vi.fn(async () => ({ ok: false as const, reason: 'must not be called' }));
-    const base = createPostgresExecutionPersistence(db);
-    const emailSync = base.emailSync;
-    if (!emailSync) throw new Error('PostgreSQL persistence has no email sync repository');
-    const scoreClaims: Array<Parameters<EmailSyncRepository['claimIngestScore']>> = [];
-    const persistence = {
-      ...base,
-      emailSync: new Proxy(emailSync, {
-        get(target, property, receiver) {
-          if (property === 'claimIngestScore') {
-            return async (...args: Parameters<EmailSyncRepository['claimIngestScore']>) => {
-              scoreClaims.push(args);
-              return emailSync.claimIngestScore(...args);
-            };
-          }
-          return Reflect.get(target, property, receiver);
-        },
-      }),
-    } as unknown as EmailSyncDeps['persistence'];
-    const deps = {
-      config: {
-        ASSISTANT_MODULES: ['google'],
-        GMAIL_SYNC_ENABLED: 'true',
-        EMAIL_INGEST_MODE: 'forwarded',
-        EMAIL_INGEST_IMPORTANCE_THRESHOLD: 3,
-        EMAIL_INGEST_NOTIFY_THRESHOLD: 5,
-        EMAIL_INGEST_MAX_TRIAGE_PER_DAY: 40,
-      },
-      db,
-      persistence,
-      router: { object: score },
-      workspace: {},
-      googleClient: {
-        configured: () => true,
-        api: async () => ({
-          id: key,
-          threadId,
-          labelIds: ['INBOX'],
-          payload: {
-            mimeType: 'text/plain',
-            headers: [
-              { name: 'From', value: 'sender@example.test' },
-              { name: 'Subject', value: 'Booking confirmation' },
-              { name: 'List-Id', value: 'mailing-list.example.test' },
-              {
-                name: 'Authentication-Results',
-                value: 'mx.google.com; dkim=pass header.d=example.test',
-              },
-            ],
-            body: { data: Buffer.from(body).toString('base64url') },
+  it.for(['INBOX', 'CATEGORY_PERSONAL'])(
+    'uses atomic observer admission on forwarded mail with labels %j',
+    async (label, ctx) => {
+      if (!dbUp) return ctx.skip();
+      const key = randomUUID();
+      const channelMessageId = `gmail:${key}`;
+      const threadId = `thread-${key}`;
+      const body = 'The booking is confirmed for October 20.';
+      const legacyObserver = vi.fn(async () => {});
+      const score = vi.fn(async () => ({ ok: false as const, reason: 'must not be called' }));
+      const base = createPostgresExecutionPersistence(db);
+      const emailSync = base.emailSync;
+      if (!emailSync) throw new Error('PostgreSQL persistence has no email sync repository');
+      const scoreClaims: Array<Parameters<EmailSyncRepository['claimIngestScore']>> = [];
+      const persistence = {
+        ...base,
+        emailSync: new Proxy(emailSync, {
+          get(target, property, receiver) {
+            if (property === 'claimIngestScore') {
+              return async (...args: Parameters<EmailSyncRepository['claimIngestScore']>) => {
+                scoreClaims.push(args);
+                return emailSync.claimIngestScore(...args);
+              };
+            }
+            return Reflect.get(target, property, receiver);
           },
         }),
-      },
-      notifyOwner: async () => {},
-      observeInboundEmail: legacyObserver,
-      durableEmailObservers: [
-        { identity: { key: 'test.forwarded-atomic', version: 1, workClass: 'idempotent_db' } },
-      ],
-    } as unknown as EmailSyncDeps;
-    let conversationId: string | undefined;
-    try {
-      await expect(
-        processMessage(deps, agentId, 'assistant@example.test', new Map(), key),
-      ).resolves.toBe('skipped');
-      expect(score).not.toHaveBeenCalled();
-      expect(scoreClaims[0]?.[5]).toBe('deterministic_no_model');
-      expect(legacyObserver).not.toHaveBeenCalled();
-      const [ingest] = await db
-        .select()
-        .from(emailIngest)
-        .where(eq(emailIngest.channelMessageId, channelMessageId));
-      conversationId = ingest?.conversationId ?? undefined;
-      expect(ingest?.observerRegistrySnapshot).toEqual([
-        { key: 'test.forwarded-atomic', version: 1, workClass: 'idempotent_db' },
-      ]);
-      expect(
-        await db.select().from(messages).where(eq(messages.channelMessageId, channelMessageId)),
-      ).toHaveLength(1);
-      expect(
-        await db
+      } as unknown as EmailSyncDeps['persistence'];
+      const deps = {
+        config: {
+          ASSISTANT_MODULES: ['google'],
+          GMAIL_SYNC_ENABLED: 'true',
+          EMAIL_INGEST_MODE: 'forwarded',
+          EMAIL_INGEST_IMPORTANCE_THRESHOLD: 3,
+          EMAIL_INGEST_NOTIFY_THRESHOLD: 5,
+          EMAIL_INGEST_MAX_TRIAGE_PER_DAY: 40,
+        },
+        db,
+        persistence,
+        router: { object: score },
+        workspace: {},
+        googleClient: {
+          configured: () => true,
+          api: async () => ({
+            id: key,
+            threadId,
+            labelIds: [label],
+            payload: {
+              mimeType: 'text/plain',
+              headers: [
+                { name: 'From', value: 'sender@example.test' },
+                { name: 'Subject', value: 'Booking confirmation' },
+                { name: 'List-Id', value: 'mailing-list.example.test' },
+                {
+                  name: 'Authentication-Results',
+                  value: 'mx.google.com; dkim=pass header.d=example.test',
+                },
+              ],
+              body: { data: Buffer.from(body).toString('base64url') },
+            },
+          }),
+        },
+        notifyOwner: async () => {},
+        observeInboundEmail: legacyObserver,
+        durableEmailObservers: [
+          { identity: { key: 'test.forwarded-atomic', version: 1, workClass: 'idempotent_db' } },
+        ],
+      } as unknown as EmailSyncDeps;
+      let conversationId: string | undefined;
+      try {
+        await expect(
+          processMessage(deps, agentId, 'assistant@example.test', new Map(), key),
+        ).resolves.toBe('skipped');
+        expect(score).not.toHaveBeenCalled();
+        expect(scoreClaims[0]?.[5]).toBe('deterministic_no_model');
+        expect(legacyObserver).not.toHaveBeenCalled();
+        const [ingest] = await db
           .select()
-          .from(emailObserverWork)
-          .where(eq(emailObserverWork.sourceKey, channelMessageId)),
-      ).toHaveLength(1);
-    } finally {
-      await db.delete(emailObserverWork).where(eq(emailObserverWork.sourceKey, channelMessageId));
-      await db.delete(emailIngest).where(eq(emailIngest.channelMessageId, channelMessageId));
-      await db.delete(messages).where(eq(messages.channelMessageId, channelMessageId));
-      if (conversationId) {
-        await db.delete(channelBindings).where(eq(channelBindings.externalId, threadId));
-        await db.delete(conversations).where(eq(conversations.id, conversationId));
+          .from(emailIngest)
+          .where(eq(emailIngest.channelMessageId, channelMessageId));
+        conversationId = ingest?.conversationId ?? undefined;
+        expect(ingest?.observerRegistrySnapshot).toEqual([
+          { key: 'test.forwarded-atomic', version: 1, workClass: 'idempotent_db' },
+        ]);
+        expect(
+          await db.select().from(messages).where(eq(messages.channelMessageId, channelMessageId)),
+        ).toHaveLength(1);
+        expect(
+          await db
+            .select()
+            .from(emailObserverWork)
+            .where(eq(emailObserverWork.sourceKey, channelMessageId)),
+        ).toHaveLength(1);
+      } finally {
+        await db.delete(emailObserverWork).where(eq(emailObserverWork.sourceKey, channelMessageId));
+        await db.delete(emailIngest).where(eq(emailIngest.channelMessageId, channelMessageId));
+        await db.delete(messages).where(eq(messages.channelMessageId, channelMessageId));
+        if (conversationId) {
+          await db.delete(channelBindings).where(eq(channelBindings.externalId, threadId));
+          await db.delete(conversations).where(eq(conversations.id, conversationId));
+        }
       }
-    }
-  });
+    },
+  );
 
   it('commits a deterministic fallback once while keeping an ambiguous score attempt unknown', async (ctx) => {
     if (!dbUp) return ctx.skip();

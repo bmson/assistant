@@ -2,6 +2,7 @@ import {
   type Db,
   deviceTokens,
   emailIngest,
+  emailIngestReadableSql,
   proactiveMoments,
   proactivePings,
 } from '@assistant/db';
@@ -82,7 +83,7 @@ async function sqlProactiveCounts(
       .where(
         and(
           eq(emailIngest.agentId, agentId),
-          eq(emailIngest.pipelineStage, 'complete'),
+          emailIngestReadableSql(),
           gte(emailIngest.createdAt, since24h),
         ),
       ),
@@ -92,14 +93,14 @@ async function sqlProactiveCounts(
       .where(
         and(
           eq(emailIngest.agentId, agentId),
-          eq(emailIngest.pipelineStage, 'complete'),
+          emailIngestReadableSql(),
           gte(emailIngest.createdAt, since7d),
         ),
       ),
     db
       .select({ createdAt: emailIngest.createdAt })
       .from(emailIngest)
-      .where(and(eq(emailIngest.agentId, agentId), eq(emailIngest.pipelineStage, 'complete')))
+      .where(and(eq(emailIngest.agentId, agentId), emailIngestReadableSql()))
       .orderBy(desc(emailIngest.createdAt))
       .limit(1),
     db

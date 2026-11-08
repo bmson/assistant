@@ -4,6 +4,7 @@ import {
   type EmailExtractionRow,
   type EmailFactHashState,
   type EmbeddingSpace,
+  emailIngestReadable,
   type Records,
   snapshotEmbeddingSpace,
   validateEmbedding,
@@ -59,7 +60,7 @@ export class FirestoreEmailExtractionRepository implements EmailExtractionReposi
             typeof row.id !== 'string' ||
             documentKey(row.id) !== doc.id ||
             row.agentId !== this.agentId ||
-            (row.pipelineStage !== undefined && row.pipelineStage !== 'complete')
+            !emailIngestReadable(row)
           )
             return [];
           return [
@@ -99,7 +100,35 @@ export class FirestoreEmailExtractionRepository implements EmailExtractionReposi
               .get()
           ).docs[0];
     const text = snapshot?.exists ? snapshot.get('text') : null;
-    return typeof text === 'string' ? text : null;
+    if (typeof text === 'string') return text;
+    const ingest = await this.store
+      .collection('emailIngest')
+      .where('agentId', '==', this.agentId)
+      .where('channelMessageId', '==', channelMessageId)
+      .limit(1)
+      .get();
+    const doc = ingest.docs[0];
+    if (!doc) return null;
+    const row = decodeRecord<Records['emailIngest']>(doc.data());
+    if (
+      row.agentId !== this.agentId ||
+      documentKey(row.id) !== doc.id ||
+      !emailIngestReadable(row) ||
+      row.admittedSourceKind !== 'automated_source' ||
+      !row.admittedSourceId
+    )
+      return null;
+    const source = await this.store.doc('emailObserverSources', row.admittedSourceId).get();
+    if (
+      !source.exists ||
+      source.get('id') !== row.admittedSourceId ||
+      source.get('agentId') !== this.agentId ||
+      source.get('channelMessageId') !== channelMessageId ||
+      source.get('sourceKey') !== channelMessageId
+    )
+      return null;
+    const body = source.get('body');
+    return typeof body === 'string' ? body : null;
   }
 
   async savePrepared(
@@ -291,7 +320,7 @@ export class FirestoreEmailExtractionRepository implements EmailExtractionReposi
       const page = await query.get();
       count += page.docs.filter((doc) => {
         const row = decodeRecord<Records['emailIngest']>(doc.data());
-        return row.pipelineStage === undefined || row.pipelineStage === 'complete';
+        return emailIngestReadable(row);
       }).length;
       scanned += page.size;
       if (page.size < 200) return count;

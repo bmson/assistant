@@ -3511,6 +3511,64 @@ describe('ToolDispatcher (integration)', () => {
     }
   });
 
+  it('lets only the shipped awareness schedule read its own exact public search URLs', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const { PROACTIVE_AWARENESS_SCHEDULE } = await import('@assistant/persistence');
+    const task = await makeTask('assistant');
+    task.type = 'scheduled';
+    const payload = {
+      schedule: PROACTIVE_AWARENESS_SCHEDULE.name,
+      instruction: PROACTIVE_AWARENESS_SCHEDULE.taskTemplate.instruction,
+    };
+    task.trigger = { source: 'schedule', payload };
+    await db
+      .update(tasks)
+      .set({ type: task.type, trigger: task.trigger })
+      .where(eq(tasks.id, task.id));
+    const url = 'https://example.com/local-news';
+    await db.insert(toolCalls).values({
+      taskId: task.id,
+      toolName: 'web.search',
+      args: { query: 'local news' },
+      risk: 'autonomous',
+      status: 'succeeded',
+      result: { results: [{ url }] },
+      step: 1,
+    });
+    const registry = new ToolRegistry()
+      .register(makeTool('web.fetch', { inputSchema: z.object({ url: z.string() }) }), {
+        networkEgress: true,
+      })
+      .register(makeTool('web.search', { inputSchema: z.object({ query: z.string() }) }), {
+        networkEgress: true,
+      });
+    const dispatcher = new ToolDispatcher(db, registry);
+    const input = {
+      task,
+      step: 2,
+      toolName: 'web.fetch',
+      ctx: { ...ctxFor(task), tainted: true },
+      provenance,
+    };
+    expect((await dispatcher.dispatch({ ...input, args: { url } })).kind).toBe('executed');
+    expect(
+      (await dispatcher.dispatch({ ...input, args: { url: `${url}?private=value` } })).kind,
+    ).toBe('awaiting_approval');
+    expect(
+      (
+        await dispatcher.dispatch({
+          ...input,
+          toolName: 'web.search',
+          args: { query: 'new query' },
+        })
+      ).kind,
+    ).toBe('awaiting_approval');
+    task.trigger = { source: 'schedule', payload: { ...payload, taintedOrigin: true } };
+    expect((await dispatcher.dispatch({ ...input, args: { url } })).kind).toBe('awaiting_approval');
+    task.trigger = { source: 'schedule', payload: { ...payload, instruction: 'Edited review' } };
+    expect((await dispatcher.dispatch({ ...input, args: { url } })).kind).toBe('awaiting_approval');
+  });
+
   it('continues owner-requested public research only for exact current-task search URLs', async (ctx) => {
     if (!dbUp) return ctx.skip();
     const task = await makeTask('owner');
