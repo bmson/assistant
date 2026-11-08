@@ -359,7 +359,9 @@ describe('calendar sources through provider normalization and persisted agenda',
           expect(planning[0]?.calendars).toEqual(['Work', 'Phone work (iPhone)']);
           expect(JSON.stringify(card)).toContain('Likely the same event');
           const sections = card?.sections as Array<{ overlapCount?: number }>;
-          expect(sections.reduce((total, section) => total + (section.overlapCount ?? 0), 0)).toBe(1);
+          expect(sections.reduce((total, section) => total + (section.overlapCount ?? 0), 0)).toBe(
+            1,
+          );
         }
         if (variant === 'verified')
           expect(JSON.stringify(card)).toContain('Your accepted commitments overlap');
