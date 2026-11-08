@@ -243,6 +243,7 @@ function releaseLiteral(native: unknown, name: string): string {
   if (
     matches.length !== 1 ||
     matches[0]?.valueSource !== undefined ||
+    matches[0]?.valueFrom !== undefined ||
     typeof matches[0]?.value !== 'string'
   )
     throw new Error('Current native proof refused');
@@ -278,7 +279,8 @@ export function observeCanonicalCurrentWeb(raw: unknown, native: unknown): Expec
   const account = 'assistant-web@bmson-assistant.iam.gserviceaccount.com';
   if (
     r.name !== `${WEB_SERVICE}/revisions/${revision}` ||
-    ![WEB_SERVICE, 'assistant-web'].includes(String(r.service)) ||
+    typeof r.service !== 'string' ||
+    ![WEB_SERVICE, 'assistant-web'].includes(r.service) ||
     typeof r.uid !== 'string' ||
     !/^[A-Za-z0-9-]{1,128}$/.test(r.uid) ||
     r.serviceAccount !== account ||

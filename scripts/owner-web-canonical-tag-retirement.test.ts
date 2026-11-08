@@ -172,10 +172,12 @@ describe('fixed historical alias beside canonical untagged traffic', () => {
     'wrongCurrentImage',
     'wrongCurrentAccount',
     'wrongCurrentService',
+    'nonliteralService',
     'missingCurrentUid',
     'notReady',
     'badSource',
     'secretSource',
+    'legacySecretSource',
     'duplicateSource',
     'oldTimeout',
     'oldImage',
@@ -214,6 +216,8 @@ describe('fixed historical alias beside canonical untagged traffic', () => {
       Object.assign(f.currentNative.containers[0] ?? {}, { image: 'foreign/image' });
     if (kind === 'wrongCurrentAccount') f.currentNative.serviceAccount = 'foreign@elsewhere.test';
     if (kind === 'wrongCurrentService') f.currentNative.service = 'assistant-agent';
+    if (kind === 'nonliteralService')
+      Object.assign(f.currentNative, { service: ['assistant-web'] });
     if (kind === 'missingCurrentUid') f.currentNative.uid = '';
     if (kind === 'notReady') f.currentNative.conditions[0] = { state: 'CONDITION_PENDING' };
     const env = f.currentNative.containers[0]?.env;
@@ -221,6 +225,7 @@ describe('fixed historical alias beside canonical untagged traffic', () => {
     if (!env || !source) throw new Error('Missing source');
     if (kind === 'badSource') source.value = 'unknown';
     if (kind === 'secretSource') Object.assign(source, { valueSource: { secretKeyRef: {} } });
+    if (kind === 'legacySecretSource') Object.assign(source, { valueFrom: { secretKeyRef: {} } });
     if (kind === 'duplicateSource') env.push({ ...source });
     if (kind === 'oldTimeout') f.historicalNative.timeout = '601s';
     if (kind === 'oldImage')
