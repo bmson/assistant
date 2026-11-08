@@ -23,7 +23,15 @@ export interface GoalWorkLink {
   messageCursor: string;
 }
 
-type WorkGoal = Pick<GoalRow, 'id' | 'title' | 'description' | 'targetDate'>;
+type WorkGoal = Pick<
+  GoalRow,
+  'id' | 'title' | 'description' | 'targetDate' | 'researchAssignment'
+>;
+
+function assertOrdinaryGoal(goal: Pick<GoalRow, 'researchAssignment'>): void {
+  if (goal.researchAssignment)
+    throw new Error('Research assignments cannot use generic goal work or automation');
+}
 
 function openingWorkMessage(goal: WorkGoal): string {
   return [
@@ -41,6 +49,7 @@ async function createGoalWork(
   agentId: string,
   goal: WorkGoal,
 ): Promise<GoalWorkLink & { taskGeneration: number }> {
+  assertOrdinaryGoal(goal);
   const [conversation] = await db
     .insert(conversations)
     .values({
@@ -109,6 +118,7 @@ export async function startExistingGoalWork(db: Db, goalId: string): Promise<Goa
     .from(goals)
     .where(and(eq(goals.id, goalId), eq(goals.agentId, agent.id), isNull(goals.archivedAt)));
   if (!goal) throw new Error('goal not found or is archived');
+  assertOrdinaryGoal(goal);
   const work = await db.transaction(async (tx) => {
     const started = await createGoalWork(tx as unknown as Db, agent.id, goal);
     await ensureGoalAutomation(tx as unknown as Db, agent, goal, started.conversationId);
@@ -120,6 +130,13 @@ export async function startExistingGoalWork(db: Db, goalId: string): Promise<Goa
 
 export async function updateGoalSettings(db: Db, goalId: string, input: GoalInput): Promise<void> {
   const agent = await getAgent(db);
+  const [existing] = await db
+    .select()
+    .from(goals)
+    .where(and(eq(goals.id, goalId), eq(goals.agentId, agent.id)))
+    .limit(1);
+  if (!existing) return;
+  assertOrdinaryGoal(existing);
   const [goal] = await db
     .update(goals)
     .set({ ...input, updatedAt: new Date() })
@@ -131,6 +148,13 @@ export async function updateGoalSettings(db: Db, goalId: string, input: GoalInpu
 export async function changeGoalStatus(db: Db, goalId: string, status: GoalStatus): Promise<void> {
   if (!goalStatuses.includes(status)) throw new Error(`invalid goal status: ${String(status)}`);
   const agent = await getAgent(db);
+  const [existing] = await db
+    .select()
+    .from(goals)
+    .where(and(eq(goals.id, goalId), eq(goals.agentId, agent.id)))
+    .limit(1);
+  if (!existing) return;
+  assertOrdinaryGoal(existing);
   const [goal] = await db
     .update(goals)
     .set({ status, updatedAt: new Date() })
@@ -144,11 +168,12 @@ export async function changeGoalStatus(db: Db, goalId: string, status: GoalStatu
 export async function changeGoalAutonomy(db: Db, goalId: string, enabled: boolean): Promise<void> {
   const agent = await getAgent(db);
   const [goal] = await db
-    .select({ taintedOrigin: goals.taintedOrigin })
+    .select({ taintedOrigin: goals.taintedOrigin, researchAssignment: goals.researchAssignment })
     .from(goals)
     .where(and(eq(goals.id, goalId), eq(goals.agentId, agent.id)))
     .limit(1);
   if (!goal) throw new Error('goal not found');
+  assertOrdinaryGoal(goal);
   if (enabled && goal.taintedOrigin) {
     throw new Error('a goal created from external content cannot be given free-range autonomy');
   }

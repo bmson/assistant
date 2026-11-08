@@ -123,6 +123,14 @@ export function occurrenceIsCurrent(current: ScheduleRecord, input: ScheduleOccu
 
 export const GOAL_TASK_TERMINAL = ['done', 'failed', 'cancelled'];
 export const GOAL_SUPERSEDED_PROGRESS = 'superseded by the next automatic session';
+/** Research assignments are never eligible for an automatic goal occurrence. */
+export function goalAutomationEligible(goal: {
+  researchAssignment?: Records['goals']['researchAssignment'];
+}): boolean {
+  // Old Firestore goal documents predate this optional field. Treat absence as
+  // the same ordinary-goal state as SQL NULL; every present value stays gated.
+  return goal.researchAssignment === null || goal.researchAssignment === undefined;
+}
 /** Compare the complete goal and the exact open task versions while locked. */
 export function goalOccurrenceIsCurrent(
   input: ScheduleOccurrence,
@@ -147,6 +155,7 @@ export function goalOccurrenceIsCurrent(
     canonical(goal) !== canonical(guard.goal)
   )
     return false;
+  if (!goalAutomationEligible(goal)) return false;
   const ordered = (rows: GoalSessionState['openTasks']) =>
     [...rows].sort((a, b) => a.id.localeCompare(b.id));
   if (canonical(ordered(openTasks)) !== canonical(ordered(guard.openTasks))) return false;

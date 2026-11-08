@@ -1,19 +1,35 @@
 'use server';
 
 import {
+  acceptResearchAssignmentShortlist as acceptPostgresResearchAssignmentShortlist,
   archiveGoalRecord,
   archiveInactiveGoalRecords,
   changeGoalAutonomy,
   changeGoalStatus,
   createGoalWithWork,
+  editResearchAssignmentRecord as editPostgresResearchAssignment,
   type GoalInput,
   type GoalStatus,
+  recordResearchAssignmentOptionsRecord as recordPostgresResearchAssignmentOptions,
+  reopenResearchAssignmentRecord as reopenPostgresResearchAssignment,
   restoreGoalRecord,
+  setResearchAssignmentStoppedStateRecord as setPostgresResearchAssignmentStoppedState,
   startExistingGoalWork,
   updateGoalSettings,
 } from '@assistant/application/goals';
 import { loadConfig, validateAgentPersistenceConfig } from '@assistant/config';
-import { FirestoreGoalMutationRepository } from '@assistant/firestore';
+import {
+  FirestoreGoalMutationRepository,
+  FirestoreResearchAssignmentRepository,
+} from '@assistant/firestore';
+import type {
+  ResearchAssignmentBriefPatch,
+  ResearchAssignmentOptionsSubmission,
+} from '@assistant/persistence';
+import {
+  assertResearchAssignmentBriefPatch,
+  assertResearchAssignmentOptionsInput,
+} from '@assistant/persistence';
 import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
 import { requireOwner } from '@/auth';
@@ -90,6 +106,76 @@ function firestoreGoals(): FirestoreGoalMutationRepository {
     getFirestoreInstallationStore(),
     config.FIRESTORE_AGENT_ID,
   );
+}
+
+function firestoreResearchAssignments(): FirestoreResearchAssignmentRepository {
+  const config = loadConfig();
+  const problems = validateAgentPersistenceConfig(config);
+  if (problems.length) throw new Error(problems.join('; '));
+  return new FirestoreResearchAssignmentRepository(
+    getFirestoreInstallationStore(),
+    config.FIRESTORE_AGENT_ID,
+  );
+}
+
+export async function editResearchAssignment(
+  goalId: string,
+  patch: ResearchAssignmentBriefPatch,
+): Promise<void> {
+  await requireOwner();
+  if (!goalId) throw new Error('Missing assignment id.');
+  assertResearchAssignmentBriefPatch(patch);
+  if (loadConfig().PERSISTENCE_DRIVER === 'firestore')
+    await firestoreResearchAssignments().edit(goalId, patch);
+  else await editPostgresResearchAssignment(getDb(), goalId, patch);
+  revalidateGoalViews();
+}
+
+export async function reopenAssignment(goalId: string): Promise<void> {
+  await requireOwner();
+  if (!goalId) throw new Error('Missing assignment id.');
+  if (loadConfig().PERSISTENCE_DRIVER === 'firestore')
+    await firestoreResearchAssignments().reopen(goalId);
+  else await reopenPostgresResearchAssignment(getDb(), goalId);
+  revalidateGoalViews();
+}
+
+export async function setAssignmentStoppedState(
+  goalId: string,
+  status: 'paused' | 'cancelled',
+): Promise<void> {
+  await requireOwner();
+  if (!goalId) throw new Error('Missing assignment id.');
+  if (loadConfig().PERSISTENCE_DRIVER === 'firestore')
+    await firestoreResearchAssignments().setStoppedState(goalId, status);
+  else await setPostgresResearchAssignmentStoppedState(getDb(), goalId, status);
+  revalidateGoalViews();
+}
+
+export async function acceptAssignmentShortlist(
+  goalId: string,
+  resultRevision: number,
+): Promise<void> {
+  await requireOwner();
+  if (!goalId || !Number.isSafeInteger(resultRevision) || resultRevision < 1)
+    throw new Error('Invalid assignment shortlist.');
+  if (loadConfig().PERSISTENCE_DRIVER === 'firestore')
+    await firestoreResearchAssignments().acceptShortlist(goalId, resultRevision);
+  else await acceptPostgresResearchAssignmentShortlist(getDb(), goalId, resultRevision);
+  revalidateGoalViews();
+}
+
+export async function recordAssignmentOptions(
+  goalId: string,
+  input: ResearchAssignmentOptionsSubmission,
+): Promise<void> {
+  await requireOwner();
+  if (!goalId) throw new Error('Missing assignment id.');
+  assertResearchAssignmentOptionsInput(input);
+  if (loadConfig().PERSISTENCE_DRIVER === 'firestore')
+    await firestoreResearchAssignments().recordOptions(goalId, input);
+  else await recordPostgresResearchAssignmentOptions(getDb(), goalId, input);
+  revalidateGoalViews();
 }
 
 export async function createGoal(_prev: GoalFormState, formData: FormData): Promise<GoalFormState> {
