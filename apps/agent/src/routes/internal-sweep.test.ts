@@ -188,6 +188,7 @@ describe('POST /internal/sweep in Firestore mode', () => {
       renotifiedAttention: 6,
       missionReportsRepaired: 0,
       expiredWatches: 3,
+      awarenessSchedulesCreated: 0,
       schedulesFired: 1,
       budgetNotices: 1,
       messagesEmbedded: 7,
