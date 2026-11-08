@@ -3798,6 +3798,9 @@ struct RichResponseCards: View {
                 subtitle: complete ? "Calendar coverage is complete" : "Calendar coverage is partial",
                 countLabel: "\(conflicts.count)"
             )
+            Text("Calendar times overlap; this does not confirm attendance.")
+                .font(.caption)
+                .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
             ForEach(conflicts) { conflict in
                 VStack(alignment: .leading, spacing: 10) {
                     Label(
@@ -3806,38 +3809,58 @@ struct RichResponseCards: View {
                     )
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(AssistantTheme.accent(for: colorScheme))
-                    Text(conflict.evidenceNote ?? "The times overlap; personal attendance and event identity are unverified.")
-                        .font(.caption)
-                        .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
                     ForEach(Array(conflict.groups.enumerated()), id: \.offset) { _, events in
                         if let event = events.first {
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text(event.title)
-                                    .font(.subheadline.weight(.semibold))
-                                    .foregroundStyle(AssistantTheme.ink(for: colorScheme))
-                                Text("\(cardTime(event.start))–\(cardTime(event.end))")
-                                    .font(.caption.monospacedDigit())
-                                    .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
-                                HStack(spacing: 5) {
-                                    ForEach(events) { source in
-                                        Text(events.count > 1 ? "\(source.calendar) · \(source.title) · \(cardTime(source.start))–\(cardTime(source.end))" : source.calendar)
-                                            .font(.caption2.weight(.medium))
-                                            .padding(.horizontal, 7)
-                                            .padding(.vertical, 6)
-                                            .background(AssistantTheme.sunken(for: colorScheme), in: Capsule())
-                                    }
-                                }
-                                if !event.location.isEmpty {
-                                    Label(event.location, systemImage: "mappin.and.ellipse")
-                                        .font(.caption)
-                                        .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                            HStack(alignment: .top, spacing: 10) {
+                                RoundedRectangle(cornerRadius: 2)
+                                    .fill(AssistantTheme.accent(for: colorScheme).opacity(0.35))
+                                    .frame(width: 3)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("\(cardTime(event.start))–\(cardTime(event.end))")
+                                        .font(.caption.monospacedDigit().weight(.medium))
+                                        .foregroundStyle(AssistantTheme.accent(for: colorScheme))
+                                    Text(event.title)
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundStyle(AssistantTheme.ink(for: colorScheme))
                                         .fixedSize(horizontal: false, vertical: true)
+                                    Text(events.map(\.calendar).reduce(into: [String]()) { names, name in
+                                        if !name.isEmpty && !names.contains(name) { names.append(name) }
+                                    }.joined(separator: " · "))
+                                        .font(.caption2)
+                                        .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                                    if !event.location.isEmpty {
+                                        Label(event.location, systemImage: "mappin")
+                                            .font(.caption)
+                                            .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                                            .lineLimit(usesAccessibilityLayout ? nil : 1)
+                                    }
+                                    CardDisclosure(collapsedLabel: "Event details", expandedLabel: "Hide event details", standalone: false) {
+                                        VStack(alignment: .leading, spacing: 8) {
+                                            ForEach(events) { source in
+                                                VStack(alignment: .leading, spacing: 3) {
+                                                    Text(source.calendar).font(.caption.weight(.semibold))
+                                                    Text(source.title)
+                                                    Text("\(cardTime(source.start))–\(cardTime(source.end))")
+                                                    if !source.location.isEmpty { Text(source.location) }
+                                                }
+                                                .font(.caption)
+                                                .fixedSize(horizontal: false, vertical: true)
+                                            }
+                                        }
+                                        .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                                    }
                                 }
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(12)
-                            .background(AssistantTheme.sunken(for: colorScheme).opacity(0.52), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.vertical, 4)
                         }
+                    }
+                    CardDisclosure(collapsedLabel: "Attendance details", expandedLabel: "Hide attendance details", standalone: false) {
+                        Text(conflict.evidenceNote ?? "The times overlap; personal attendance and event identity are unverified.")
+                            .font(.caption)
+                            .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }

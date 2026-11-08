@@ -40,6 +40,73 @@ describe('generated card icon fallback', () => {
   );
 });
 
+describe('compact calendar conflict cards', () => {
+  it('keeps full source titles, alternate times and addresses in closed disclosures', () => {
+    const sources = [
+      {
+        id: 'family',
+        title: 'United v Palo Alto',
+        calendar: 'Family',
+        start: '2026-11-08T00:25:00Z',
+        end: '2026-11-08T02:30:00Z',
+        location: 'Crocker Amazon Soccer Fields, 785 Moscow St',
+      },
+      {
+        id: 'team',
+        title: 'Azul vs Palo Alto Gold',
+        calendar: 'SF United Soccer',
+        start: '2026-11-08T01:10:00Z',
+        end: '2026-11-08T02:30:00Z',
+        location: 'Crocker Amazon, 1669 Geneva Avenue',
+      },
+    ];
+    const cards = [
+      {
+        kind: 'calendar-conflicts',
+        title: 'Possible overlap',
+        complete: true,
+        conflicts: [
+          {
+            id: 'one',
+            overlapStart: '2026-11-08T01:00:00Z',
+            overlapEnd: '2026-11-08T02:30:00Z',
+            evidenceNote: 'Your attendance at the gala is not confirmed.',
+            groups: [
+              { events: sources },
+              {
+                events: [
+                  {
+                    ...sources[0],
+                    id: 'gala',
+                    title: 'Casino Night Gala',
+                    calendar: 'SF United Soccer',
+                    location: 'Leon Event Hall, 5051 Mission Street',
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ];
+    expect(rendersAllCards(cards)).toBe(true);
+    const html = renderToStaticMarkup(
+      <ResponseCards cards={cards} timeZone="America/Los_Angeles" />,
+    );
+    expect(html).toContain('Calendar times overlap; this does not confirm attendance.');
+    expect(html).toContain('Family · SF United Soccer');
+    expect(html).toContain('4:25 PM');
+    expect(html).toContain('5:10 PM');
+    expect(html).toContain('1669 Geneva Avenue');
+    expect(html).toContain('Azul vs Palo Alto Gold');
+    expect(html.match(/<details\b/g)).toHaveLength(3);
+    expect(html).not.toMatch(/<details[^>]*\sopen(?:[\s=>])/);
+    expect(html).toContain('Event details</summary>');
+    expect(html).toContain('Attendance details</summary>');
+    expect(html).not.toContain('rounded-full border border-edge');
+  });
+});
+
 describe('calendar agenda briefing', () => {
   const makeCard = (count: number): Record<string, unknown> => ({
     kind: 'briefing',
@@ -63,6 +130,29 @@ describe('calendar agenda briefing', () => {
   });
   const renderAgenda = (card: Record<string, unknown>) =>
     renderToStaticMarkup(<ResponseCards cards={[card]} timeZone="UTC" />);
+
+  it('keeps differing source titles and locations behind a disclosure rather than repeating the event', () => {
+    const card = makeCard(1);
+    const sections = card.sections as Record<string, unknown>[];
+    sections.push({
+      type: 'attention',
+      title: 'Calendar source differences',
+      items: [
+        {
+          title: 'Source titles differ',
+          detail:
+            'Family: United v Palo Alto; Team: Azul vs Palo Alto Gold. Both locations retained.',
+        },
+      ],
+    });
+    const html = renderAgenda(card);
+    expect(html).toContain('Calendar source details</summary>');
+    expect(html).toContain('Family: United v Palo Alto');
+    expect(html).toContain('Both locations retained.');
+    expect(html.match(/<details\b/g)).toHaveLength(1);
+    expect(html).not.toMatch(/<details[^>]*\sopen(?:[\s=>])/);
+    expect(html).toContain('border-l-2 border-accent/35');
+  });
 
   it.each([0, 1, 6, 7, 20])('renders %i event rows with a six-row default preview', (count) => {
     const card = makeCard(count);

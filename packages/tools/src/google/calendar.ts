@@ -3,6 +3,7 @@ import {
   type CalendarOwnerParticipation,
   type CalendarOwnerParticipationStatus,
   type CalendarPurpose,
+  calendarEventMatchEvidence,
   type PhoneCalendarCache,
   type PhoneCalendarSnapshot,
   phoneCalendarCoverage,
@@ -912,24 +913,53 @@ async function collectEvents(
       .find(
         (candidate) =>
           !sameCalendarOccurrence(candidate, event) &&
-          probablePhoneCalendarDuplicate(candidate, event),
+          (probablePhoneCalendarDuplicate(candidate, event) ||
+            calendarEventMatchEvidence(candidate, event)?.kind === 'probable'),
       );
     return original
       ? [
           {
             event: { calendarId: event.calendarId, eventId: event.eventId },
             possibleCopyOf: { calendarId: original.calendarId, eventId: original.eventId },
+            ...(calendarEventMatchEvidence(original, event)
+              ? { matchEvidence: calendarEventMatchEvidence(original, event) }
+              : {}),
+          },
+        ]
+      : [];
+  });
+  const possibleDuplicateOccurrences = events.flatMap((event, index) => {
+    const original = events
+      .slice(0, index)
+      .find(
+        (candidate) =>
+          !sameCalendarOccurrence(candidate, event) &&
+          calendarEventMatchEvidence(candidate, event)?.kind === 'possible',
+      );
+    return original
+      ? [
+          {
+            event: { calendarId: event.calendarId, eventId: event.eventId },
+            possibleCopyOf: { calendarId: original.calendarId, eventId: original.eventId },
+            matchEvidence: calendarEventMatchEvidence(original, event),
           },
         ]
       : [];
   });
   return {
     events,
+    ...(possibleDuplicateOccurrences.length
+      ? {
+          possibleDuplicateOccurrences,
+          possibleDuplicateNote:
+            'These pairs are possibly the same event, but source times or details are insufficient to merge them. Keep both entries visible and verify the invitations before calling the pair a scheduling conflict. Retain overlaps with other distinct events. Similarity never authorizes editing or cancelling a source.',
+        }
+      : {}),
     ...(probableDuplicateOccurrences.length
       ? {
           probableDuplicateOccurrences,
           probableDuplicateNote:
-            'These iPhone mirrors match title, start and end, with no conflicting location. Treat them as probable duplicate listings, not scheduling conflicts. Identity is unverified; retain both sources and do not edit or cancel either copy based on similarity.',
+            'These are probable copies based on matching event context and timing, or exact iPhone mirror listings. Do not treat the copies themselves as a scheduling conflict. Group only unambiguous, pairwise-compatible matches; preserve every source and source time. Identity is unverified; do not edit or cancel either copy based on similarity.',
         }
       : {}),
     ...(duplicateOccurrences.length

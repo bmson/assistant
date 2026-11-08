@@ -1,12 +1,25 @@
 import type {
+  CalendarMatchCandidate,
   CalendarOccurrenceIdentity,
   CalendarOwnerParticipation,
   CalendarOwnerParticipationStatus,
 } from '@assistant/persistence';
-import { probablePhoneCalendarDuplicate, sameCalendarOccurrence } from '@assistant/persistence';
+import {
+  calendarEventMatchEvidence,
+  probablePhoneCalendarDuplicate,
+  sameCalendarOccurrence,
+} from '@assistant/persistence';
 import type { BriefingCalendarEvent } from './briefing.js';
 
-export type CalendarRelationship = 'probable_duplicate' | 'compatible_time_roles' | 'unresolved';
+export type CalendarRelationship =
+  | 'probable_duplicate'
+  | 'possible_duplicate'
+  | 'compatible_time_roles'
+  | 'unresolved';
+export const isCalendarAdvisoryRelationship = (relationship?: CalendarRelationship): boolean =>
+  relationship === 'probable_duplicate' ||
+  relationship === 'possible_duplicate' ||
+  relationship === 'compatible_time_roles';
 export type CalendarOverlapClassification =
   | 'personal_commitment_conflict'
   | 'commitments_policy_overlap'
@@ -99,18 +112,14 @@ function occurrenceGroups<T>(
   return groups.sort((left, right) => left.first - right.first).flatMap((group) => group.values);
 }
 
-type PresentationOccurrence = CalendarOccurrenceIdentity & {
-  summary?: unknown;
+type PresentationOccurrence = CalendarMatchCandidate & {
   calendar?: unknown;
   calendarTimeZone?: unknown;
-  location?: unknown;
-  allDay?: unknown;
-  status?: unknown;
 };
 
 export interface ProbableCalendarMatchEvidence {
   kind: 'probable-match';
-  basis: 'matchup-venue-and-time';
+  basis: 'matchup-venue-and-time' | 'event-context-and-time' | 'matching-phone-listing';
   /** Source start difference; this does not establish an arrival instruction. */
   earlierStartMinutes: number;
 }
@@ -204,6 +213,15 @@ export function probableCalendarMatchEvidence(
     !/T/.test(sourceText(right.start))
   )
     return;
+  if (probablePhoneCalendarDuplicate(left, right))
+    return { kind: 'probable-match', basis: 'matching-phone-listing', earlierStartMinutes: 0 };
+  const general = calendarEventMatchEvidence(left, right);
+  if (general?.kind === 'probable')
+    return {
+      kind: 'probable-match',
+      basis: 'event-context-and-time',
+      earlierStartMinutes: general.earlierStartMinutes,
+    };
   // Reject ordinary unrelated events before parsing timestamps. This matcher
   // also sits in the calendar overlap pair loop, where dense calendars can
   // produce millions of candidates with no venue or matchup evidence.
@@ -498,29 +516,61 @@ function venues(event: BriefingCalendarEvent): Set<string> {
 export function calendarRelationship(
   left: BriefingCalendarEvent,
   right: BriefingCalendarEvent,
+  timeZone?: string,
 ): CalendarRelationship {
   if (!left.calendarId || !right.calendarId || left.calendarId === right.calendarId)
     return 'unresolved';
+  if (left.allDay || right.allDay || left.status === 'cancelled' || right.status === 'cancelled')
+    return 'unresolved';
   if (
-    (left.recurringEventId || right.recurringEventId) &&
-    left.originalStartTime !== right.originalStartTime
+    left.originalStartTime &&
+    right.originalStartTime &&
+    (!Number.isFinite(Date.parse(left.originalStartTime)) ||
+      Date.parse(left.originalStartTime) !== Date.parse(right.originalStartTime))
   )
     return 'unresolved';
-  if (probableCalendarMatchEvidence(left, right)) return 'probable_duplicate';
+  if (probableCalendarMatchEvidence(left, right, timeZone)) return 'probable_duplicate';
+  const uncertain =
+    calendarEventMatchEvidence(left, right)?.kind === 'possible'
+      ? 'possible_duplicate'
+      : 'unresolved';
+  if (Boolean(left.originalStartTime) !== Boolean(right.originalStartTime)) return uncertain;
   const name = title(left);
   const phoneMirror =
     left.calendarId.startsWith('iphone:') || right.calendarId.startsWith('iphone:');
   if (name !== title(right) || (name.split(' ').length < 2 && (!phoneMirror || name.length < 4)))
-    return 'unresolved';
+    return uncertain;
   if (probablePhoneCalendarDuplicate(left, right)) return 'probable_duplicate';
   const venue = venues(right);
-  if (![...venues(left)].some((entry) => venue.has(entry))) return 'unresolved';
+  if (![...venues(left)].some((entry) => venue.has(entry))) return uncertain;
   const earlier = Date.parse(left.start) <= Date.parse(right.start) ? left : right;
   const later = earlier === left ? right : left;
   const distance = Date.parse(later.start) - Date.parse(earlier.start);
-  if (!Number.isFinite(distance) || distance > 60 * 60_000) return 'unresolved';
+  if (!Number.isFinite(distance) || distance > 60 * 60_000) return uncertain;
   if (role(earlier) === 'arrival' && role(later) === 'start') return 'compatible_time_roles';
-  return distance === 0 && left.end === right.end ? 'probable_duplicate' : 'unresolved';
+  return uncertain;
+}
+
+/** A single suggestive variant cannot hide another source's unrelated event. */
+export function calendarGroupRelationship(
+  left: readonly BriefingCalendarEvent[],
+  right: readonly BriefingCalendarEvent[],
+  timeZone?: string,
+): CalendarRelationship {
+  let result: CalendarRelationship | undefined;
+  for (const a of left)
+    for (const b of right) {
+      const relationship = calendarRelationship(a, b, timeZone);
+      if (relationship === 'unresolved') return 'unresolved';
+      if (result === undefined || result === relationship) {
+        result = relationship;
+        continue;
+      }
+      if (result === 'compatible_time_roles' || relationship === 'compatible_time_roles')
+        return 'unresolved';
+      result = 'possible_duplicate';
+    }
+  return result ?? 'unresolved';
 }
 
 export function calendarRelationshipNote(
@@ -528,9 +578,11 @@ export function calendarRelationshipNote(
   attendance: 'confirmed' | 'unresolved',
 ): string {
   if (relationship === 'compatible_time_roles')
-    return 'These may describe arrival and kickoff for one event. Keep the earlier arrival time; source identity is unverified.';
+    return 'These may describe arrival and start for one event. Keep the earlier arrival time; source identity is unverified.';
   if (relationship === 'probable_duplicate')
     return 'These may be duplicate listings. Both sources are retained because their occurrence identity is unverified.';
+  if (relationship === 'possible_duplicate')
+    return 'Possibly the same event. Both entries remain visible; confirm the source times and details before treating this as a scheduling conflict.';
   return attendance === 'confirmed'
     ? 'Both entries have verified evidence as busy personal commitments; occurrence identity has not been equated.'
     : 'The event times overlap; personal attendance and matching occurrence identity are not established for both records.';

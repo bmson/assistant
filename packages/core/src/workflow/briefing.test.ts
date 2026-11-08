@@ -1591,7 +1591,7 @@ describe('runBriefing — richer inputs', () => {
     expect(agenda?.type === 'agenda' ? agenda.items : []).toHaveLength(2);
     expect(briefingCalendarPromptLines(agenda, 36, true)).toEqual([
       'On the calendar (2 schedule items shown in the next 36h):',
-      '- Tomorrow 4:25 PM – 6:30 PM: ⚽ Harbor v Bay City (5:10PM) at Cedar Estuary Soccer Fields, 100 North Gate, Bay City — Likely the same match: Home 4:25 PM; Harbor Soccer 5:10 PM; source locations differ.',
+      '- Tomorrow 4:25 PM – 6:30 PM: ⚽ Harbor v Bay City (5:10PM) at Cedar Estuary Soccer Fields, 100 North Gate, Bay City — Likely the same event: Home 4:25 PM; Harbor Soccer 5:10 PM; source locations differ.',
       '- Tomorrow 5:00 PM – 10:30 PM: Harbor Club Fundraiser Night at Founders Pavilion Hall, 5051 Harbor Ave',
     ]);
   });
@@ -1666,7 +1666,7 @@ describe('runBriefing — richer inputs', () => {
     const conflicts = overlaps.filter((conflict) => conflict.relationship !== 'probable_duplicate');
     expect(conflicts).toHaveLength(4);
     expect(overlaps).toHaveLength(4);
-    expect(overlaps.totalCount).toBe(11);
+    expect(overlaps.totalCount).toBe(10);
     expect(overlaps.conflictCount).toBe(10);
     expect(
       overlaps.filter((conflict) => conflict.relationship === 'probable_duplicate'),

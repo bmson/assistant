@@ -31,6 +31,9 @@ export interface CalendarOccurrenceSource extends CalendarOccurrenceIdentity {
   calendarTimeZone?: string;
   /** Literal provider organizer, preserved per source and never an attendance signal. */
   organizer?: string;
+  attendees?: readonly string[];
+  attendeeDetails?: readonly { email: string; displayName?: string }[];
+  links?: readonly { type?: string; label?: string; url: string }[];
   summary?: string;
   description?: string;
   location?: string;

@@ -69,6 +69,72 @@ const gala: BriefingCalendarEvent = {
 };
 
 describe('source-preserving probable match presentation', () => {
+  it('recognizes differently named appointments using activity, named context, venue and time', () => {
+    const dentist = {
+      ...familyMatch,
+      summary: 'Dentist Dr Chen',
+      location: 'Sunset Dental, 123 Main St',
+    };
+    const copy = {
+      ...teamMatch,
+      summary: 'Dental appointment with Dr Chen',
+      start: dentist.start,
+      location: 'Sunset Dental\n123 Main Street',
+    };
+    expect(presentationOccurrenceGroups([dentist, copy])).toEqual([[dentist, copy]]);
+    expect(canonicalOccurrenceGroups([dentist, copy])).toHaveLength(2);
+    for (const changed of [
+      { ...copy, summary: 'Dentist Dr Smith' },
+      { ...copy, summary: 'Dentist Dr Chen practice' },
+      { ...copy, summary: 'Unrelated appointment' },
+      { ...copy, location: 'Other Dental, 123 Main St' },
+      { ...copy, start: teamMatch.start },
+      { ...copy, calendarId: dentist.calendarId },
+    ])
+      expect(presentationOccurrenceGroups([dentist, changed])).toHaveLength(2);
+  });
+
+  it('does not merge simultaneous meetings for different people or distinct event types', () => {
+    const meeting = { ...familyMatch, summary: 'Design review Alex', location: 'Sunset Office' };
+    const other = {
+      ...teamMatch,
+      summary: 'Design review Sam',
+      start: meeting.start,
+      location: meeting.location,
+    };
+    expect(presentationOccurrenceGroups([meeting, other])).toHaveLength(2);
+    expect(
+      presentationOccurrenceGroups([
+        { ...meeting, summary: 'Design review 1' },
+        { ...other, summary: 'Design review 2' },
+      ]),
+    ).toHaveLength(2);
+    expect(
+      presentationOccurrenceGroups([
+        { ...meeting, summary: 'Harbor United practice' },
+        { ...other, summary: 'Harbor United game' },
+      ]),
+    ).toHaveLength(2);
+  });
+
+  it('groups exact phone mirrors without treating them as provider identity', () => {
+    const original = { ...familyMatch, summary: 'Dentist', location: '' };
+    const copy = { ...original, calendarId: 'iphone:family', eventId: 'phone-copy' };
+    expect(presentationOccurrenceGroups([original, copy])).toEqual([[original, copy]]);
+    expect(canonicalOccurrenceGroups([original, copy])).toHaveLength(2);
+    expect(findConflicts([original, copy])).toHaveLength(0);
+  });
+
+  it('groups short identical titles only with independent venue and time evidence', () => {
+    const original = { ...familyMatch, summary: 'Dentist', location: 'Sunset Dental' };
+    const copy = { ...original, calendarId: 'personal', eventId: 'copy' };
+    expect(presentationOccurrenceGroups([original, copy])).toEqual([[original, copy]]);
+    expect(presentationOccurrenceGroups([original, { ...copy, location: '' }])).toHaveLength(2);
+    expect(
+      presentationOccurrenceGroups([original, { ...copy, start: teamMatch.start }]),
+    ).toHaveLength(2);
+  });
+
   it('groups the screenshot match while retaining both source times and a distinct Gala', () => {
     const events = [familyMatch, teamMatch, gala];
     const before = structuredClone(events);
@@ -347,6 +413,7 @@ describe('advisory calendar relationships', () => {
     expect(calendarRelationship(arrival, kickoff)).toBe('compatible_time_roles');
     const conflicts = findConflicts([arrival, kickoff]);
     expect(conflicts).toHaveLength(1);
+    expect(conflicts.conflictCount).toBe(0);
     expect(conflicts[0]?.a[0]?.start).toBe(arrival.start);
     expect(conflicts[0]?.b[0]?.start).toBe(kickoff.start);
     const agenda = agendaSection({
@@ -382,7 +449,7 @@ describe('advisory calendar relationships', () => {
   it('labels matching descriptive listings as probable while keeping both sources', () => {
     const copy = { ...arrival, calendarId: 'personal', eventId: 'copy', description: '' };
     expect(calendarRelationship(arrival, copy)).toBe('probable_duplicate');
-    expect(findConflicts([arrival, copy])).toHaveLength(1);
+    expect(findConflicts([arrival, copy])).toHaveLength(0);
     expect(calendarRelationshipNote('probable_duplicate', 'confirmed')).toContain(
       'Both sources are retained',
     );
@@ -414,7 +481,7 @@ it('recognizes an exact iPhone mirror without a venue while retaining distinct o
       calendarId: 'iphone:work',
       start: '2026-10-19T09:15:00Z',
     }),
-  ).toBe('unresolved');
+  ).toBe('possible_duplicate');
 });
 
 it('requires verified human attendee evidence or explicit busy-commitments policy', () => {

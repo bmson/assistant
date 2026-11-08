@@ -693,8 +693,8 @@ function CalendarAgendaRow({ item }: { item: Raw }) {
   const time = day === 'Timed' ? str(item.time) : day;
 
   return (
-    <li className="grid min-w-0 grid-cols-1 gap-x-3 rounded-md border border-edge/50 px-3 py-2.5 text-sm sm:grid-cols-[4.75rem_minmax(0,1fr)]">
-      <span className="min-w-0 text-xs leading-5 font-medium text-muted [overflow-wrap:anywhere]">
+    <li className="grid min-w-0 grid-cols-1 gap-x-3 border-l-2 border-accent/35 py-2 pl-3 text-sm sm:grid-cols-[4.75rem_minmax(0,1fr)]">
+      <span className="min-w-0 text-xs leading-5 font-medium tabular-nums text-accent [overflow-wrap:anywhere]">
         {day === 'All day' ? str(item.time) : time}
       </span>
       <div className="min-w-0">
@@ -896,6 +896,15 @@ function CalendarAgendaCard({ data }: { data: Raw }) {
             if (Object.hasOwn(section, 'overlaps') || typeof section.itemCount === 'number')
               return (
                 <CalendarAgendaAttention key={key} section={section} eventIndex={eventIndex} />
+              );
+            if (section.type === 'attention' && section.title === 'Calendar source differences')
+              return (
+                <details key={key} className="min-w-0 text-xs text-muted">
+                  <summary className={`w-fit cursor-pointer rounded-sm py-2 ${focusRing}`}>
+                    Calendar source details
+                  </summary>
+                  <BriefingList section={section} />
+                </details>
               );
             return <BriefingList key={key} section={section} />;
           })}
@@ -1546,6 +1555,9 @@ function CalendarConflictsCard({ data, timeZone }: { data: Raw; timeZone: string
   const conflicts = recs(data.conflicts).filter(validConflict);
   return (
     <CardShell icon={AlertTriangle} label={str(data.title) || 'Schedule conflict'}>
+      <p className="mb-3 text-xs text-muted">
+        Calendar times overlap; this does not confirm attendance.
+      </p>
       <div className="flex flex-col gap-4">
         {conflicts.map((conflict, index) => {
           const groups = recs(conflict.groups);
@@ -1558,10 +1570,6 @@ function CalendarConflictsCard({ data, timeZone }: { data: Raw; timeZone: string
                   str(conflict.overlapEnd),
                   str(data.timeZone) || timeZone,
                 )}
-              </p>
-              <p className="mb-2 text-xs text-muted">
-                {str(conflict.evidenceNote) ||
-                  'The times overlap; personal attendance and event identity are unverified.'}
               </p>
               <div className="grid gap-2 sm:grid-cols-2">
                 {groups.map((group) => {
@@ -1578,41 +1586,68 @@ function CalendarConflictsCard({ data, timeZone }: { data: Raw; timeZone: string
                   return (
                     <div
                       key={groupKey || `${str(event.title)}:${str(event.start)}`}
-                      className="rounded-lg border border-edge/70 bg-sunken/35 p-3"
+                      className="min-w-0 border-l-2 border-accent/35 py-1 pl-3"
                     >
-                      <p className="text-sm font-medium text-strong">
-                        {str(event.title) || 'Untitled event'}
-                      </p>
-                      <p className="mt-1 text-xs text-muted">
+                      <p className="text-xs font-medium tabular-nums text-accent">
                         {timeRange(
                           str(event.start),
                           str(event.end),
                           str(data.timeZone) || timeZone,
                         )}
                       </p>
-                      <div className="mt-2 flex flex-wrap gap-1.5">
-                        {events.map((source, sourceIndex) => (
-                          <span
-                            key={str(source.id) || sourceIndex}
-                            className="rounded-full border border-edge px-2 py-0.5 text-[10px] text-muted"
-                          >
-                            {str(source.calendar) || 'Calendar'}
-                            {events.length > 1
-                              ? ` · ${str(source.title)} · ${timeRange(str(source.start), str(source.end), str(data.timeZone) || timeZone)}`
-                              : ''}
-                          </span>
-                        ))}
-                      </div>
+                      <p className="mt-1 text-sm font-medium text-strong [overflow-wrap:anywhere]">
+                        {str(event.title) || 'Untitled event'}
+                      </p>
+                      <p className="mt-1 text-xs text-muted [overflow-wrap:anywhere]">
+                        {[
+                          ...new Set(events.map((source) => str(source.calendar)).filter(Boolean)),
+                        ].join(' · ')}
+                      </p>
                       {str(event.location) ? (
-                        <p className="mt-2 flex items-center gap-1 text-xs text-muted">
-                          <MapPin className="size-3" aria-hidden="true" />
-                          {str(event.location)}
+                        <p className="mt-1 flex min-w-0 items-center gap-1 text-xs text-muted">
+                          <MapPin className="size-3 shrink-0" aria-hidden="true" />
+                          <span className="truncate">{str(event.location)}</span>
                         </p>
                       ) : null}
+                      <details className="mt-1 text-xs text-muted">
+                        <summary
+                          className={`w-fit cursor-pointer rounded-sm py-2 text-accent ${focusRing}`}
+                        >
+                          Event details
+                        </summary>
+                        <ul className="flex flex-col gap-2 pt-1">
+                          {events.map((source, sourceIndex) => (
+                            <li
+                              key={str(source.id) || sourceIndex}
+                              className="[overflow-wrap:anywhere]"
+                            >
+                              <p className="font-medium">{str(source.calendar) || 'Calendar'}</p>
+                              <p>{str(source.title)}</p>
+                              <p>
+                                {timeRange(
+                                  str(source.start),
+                                  str(source.end),
+                                  str(data.timeZone) || timeZone,
+                                )}
+                              </p>
+                              {str(source.location) ? <p>{str(source.location)}</p> : null}
+                            </li>
+                          ))}
+                        </ul>
+                      </details>
                     </div>
                   );
                 })}
               </div>
+              <details className="mt-2 text-xs text-muted">
+                <summary className={`w-fit cursor-pointer rounded-sm py-2 ${focusRing}`}>
+                  Attendance details
+                </summary>
+                <p className="leading-5">
+                  {str(conflict.evidenceNote) ||
+                    'The times overlap; personal attendance and event identity are unverified.'}
+                </p>
+              </details>
             </section>
           );
         })}
