@@ -2276,6 +2276,220 @@ final class NativeVisualReviewTests: XCTestCase {
         }
     }
 
+    /// Focused actual SwiftUI fixture renders. Forced viewport/size class is
+    /// explicit: this does not establish physical rotation, keyboard or VoiceOver.
+    @MainActor
+    func testMobileApprovalAndProactiveDisclosureAccessibilityLayouts() async throws {
+        enum CaptureBudgetError: Error { case exceeded, invalidImage, attachmentBytesExceeded }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(120))
+        var retainedPNGBytes = 0
+        let maximumPNGBytes = 64 * 1024 * 1024
+        func checkBudget() throws {
+            guard ContinuousClock.now < deadline else { throw CaptureBudgetError.exceeded }
+        }
+        let fixture = try NativeReviewFixture()
+        var responses = fixture.responses
+        let path = "/api/mobile/v1/overview"
+        var overview = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(responses[path])) as? [String: Any])
+        var approvals = try XCTUnwrap(overview["approvals"] as? [String: Any])
+        var pending = try XCTUnwrap(approvals["pending"] as? [[String: Any]])
+        var approval = try XCTUnwrap(pending[0]["approval"] as? [String: Any])
+        approval["summary"] = "Send the synthetic arrival update only to the named recipient. Keep the confirmed time and original scope; do not change the booking, add recipients or agree to a fee."
+        pending[0]["approval"] = approval
+        approvals["pending"] = [pending[0]]
+        overview["approvals"] = approvals
+        responses[path] = try JSONSerialization.data(withJSONObject: overview)
+        NativeReviewProtocol.install(responses)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [NativeReviewProtocol.self]
+        let client = APIClient(configuration: .init(baseURL: URL(string: "https://native-review.test")!, token: "fixture-only"), session: URLSession(configuration: configuration))
+        let suite = "assistant.mobile-controls-review"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defaults.removePersistentDomain(forName: suite)
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = AppModel(apiClient: client, defaults: defaults)
+        await model.refreshAll()
+        XCTAssertNotNil(model.overview)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let previousWindow = scene.keyWindow
+        defer { previousWindow?.makeKey() }
+        let layouts: [(String, CGSize, DynamicTypeSize, UserInterfaceSizeClass)] = [
+            ("portrait-default", CGSize(width: 390, height: 844), .large, .regular),
+            ("portrait-AX5", CGSize(width: 320, height: 700), .accessibility5, .regular),
+            ("landscape-default", CGSize(width: 844, height: 390), .large, .compact),
+            ("landscape-AX1", CGSize(width: 844, height: 390), .accessibility1, .compact),
+            ("landscape-AX5", CGSize(width: 844, height: 390), .accessibility5, .compact),
+        ]
+        func elements(_ root: NSObject) -> [NSObject] {
+            var visited = Set<ObjectIdentifier>()
+            func walk(_ value: NSObject, depth: Int) -> [NSObject] {
+                guard depth < 40, visited.insert(ObjectIdentifier(value)).inserted else { return [] }
+                var result = value.isAccessibilityElement ? [value] : []
+                if let view = value as? UIView { result += view.subviews.flatMap { walk($0, depth: depth + 1) } }
+                if let children = value.accessibilityElements {
+                    result += children.compactMap { $0 as? NSObject }.flatMap { walk($0, depth: depth + 1) }
+                }
+                let count = value.accessibilityElementCount()
+                if count > 0 && count < 2000 {
+                    for index in 0..<count {
+                        if let child = value.accessibilityElement(at: index) as? NSObject { result += walk(child, depth: depth + 1) }
+                    }
+                }
+                return result
+            }
+            return walk(root, depth: 0)
+        }
+        for scheme in [ColorScheme.light, .dark] {
+            for (name, bounds, textSize, verticalClass) in layouts {
+                for surface in ["approvals", "proactive"] {
+                    try checkBudget()
+                    let window = UIWindow(windowScene: scene)
+                    window.frame = CGRect(origin: .zero, size: bounds)
+                    window.overrideUserInterfaceStyle = scheme == .light ? .light : .dark
+                    let content: AnyView = surface == "approvals" ? AnyView(ApprovalsView()) : AnyView(
+                        ScrollView {
+                            ProactiveAlertContent(category: "calendar", urgency: "for_your_attention",
+                                title: "Synthetic source listings need review",
+                                summary: "The checked source listings have different times. Calendar RSVP does not establish who is attending or driving. Keep both listings visible and check the original source before making a change.",
+                                startsAt: "", dueAt: "",
+                                details: [.init(label: "Source qualification", value: "The phone calendar was not checked. These synthetic facts are not evidence of live calendar coverage.")],
+                                actionSummary: "Read both original listings before deciding.")
+                                .padding(16)
+                        }
+                    )
+                    let host = UIHostingController(rootView: content.environment(model)
+                        .environment(\.colorScheme, scheme).environment(\.dynamicTypeSize, textSize)
+                        .environment(\.verticalSizeClass, verticalClass)
+                        .transaction { $0.animation = nil; $0.disablesAnimations = true })
+                    window.rootViewController = host
+                    window.makeKeyAndVisible()
+                    defer { window.isHidden = true; window.rootViewController = nil }
+                    try await Task.sleep(for: .milliseconds(500))
+                    window.layoutIfNeeded()
+                    let key = "mobile1a-\(surface)-\(name)-\(scheme == .light ? "light" : "dark")"
+                    var observations: [[String: Any]] = []
+                    var actionFrames: [String: CGRect] = [:]
+                    func scrolls(_ view: UIView) -> [UIScrollView] {
+                        ((view as? UIScrollView).map { [$0] } ?? []) + view.subviews.flatMap(scrolls)
+                    }
+                    func record(_ state: String) throws {
+                        try checkBudget()
+                        let nativeElements = elements(window)
+                        let offset = scrolls(window).max(by: { $0.bounds.height < $1.bounds.height })?.contentOffset ?? .zero
+                        for element in nativeElements {
+                            if let label = element.accessibilityLabel, ["Approve", "Deny", "More"].contains(label) {
+                                let visibleFrame = window.screen.coordinateSpace.convert(element.accessibilityFrame, to: window)
+                                if visibleFrame.height > 0 && visibleFrame.intersects(window.bounds) {
+                                    // The single approval may need several viewports.
+                                    // Compare stable content positions, not screen Y
+                                    // values gathered at different scroll offsets.
+                                    actionFrames[label] = visibleFrame.offsetBy(dx: offset.x, dy: offset.y)
+                                }
+                            }
+                        }
+                        let rows = nativeElements.map { value -> [String: Any] in
+                            let frame = value.accessibilityFrame
+                            return ["label": value.accessibilityLabel ?? "", "value": value.accessibilityValue ?? "",
+                                    "x": frame.minX, "y": frame.minY, "width": frame.width, "height": frame.height,
+                                    "traits": value.accessibilityTraits.rawValue]
+                        }
+                        observations.append(["state": state, "elements": rows,
+                                             "primaryScrollOffsetX": offset.x, "primaryScrollOffsetY": offset.y])
+                        let png: Data = try autoreleasepool {
+                            let format = UIGraphicsImageRendererFormat()
+                            format.scale = 1 // Native UIKit fixture capture at one pixel per point.
+                            let image = UIGraphicsImageRenderer(bounds: window.bounds, format: format).image { _ in
+                                XCTAssertTrue(window.drawHierarchy(in: window.bounds, afterScreenUpdates: true))
+                            }
+                            guard let data = image.pngData() else { throw CaptureBudgetError.invalidImage }
+                            return data
+                        }
+                        try checkBudget()
+                        guard png.count <= maximumPNGBytes - retainedPNGBytes else {
+                            throw CaptureBudgetError.attachmentBytesExceeded
+                        }
+                        retainedPNGBytes += png.count
+                        let attachment = XCTAttachment(data: png, uniformTypeIdentifier: "public.png")
+                        attachment.name = key + "-" + state; attachment.lifetime = .keepAlways; add(attachment)
+                    }
+                    try record("collapsed-top")
+                    if surface == "proactive" {
+                        XCTAssertFalse(elements(window).compactMap(\.accessibilityLabel).contains {
+                            $0.contains("The phone calendar was not checked.")
+                        }, "Source details must begin collapsed")
+                        let disclosure = elements(window).first { $0.accessibilityLabel == "Details" }
+                        XCTAssertNotNil(disclosure, "Native disclosure must be observable to measure its actual accessibility frame")
+                        if let disclosure {
+                            XCTAssertGreaterThanOrEqual(disclosure.accessibilityFrame.height, 44)
+                            let activated = disclosure.accessibilityActivate()
+                            XCTAssertTrue(activated, "Native accessibility activation must report success")
+                            observations.append(["nativeAccessibilityActivationReturned": activated,
+                                                 "limit": "Accessibility activation is not a physical tap or VoiceOver execution"])
+                            try await Task.sleep(for: .milliseconds(400))
+                            window.layoutIfNeeded()
+                            let expandedLabels = elements(window).compactMap(\.accessibilityLabel)
+                            XCTAssertTrue(expandedLabels.contains { $0.contains("The phone calendar was not checked.") },
+                                          "Successful activation must reveal the source qualification")
+                            XCTAssertEqual(expandedLabels.filter { $0.contains("Read both original listings before deciding.") }.count, 1,
+                                           "Expanded action summary must appear once")
+                            try record("after-native-accessibility-activation")
+                        }
+                    }
+                    if let scroll = scrolls(window).max(by: { $0.bounds.height < $1.bounds.height }) {
+                        for step in 0..<20 {
+                            try checkBudget()
+                            let bottom = max(-scroll.adjustedContentInset.top, scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom)
+                            if scroll.contentOffset.y >= bottom - 1 { break }
+                            let next = min(bottom, scroll.contentOffset.y + max(80, scroll.bounds.height * 0.75))
+                            scroll.setContentOffset(CGPoint(x: 0, y: next), animated: false)
+                            try await Task.sleep(for: .milliseconds(80))
+                            window.layoutIfNeeded()
+                            try record("scroll-\(step)")
+                        }
+                        XCTAssertGreaterThanOrEqual(scroll.contentOffset.y + 1, max(-scroll.adjustedContentInset.top, scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom), "Bounded captures must reach all actions")
+                    }
+                    if surface == "approvals" {
+                        for title in ["Approve", "Deny", "More"] {
+                            let frame = try XCTUnwrap(actionFrames[title], "Missing actual approval action: \(title)")
+                            XCTAssertGreaterThanOrEqual(frame.height, 44, "Action target: \(title)")
+                        }
+                        if textSize.isAccessibilitySize {
+                            XCTAssertLessThan(try XCTUnwrap(actionFrames["Approve"]).minY, try XCTUnwrap(actionFrames["Deny"]).minY)
+                            XCTAssertLessThan(try XCTUnwrap(actionFrames["Deny"]).minY, try XCTUnwrap(actionFrames["More"]).minY)
+                        }
+                    } else {
+                        let disclosure = try XCTUnwrap(elements(window).first { $0.accessibilityLabel == "Details" })
+                        XCTAssertTrue(disclosure.accessibilityActivate(), "Second native activation must collapse Details")
+                        try await Task.sleep(for: .milliseconds(400))
+                        window.layoutIfNeeded()
+                        XCTAssertFalse(elements(window).compactMap(\.accessibilityLabel).contains {
+                            $0.contains("The phone calendar was not checked.")
+                        }, "Second activation must remove expanded-only source facts")
+                        try record("after-native-accessibility-collapse")
+                    }
+                    let receipt: [String: Any] = ["case": key, "viewport": ["width": bounds.width, "height": bounds.height],
+                        "forcedCompactVertical": verticalClass == .compact, "accessibilitySize": textSize.isAccessibilitySize,
+                        "capturePixelsPerPoint": 1, "retainedPNGBytes": retainedPNGBytes, "maximumPNGBytes": maximumPNGBytes,
+                        "actionFramesCoordinateSpace": "window point coordinates plus primary scroll content offset; one pending approval",
+                        "actionContentFrames": actionFrames.map { label, frame in
+                            ["label": label, "x": frame.minX, "y": frame.minY, "width": frame.width, "height": frame.height] as [String: Any]
+                        },
+                        "observations": observations, "scope": "Actual native SwiftUI synthetic fixture; forced viewport/environment, no real approval writes, physical rotation/tap/keyboard/VoiceOver proof"]
+                    let data = try JSONSerialization.data(withJSONObject: receipt, options: [.sortedKeys])
+                    let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+                    attachment.name = key + "-geometry"; attachment.lifetime = .keepAlways; add(attachment)
+                    // Release this case before creating the next window. The
+                    // scoped defer also performs the same cleanup on failure.
+                    window.isHidden = true
+                    window.rootViewController = nil
+                    XCTAssertTrue(window.isHidden && window.rootViewController == nil)
+                }
+            }
+        }
+        XCTAssertTrue(NativeReviewProtocol.externalRequests.isEmpty)
+        XCTAssertTrue(NativeReviewProtocol.mutations.isEmpty)
+    }
+
     @MainActor
     func testBriefingLongSourceQualificationsAndMetadata() async throws {
         enum BudgetError: Error { case exceeded, imageUnavailable }

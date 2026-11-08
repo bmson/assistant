@@ -5120,7 +5120,7 @@ struct ProactiveAlertContent: View {
                     .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
             }
             if !details.isEmpty || !summary.isEmpty || actionSummary != nil {
-                DisclosureGroup("Details", isExpanded: $expanded) {
+                DisclosureGroup(isExpanded: $expanded) {
                     VStack(alignment: .leading, spacing: 10) {
                         if let actionSummary, !actionSummary.isEmpty, actionSummary != summary, actionSummary != title {
                             Text(AssistantMarkdown.inlineAttributed(actionSummary))
@@ -5141,6 +5141,10 @@ struct ProactiveAlertContent: View {
                         }
                     }
                     .padding(.top, 6)
+                } label: {
+                    Text("Details")
+                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                        .contentShape(Rectangle())
                 }
                 .font(.caption.weight(.semibold))
                 .tint(AssistantTheme.accent(for: colorScheme))
