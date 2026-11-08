@@ -158,6 +158,45 @@ environment on first use if it does not exist. Add required reviewers only when
 production releases should wait for a human gate. Workflow concurrency queues
 releases instead of cancelling one already in progress.
 
+## Reviewed retirement of the known stale resume alias
+
+The protected `owner-web-tag-retirement.yml` workflow has two fixed profiles.
+`legacy-01080` remains the default and retains its original pinned-current checks.
+`known-resume-40403696377-1` is an explicit, narrow repair for that one proven
+historical alias beside a settled **untagged 100% canonical allocation**. It is not
+a general tag-removal command and does not bypass release prerequisites.
+
+For the new profile, the read-only plan binds the currently serving revision's
+full resource identity, UID, immutable image, source SHA, existing pause setting,
+native snapshot hash, service account and ready state. It requires the service's
+latest-created/latest-ready identities to agree with that canonical target and
+refuses other unknown targets. The historical alias must retain its existing
+reviewed revision/image/URI ownership proof and have zero allocated traffic.
+The source must be literal `ASSISTANT_RELEASE_SOURCE_SHA` or `RELEASE_SHA`
+metadata; when both are returned they must agree. Missing, duplicate, secret-backed
+or conflicting source metadata is refused rather than inferred from an image name.
+
+1. Dispatch `Retire exact historical web alias` on the exact reviewed main source
+   with `mode=plan` and `retirement_profile=known-resume-40403696377-1`.
+2. Review the retained `owner-web-tag-retirement-plan.json`. Confirm the sole
+   removed alias, the unchanged canonical revision/image/source/pause state, and
+   a patch containing only the service name, current etag and retained100 row.
+3. Only after approval, dispatch `mode=apply` with the **same profile**, exact
+   `reviewed_source_sha`, packet hash and observation time. Review expires after
+   30 minutes and is rechecked immediately before the write. Fresh service and
+   native reads must reproduce the reviewed packet; drift refuses the mutation.
+4. The existing transport permits one traffic-only CAS, observes the exact native
+   operation, verifies the unchanged current/configuration, then waits the full
+   600-second drain and requires stable service version through its final check.
+   An already-absent recovery still requires the drain. Uncertain outcomes are
+   never retried automatically and no alias is recreated on failure.
+
+This repair changes neither default request allocation nor service templates,
+application write settings, scaling, credentials, revisions or IAM. Its receipt
+does **not** authorize application editing or declare the new release deployed.
+Re-run ordinary release preflight and the protected deployment path separately;
+keep the deployment/cleanup operator holds in force.
+
 ## Retaining only the current deployment
 
 For a personal installation without rollback history, set the repository

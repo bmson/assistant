@@ -4,7 +4,7 @@ import { lstatSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { verifyWifEnvironment } from './owner-editor-release-inventory.js';
-import { nativeRetirementClient } from './owner-web-tag-native.js';
+import { nativeRetirementClient, type RetainedTargetPolicy } from './owner-web-tag-native.js';
 
 const exec = promisify(execFile);
 export type ProtectedCloudStage =
@@ -103,6 +103,15 @@ export async function protectedWebTagCredential(
 /** Existing retirement entrypoint retains its exact single-target transport. */
 export async function protectedWebTagCloud(
   mark: (stage: ProtectedCloudStage) => void = () => undefined,
+  retainedTarget: RetainedTargetPolicy = 'tagged',
 ) {
-  return nativeRetirementClient(await protectedWebTagCredential(mark));
+  if (!['tagged', 'canonical-untagged'].includes(retainedTarget))
+    throw new Error('Invalid native retained-target policy');
+  return nativeRetirementClient(
+    await protectedWebTagCredential(mark),
+    fetch,
+    undefined,
+    undefined,
+    retainedTarget,
+  );
 }

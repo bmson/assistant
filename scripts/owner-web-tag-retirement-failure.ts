@@ -53,6 +53,9 @@ const commandReasons = new Set([
   'sdk_command_failed',
 ]);
 const messages = new Map([
+  ['Unknown retirement profile', 'profile_refused'],
+  ['Current native proof refused', 'current_native_proof_refused'],
+  ['Historical native proof refused', 'historical_native_proof_refused'],
   ['Invalid WIF file', 'credential_file_refused'],
   ['Unsupported protected cloud runner', 'runner_refused'],
   ['Invalid protected cloud binary', 'binary_refused'],

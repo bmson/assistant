@@ -127,6 +127,10 @@ export interface ExpectedCurrentWeb {
   tag: string;
   uriSha256: string;
   paused: boolean;
+  /** Explicit opt-in for retaining an untagged canonical allocation, never an arbitrary alias. */
+  binding?: 'canonical-untagged';
+  nativeRevisionSha256?: string;
+  releaseSource?: string;
 }
 export function immutableWebRevision(
   raw: unknown,
@@ -202,6 +206,108 @@ function serviceState(raw: unknown) {
     configurationSha256: digest(configuration),
   };
 }
+
+/** Observe only a settled, unique untagged100 target; no caller-selected revision or image. */
+export function canonicalCurrentWebRevision(raw: unknown): string {
+  const state = serviceState(raw);
+  const active = state.observed.filter((row) => percentage(row) > 0);
+  const row = active[0];
+  if (active.length !== 1 || !row || percentage(row) !== 100 || row.tag !== undefined)
+    throw new Error('Current 100 identity changed');
+  const name = revisionName(row.revision);
+  if (row.uri !== undefined && row.uri !== canonicalServiceUri(state.s.uri))
+    throw new Error('Current 100 identity changed');
+  if (
+    revisionName(state.s.latestReadyRevision) !== name ||
+    revisionName(state.s.latestCreatedRevision) !== name
+  )
+    throw new Error('Current service template identity mismatch');
+  return name;
+}
+
+function canonicalServiceUri(raw: unknown): string {
+  const uri = text(raw, /^https:\/\/[^\s]{1,512}$/);
+  if (uri !== WEB_CANONICAL_URL && uri !== 'https://assistant-web-3gimfiaifa-uw.a.run.app')
+    throw new Error('Current 100 identity changed');
+  return uri;
+}
+
+function releaseLiteral(native: unknown, name: string): string {
+  const r = object(native);
+  const containers = r.containers;
+  if (!Array.isArray(containers) || containers.length !== 1)
+    throw new Error('Current native proof refused');
+  const env = object(containers[0]).env;
+  if (!Array.isArray(env)) throw new Error('Current native proof refused');
+  const matches = env.map(object).filter((row) => row.name === name);
+  if (
+    matches.length !== 1 ||
+    matches[0]?.valueSource !== undefined ||
+    matches[0]?.valueFrom !== undefined ||
+    typeof matches[0]?.value !== 'string'
+  )
+    throw new Error('Current native proof refused');
+  return matches[0].value;
+}
+
+function nativeReleaseSource(native: unknown): string {
+  const containers = object(native).containers;
+  const env = Array.isArray(containers) ? object(containers[0]).env : undefined;
+  if (!Array.isArray(env)) throw new Error('Current native proof refused');
+  const names = ['ASSISTANT_RELEASE_SOURCE_SHA', 'RELEASE_SHA'].filter((name) =>
+    env.map(object).some((row) => row.name === name),
+  );
+  const sources = names.map((name) => releaseLiteral(native, name));
+  const source = sources[0];
+  if (
+    source === undefined ||
+    sources.some((value) => !/^[a-f0-9]{40}$/.test(value)) ||
+    new Set(sources).size !== 1
+  )
+    throw new Error('Current native proof refused');
+  return source;
+}
+
+/** Bind the observed immutable current revision without changing its image, source, pause state or template. */
+export function observeCanonicalCurrentWeb(raw: unknown, native: unknown): ExpectedCurrentWeb {
+  const state = serviceState(raw);
+  const revision = canonicalCurrentWebRevision(raw);
+  const r = object(native);
+  const source = nativeReleaseSource(r);
+  const pause = releaseLiteral(r, 'ASSISTANT_RELEASE_WRITES_PAUSED');
+  if (!['true', 'false'].includes(pause)) throw new Error('Current native proof refused');
+  const account = 'assistant-web@bmson-assistant.iam.gserviceaccount.com';
+  if (
+    r.name !== `${WEB_SERVICE}/revisions/${revision}` ||
+    typeof r.service !== 'string' ||
+    ![WEB_SERVICE, 'assistant-web'].includes(r.service) ||
+    typeof r.uid !== 'string' ||
+    !/^[A-Za-z0-9-]{1,128}$/.test(r.uid) ||
+    r.serviceAccount !== account ||
+    state.template.serviceAccount !== account ||
+    r.reconciling === true ||
+    !Array.isArray(r.conditions) ||
+    r.conditions.length < 1 ||
+    r.conditions.length > 16 ||
+    r.conditions.some((condition) => object(condition).state !== 'CONDITION_SUCCEEDED')
+  )
+    throw new Error('Current native proof refused');
+  const image = text(
+    object((r.containers as unknown[])[0]).image,
+    /^us-west1-docker\.pkg\.dev\/bmson-assistant\/assistant\/web@sha256:[a-f0-9]{64}$/,
+  );
+  immutableWebRevision(r, revision, image, pause === 'true');
+  return {
+    revision,
+    image,
+    tag: '',
+    paused: pause === 'true',
+    uriSha256: tagHash(canonicalServiceUri(state.s.uri)),
+    binding: 'canonical-untagged',
+    nativeRevisionSha256: digest(r),
+    releaseSource: source,
+  };
+}
 /** Bounded public traffic projection; native templates/env never leave the parser. */
 export function webTagTrafficSnapshot(raw: unknown) {
   const state = serviceState(raw);
@@ -222,6 +328,7 @@ export interface RetirementPlan {
   templateSha256: string;
   configurationSha256: string;
   current: ExpectedCurrentWeb;
+  nativeRevisionSha256?: Record<string, string>;
   proofs: OwnedWebTagProof[];
   beforeTrafficSha256: string;
   beforeStatusSha256: string;
@@ -239,16 +346,49 @@ export function planOwnedWebTagRetirement(
   const state = serviceState(raw),
     proofs = approvedProofs.map(validateOwnedProof);
   if (typeof current.paused !== 'boolean') throw new Error('Unknown current pause state');
+  if (current.binding !== undefined && current.binding !== 'canonical-untagged')
+    throw new Error('Current native proof refused');
   current = {
     revision: revisionName(current.revision),
     image: text(
       current.image,
       /^us-west1-docker\.pkg\.dev\/bmson-assistant\/assistant\/web@sha256:[a-f0-9]{64}$/,
     ),
-    tag: text(current.tag, /^(candidate|resume)-[0-9]{1,20}-[1-9][0-9]{0,5}$/),
+    tag:
+      current.binding === 'canonical-untagged'
+        ? text(current.tag, /^$/)
+        : text(current.tag, /^(candidate|resume)-[0-9]{1,20}-[1-9][0-9]{0,5}$/),
     uriSha256: text(current.uriSha256, /^[a-f0-9]{64}$/),
     paused: current.paused,
+    ...(current.binding === 'canonical-untagged'
+      ? {
+          binding: 'canonical-untagged' as const,
+          nativeRevisionSha256: text(current.nativeRevisionSha256, /^[a-f0-9]{64}$/),
+          releaseSource: text(current.releaseSource, /^[a-f0-9]{40}$/),
+        }
+      : {}),
   };
+  if (current.binding === 'canonical-untagged') {
+    // This profile retires precisely the second historical pin; it cannot be repurposed for other aliases.
+    if (
+      proofs.length !== 1 ||
+      digest(proofs[0]) !== digest(HISTORICAL_WEB_TAGS[1]) ||
+      digest(observeCanonicalCurrentWeb(raw, nativeRevisions[current.revision])) !== digest(current)
+    )
+      throw new Error('Current native proof refused');
+    const historical = object(nativeRevisions[proofs[0]?.revision ?? '']);
+    const containers = historical.containers;
+    const env = Array.isArray(containers) ? object(containers[0]).env : undefined;
+    if (
+      Array.isArray(env) &&
+      env
+        .map(object)
+        .some((row) => ['ASSISTANT_RELEASE_SOURCE_SHA', 'RELEASE_SHA'].includes(String(row.name)))
+    ) {
+      if (nativeReleaseSource(historical) !== proofs[0]?.source)
+        throw new Error('Historical native proof refused');
+    }
+  }
   if (
     proofs.length < 1 ||
     proofs.length > 8 ||
@@ -260,8 +400,14 @@ export function planOwnedWebTagRetirement(
     active.length !== 1 ||
     percentage(active[0] ?? {}) !== 100 ||
     revisionName(active[0]?.revision) !== current.revision ||
-    active[0]?.tag !== current.tag ||
-    tagHash(text(active[0]?.uri, /^https:\/\/[^\s]{1,512}$/)) !== current.uriSha256
+    (current.binding === 'canonical-untagged'
+      ? active[0]?.tag !== undefined
+      : active[0]?.tag !== current.tag) ||
+    tagHash(
+      current.binding === 'canonical-untagged'
+        ? canonicalServiceUri(state.s.uri)
+        : text(active[0]?.uri, /^https:\/\/[^\s]{1,512}$/),
+    ) !== current.uriSha256
   )
     throw new Error('Current 100 identity changed');
   immutableWebRevision(
@@ -320,6 +466,16 @@ export function planOwnedWebTagRetirement(
     configurationSha256: state.configurationSha256,
     current,
     proofs,
+    ...(current.binding === 'canonical-untagged'
+      ? {
+          nativeRevisionSha256: Object.fromEntries(
+            [current.revision, ...proofs.map((proof) => proof.revision)].map((name) => [
+              name,
+              digest(nativeRevisions[name]),
+            ]),
+          ),
+        }
+      : {}),
     beforeTrafficSha256: digest(state.desired),
     beforeStatusSha256: digest(state.observed),
     patch: remove.size ? { name: WEB_SERVICE, etag: state.etag, traffic } : null,
@@ -329,6 +485,16 @@ export function planOwnedWebTagRetirement(
 }
 export function verifyOwnedWebTagRetirement(raw: unknown, plan: RetirementPlan) {
   const state = serviceState(raw);
+  if (plan.current.binding === 'canonical-untagged') {
+    if (
+      !/^[1-9][0-9]{0,18}$/.test(state.generation) ||
+      !/^[1-9][0-9]{0,18}$/.test(plan.generation) ||
+      (plan.patch
+        ? state.etag === plan.etag || BigInt(state.generation) <= BigInt(plan.generation)
+        : state.etag !== plan.etag || state.generation !== plan.generation)
+    )
+      throw new Error('Service version changed or drain stability evidence is missing');
+  }
   if (
     state.uid !== plan.uid ||
     state.templateSha256 !== plan.templateSha256 ||
@@ -340,10 +506,16 @@ export function verifyOwnedWebTagRetirement(raw: unknown, plan: RetirementPlan) 
   const row = state.observed[0];
   if (
     !row ||
-    row.tag !== plan.current.tag ||
+    (plan.current.binding === 'canonical-untagged'
+      ? row.tag !== undefined
+      : row.tag !== plan.current.tag) ||
     percentage(row) !== 100 ||
     revisionName(row.revision) !== plan.current.revision ||
-    tagHash(text(row.uri, /^https:\/\/[^\s]{1,512}$/)) !== plan.current.uriSha256 ||
+    tagHash(
+      plan.current.binding === 'canonical-untagged'
+        ? canonicalServiceUri(state.s.uri)
+        : text(row.uri, /^https:\/\/[^\s]{1,512}$/),
+    ) !== plan.current.uriSha256 ||
     plan.proofs.some((p) => state.observed.some((r) => r.tag === p.tag))
   )
     throw new Error('Retirement post-state traffic changed');
