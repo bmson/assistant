@@ -107,6 +107,12 @@ struct BriefingCardView: View {
                             itemCount: itemCount,
                             itemsTruncated: itemsTruncated
                         )
+                    } else if kind == "attention" && title == "Calendar source differences" {
+                        CardDisclosure(collapsedLabel: "Calendar source details", expandedLabel: "Hide calendar source details", standalone: false) {
+                            VStack(alignment: .leading, spacing: 8) {
+                                ForEach(Array(items.enumerated()), id: \.offset) { _, item in listRow(item) }
+                            }
+                        }
                     } else {
                         VStack(alignment: .leading, spacing: 8) {
                             heading(title)
@@ -226,8 +232,8 @@ struct BriefingCardView: View {
             timeLabel = item.time
         }
         let time = Text(timeLabel)
-            .font(.caption.weight(.medium))
-            .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+            .font(.caption.monospacedDigit().weight(.medium))
+            .foregroundStyle(AssistantTheme.accent(for: colorScheme))
         let details = VStack(alignment: .leading, spacing: 4) {
             Text(item.title)
                 .font(.subheadline.weight(.semibold))

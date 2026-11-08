@@ -9,6 +9,7 @@ import type { EventSalience } from '../proactive/calendar-salience.js';
 import type { BriefingCalendarEvent, CalendarConflict } from './briefing.js';
 import {
   calendarRelationshipNote,
+  isCalendarAdvisoryRelationship,
   presentationOccurrenceGroups,
   probableCalendarMatchEvidence,
 } from './calendar-relationship.js';
@@ -146,7 +147,9 @@ export function agendaSection(input: {
 }): BriefingSection | undefined {
   if (!input.events.length && input.complete) return undefined;
   const conflicting = new Set(
-    input.conflicts.flatMap((conflict) => [...conflict.a, ...conflict.b].map(eventKey)),
+    input.conflicts
+      .filter((conflict) => !isCalendarAdvisoryRelationship(conflict.relationship))
+      .flatMap((conflict) => [...conflict.a, ...conflict.b].map(eventKey)),
   );
   const notes = new Map(
     input.salient.map((scored) => [eventKey(scored.event), tidy(scored.reasons.join('; '))]),
@@ -181,17 +184,21 @@ export function agendaSection(input: {
       ...new Set(
         events.map(
           (event) =>
-            `${tidy(event.calendar) || 'Calendar'} ${ownerTime(event.start, input.timeZone)}`,
+            `${tidy(event.calendar) || 'Calendar'} ${ownerTime(event.start, input.timeZone)}${new Set(events.map((source) => Date.parse(source.end))).size > 1 ? `–${ownerTime(event.end, input.timeZone)}` : ''}`,
         ),
       ),
     ];
     const locations = [...new Set(events.map((event) => tidy(event.location)).filter(Boolean))];
     addConflictNote(
       representative,
-      `Likely the same match: ${sourceTimes.join('; ')}${locations.length > 1 ? '; source locations differ' : ''}.`,
+      `Likely the same event: ${sourceTimes.join('; ')}${locations.length > 1 ? '; source locations differ' : ''}.`,
     );
   }
   for (const conflict of input.conflicts) {
+    if (conflict.relationship === 'possible_duplicate') {
+      for (const event of [...conflict.a, ...conflict.b])
+        addConflictNote(event, calendarRelationshipNote(conflict.relationship, 'unresolved'));
+    }
     if (conflict.relationship === 'compatible_time_roles') {
       addConflictNote(
         conflict.a[0],
@@ -230,7 +237,17 @@ export function agendaSection(input: {
           : undefined;
       return {
         day: eventDay(representative, input.timeZone, input.now),
-        time: eventTime(representative, input.timeZone, input.now),
+        time: eventTime(
+          {
+            ...representative,
+            end: events.reduce(
+              (latest, event) => (Date.parse(event.end) > Date.parse(latest) ? event.end : latest),
+              representative.end,
+            ),
+          },
+          input.timeZone,
+          input.now,
+        ),
         title: tidy(representative.summary) || 'Untitled event',
         ...(representative.location ? { location: tidy(representative.location) } : {}),
         ...(flag ? { flag } : {}),

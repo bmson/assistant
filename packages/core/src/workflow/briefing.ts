@@ -63,9 +63,10 @@ import {
 } from './briefing-card.js';
 import {
   type CalendarRelationship,
+  calendarGroupRelationship,
   calendarOverlapAttendanceNote,
-  calendarRelationship,
   classifyCalendarOverlap,
+  isCalendarAdvisoryRelationship,
   possibleCalendarIdentityDisagreement,
   presentationOccurrenceGroups,
   verifiedOwnerParticipation,
@@ -171,6 +172,7 @@ export interface BriefingCalendarEvent {
   organizer?: string;
   /** Raw "email (responseStatus)" strings, as the calendar adapter renders them. */
   attendees?: readonly string[];
+  links?: readonly unknown[];
 }
 
 export interface BriefingCalendarWindow {
@@ -471,13 +473,15 @@ export function calendarOverlapBriefingItems(
   timeZone: string,
 ): BriefingListItem[] {
   const items = conflicts.map((conflict) => ({
-    title: `${calendarConflictSummarySideLabel(conflict.a)} overlaps ${calendarConflictSummarySideLabel(conflict.b)}`,
+    title: `${calendarConflictSummarySideLabel(conflict.a)} ${isCalendarAdvisoryRelationship(conflict.relationship) ? 'may be the same event as' : 'overlaps'} ${calendarConflictSummarySideLabel(conflict.b)}`,
     detail: [
       `${localDateTime(conflict.overlapStart, timeZone)}–${localDateTime(conflict.overlapEnd, timeZone)}`,
       conflict.sourceIdentityDisagreement
         ? 'These entries may be copies with different times; which invitation has the current time is unclear.'
         : '',
-      calendarConflictAttendanceSummary(conflict),
+      isCalendarAdvisoryRelationship(conflict.relationship)
+        ? 'Possibly the same event; verify the invitations before treating this as a scheduling conflict.'
+        : calendarConflictAttendanceSummary(conflict),
     ]
       .filter(Boolean)
       .join(' · '),
@@ -578,14 +582,8 @@ export function findConflicts(
       const later = groups[j];
       if (!later || later.startMs >= earlier.endMs) break;
       totalCount += 1;
-      const relationship =
-        earlier.events.length === 1 && later.events.length === 1
-          ? calendarRelationship(
-              earlier.events[0] as BriefingCalendarEvent,
-              later.events[0] as BriefingCalendarEvent,
-            )
-          : 'unresolved';
-      const isDuplicateListing = relationship === 'probable_duplicate';
+      const relationship = calendarGroupRelationship(earlier.events, later.events, timeZone);
+      const isDuplicateListing = isCalendarAdvisoryRelationship(relationship);
       if (!isDuplicateListing) conflictCount += 1;
       if (
         isDuplicateListing
@@ -606,9 +604,10 @@ export function findConflicts(
           : 'unspecified',
         sourceVariants: group,
       });
-      const classification = sourceIdentityDisagreement
-        ? 'attendance_unconfirmed'
-        : classifyCalendarOverlap(aggregate(earlier.events), aggregate(later.events));
+      const classification =
+        sourceIdentityDisagreement || isDuplicateListing
+          ? 'attendance_unconfirmed'
+          : classifyCalendarOverlap(aggregate(earlier.events), aggregate(later.events));
       const detail: CalendarConflict = {
         a: earlier.events,
         b: later.events,
@@ -1156,10 +1155,12 @@ export async function runBriefing(
       (entry) => !inactiveRefs.has(entry.sourceRef),
     );
     const overlaps = findConflicts(calendar?.events ?? [], agent.timezone);
-    const duplicateListings = overlaps.filter(
-      (overlap) => overlap.relationship === 'probable_duplicate',
+    const duplicateListings = overlaps.filter((overlap) =>
+      isCalendarAdvisoryRelationship(overlap.relationship),
     );
-    const conflicts = overlaps.filter((overlap) => overlap.relationship !== 'probable_duplicate');
+    const conflicts = overlaps.filter(
+      (overlap) => !isCalendarAdvisoryRelationship(overlap.relationship),
+    );
     // Salience is judged against the owner's own addresses so an unanswered
     // invitation can be told from one they already accepted, and an in-house
     // organizer from an outside one.
@@ -1189,7 +1190,7 @@ export async function runBriefing(
       ? agendaSection({
           events: calendar.events,
           complete: calendar.complete,
-          conflicts,
+          conflicts: overlaps,
           salient,
           timeZone: agent.timezone,
           now,

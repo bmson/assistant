@@ -314,6 +314,14 @@ function relationshipEvent(event: PlainRecord): BriefingCalendarEvent {
     start: typeof event.start === 'string' ? event.start : '',
     end: typeof event.end === 'string' ? event.end : '',
     calendar: safeText(event.calendar, 100),
+    ...(typeof event.calendarTimeZone === 'string'
+      ? { calendarTimeZone: event.calendarTimeZone }
+      : {}),
+    ...(typeof event.organizer === 'string' ? { organizer: event.organizer } : {}),
+    ...(Array.isArray(event.attendees)
+      ? { attendees: event.attendees.filter((value): value is string => typeof value === 'string') }
+      : {}),
+    ...(Array.isArray(event.links) ? { links: event.links } : {}),
     allDay: event.allDay === true,
     ...(typeof event.calendarId === 'string' ? { calendarId: event.calendarId } : {}),
     ...(typeof event.eventId === 'string' ? { eventId: event.eventId } : {}),
@@ -1177,8 +1185,13 @@ export function weeklyCalendarPlanResult(input: WeeklyCalendarPlanInput): Weekly
       const relationship = calendarRelationship(
         relationshipEvent(left.event),
         relationshipEvent(right.event),
+        input.timeZone,
       );
-      if (relationship === 'probable_duplicate') {
+      if (
+        relationship === 'probable_duplicate' ||
+        relationship === 'possible_duplicate' ||
+        relationship === 'compatible_time_roles'
+      ) {
         const pairKey = [eventIdentity(left.event), eventIdentity(right.event)].sort().join('\0');
         if (!probableDuplicatePairs.has(pairKey)) {
           probableDuplicatePairs.add(pairKey);

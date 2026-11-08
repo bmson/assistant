@@ -11,8 +11,8 @@ import {
 import type { BriefingCalendarEvent } from './briefing.js';
 import {
   calendarArrivalLead,
+  calendarGroupRelationship,
   calendarOverlapAttendanceNote,
-  calendarRelationship,
   classifyCalendarOverlap,
   parseCalendarOwnerParticipation,
   possibleCalendarIdentityDisagreement,
@@ -92,10 +92,18 @@ function relationshipEvent(event: ResponseCard): BriefingCalendarEvent {
   const source = eventSources(event)[0] ?? {};
   return {
     summary: text(source.summary ?? event.title) || '(untitled event)',
-    start: text(event.start),
-    end: text(event.end),
-    calendar: text(event.calendar),
-    allDay: event.allDay === true,
+    start: text(source.start ?? event.start),
+    end: text(source.end ?? event.end),
+    calendar: text(source.calendar ?? event.calendar),
+    allDay: (source.allDay ?? event.allDay) === true,
+    ...(text(source.status ?? event.status) ? { status: text(source.status ?? event.status) } : {}),
+    ...(text(source.organizer) ? { organizer: text(source.organizer) } : {}),
+    ...(Array.isArray(source.attendees)
+      ? {
+          attendees: source.attendees.filter((value): value is string => typeof value === 'string'),
+        }
+      : {}),
+    ...(Array.isArray(source.links) ? { links: source.links } : {}),
     ...(text(source.calendarId ?? event.calendarId)
       ? { calendarId: text(source.calendarId ?? event.calendarId) }
       : {}),
@@ -116,6 +124,9 @@ function relationshipEvent(event: ResponseCard): BriefingCalendarEvent {
       : {}),
     ...(text(source.description ?? event.description)
       ? { description: text(source.description ?? event.description) }
+      : {}),
+    ...(text(source.calendarTimeZone ?? event.calendarTimeZone)
+      ? { calendarTimeZone: text(source.calendarTimeZone ?? event.calendarTimeZone) }
       : {}),
   };
 }
@@ -876,6 +887,9 @@ function calendarPairAttentionByDay(
         INSTANT.test(text(event.start)) &&
         INSTANT.test(text(event.end)),
       relationship: relationshipEvent(event),
+      relationshipSources: sources.map((source) =>
+        relationshipEvent({ ...event, sourceVariants: [source] }),
+      ),
     };
   });
   let formattedDetails = 0;
@@ -906,7 +920,13 @@ function calendarPairAttentionByDay(
         attention = emptyPairAttention();
         byDay.set(day, attention);
       }
-      if (calendarRelationship(left.relationship, right.relationship) === 'compatible_time_roles') {
+      // Every variant must be considered: the first source alone can miss a meeting link or a changed time.
+      const relationship = calendarGroupRelationship(
+        left.relationshipSources,
+        right.relationshipSources,
+        zone,
+      );
+      if (relationship === 'compatible_time_roles') {
         attention.arrivalCount += 1;
         if (formattedDetails < MAX_PAIR_DETAILS) {
           formattedDetails += 1;
@@ -941,19 +961,21 @@ function calendarPairAttentionByDay(
         continue;
       }
       const probableMirror =
-        (left.hasPhoneSource || right.hasPhoneSource) &&
-        left.sources.some((leftSource) =>
-          right.sources.some(
-            (rightSource) =>
-              classifyCalendarOccurrence(leftSource, rightSource).kind === 'probable-mirror',
-          ),
-        );
+        relationship === 'probable_duplicate' ||
+        relationship === 'possible_duplicate' ||
+        ((left.hasPhoneSource || right.hasPhoneSource) &&
+          left.sources.some((leftSource) =>
+            right.sources.some(
+              (rightSource) =>
+                classifyCalendarOccurrence(leftSource, rightSource).kind === 'probable-mirror',
+            ),
+          ));
       if (probableMirror) {
         attention.duplicateCount += 1;
         if (formattedDetails < MAX_PAIR_DETAILS) {
           formattedDetails += 1;
           attention.duplicateListings.push({
-            title: `Possible copies: ${text(left.event.title)} (${sourceNames(left.sources).join(', ')}) · ${text(right.event.title)} (${sourceNames(right.sources).join(', ')})`,
+            title: `${relationship === 'possible_duplicate' ? 'Possibly the same event' : 'Possible copies'}: ${text(left.event.title)} (${sourceNames(left.sources).join(', ')}) · ${text(right.event.title)} (${sourceNames(right.sources).join(', ')})`,
             detail:
               'These listings may be copies of one event. Both remain visible; check the invitation to confirm whether they are copies.',
             ...(comparisonFor(left.event, right.event)
@@ -1146,7 +1168,20 @@ export function calendarAgendaCards(input: {
         const note = [
           ownerRSVPNote(event),
           status === 'cancelled' ? 'Cancelled' : '',
-          differences ? `Calendar copies differ in ${differences.fields.join(', ')}.` : '',
+          event.probableMatch === true
+            ? `Likely the same event.${
+                differences?.timeDiffers
+                  ? ` Source times: ${eventSources(event)
+                      .map(
+                        (source) =>
+                          `${text(source.calendar) || 'Calendar'} ${zone ? `${clock(text(source.start), zone)}–${clock(text(source.end), zone)}` : `${text(source.start)}–${text(source.end)}`}`,
+                      )
+                      .join('; ')}. Earliest start and latest end shown.`
+                  : ''
+              }`
+            : differences
+              ? `Calendar copies differ in ${differences.fields.join(', ')}.`
+              : '',
           event.windowMembership === 'source-date-only'
             ? `Date could not be verified in the requested window.${validDate(text(event.start)) ? ` Source date: ${text(event.start)}${validDate(text(event.end)) ? `; ends ${text(event.end)} (exclusive)` : ''}.${!validZone(event.calendarTimeZone) ? ' Calendar time zone unavailable.' : ''}` : ''}`
             : '',
@@ -1166,10 +1201,13 @@ export function calendarAgendaCards(input: {
             differences?.timeDiffers &&
             new Set(eventSources(event).map((source) => source.allDay === true)).size > 1
               ? 'Time unavailable'
-              : differences?.timeDiffers
+              : differences?.timeDiffers && event.probableMatch !== true
                 ? 'Time differs by source'
                 : eventTime(event, zone),
-          title: differences?.titleDiffers ? 'Title differs by source' : text(event.title),
+          title:
+            differences?.titleDiffers && event.probableMatch !== true
+              ? 'Title differs by source'
+              : text(event.title),
           ...(text(event.location) ? { location: text(event.location) } : {}),
           ...(note ? { note } : {}),
           calendars: list(event.calendars),
