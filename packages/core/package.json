@@ -93,7 +93,7 @@
     "@assistant/config": "workspace:*",
     "@assistant/db": "workspace:*",
     "@assistant/persistence": "workspace:*",
-    "@google/genai": "2.32.0",
+    "@google/genai": "3.0.0",
     "@openrouter/ai-sdk-provider": "^3.1.0",
     "@opentelemetry/api": "^1.10.0",
     "ai": "^7.0.156",
