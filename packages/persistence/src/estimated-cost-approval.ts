@@ -1,5 +1,6 @@
-/** Wire contract for one explicitly approved continuation of one owner request.
+/** Immutable review snapshot for one explicitly approved continuation of one owner request.
  * Amounts are integer microdollars; they are estimates, not a provider charge cap.
+ * Financial fields describe the quote at its creation time, not live totals.
  */
 export interface EstimatedCostQuote {
   type: 'estimated-cost-approval';
@@ -30,6 +31,98 @@ export interface EstimatedCostQuote {
   complete: boolean;
   canApprove: boolean;
   unavailableReason?: string;
+}
+
+/** Validate stored wire data before displaying or acting on it. */
+export function parseEstimatedCostQuote(value: unknown): EstimatedCostQuote | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  const strings = [
+    'operationId',
+    'taskId',
+    'requestText',
+    'quoteId',
+    'quoteVersion',
+    'expiresAt',
+  ] as const;
+  const amounts = [
+    'nextAttemptMicros',
+    'allowanceMicros',
+    'recordedDailyMicros',
+    'recordedMonthlyMicros',
+    'totalHeldMicros',
+    'eligibleHistoricalUnknownMicros',
+    'pendingApprovalMicros',
+    'dailyCeilingMicros',
+    'monthlyCeilingMicros',
+    'dailyProjectedGrossMicros',
+    'monthlyProjectedGrossMicros',
+  ] as const;
+  if (
+    row.type !== 'estimated-cost-approval' ||
+    strings.some((key) => typeof row[key] !== 'string' || !row[key]) ||
+    amounts.some(
+      (key) =>
+        typeof row[key] !== 'number' || !Number.isSafeInteger(row[key]) || (row[key] as number) < 0,
+    ) ||
+    typeof row.complete !== 'boolean' ||
+    typeof row.canApprove !== 'boolean' ||
+    (row.canApprove && !row.complete) ||
+    (row.unavailableReason !== undefined && typeof row.unavailableReason !== 'string') ||
+    !Number.isFinite(Date.parse(row.expiresAt as string))
+  )
+    return null;
+  if ((row.eligibleHistoricalUnknownMicros as number) > (row.totalHeldMicros as number))
+    return null;
+  if (
+    row.canApprove &&
+    ((row.nextAttemptMicros as number) === 0 ||
+      (row.allowanceMicros as number) < (row.nextAttemptMicros as number) ||
+      (row.pendingApprovalMicros as number) < (row.allowanceMicros as number))
+  )
+    return null;
+  if (row.complete) {
+    const daily =
+      (row.recordedDailyMicros as number) +
+      (row.totalHeldMicros as number) +
+      (row.pendingApprovalMicros as number);
+    const monthly =
+      (row.recordedMonthlyMicros as number) +
+      (row.totalHeldMicros as number) +
+      (row.pendingApprovalMicros as number);
+    if (
+      !Number.isSafeInteger(daily) ||
+      !Number.isSafeInteger(monthly) ||
+      row.dailyProjectedGrossMicros !== daily ||
+      row.monthlyProjectedGrossMicros !== monthly
+    )
+      return null;
+  }
+  return {
+    type: 'estimated-cost-approval',
+    operationId: row.operationId as string,
+    taskId: row.taskId as string,
+    requestText: row.requestText as string,
+    quoteId: row.quoteId as string,
+    quoteVersion: row.quoteVersion as string,
+    expiresAt: row.expiresAt as string,
+    nextAttemptMicros: row.nextAttemptMicros as number,
+    allowanceMicros: row.allowanceMicros as number,
+    recordedDailyMicros: row.recordedDailyMicros as number,
+    recordedMonthlyMicros: row.recordedMonthlyMicros as number,
+    totalHeldMicros: row.totalHeldMicros as number,
+    eligibleHistoricalUnknownMicros: row.eligibleHistoricalUnknownMicros as number,
+    pendingApprovalMicros: row.pendingApprovalMicros as number,
+    dailyCeilingMicros: row.dailyCeilingMicros as number,
+    monthlyCeilingMicros: row.monthlyCeilingMicros as number,
+    dailyProjectedGrossMicros: row.dailyProjectedGrossMicros as number,
+    monthlyProjectedGrossMicros: row.monthlyProjectedGrossMicros as number,
+    complete: row.complete,
+    canApprove: row.canApprove,
+    ...(typeof row.unavailableReason === 'string'
+      ? { unavailableReason: row.unavailableReason }
+      : {}),
+  };
 }
 
 /** Explicit card actions only. The server derives all amounts from the quote. */
@@ -69,8 +162,80 @@ export type EstimatedCostRequestProjection =
   | { status: 'cancelled'; operationId: string; quote?: EstimatedCostQuote }
   | { status: 'unavailable'; operationId: string; quote?: EstimatedCostQuote; reason: string };
 
+/** Current accounting, read independently of the immutable quote. Null means
+ * unavailable or incomplete, never zero. All present values come from one
+ * consistent read. totalHeld includes historicalUnknown as a subset and all
+ * protected grant-linked unknowns. Pending sums current unexpired proposed
+ * allowances once each and excludes approved/declined/cancelled/expired ones.
+ * Planned exposure is recorded spend + total held + pending, per period.
+ * Historical unknown may be supplied only when its exact unique eligible IDs
+ * and current amounts are proven. GET does not create or revise a quote. */
+export interface EstimatedCostBudgetTracking {
+  observedAt: string;
+  complete: boolean;
+  recordedDailyMicros: number | null;
+  recordedMonthlyMicros: number | null;
+  totalHeldMicros: number | null;
+  historicalUnknownMicros: number | null;
+  pendingApprovalMicros: number | null;
+  dailyPlannedExposureMicros: number | null;
+  monthlyPlannedExposureMicros: number | null;
+}
+
+/** Project a canonical request and its explicitly quote-linked grant. */
+export function projectEstimatedCostRequest(input: {
+  operationId: string;
+  taskId: string;
+  state: string;
+  quote: unknown;
+  quoteExpired: boolean;
+  grant?: { quoteId: string; expiresAt: string; expired: boolean };
+}): EstimatedCostRequestProjection {
+  const quote = parseEstimatedCostQuote(input.quote);
+  if (!quote || quote.operationId !== input.operationId || quote.taskId !== input.taskId)
+    throw new Error('Invalid stored estimated cost quote');
+  if (input.state === 'pending')
+    return input.quoteExpired
+      ? { status: 'expired_or_needs_refresh', operationId: input.operationId, quote }
+      : { status: 'pending', operationId: input.operationId, quote };
+  if (input.state === 'approved') {
+    if (
+      !input.grant ||
+      input.grant.quoteId !== quote.quoteId ||
+      !Number.isFinite(Date.parse(input.grant.expiresAt))
+    )
+      throw new Error('Invalid stored estimated cost grant');
+    return input.grant.expired
+      ? { status: 'expired_or_needs_refresh', operationId: input.operationId, quote }
+      : {
+          status: 'approved',
+          operationId: input.operationId,
+          quote,
+          grantExpiresAt: input.grant.expiresAt,
+        };
+  }
+  if (input.state === 'declined')
+    return { status: 'declined', operationId: input.operationId, quote };
+  if (input.state === 'cancelled')
+    return { status: 'cancelled', operationId: input.operationId, quote };
+  if (input.state === 'expired_or_needs_refresh')
+    return { status: 'expired_or_needs_refresh', operationId: input.operationId, quote };
+  if (input.state === 'unavailable')
+    return {
+      status: 'unavailable',
+      operationId: input.operationId,
+      quote,
+      reason: 'The estimate is unavailable.',
+    };
+  throw new Error('Unknown estimated cost request state');
+}
+
 export type EstimatedCostQuoteResponse =
-  | { ok: true; request: EstimatedCostRequestProjection }
+  | {
+      ok: true;
+      request: EstimatedCostRequestProjection;
+      tracking: EstimatedCostBudgetTracking | null;
+    }
   | EstimatedCostHttpError;
 
 /** POST decision accepts EstimatedCostDecision; GET decision?operationId=...&decisionId=... reads its exact receipt. */
@@ -104,6 +269,45 @@ export type EstimatedCostHttpError = {
 export interface EstimatedCostActor {
   installationId: string;
   ownerId: string;
+}
+
+/** Checks the exact owner chat admission before a parked task may be closed. */
+export function matchesEstimatedCostParkedTask(
+  task: {
+    id: string;
+    agentId: string;
+    type: string;
+    trust: string;
+    status: string;
+    trigger: unknown;
+  },
+  identity: {
+    actor: EstimatedCostActor;
+    taskId: string;
+    operationId: string;
+    requestFingerprint: string;
+  },
+): boolean {
+  if (
+    task.id !== identity.taskId ||
+    task.agentId !== identity.actor.ownerId ||
+    task.type !== 'chat_turn' ||
+    task.trust !== 'owner' ||
+    task.status !== 'waiting_estimated_cost'
+  )
+    return false;
+  if (!task.trigger || typeof task.trigger !== 'object' || Array.isArray(task.trigger))
+    return false;
+  const payload = (task.trigger as { payload?: unknown }).payload;
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
+  const admission = (payload as { chatAdmission?: unknown }).chatAdmission;
+  if (!admission || typeof admission !== 'object' || Array.isArray(admission)) return false;
+  const row = admission as Record<string, unknown>;
+  return (
+    row.protocol === 'owner-chat-v1' &&
+    row.clientOperationId === identity.operationId &&
+    row.requestHash === identity.requestFingerprint
+  );
 }
 
 /** Internal server-only draw against a single approved request; not an HTTP payload. */
