@@ -56,6 +56,94 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore atomic cost led
     expect((await costs.totals()).heldUsd).toBe(0.2);
   });
 
+  it('atomically transfers escrow to one attempt under concurrent draws', async () => {
+    const taskId = 'grant-task';
+    await store.doc('tasks', taskId).set({ id: taskId, spentUsd: '0', budgetUsdLimit: '0.5' });
+    const reservation = await costs.reserve({ source: 'model', estimatedUsd: 0.2, taskId });
+    if (!reservation.ok) throw new Error('Fixture failed to reserve');
+    const grantId = 'grant-one';
+    const operationId = 'operation-one';
+    await store
+      .doc('costReservations', reservation.reservationId)
+      .update({ reservationKind: 'escrow', costGrantId: grantId });
+    await store.doc('estimatedCostRequests', operationId).set({
+      installationId: 'install',
+      ownerId: 'owner',
+      taskId,
+      bindingDigest: 'binding',
+      state: 'approved',
+    });
+    await store.doc('estimatedCostGrants', grantId).set({
+      operationId,
+      escrowReservationId: reservation.reservationId,
+      allowanceMicros: 200_000,
+      consumedMicros: 0,
+      expiresAt: new Date(now.getTime() + 60_000),
+    });
+    const input = {
+      actor: { installationId: 'install', ownerId: 'owner' },
+      operationId,
+      grantId,
+      bindingDigest: 'binding',
+      taskId,
+      source: 'model' as const,
+      estimatedMicros: 120_000,
+      description: 'attempt',
+    };
+    const before = await costs.totals();
+    const outcomes = await Promise.all([
+      costs.drawEstimatedCostGrant({ ...input, attemptId: 'attempt-one' }),
+      costs.drawEstimatedCostGrant({ ...input, attemptId: 'attempt-two' }),
+    ]);
+    expect(outcomes.filter((outcome) => outcome.ok)).toHaveLength(1);
+    expect(outcomes.filter((outcome) => !outcome.ok)).toEqual([{ ok: false, reason: 'exhausted' }]);
+    const success = outcomes.find((outcome) => outcome.ok);
+    if (!success?.ok) throw new Error('Expected successful draw');
+    expect(
+      await costs.drawEstimatedCostGrant({ ...input, attemptId: success.reservationId }),
+    ).toEqual(success);
+    expect((await costs.totals()).heldUsd).toBe(before.heldUsd);
+    expect((await store.doc('estimatedCostGrants', grantId).get()).get('consumedMicros')).toBe(
+      120_000,
+    );
+    await expect(
+      costs.drawEstimatedCostGrant({
+        ...input,
+        attemptId: success.reservationId,
+        estimatedMicros: 1,
+      }),
+    ).rejects.toThrow('reused');
+    expect(
+      await costs.drawEstimatedCostGrant({
+        ...input,
+        actor: { ...input.actor, ownerId: 'other' },
+        attemptId: 'other-attempt',
+      }),
+    ).toEqual({ ok: false, reason: 'unavailable' });
+    await costs.reconcile(success.reservationId, { usd: 0.15 });
+    expect((await store.doc('estimatedCostGrants', grantId).get()).get('consumedMicros')).toBe(
+      150_000,
+    );
+    expect((await costs.totals()).heldUsd).toBeCloseTo(before.heldUsd - 0.15);
+    const unknownId = 'unknown-attempt';
+    expect(
+      await costs.drawEstimatedCostGrant({
+        ...input,
+        estimatedMicros: 30_000,
+        attemptId: unknownId,
+      }),
+    ).toEqual({ ok: true, reservationId: unknownId });
+    now = new Date(now.getTime() + 60_000);
+    expect(
+      await costs.drawEstimatedCostGrant({ ...input, attemptId: success.reservationId }),
+    ).toEqual({ ok: false, reason: 'expired' });
+    await store.doc('costReservations', unknownId).update({ status: 'unknown' });
+    expect(await costs.expireEstimatedCostGrant(grantId)).toBe(true);
+    expect(await costs.expireEstimatedCostGrant(grantId)).toBe(false);
+    expect((await store.doc('costReservations', unknownId).get()).get('status')).toBe('unknown');
+    expect((await costs.totals()).heldUsd).toBeCloseTo(before.heldUsd - 0.17);
+  });
+
   it('serializes competing reservations and never over-reserves the daily cap', async () => {
     const results = await Promise.all(
       Array.from({ length: 8 }, () => costs.reserve({ source: 'model', estimatedUsd: 0.3 })),

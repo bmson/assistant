@@ -99,6 +99,23 @@ export interface EstimatedCostActor {
   ownerId: string;
 }
 
+/** Internal server-only draw against a single approved request; not an HTTP payload. */
+export interface EstimatedCostGrantDraw {
+  actor: EstimatedCostActor;
+  operationId: string;
+  grantId: string;
+  bindingDigest: string;
+  attemptId: string;
+  taskId: string;
+  source: import('./contracts.js').SpendSource;
+  estimatedMicros: number;
+  description: string;
+}
+
+export type EstimatedCostGrantDrawResult =
+  | { ok: true; reservationId: string }
+  | { ok: false; reason: 'unavailable' | 'expired' | 'exhausted' | 'closed' };
+
 /** Application boundary used by the web and mobile HTTP handlers.
  * Implementations own authorization, durable idempotency and all ledger decisions. */
 export interface EstimatedCostApprovalService {

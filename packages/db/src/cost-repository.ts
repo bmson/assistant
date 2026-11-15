@@ -3,6 +3,8 @@ import {
   addLedgerMicros,
   type CostRepository,
   DEFAULT_RATES,
+  type EstimatedCostGrantDraw,
+  type EstimatedCostGrantDrawResult,
   ledgerUsdToMicros,
   MAX_LEDGER_USD_MICROS,
   microsToUsd,
@@ -17,6 +19,8 @@ import {
   budgets,
   costEvents,
   costReservations,
+  estimatedCostGrants,
+  estimatedCostRequests,
   rateTable,
   type SpendSource,
   tasks,
@@ -31,6 +35,140 @@ export async function getRate(
   const fallback = DEFAULT_RATES[key];
   if (!fallback) throw new Error(`no rate for key: ${key}`);
   return fallback;
+}
+
+/** Move a grant allocation into one attempt without changing total held capacity. */
+export async function drawEstimatedCostGrant(
+  db: Db,
+  input: EstimatedCostGrantDraw,
+): Promise<EstimatedCostGrantDrawResult> {
+  if (!Number.isSafeInteger(input.estimatedMicros) || input.estimatedMicros <= 0)
+    throw new Error('Invalid grant draw amount');
+  return db.transaction(async (tx) => {
+    await lockCostLedger(tx as unknown as Db);
+    const [request] = await tx
+      .select()
+      .from(estimatedCostRequests)
+      .where(eq(estimatedCostRequests.operationId, input.operationId));
+    const [grant] = await tx
+      .select()
+      .from(estimatedCostGrants)
+      .where(eq(estimatedCostGrants.id, input.grantId));
+    if (
+      !request ||
+      request.installationId !== input.actor.installationId ||
+      request.ownerId !== input.actor.ownerId ||
+      request.taskId !== input.taskId ||
+      request.bindingDigest !== input.bindingDigest ||
+      request.state !== 'approved' ||
+      !grant ||
+      grant.operationId !== input.operationId
+    )
+      return { ok: false, reason: 'unavailable' };
+    const [clock] = await tx.execute<{ valid: boolean }>(
+      sql`select expires_at > now() as valid from estimated_cost_grants where id = ${input.grantId}`,
+    );
+    if (clock?.valid !== true) return { ok: false, reason: 'expired' };
+    const [existing] = await tx
+      .select()
+      .from(costReservations)
+      .where(eq(costReservations.id, input.attemptId));
+    const decimal = microsToUsd(input.estimatedMicros).toFixed(6);
+    if (existing) {
+      if (
+        existing.reservationKind !== 'attempt' ||
+        existing.costGrantId !== input.grantId ||
+        existing.taskId !== input.taskId ||
+        existing.source !== input.source ||
+        existing.estimatedUsd !== decimal ||
+        existing.description !== input.description
+      )
+        throw new Error('Grant attempt ID reused for different work');
+      return existing.status === 'held'
+        ? { ok: true, reservationId: existing.id }
+        : { ok: false, reason: 'closed' };
+    }
+    const [escrow] = await tx
+      .select()
+      .from(costReservations)
+      .where(eq(costReservations.id, grant.escrowReservationId));
+    if (
+      escrow?.status !== 'held' ||
+      escrow.reservationKind !== 'escrow' ||
+      escrow.costGrantId !== grant.id ||
+      escrow.taskId !== input.taskId
+    )
+      return { ok: false, reason: 'unavailable' };
+    const balance = storedLedgerUsdToMicros(escrow.estimatedUsd);
+    if (
+      !Number.isSafeInteger(grant.allowanceMicros) ||
+      !Number.isSafeInteger(grant.consumedMicros) ||
+      grant.consumedMicros < 0 ||
+      grant.consumedMicros > grant.allowanceMicros ||
+      balance !== grant.allowanceMicros - grant.consumedMicros
+    )
+      throw new Error('Invalid grant escrow balance');
+    if (input.estimatedMicros > balance) return { ok: false, reason: 'exhausted' };
+    await tx
+      .update(costReservations)
+      .set({ estimatedUsd: microsToUsd(balance - input.estimatedMicros).toFixed(6) })
+      .where(eq(costReservations.id, escrow.id));
+    await tx
+      .update(estimatedCostGrants)
+      .set({ consumedMicros: grant.consumedMicros + input.estimatedMicros })
+      .where(eq(estimatedCostGrants.id, grant.id));
+    await tx.insert(costReservations).values({
+      id: input.attemptId,
+      taskId: input.taskId,
+      source: input.source,
+      estimatedUsd: decimal,
+      reservationKind: 'attempt',
+      costGrantId: grant.id,
+      description: input.description,
+    });
+    return { ok: true, reservationId: input.attemptId };
+  });
+}
+
+/** Release only an expired grant's unused escrow. Child reservations are untouched. */
+export async function expireEstimatedCostGrant(db: Db, grantId: string): Promise<boolean> {
+  return db.transaction(async (tx) => {
+    await lockCostLedger(tx as unknown as Db);
+    const [grant] = await tx
+      .select()
+      .from(estimatedCostGrants)
+      .where(eq(estimatedCostGrants.id, grantId));
+    if (!grant) return false;
+    const [clock] = await tx.execute<{ expired: boolean }>(
+      sql`select expires_at <= now() as expired from estimated_cost_grants where id = ${grantId}`,
+    );
+    if (clock?.expired !== true) return false;
+    const [escrow] = await tx
+      .select()
+      .from(costReservations)
+      .where(eq(costReservations.id, grant.escrowReservationId));
+    if (!escrow || escrow.status === 'released') return false;
+    if (
+      escrow.status !== 'held' ||
+      escrow.reservationKind !== 'escrow' ||
+      escrow.costGrantId !== grantId
+    )
+      throw new Error('Invalid grant escrow');
+    const balance = storedLedgerUsdToMicros(escrow.estimatedUsd);
+    if (
+      !Number.isSafeInteger(grant.allowanceMicros) ||
+      !Number.isSafeInteger(grant.consumedMicros) ||
+      grant.consumedMicros < 0 ||
+      grant.consumedMicros > grant.allowanceMicros ||
+      balance !== grant.allowanceMicros - grant.consumedMicros
+    )
+      throw new Error('Invalid grant escrow balance');
+    await tx
+      .update(costReservations)
+      .set({ status: 'released', reconciledAt: sql`now()` })
+      .where(eq(costReservations.id, escrow.id));
+    return true;
+  });
 }
 
 export interface CostEventInput {
@@ -382,6 +520,57 @@ export async function reconcileReservation(
   const actualDecimal = actualUsd.toFixed(6);
   await db.transaction(async (tx) => {
     await lockCostLedger(tx as unknown as Db);
+    const [current] = await tx
+      .select()
+      .from(costReservations)
+      .where(eq(costReservations.id, reservationId));
+    if (
+      current?.costGrantId &&
+      current.reservationKind === 'attempt' &&
+      ['held', 'dispatching', 'unknown'].includes(current.status)
+    ) {
+      const [grant] = await tx
+        .select()
+        .from(estimatedCostGrants)
+        .where(eq(estimatedCostGrants.id, current.costGrantId));
+      if (!grant) throw new Error('Missing grant for settlement');
+      const [escrow] = await tx
+        .select()
+        .from(costReservations)
+        .where(eq(costReservations.id, grant.escrowReservationId));
+      if (
+        escrow?.reservationKind !== 'escrow' ||
+        escrow.costGrantId !== grant.id ||
+        escrow.taskId !== current.taskId ||
+        !['held', 'released'].includes(escrow.status)
+      )
+        throw new Error('Invalid grant escrow');
+      if (escrow.status === 'held') {
+        const balance = storedLedgerUsdToMicros(escrow.estimatedUsd);
+        if (
+          !Number.isSafeInteger(grant.allowanceMicros) ||
+          !Number.isSafeInteger(grant.consumedMicros) ||
+          grant.consumedMicros < 0 ||
+          grant.consumedMicros > grant.allowanceMicros ||
+          balance !== grant.allowanceMicros - grant.consumedMicros
+        )
+          throw new Error('Invalid grant escrow balance');
+        const extra = Math.min(
+          balance,
+          Math.max(0, actualMicros - storedLedgerUsdToMicros(current.estimatedUsd)),
+        );
+        if (extra > 0) {
+          await tx
+            .update(costReservations)
+            .set({ estimatedUsd: microsToUsd(balance - extra).toFixed(6) })
+            .where(eq(costReservations.id, escrow.id));
+          await tx
+            .update(estimatedCostGrants)
+            .set({ consumedMicros: grant.consumedMicros + extra })
+            .where(eq(estimatedCostGrants.id, grant.id));
+        }
+      }
+    }
     const [reservation] = await tx
       .update(costReservations)
       .set({

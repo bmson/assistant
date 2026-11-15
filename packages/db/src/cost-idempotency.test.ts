@@ -2,8 +2,20 @@ import { randomUUID } from 'node:crypto';
 import { eq, inArray, sql } from 'drizzle-orm';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createDb, type Db } from './client.js';
-import { createPostgresCostRepository, recordCostEvent } from './cost-repository.js';
-import { agents, costEvents, costReservations, tasks } from './schema.js';
+import {
+  createPostgresCostRepository,
+  drawEstimatedCostGrant,
+  expireEstimatedCostGrant,
+  recordCostEvent,
+} from './cost-repository.js';
+import {
+  agents,
+  costEvents,
+  costReservations,
+  estimatedCostGrants,
+  estimatedCostRequests,
+  tasks,
+} from './schema.js';
 import { assertAllocatedTestTarget } from './test-target.js';
 
 const DATABASE_URL = (() => {
@@ -96,6 +108,126 @@ describe('PostgreSQL idempotent cost events', () => {
       reservationKind: 'escrow',
       estimatedUsd: '0.200000',
     });
+  });
+
+  it('atomically transfers escrow to one attempt under concurrent draws', async () => {
+    const costs = createPostgresCostRepository(db);
+    const reservation = await costs.reserve({ source: 'model', estimatedUsd: 0.2, taskId });
+    if (!reservation.ok) throw new Error('Fixture failed to reserve');
+    reservationIds.push(reservation.reservationId);
+    const grantId = randomUUID();
+    const operationId = randomUUID();
+    await db
+      .update(costReservations)
+      .set({ reservationKind: 'escrow', costGrantId: grantId })
+      .where(eq(costReservations.id, reservation.reservationId));
+    await db.insert(estimatedCostRequests).values({
+      operationId,
+      installationId: 'install',
+      ownerId: 'owner',
+      taskId,
+      requestFingerprint: 'request',
+      bindingDigest: 'binding',
+      state: 'approved',
+      quote: {},
+      baseline: {},
+    });
+    await db.insert(estimatedCostGrants).values({
+      id: grantId,
+      operationId,
+      escrowReservationId: reservation.reservationId,
+      allowanceMicros: 200_000,
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    const input = {
+      actor: { installationId: 'install', ownerId: 'owner' },
+      operationId,
+      grantId,
+      bindingDigest: 'binding',
+      taskId,
+      source: 'model' as const,
+      estimatedMicros: 120_000,
+      description: 'attempt',
+    };
+    const firstId = randomUUID();
+    const secondId = randomUUID();
+    reservationIds.push(firstId, secondId);
+    try {
+      const before = await costs.totals();
+      const outcomes = await Promise.all([
+        drawEstimatedCostGrant(db, { ...input, attemptId: firstId }),
+        drawEstimatedCostGrant(db, { ...input, attemptId: secondId }),
+      ]);
+      expect(outcomes.filter((outcome) => outcome.ok)).toHaveLength(1);
+      expect(outcomes.filter((outcome) => !outcome.ok)).toEqual([
+        { ok: false, reason: 'exhausted' },
+      ]);
+      const success = outcomes.find((outcome) => outcome.ok);
+      if (!success?.ok) throw new Error('Expected successful draw');
+      expect(
+        await drawEstimatedCostGrant(db, { ...input, attemptId: success.reservationId }),
+      ).toEqual(success);
+      expect((await costs.totals()).heldUsd).toBe(before.heldUsd);
+      const [grant] = await db
+        .select()
+        .from(estimatedCostGrants)
+        .where(eq(estimatedCostGrants.id, grantId));
+      expect(grant?.consumedMicros).toBe(120_000);
+      await expect(
+        drawEstimatedCostGrant(db, {
+          ...input,
+          attemptId: success.reservationId,
+          estimatedMicros: 1,
+        }),
+      ).rejects.toThrow('reused');
+      expect(
+        await drawEstimatedCostGrant(db, {
+          ...input,
+          actor: { ...input.actor, ownerId: 'other' },
+          attemptId: randomUUID(),
+        }),
+      ).toEqual({ ok: false, reason: 'unavailable' });
+      await costs.reconcile(success.reservationId, { usd: 0.15 });
+      const [adjusted] = await db
+        .select()
+        .from(estimatedCostGrants)
+        .where(eq(estimatedCostGrants.id, grantId));
+      expect(adjusted?.consumedMicros).toBe(150_000);
+      expect((await costs.totals()).heldUsd).toBeCloseTo(before.heldUsd - 0.15);
+      const unknownId = randomUUID();
+      reservationIds.push(unknownId);
+      expect(
+        await drawEstimatedCostGrant(db, {
+          ...input,
+          estimatedMicros: 30_000,
+          attemptId: unknownId,
+        }),
+      ).toEqual({ ok: true, reservationId: unknownId });
+      await db
+        .update(estimatedCostGrants)
+        .set({ expiresAt: new Date(Date.now() - 1_000) })
+        .where(eq(estimatedCostGrants.id, grantId));
+      expect(
+        await drawEstimatedCostGrant(db, { ...input, attemptId: success.reservationId }),
+      ).toEqual({ ok: false, reason: 'expired' });
+      await db
+        .update(costReservations)
+        .set({ status: 'unknown' })
+        .where(eq(costReservations.id, unknownId));
+      expect(await expireEstimatedCostGrant(db, grantId)).toBe(true);
+      expect(await expireEstimatedCostGrant(db, grantId)).toBe(false);
+      const [child] = await db
+        .select()
+        .from(costReservations)
+        .where(eq(costReservations.id, unknownId));
+      expect(child?.status).toBe('unknown');
+      expect((await costs.totals()).heldUsd).toBeCloseTo(before.heldUsd - 0.17);
+    } finally {
+      await db.delete(estimatedCostGrants).where(eq(estimatedCostGrants.id, grantId));
+      await db
+        .delete(estimatedCostRequests)
+        .where(eq(estimatedCostRequests.operationId, operationId));
+    }
   });
 
   it('does not release a hold whose provider dispatch commits while stale cleanup waits', async () => {

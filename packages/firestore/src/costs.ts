@@ -5,6 +5,8 @@ import {
   type CostEventInput,
   type CostRepository,
   type CostTotals,
+  type EstimatedCostGrantDraw,
+  type EstimatedCostGrantDrawResult,
   ledgerUsdToMicros,
   MAX_LEDGER_USD_MICROS,
   microsToUsd,
@@ -63,6 +65,158 @@ export class FirestoreCostRepository implements CostRepository {
   readonly kind = 'cost-repository' as const;
 
   constructor(private readonly store: InstallationStore) {}
+
+  /** Atomically move pre-reserved capacity from escrow to one attempt. */
+  async drawEstimatedCostGrant(
+    input: EstimatedCostGrantDraw,
+  ): Promise<EstimatedCostGrantDrawResult> {
+    if (!Number.isSafeInteger(input.estimatedMicros) || input.estimatedMicros <= 0)
+      throw new Error('Invalid grant draw amount');
+    const requestRef = this.store.doc('estimatedCostRequests', input.operationId);
+    const grantRef = this.store.doc('estimatedCostGrants', input.grantId);
+    const attemptRef = this.store.doc('costReservations', input.attemptId);
+    return this.store.db.runTransaction(async (tx) => {
+      const [request, grant, existing] = await tx.getAll(requestRef, grantRef, attemptRef);
+      if (
+        !request?.exists ||
+        request.get('installationId') !== input.actor.installationId ||
+        request.get('ownerId') !== input.actor.ownerId ||
+        request.get('taskId') !== input.taskId ||
+        request.get('bindingDigest') !== input.bindingDigest ||
+        request.get('state') !== 'approved' ||
+        !grant?.exists ||
+        grant.get('operationId') !== input.operationId
+      )
+        return { ok: false, reason: 'unavailable' };
+      const expiry = decodeRecord<Date>(grant.get('expiresAt'));
+      if (!(expiry instanceof Date) || !Number.isFinite(expiry.getTime()))
+        throw new Error('Invalid grant expiry');
+      if (expiry.getTime() <= this.store.now().getTime()) return { ok: false, reason: 'expired' };
+      const decimal = microsToUsd(input.estimatedMicros).toFixed(6);
+      if (existing?.exists) {
+        if (
+          existing.get('reservationKind') !== 'attempt' ||
+          existing.get('costGrantId') !== input.grantId ||
+          existing.get('taskId') !== input.taskId ||
+          existing.get('source') !== input.source ||
+          existing.get('estimatedUsd') !== decimal ||
+          existing.get('description') !== input.description
+        )
+          throw new Error('Grant attempt ID reused for different work');
+        return existing.get('status') === 'held'
+          ? { ok: true, reservationId: input.attemptId }
+          : { ok: false, reason: 'closed' };
+      }
+      const escrowId = grant.get('escrowReservationId');
+      if (typeof escrowId !== 'string' || !escrowId)
+        throw new Error('Invalid grant escrow identity');
+      const escrowRef = this.store.doc('costReservations', escrowId);
+      const refs = this.refs(this.store.now(), input.taskId);
+      if (!refs.taskHolds) throw new Error('Missing task hold reference');
+      const [escrow, holds, taskHolds] = await tx.getAll(escrowRef, refs.holds, refs.taskHolds);
+      if (
+        !escrow?.exists ||
+        escrow.get('status') !== 'held' ||
+        escrow.get('reservationKind') !== 'escrow' ||
+        escrow.get('costGrantId') !== input.grantId ||
+        escrow.get('taskId') !== input.taskId
+      )
+        return { ok: false, reason: 'unavailable' };
+      if (!holds?.exists || !taskHolds?.exists) throw new Error('Missing grant hold counters');
+      const balance = storedLedgerUsdToMicros(escrow.get('estimatedUsd'));
+      const allowance: unknown = grant.get('allowanceMicros');
+      const consumed: unknown = grant.get('consumedMicros');
+      if (
+        typeof allowance !== 'number' ||
+        typeof consumed !== 'number' ||
+        !Number.isSafeInteger(allowance) ||
+        !Number.isSafeInteger(consumed) ||
+        consumed < 0 ||
+        consumed > allowance ||
+        balance !== allowance - consumed ||
+        integer(holds, 'heldMicros') < balance ||
+        integer(taskHolds, 'heldMicros') < balance
+      )
+        throw new Error('Invalid grant escrow balance');
+      if (input.estimatedMicros > balance) return { ok: false, reason: 'exhausted' };
+      tx.update(escrowRef, {
+        estimatedUsd: microsToUsd(balance - input.estimatedMicros).toFixed(6),
+      });
+      tx.update(grantRef, { consumedMicros: consumed + input.estimatedMicros });
+      tx.create(attemptRef, {
+        id: input.attemptId,
+        taskId: input.taskId,
+        source: input.source,
+        estimatedUsd: decimal,
+        actualUsd: null,
+        status: 'held',
+        reservationKind: 'attempt',
+        costGrantId: input.grantId,
+        description: input.description,
+        fingerprint: fingerprint({
+          source: input.source,
+          estimatedUsd: microsToUsd(input.estimatedMicros),
+          taskId: input.taskId,
+          description: input.description,
+        }),
+        createdAt: this.store.now(),
+        reconciledAt: null,
+      });
+      return { ok: true, reservationId: input.attemptId };
+    });
+  }
+
+  /** Release only an expired grant's unused escrow; dispatched and unknown children remain held. */
+  async expireEstimatedCostGrant(grantId: string): Promise<boolean> {
+    const grantRef = this.store.doc('estimatedCostGrants', grantId);
+    return this.store.db.runTransaction(async (tx) => {
+      const grant = await tx.get(grantRef);
+      if (!grant.exists) return false;
+      const expiry = decodeRecord<Date>(grant.get('expiresAt'));
+      if (!(expiry instanceof Date) || !Number.isFinite(expiry.getTime()))
+        throw new Error('Invalid grant expiry');
+      if (expiry.getTime() > this.store.now().getTime()) return false;
+      const escrowId = grant.get('escrowReservationId');
+      if (typeof escrowId !== 'string' || !escrowId)
+        throw new Error('Invalid grant escrow identity');
+      const escrowRef = this.store.doc('costReservations', escrowId);
+      const escrow = await tx.get(escrowRef);
+      if (!escrow.exists || escrow.get('status') === 'released') return false;
+      if (
+        escrow.get('status') !== 'held' ||
+        escrow.get('reservationKind') !== 'escrow' ||
+        escrow.get('costGrantId') !== grantId
+      )
+        throw new Error('Invalid grant escrow');
+      const taskId = escrow.get('taskId');
+      if (typeof taskId !== 'string' || !taskId) throw new Error('Invalid grant task');
+      const refs = this.refs(this.store.now(), taskId);
+      if (!refs.taskHolds) throw new Error('Missing task hold reference');
+      const [holds, taskHolds] = await tx.getAll(refs.holds, refs.taskHolds);
+      if (!holds?.exists || !taskHolds?.exists) throw new Error('Missing grant hold counters');
+      const held = integer(holds, 'heldMicros');
+      const taskHeld = integer(taskHolds, 'heldMicros');
+      const balance = storedLedgerUsdToMicros(escrow.get('estimatedUsd'));
+      const allowance: unknown = grant.get('allowanceMicros');
+      const consumed: unknown = grant.get('consumedMicros');
+      if (
+        typeof allowance !== 'number' ||
+        typeof consumed !== 'number' ||
+        !Number.isSafeInteger(allowance) ||
+        !Number.isSafeInteger(consumed) ||
+        consumed < 0 ||
+        consumed > allowance ||
+        balance !== allowance - consumed ||
+        held < balance ||
+        taskHeld < balance
+      )
+        throw new Error('Invalid grant escrow balance');
+      tx.update(escrowRef, { status: 'released', reconciledAt: this.store.now() });
+      tx.set(refs.holds, { heldMicros: held - balance });
+      tx.set(refs.taskHolds, { heldMicros: taskHeld - balance });
+      return true;
+    });
+  }
 
   async getRate(key: string) {
     const snapshot = await this.store.doc('rateTable', key).get();
@@ -313,15 +467,70 @@ export class FirestoreCostRepository implements CostRepository {
       taskSpent = storedLedgerUsdToMicros(task?.get('spentUsd') ?? '0');
       if (taskHeld < estimated) throw new Error('Task hold underflow');
     }
+    let poolExtra = 0;
+    let poolUpdate:
+      | {
+          grantRef: ReturnType<InstallationStore['doc']>;
+          escrowRef: ReturnType<InstallationStore['doc']>;
+          balance: number;
+          consumed: number;
+        }
+      | undefined;
+    const grantId: unknown = reservation?.get('costGrantId');
+    if (actual !== null && grantId != null) {
+      if (typeof grantId !== 'string' || !grantId || reservationKind !== 'attempt')
+        throw new Error('Invalid grant provenance');
+      const grantRef = this.store.doc('estimatedCostGrants', grantId);
+      const grant = await tx.get(grantRef);
+      if (!grant.exists) throw new Error('Missing grant for settlement');
+      const escrowId: unknown = grant.get('escrowReservationId');
+      if (typeof escrowId !== 'string' || !escrowId)
+        throw new Error('Invalid grant escrow identity');
+      const escrowRef = this.store.doc('costReservations', escrowId);
+      const escrow = await tx.get(escrowRef);
+      if (
+        !escrow.exists ||
+        escrow.get('reservationKind') !== 'escrow' ||
+        escrow.get('costGrantId') !== grantId ||
+        escrow.get('taskId') !== taskId ||
+        !['held', 'released'].includes(String(escrow.get('status')))
+      )
+        throw new Error('Invalid grant escrow');
+      if (escrow.get('status') === 'held') {
+        const balance = storedLedgerUsdToMicros(escrow.get('estimatedUsd'));
+        const allowance: unknown = grant.get('allowanceMicros');
+        const consumed: unknown = grant.get('consumedMicros');
+        if (
+          typeof allowance !== 'number' ||
+          typeof consumed !== 'number' ||
+          !Number.isSafeInteger(allowance) ||
+          !Number.isSafeInteger(consumed) ||
+          consumed < 0 ||
+          consumed > allowance ||
+          balance !== allowance - consumed
+        )
+          throw new Error('Invalid grant escrow balance');
+        poolExtra = Math.min(balance, Math.max(0, amount - estimated));
+        if (held < estimated + poolExtra || taskHeld < estimated + poolExtra)
+          throw new Error('Grant hold underflow');
+        poolUpdate = { grantRef, escrowRef, balance, consumed };
+      }
+    }
     // All reads are complete before any writes: Firestore may rerun this callback.
+    if (poolUpdate && poolExtra > 0) {
+      tx.update(poolUpdate.escrowRef, {
+        estimatedUsd: microsToUsd(poolUpdate.balance - poolExtra).toFixed(6),
+      });
+      tx.update(poolUpdate.grantRef, { consumedMicros: poolUpdate.consumed + poolExtra });
+    }
     if (reservationRef) {
       tx.update(reservationRef, {
         status: writesEvent ? 'reconciled' : 'released',
         actualUsd: writesEvent ? microsToUsd(amount).toFixed(6) : null,
         reconciledAt: now,
       });
-      tx.set(refs.holds, { heldMicros: held - estimated });
-      if (refs.taskHolds) tx.set(refs.taskHolds, { heldMicros: taskHeld - estimated });
+      tx.set(refs.holds, { heldMicros: held - estimated - poolExtra });
+      if (refs.taskHolds) tx.set(refs.taskHolds, { heldMicros: taskHeld - estimated - poolExtra });
     } else {
       // Direct spend and reservations contend on this same document.
       tx.set(refs.holds, { heldMicros: held });
