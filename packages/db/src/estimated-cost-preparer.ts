@@ -45,7 +45,11 @@ type Initial = { kind: 'initial'; input: EstimatedCostTurnParkInput };
 type Refresh = { kind: 'refresh'; actor: EstimatedCostActor; request: EstimatedCostQuoteRequest };
 
 /** Read-only preparation; the storage transaction rechecks all authority and amounts. */
-async function prepare(db: Db, input: Initial | Refresh): Promise<EstimatedCostPreparationResult> {
+async function prepare(
+  db: Db,
+  input: Initial | Refresh,
+  providerSource?: import('@assistant/persistence').EstimatedCostRuntimeProviderSource,
+): Promise<EstimatedCostPreparationResult> {
   const actor = input.kind === 'initial' ? input.input.actor : input.actor;
   const operationId =
     input.kind === 'initial' ? input.input.operationId : input.request.operationId;
@@ -116,6 +120,7 @@ async function prepare(db: Db, input: Initial | Refresh): Promise<EstimatedCostP
     routingDigest,
     critical,
     additionalRoles: [...additionalRoles],
+    providerSource,
   });
   if (
     oldBinding &&
@@ -322,24 +327,36 @@ const enabled = (options: { mutationsEnabled?: () => boolean }) => {
 };
 export function createPostgresEstimatedCostQuotePreparer(
   db: Db,
-  options: { mutationsEnabled?: () => boolean } = {},
+  options: {
+    mutationsEnabled?: () => boolean;
+    providerSource?: import('@assistant/persistence').EstimatedCostRuntimeProviderSource;
+  } = {},
 ): EstimatedCostQuotePreparer {
   return {
     async prepare(actor, request) {
-      return enabled(options) ? prepare(db, { kind: 'refresh', actor, request }) : unavailable;
+      return enabled(options)
+        ? prepare(db, { kind: 'refresh', actor, request }, options.providerSource)
+        : unavailable;
     },
   };
 }
 export function createPostgresEstimatedCostTurnParking(
   db: Db,
-  options: { mutationsEnabled?: () => boolean } = {},
+  options: {
+    mutationsEnabled?: () => boolean;
+    providerSource?: import('@assistant/persistence').EstimatedCostRuntimeProviderSource;
+  } = {},
 ): EstimatedCostTurnParking {
   return {
     async park(input) {
       if (!enabled(options)) return unavailable;
-      const prepared = await prepare(db, { kind: 'initial', input });
+      const prepared = await prepare(db, { kind: 'initial', input }, options.providerSource);
       if (!prepared.ok) return prepared;
-      const result = await storePreparedPostgresQuote(db, prepared.prepared);
+      const result = await storePreparedPostgresQuote(
+        db,
+        prepared.prepared,
+        options.providerSource,
+      );
       if (!result.ok) return result;
       if (result.request.status !== 'pending') return unavailable;
       return {

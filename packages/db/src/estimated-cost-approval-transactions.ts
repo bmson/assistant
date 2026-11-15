@@ -13,6 +13,8 @@ import {
   type EstimatedCostQuoteCheck,
   type EstimatedCostQuoteResponse,
   type EstimatedCostSourceBinding,
+  type EstimatedCostRuntimeProviderSource,
+  validateEstimatedCostRuntimeProviderSource,
   estimatedCostAllowanceExpiry,
   estimatedCostCardMessageId,
   estimatedCostConnectionId,
@@ -53,6 +55,20 @@ const id = (value: unknown): value is string =>
   typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value);
 const activeStatuses = ['held', 'dispatching', 'unknown'];
 
+function environmentDigest(
+  actor: EstimatedCostActor,
+  source?: EstimatedCostRuntimeProviderSource,
+): string | null {
+  if (!source) return null;
+  try {
+    validateEstimatedCostRuntimeProviderSource(source);
+  } catch {
+    return null;
+  }
+  if (source.installationId !== actor.installationId) return null;
+  return hash({ kind: 'deployment-provider-source-v1', ...source });
+}
+
 /** Capture trusted source witnesses without a provider request. An existing
  * transaction uses a savepoint; an ordinary Db gets one complete transaction. */
 export async function capturePostgresEstimatedCostSourceBinding(
@@ -65,6 +81,7 @@ export async function capturePostgresEstimatedCostSourceBinding(
     routingDigest: string;
     critical: boolean;
     additionalRoles: string[];
+    providerSource?: EstimatedCostRuntimeProviderSource;
   },
 ): Promise<EstimatedCostSourceBinding> {
   return db.transaction(async (raw) => {
@@ -117,7 +134,13 @@ export async function capturePostgresEstimatedCostSourceBinding(
           sql`, `,
         )}) order by id for share`,
       );
-      if (connectionRows.length !== connections.length)
+      const rows = new Map(connectionRows.map((value) => [String(value.row.id), value.row]));
+      const environment = environmentDigest(input.actor, input.providerSource);
+      if (
+        connections.some(
+          (connection) => !rows.has(connection) && !(connection === 'openrouter' && environment),
+        )
+      )
         throw new Error('Configured source connection is unavailable');
       return {
         role: roleName,
@@ -125,8 +148,11 @@ export async function capturePostgresEstimatedCostSourceBinding(
         modelRows: modelRows
           .map((value) => ({ id: String(value.row.id), digest: hash(value.row) }))
           .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
-        connectionRows: connectionRows
-          .map((value) => ({ id: String(value.row.id), digest: hash(value.row) }))
+        connectionRows: connections
+          .map((connection) => ({
+            id: connection,
+            digest: rows.has(connection) ? hash(rows.get(connection)) : environment!,
+          }))
           .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
       };
     };
@@ -152,7 +178,16 @@ export async function capturePostgresEstimatedCostSourceBinding(
       })),
       privacyGeneration,
     };
-    if (!(await verifySource(tx, input.actor, source, hash(source), privacyGeneration)))
+    if (
+      !(await verifySource(
+        tx,
+        input.actor,
+        source,
+        hash(source),
+        privacyGeneration,
+        input.providerSource,
+      ))
+    )
       throw new Error('Current source binding cannot be proven');
     return source;
   });
@@ -172,6 +207,7 @@ async function verifySource(
   binding: EstimatedCostSourceBinding,
   digest: string,
   privacy: string | null,
+  providerSource?: EstimatedCostRuntimeProviderSource,
 ): Promise<boolean> {
   if (
     !plain(binding) ||
@@ -230,9 +266,22 @@ async function verifySource(
       sql`, `,
     )})`} order by id for share`,
   );
-  if (connections.length !== connectionIds.length) return false;
+  const presentIds = new Set(connections.map((connection) => connection.row.id));
+  const environment = environmentDigest(actor, providerSource);
+  if (
+    connectionIds.some(
+      (connection) => !presentIds.has(connection) && !(connection === 'openrouter' && environment),
+    )
+  )
+    return false;
   const connectionProofs = new Map(binding.connectionRows.map((row) => [row.id, row.digest]));
   if (connectionProofs.size !== connectionIds.length) return false;
+  if (
+    !presentIds.has('openrouter') &&
+    connectionIds.includes('openrouter') &&
+    connectionProofs.get('openrouter') !== environment
+  )
+    return false;
   for (const connection of connections) {
     if (
       connection.row?.enabled !== true ||
@@ -276,7 +325,7 @@ async function verifySource(
       selectedModelId: additional.modelRows[0]?.id ?? '',
       additionalRoutes: [],
     };
-    if (!(await verifySource(tx, actor, other, hash(other), privacy))) return false;
+    if (!(await verifySource(tx, actor, other, hash(other), privacy, providerSource))) return false;
   }
   return actor.ownerId.length > 0;
 }
@@ -510,6 +559,7 @@ function sameOwner(request: StoredRequest, actor: EstimatedCostActor): boolean {
 export async function storePreparedPostgresQuote(
   db: Db,
   prepared: EstimatedCostPreparedQuote,
+  providerSource?: EstimatedCostRuntimeProviderSource,
 ): Promise<EstimatedCostQuoteResponse> {
   const quote = parseEstimatedCostQuote(prepared.quote);
   const actor = prepared.actor;
@@ -593,7 +643,16 @@ export async function storePreparedPostgresQuote(
       task.lockedUntil <= now
     )
       return conflict(quote.operationId);
-    if (!(await verifySource(tx, actor, prepared.sourceBinding, prepared.bindingDigest, privacy)))
+    if (
+      !(await verifySource(
+        tx,
+        actor,
+        prepared.sourceBinding,
+        prepared.bindingDigest,
+        privacy,
+        providerSource,
+      ))
+    )
       return unavailable(quote.operationId);
     const frozen = await baseline(tx, actor, prepared.baseline);
     if (!frozen) return unavailable(quote.operationId);
@@ -698,6 +757,7 @@ export async function approvePostgresEstimatedCost(
   db: Db,
   actor: EstimatedCostActor,
   decision: EstimatedCostDecision,
+  providerSource?: EstimatedCostRuntimeProviderSource,
 ): Promise<EstimatedCostDecisionResponse> {
   if (
     decision.decision !== 'approve' ||
@@ -788,7 +848,8 @@ export async function approvePostgresEstimatedCost(
       return unavailable(decision.operationId, decision.decisionId);
     const now = await clock(tx);
     if (!validQuoteTime(quote, now)) return stale();
-    if (!(await verifySource(tx, actor, binding, request.bindingDigest, privacy))) return stale();
+    if (!(await verifySource(tx, actor, binding, request.bindingDigest, privacy, providerSource)))
+      return stale();
     const frozen = await baseline(tx, actor, request.baseline);
     if (!frozen) return stale();
     const current = await snapshot(tx, actor, task, quote, frozen.micros, binding.critical, now);

@@ -8,6 +8,7 @@ import {
 import { eq, inArray, sql } from 'drizzle-orm';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createDb, type Db } from './client.js';
+import { createPostgresModelConnectionRepository } from './model-connection-repository.js';
 import {
   createPostgresEstimatedCostQuotePreparer,
   createPostgresEstimatedCostTurnParking,
@@ -500,5 +501,123 @@ describe('PostgreSQL independently parked spending permission', () => {
         else await db.delete(modelRoles).where(eq(modelRoles.role, role));
       }
     }
+  });
+
+  it('requires the same pinned environment witness at park, approval and dispatch', async () => {
+    await db.delete(modelConnections).where(eq(modelConnections.id, 'openrouter'));
+    const source = {
+      provider: 'openrouter' as const,
+      endpoint: 'https://openrouter.ai/api/v1' as const,
+      installationId: ownerId,
+      projectId: 'test-project',
+      secretVersion: 'projects/test-project/secrets/provider/versions/31',
+      sourceRelease: 'a'.repeat(40),
+    };
+    const binding = await capturePostgresEstimatedCostSourceBinding(db, {
+      actor: prepared.actor,
+      taskId,
+      role: 'draft',
+      selectedModelId: modelId,
+      routingDigest: 'a'.repeat(64),
+      critical: false,
+      additionalRoles: [],
+      providerSource: source,
+    });
+    prepared = { ...prepared, sourceBinding: binding, bindingDigest: hash(binding) };
+    expect((await storePreparedPostgresQuote(db, prepared)).ok).toBe(false);
+    expect((await storePreparedPostgresQuote(db, prepared, source)).ok).toBe(true);
+    const changed = { ...source, secretVersion: source.secretVersion.replace('/31', '/32') };
+    expect(
+      await approvePostgresEstimatedCost(db, prepared.actor, decision(), changed),
+    ).toMatchObject({ ok: true, receipt: { status: 'stale' } });
+    expect(
+      await approvePostgresEstimatedCost(db, prepared.actor, decision(), source),
+    ).toMatchObject({ ok: true, receipt: { status: 'approved' } });
+    const [grant] = await db
+      .select()
+      .from(estimatedCostGrants)
+      .where(eq(estimatedCostGrants.operationId, operationId));
+    if (!grant) throw new Error('Missing grant');
+    const leaseToken = randomUUID(),
+      reservationId = randomUUID();
+    await db
+      .update(tasks)
+      .set({ status: 'running', leaseToken, lockedUntil: new Date(Date.now() + 60_000) })
+      .where(eq(tasks.id, taskId));
+    expect(
+      await drawEstimatedCostGrant(db, {
+        actor: prepared.actor,
+        operationId,
+        taskId,
+        grantId: grant.id,
+        bindingDigest: prepared.bindingDigest,
+        attemptId: reservationId,
+        source: 'model',
+        estimatedMicros: 300_000,
+        description: 'draft',
+      }),
+    ).toMatchObject({ ok: true });
+    const input = {
+      actor: prepared.actor,
+      operationId,
+      taskId,
+      grantId: grant.id,
+      reservationId,
+      leaseToken,
+      role: 'draft',
+      critical: false,
+      modelId,
+      nextAttemptMicros: 300_000,
+      routingDigest: 'a'.repeat(64),
+      requestDigest: 'b'.repeat(64),
+      metadata: {
+        provider: 'openrouter',
+        model: modelId,
+        role: 'draft',
+        requestDigest: 'b'.repeat(64),
+        inputTokenEstimate: 1,
+        outputTokenLimit: 1,
+        reasoning: 'disabled' as const,
+      },
+    };
+    expect(await beginPostgresEstimatedCostGrantAttempt(db, input, changed)).toBe(false);
+    expect(await beginPostgresEstimatedCostGrantAttempt(db, input, source)).toBe(true);
+  });
+
+  it('serializes a new connection with the source and ledger fence', async () => {
+    await db.delete(modelConnections).where(eq(modelConnections.id, 'openrouter'));
+    let release!: () => void, locked!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      locked = resolve;
+    });
+    const blocker = db.transaction(async (tx) => {
+      await lockCostLedger(tx as unknown as Db);
+      locked();
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    });
+    await ready;
+    const upsert = createPostgresModelConnectionRepository(db).upsert({
+      id: 'openrouter',
+      kind: 'openrouter',
+      label: 'Synthetic',
+      enabled: true,
+      baseUrl: null,
+      vertexProject: null,
+      vertexLocation: null,
+      apiKeyEncrypted: 'synthetic',
+    });
+    try {
+      const early = await Promise.race([
+        upsert.then(() => true),
+        new Promise<false>((resolve) => setTimeout(() => resolve(false), 60)),
+      ]);
+      expect(early).toBe(false);
+    } finally {
+      release();
+      await blocker;
+    }
+    expect((await upsert).id).toBe('openrouter');
   });
 });

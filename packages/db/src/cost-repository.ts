@@ -273,7 +273,10 @@ export async function readEstimatedCostDecision(
 /** Compatible-off reads and declines; approval and new quotes remain disabled. */
 export function createPostgresEstimatedCostApprovalRepository(
   db: Db,
-  options: { mutationsEnabled?: () => boolean } = {},
+  options: {
+    mutationsEnabled?: () => boolean;
+    providerSource?: import('@assistant/persistence').EstimatedCostRuntimeProviderSource;
+  } = {},
 ): EstimatedCostApprovalRepository {
   const unavailable = {
     ok: false,
@@ -299,7 +302,7 @@ export function createPostgresEstimatedCostApprovalRepository(
       const { storePreparedPostgresQuote } = await import(
         './estimated-cost-approval-transactions.js'
       );
-      return storePreparedPostgresQuote(db, prepared);
+      return storePreparedPostgresQuote(db, prepared, options.providerSource);
     },
     async decide(actor, decision) {
       if (decision.decision === 'approve') {
@@ -307,7 +310,7 @@ export function createPostgresEstimatedCostApprovalRepository(
         const { approvePostgresEstimatedCost } = await import(
           './estimated-cost-approval-transactions.js'
         );
-        return approvePostgresEstimatedCost(db, actor, decision);
+        return approvePostgresEstimatedCost(db, actor, decision, options.providerSource);
       }
       return declinePostgresEstimatedCostRequest(db, actor, decision);
     },
@@ -870,6 +873,7 @@ export async function reserveCost(
 export async function beginPostgresEstimatedCostGrantAttempt(
   db: Db,
   input: EstimatedCostGrantAttempt,
+  providerSource?: import('@assistant/persistence').EstimatedCostRuntimeProviderSource,
 ): Promise<boolean> {
   if (
     !/^[a-f0-9]{64}$/.test(input.routingDigest) ||
@@ -913,6 +917,7 @@ export async function beginPostgresEstimatedCostGrantAttempt(
       routingDigest: binding.routingDigest,
       critical: binding.critical,
       additionalRoles: binding.additionalRoutes.map((entry) => entry.role),
+      providerSource,
     });
     if (
       canonicalEstimatedCostJson(source) !== canonicalEstimatedCostJson(binding) ||
@@ -1397,7 +1402,12 @@ export async function releaseStaleReservations(
 }
 
 /** SQL implementation of the atomic cost port; callers never receive a transaction handle. */
-export function createPostgresCostRepository(db: Db): CostRepository {
+export function createPostgresCostRepository(
+  db: Db,
+  options: {
+    providerSource?: import('@assistant/persistence').EstimatedCostRuntimeProviderSource;
+  } = {},
+): CostRepository {
   return {
     kind: 'cost-repository',
     getRate: async (key) => {
@@ -1408,7 +1418,8 @@ export function createPostgresCostRepository(db: Db): CostRepository {
     reserve: (input) => reserveCost(db, input),
     beginAttempt: (id, metadata) => beginCostAttempt(db, id, metadata),
     drawEstimatedCostGrant: (input) => drawEstimatedCostGrant(db, input),
-    beginEstimatedCostGrantAttempt: (input) => beginPostgresEstimatedCostGrantAttempt(db, input),
+    beginEstimatedCostGrantAttempt: (input) =>
+      beginPostgresEstimatedCostGrantAttempt(db, input, options.providerSource),
     markAttemptUnknown: (id, reason, receipt) => markCostAttemptUnknown(db, id, reason, receipt),
     record: (input) => recordCostEvent(db, input),
     reconcile: (id, actual) => reconcileReservation(db, id, actual),

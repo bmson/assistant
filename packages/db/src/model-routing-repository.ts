@@ -9,10 +9,15 @@ import { createPostgresCostRepository } from './cost-repository.js';
 import { conversations, modelCallAudit, modelCalls, modelRoles, models, tasks } from './schema.js';
 
 /** Preserves the current PostgreSQL router's installation-wide configuration. */
-export function createPostgresModelRoutingRepository(db: Db): ModelRoutingRepository {
+export function createPostgresModelRoutingRepository(
+  db: Db,
+  options: {
+    providerSource?: import('@assistant/persistence').EstimatedCostRuntimeProviderSource;
+  } = {},
+): ModelRoutingRepository {
   return {
     kind: 'model-routing-repository',
-    costs: createPostgresCostRepository(db),
+    costs: createPostgresCostRepository(db, options),
     async taskBudget(taskId) {
       const [task] = await db
         .select({ limit: tasks.budgetUsdLimit, spent: tasks.spentUsd })

@@ -616,7 +616,9 @@ export function validateEstimatedCostRuntimeProviderSource(
 
 export function parseEstimatedCostRuntimeProviderSource(
   raw: string,
-): EstimatedCostRuntimeProviderSource {
+  expected: { installationId: string; projectId: string; sourceRelease: string | undefined },
+): EstimatedCostRuntimeProviderSource | undefined {
+  if (raw === '') return undefined;
   let value: unknown;
   try {
     value = JSON.parse(raw);
@@ -635,6 +637,13 @@ export function parseEstimatedCostRuntimeProviderSource(
     throw new Error('Invalid estimated cost runtime provider source');
   const source = value as EstimatedCostRuntimeProviderSource;
   validateEstimatedCostRuntimeProviderSource(source);
+  if (
+    !expected.sourceRelease ||
+    source.installationId !== expected.installationId ||
+    source.projectId !== expected.projectId ||
+    source.sourceRelease !== expected.sourceRelease
+  )
+    throw new Error('Estimated cost runtime provider source scope mismatch');
   return Object.freeze({ ...source });
 }
 

@@ -25,6 +25,7 @@ import {
   createDb,
   createPostgresAuditInvestigationRepository,
   createPostgresConversationSearchRepository,
+  createPostgresCostRepository,
   createPostgresExecutionPersistence,
   createPostgresModelConnectionRepository,
   createPostgresOccasionToolReadRepository,
@@ -741,16 +742,25 @@ function buildFirestoreDeps(config: Config): AgentDeps {
  * exported so a test can compose every production module and prove that
  * construction opens no SQL client.
  */
+function estimatedCostRuntimeSource(config: Config) {
+  const providerSource = (config as Config & { ESTIMATED_COST_PROVIDER_SOURCE_JSON?: string })
+    .ESTIMATED_COST_PROVIDER_SOURCE_JSON;
+  return estimatedCostApprovalEnabled(config) && providerSource
+    ? parseEstimatedCostRuntimeProviderSource(providerSource, {
+        installationId: config.ASSISTANT_WORKSPACE_ID,
+        projectId: config.GCP_PROJECT,
+        sourceRelease: process.env.BUILD_SHA,
+      })
+    : undefined;
+}
+
 export function composeFirestoreAgent(config: Config): AgentDeps {
-  const providerSource = (config as Config & { ESTIMATED_COST_PROVIDER_SOURCE?: string })
-    .ESTIMATED_COST_PROVIDER_SOURCE;
+  const parsedProviderSource = estimatedCostRuntimeSource(config);
   const store = createInstallationStore({
     projectId: config.GCP_PROJECT,
     installationId: config.ASSISTANT_WORKSPACE_ID,
     databaseId: config.FIRESTORE_DATABASE_ID,
-    ...(estimatedCostApprovalEnabled(config) && providerSource
-      ? { estimatedCostProviderSource: parseEstimatedCostRuntimeProviderSource(providerSource) }
-      : {}),
+    ...(parsedProviderSource ? { estimatedCostProviderSource: parsedProviderSource } : {}),
   });
   const embeddingSpace = parseFirestoreEmbeddingSpace(config.FIRESTORE_EMBEDDING_SPACE);
   const persistence = createFirestoreExecutionPersistence(
@@ -995,8 +1005,11 @@ export function buildDeps(): AgentDeps {
   });
   const persistence = createPostgresExecutionPersistence(db);
   const modelConnections = createPostgresModelConnectionRepository(db);
+  const providerSource = estimatedCostRuntimeSource(config);
   const router = new ModelRouter(
-    persistence.modelRouting,
+    providerSource
+      ? { ...persistence.modelRouting, costs: createPostgresCostRepository(db, { providerSource }) }
+      : persistence.modelRouting,
     config.OPENROUTER_API_KEY,
     config.LLM_AUDIT_CAPTURE,
     createConnectedModelProviders(config, () => modelConnections.list()),
