@@ -28,8 +28,13 @@ const base = [
     location: 'River Hall, 700 High Street',
   },
 ];
-function mockRouter(groups: unknown) {
-  const object = vi.fn().mockResolvedValue({ ok: true, object: { groups } });
+function mockRouter(groups: unknown, revisedLead?: string) {
+  const object = vi
+    .fn()
+    .mockResolvedValue({
+      ok: true,
+      object: { groups, ...(revisedLead === undefined ? {} : { revisedLead }) },
+    });
   return { object, router: { object } as unknown as Pick<ModelRouter, 'object'> };
 }
 
@@ -238,7 +243,7 @@ describe('display calendar duplicate assessment', () => {
   };
 
   it('preserves literal display dates and removes only the matched overlap sentence', async () => {
-    const model = mockRouter([group]);
+    const model = mockRouter([group], 'Bring water.');
     const result = await assessCalendarDuplicates({
       ownerId: 'display-match',
       router: model.router,
@@ -251,7 +256,7 @@ describe('display calendar duplicate assessment', () => {
   });
 
   it('keys the cache by owner and the entire display snapshot', async () => {
-    const model = mockRouter([]);
+    const model = mockRouter([], '');
     const run = (ownerId: string, changes: Partial<typeof request> = {}) =>
       assessCalendarDuplicates({ ownerId, router: model.router, ...request, ...changes });
     await run('display-cache');
@@ -265,7 +270,7 @@ describe('display calendar duplicate assessment', () => {
   });
 
   it('rejects uncertain or contradictory dates and times even if the model groups them', async () => {
-    const model = mockRouter([group]);
+    const model = mockRouter([group], 'Bring water.');
     const variants = [
       { ...request, contextDate: '' },
       { ...request, events: [{ ...events[0]!, day: '' }, events[1]!] },
@@ -285,29 +290,43 @@ describe('display calendar duplicate assessment', () => {
     }
   });
 
-  it('keeps unrelated lead content and never rewrites without an accepted group', async () => {
-    const model = mockRouter([group]);
-    const lead = 'Soccer Practice and Blue Fall Practice overlap and bring water.';
-    await expect(
-      assessCalendarDuplicates({ ownerId: 'display-lead', router: model.router, ...request, lead }),
-    ).rejects.toThrow();
-    await expect(
-      assessCalendarDuplicates({
-        ownerId: 'display-empty-rewrite',
-        router: model.router,
-        ...request,
-        lead: 'Soccer Practice and Blue Fall Practice overlap.',
-      }),
-    ).rejects.toThrow();
+  it('rewrites the compound overlap claim while preserving its security notice', async () => {
+    const lead =
+      'Soccer Practice and 26/27 U13B Azul - Fall Practice overlap today at 5:30 PM, and you have several security notices requiring review.';
+    const revisedLead =
+      'Soccer practice is at 5:30 PM today; several security notices require review.';
+    const model = mockRouter([group], revisedLead);
+    const result = await assessCalendarDuplicates({
+      ownerId: 'display-compound',
+      router: model.router,
+      ...request,
+      lead,
+      events: [events[0]!, { ...events[1]!, title: '26/27 U13B Azul - Fall Practice' }],
+    });
+    expect(result).toEqual({ groups: [group], revisedLead });
+    expect(model.object.mock.calls[0]![1].system).toContain('security notices');
+  });
+
+  it('fails safely for missing or empty rewrites and ignores rewrites without accepted groups', async () => {
+    for (const [index, model] of [mockRouter([group]), mockRouter([group], '')].entries()) {
+      await expect(
+        assessCalendarDuplicates({
+          ownerId: `display-no-rewrite-${index}`,
+          router: model.router,
+          ...request,
+        }),
+      ).rejects.toThrow();
+    }
+    const emptyLead = mockRouter([group], '');
     expect(
       await assessCalendarDuplicates({
         ownerId: 'display-no-lead',
-        router: model.router,
+        router: emptyLead.router,
         ...request,
         lead: '',
       }),
-    ).toEqual({ groups: [group] });
-    const low = mockRouter([{ ...group, confidence: 0.89 }]);
+    ).toEqual({ groups: [group], revisedLead: '' });
+    const low = mockRouter([{ ...group, confidence: 0.89 }], 'ignored');
     expect(
       await assessCalendarDuplicates({ ownerId: 'display-low', router: low.router, ...request }),
     ).toEqual({ groups: [] });
