@@ -2,16 +2,16 @@
   "format": 1,
   "purpose": "Source composition and route drift evidence only; not a deployment or configured-runtime receipt.",
   "runtimeSources": {
-    "packages/config/src/index.ts": "8993f5611033b5a6bac2901f2cc3ca57b4496c981817e0387f0e3464e4f21ae9",
-    "apps/agent/src/deps.ts": "fb30df8600bbcf24da0d5cfa9ef1c92e28700b663429cdbbe37d65ecee0ea655",
+    "packages/config/src/index.ts": "e64b8e5cbe019883a5de916d38c389c7dfbf2020a45ebbcb4f43891e112188e1",
+    "apps/agent/src/deps.ts": "89217c440abad988fa569107b3c82c7fdf9ff432ce821c547617143726ecd2c0",
     "apps/agent/src/index.ts": "bc65b1a16ba83c6351a74e2c071189fb4288d5d3ec2c4425accc185da77fe6ab",
-    "apps/web/lib/server.ts": "32c28a39d0cfe21c9e8fe1ac3ae8a32a9ea6aa76c3fb2ba09c0ccd156f0ed721",
+    "apps/web/lib/server.ts": "e2d0c45a9c554581c90602d85c8b8af18ee7fabc0677808a498d7b0b4be9dd19",
     "apps/web/proxy.ts": "2a381233e47b3d4dd4db2b9fce2e267b4fdfb8b0474f75c36e563661d8de58b6",
-    "packages/db/drizzle/meta/_journal.json": "2522abfe44f13041cf19173d00f21a69563248a9dc76d0915e9f49e5e1163fed",
-    "infra/gcp/release-contracts.json": "7757e8d4ca04c64df2ac9669ceb8e9d3539d9e8c8428c74dc445fc382ea65054"
+    "packages/db/drizzle/meta/_journal.json": "20bd0a5fd629334e0169caa6f95b0afd6423a8ee69dabf0bba96decb01466ba8",
+    "infra/gcp/release-contracts.json": "111be11f1f7c739e6d03076f1523aadf6cdba71c88e8a72410efe9dc4ede2e02"
   },
-  "latestPostgresMigration": "0136_google_calendar_connections",
-  "postgresSchemaVersion": 136,
+  "latestPostgresMigration": "0137_estimated_cost_approval",
+  "postgresSchemaVersion": 137,
   "releaseContracts": {
     "agent": {
       "apiContract": 1,
@@ -20,8 +20,8 @@
         "max": 1
       },
       "postgresSchema": {
-        "min": 136,
-        "max": 136
+        "min": 137,
+        "max": 137
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -32,8 +32,8 @@
         "max": 1
       },
       "postgresSchema": {
-        "min": 136,
-        "max": 136
+        "min": 137,
+        "max": 137
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -44,8 +44,8 @@
         "max": 1
       },
       "postgresSchema": {
-        "min": 135,
-        "max": 136
+        "min": 137,
+        "max": 137
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -56,8 +56,8 @@
         "max": 1
       },
       "postgresSchema": {
-        "min": 135,
-        "max": 136
+        "min": 137,
+        "max": 137
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -68,14 +68,14 @@
         "max": 1
       },
       "postgresSchema": {
-        "min": 135,
-        "max": 136
+        "min": 137,
+        "max": 137
       },
       "currentPostgresSchemaCompatible": true
     }
   },
   "agentWebSchemaCompatible": true,
-  "webApiRouteCount": 108,
+  "webApiRouteCount": 112,
   "routes": {
     "apps/web/app/api/audit/[id]/route.ts": {
       "methods": ["GET"],
@@ -92,6 +92,14 @@
     "apps/web/app/api/chat/cancel/route.ts": {
       "methods": ["POST"],
       "sha256": "6f291e1e5c252e73c553a7547208ef242bd0b91992fc0e6858c7a24b58c08bf8"
+    },
+    "apps/web/app/api/chat/estimated-cost/decision/route.ts": {
+      "methods": ["GET", "POST"],
+      "sha256": "57e38b80798c61a32065867a7b26720672fd8ebbd80b572ecef263287fd88280"
+    },
+    "apps/web/app/api/chat/estimated-cost/quote/route.ts": {
+      "methods": ["GET", "POST"],
+      "sha256": "c67df7213906b224dafaec37176608d1a5ea4a904b79cf362f6e0e3ed56e6e19"
     },
     "apps/web/app/api/chat/route.ts": {
       "methods": ["POST"],
@@ -180,6 +188,14 @@
     "apps/web/app/api/mobile/v1/chat/cancel/route.ts": {
       "methods": ["POST"],
       "sha256": "e05355b355491e52c60dece42c3d232c5aa5ceb0f06c50e4dcced622313b18da"
+    },
+    "apps/web/app/api/mobile/v1/chat/estimated-cost/decision/route.ts": {
+      "methods": ["GET", "POST"],
+      "sha256": "7b4818c455b518f23d94b5e689dd1ecca10ada1fdc72d625c2473d55085c6f1f"
+    },
+    "apps/web/app/api/mobile/v1/chat/estimated-cost/quote/route.ts": {
+      "methods": ["GET", "POST"],
+      "sha256": "4f634358e8e289a7454094b17aa720ca531a7a7974d53ecb4b0af9252af49743"
     },
     "apps/web/app/api/mobile/v1/chat/forms/route.ts": {
       "methods": ["POST"],
