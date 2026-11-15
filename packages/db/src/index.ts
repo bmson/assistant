@@ -25,6 +25,7 @@ export { createPostgresDocumentSearchRepository } from './document-search-reposi
 export { createPostgresEmailAttachmentCustodyRepository } from './email-attachment-custody-repository.js';
 export { createPostgresEmailSyncRepository } from './email-sync-repository.js';
 export * from './entities.js';
+export { capturePostgresEstimatedCostSourceBinding } from './estimated-cost-approval-transactions.js';
 export { createPostgresExecutionContextRepository } from './execution-context-repository.js';
 export { createPostgresExecutionEvidenceRepository } from './execution-evidence-repository.js';
 export { createPostgresExecutionJobRepository } from './execution-jobs-repository.js';

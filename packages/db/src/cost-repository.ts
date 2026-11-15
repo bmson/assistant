@@ -269,12 +269,20 @@ export async function readEstimatedCostDecision(
 /** Compatible-off reads and declines; approval and new quotes remain disabled. */
 export function createPostgresEstimatedCostApprovalRepository(
   db: Db,
+  options: { mutationsEnabled?: () => boolean } = {},
 ): EstimatedCostApprovalRepository {
   const unavailable = {
     ok: false,
     outcome: 'unavailable',
     message: 'Estimated cost approval is unavailable.',
   } as const;
+  const enabled = () => {
+    try {
+      return options.mutationsEnabled?.() === true;
+    } catch {
+      return false;
+    }
+  };
   return {
     async getQuote(actor, operationId) {
       const view = await readEstimatedCostView(db, actor, operationId);
@@ -282,11 +290,21 @@ export function createPostgresEstimatedCostApprovalRepository(
         ? { ok: true, ...view }
         : { ok: false, outcome: 'not_found', operationId, message: 'Request not found.' };
     },
-    async storePreparedQuote() {
-      return unavailable;
+    async storePreparedQuote(prepared) {
+      if (!enabled()) return unavailable;
+      const { storePreparedPostgresQuote } = await import(
+        './estimated-cost-approval-transactions.js'
+      );
+      return storePreparedPostgresQuote(db, prepared);
     },
     async decide(actor, decision) {
-      if (decision.decision !== 'decline') return unavailable;
+      if (decision.decision === 'approve') {
+        if (!enabled()) return unavailable;
+        const { approvePostgresEstimatedCost } = await import(
+          './estimated-cost-approval-transactions.js'
+        );
+        return approvePostgresEstimatedCost(db, actor, decision);
+      }
       return declinePostgresEstimatedCostRequest(db, actor, decision);
     },
     async getDecisionReceipt(actor, identity) {

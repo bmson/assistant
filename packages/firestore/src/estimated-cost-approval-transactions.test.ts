@@ -352,8 +352,10 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore estimated cost 
       createdAt: now,
       digest: createHash('sha256').update(JSON.stringify(baseline)).digest('hex'),
     });
-    const parking = createFirestoreEstimatedCostTurnParking(store);
-    const outcome = await parking.park({
+    const parking = createFirestoreEstimatedCostTurnParking(store, {
+      mutationsEnabled: () => true,
+    });
+    const input = {
       actor,
       operationId: 'operation-a',
       conversationId: 'conversation',
@@ -369,7 +371,13 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore estimated cost 
         routingDigest: 'a'.repeat(64),
         requestDigest: 'b'.repeat(64),
       },
+    };
+    expect(await createFirestoreEstimatedCostTurnParking(store).park(input)).toMatchObject({
+      ok: false,
+      outcome: 'unavailable',
     });
+    expect((await store.doc('tasks', 'a').get()).get('status')).toBe('running');
+    const outcome = await parking.park(input);
     expect(outcome).toMatchObject({
       ok: true,
       status: 'pending',
@@ -381,7 +389,9 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore estimated cost 
     const b = await costs.reserve({ source: 'model', estimatedUsd: 0.1 });
     if (!b.ok) throw new Error('B must remain eligible');
     await costs.reconcile(b.reservationId, { usd: 0.01 });
-    const preparation = await createFirestoreEstimatedCostQuotePreparer(store).prepare(actor, {
+    const preparation = await createFirestoreEstimatedCostQuotePreparer(store, {
+      mutationsEnabled: () => true,
+    }).prepare(actor, {
       operationId: 'operation-a',
       quoteRequestId: 'refresh-a',
     });

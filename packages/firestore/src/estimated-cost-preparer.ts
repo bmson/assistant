@@ -296,16 +296,32 @@ async function prepare(
 /** Must be composed behind the still-disabled rollout capability. */
 export function createFirestoreEstimatedCostQuotePreparer(
   store: InstallationStore,
+  options: { mutationsEnabled?: () => boolean } = {},
 ): EstimatedCostQuotePreparer {
-  return { prepare: (actor, request) => prepare(store, { kind: 'refresh', actor, request }) };
+  return {
+    async prepare(actor, request) {
+      try {
+        if (options.mutationsEnabled?.() !== true) return unavailable;
+      } catch {
+        return unavailable;
+      }
+      return prepare(store, { kind: 'refresh', actor, request });
+    },
+  };
 }
 
 /** The hook's caller must not install it until the rollout capability is proven. */
 export function createFirestoreEstimatedCostTurnParking(
   store: InstallationStore,
+  options: { mutationsEnabled?: () => boolean } = {},
 ): EstimatedCostTurnParking {
   return {
     async park(input) {
+      try {
+        if (options.mutationsEnabled?.() !== true) return unavailable;
+      } catch {
+        return unavailable;
+      }
       const prepared = await prepare(store, { kind: 'initial', input });
       if (!prepared.ok) return prepared;
       const stored = await storePreparedFirestoreQuote(store, prepared.prepared);

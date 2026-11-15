@@ -80,12 +80,21 @@ export class FirestoreCostRepository implements CostRepository {
   constructor(private readonly store: InstallationStore) {}
 
   /** Compatible-off reads and declines; no new quote or approval is created. */
-  estimatedCostApprovalRepository(): EstimatedCostApprovalRepository {
+  estimatedCostApprovalRepository(
+    options: { mutationsEnabled?: () => boolean } = {},
+  ): EstimatedCostApprovalRepository {
     const unavailable = {
       ok: false,
       outcome: 'unavailable',
       message: 'Estimated cost approval is unavailable.',
     } as const;
+    const enabled = () => {
+      try {
+        return options.mutationsEnabled?.() === true;
+      } catch {
+        return false;
+      }
+    };
     return {
       getQuote: async (actor, operationId) => {
         const view = await this.readEstimatedCostView(actor, operationId);
@@ -93,11 +102,22 @@ export class FirestoreCostRepository implements CostRepository {
           ? { ok: true, ...view }
           : { ok: false, outcome: 'not_found', operationId, message: 'Request not found.' };
       },
-      storePreparedQuote: async () => unavailable,
-      decide: async (actor, decision) =>
-        decision.decision === 'decline'
-          ? this.declineEstimatedCostRequest(actor, decision)
-          : unavailable,
+      storePreparedQuote: async (prepared) => {
+        if (!enabled()) return unavailable;
+        const { storePreparedFirestoreQuote } = await import(
+          './estimated-cost-approval-transactions.js'
+        );
+        return storePreparedFirestoreQuote(this.store, prepared);
+      },
+      decide: async (actor, decision) => {
+        if (decision.decision === 'decline')
+          return this.declineEstimatedCostRequest(actor, decision);
+        if (!enabled()) return unavailable;
+        const { approveFirestoreEstimatedCost } = await import(
+          './estimated-cost-approval-transactions.js'
+        );
+        return approveFirestoreEstimatedCost(this.store, actor, decision);
+      },
       getDecisionReceipt: async (actor, identity) => {
         const receipt = await this.readEstimatedCostDecision(actor, identity);
         return receipt
@@ -1056,6 +1076,7 @@ export class FirestoreCostRepository implements CostRepository {
 
 export function createFirestoreEstimatedCostApprovalRepository(
   store: InstallationStore,
+  options: { mutationsEnabled?: () => boolean } = {},
 ): EstimatedCostApprovalRepository {
-  return new FirestoreCostRepository(store).estimatedCostApprovalRepository();
+  return new FirestoreCostRepository(store).estimatedCostApprovalRepository(options);
 }

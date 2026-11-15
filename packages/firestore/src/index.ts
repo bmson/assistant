@@ -37,6 +37,10 @@ export { FirestoreDreamRepository } from './dream.js';
 export { FirestoreEmailAttachmentCustodyRepository } from './email-attachment-custody.js';
 export { FirestoreEmailExtractionRepository } from './email-extraction.js';
 export { FirestoreEmailSyncRepository } from './email-sync.js';
+export {
+  createFirestoreEstimatedCostQuotePreparer,
+  createFirestoreEstimatedCostTurnParking,
+} from './estimated-cost-preparer.js';
 export { createFirestoreExecutionPersistence } from './execution.js';
 export { FirestoreExecutionContextRepository } from './execution-context.js';
 export { FirestoreExecutionEvidenceRepository } from './execution-evidence.js';
