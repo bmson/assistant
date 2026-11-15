@@ -275,6 +275,62 @@ export interface HistoricalUnknownBaselineRow {
   estimatedMicros: number;
 }
 
+/** Internal trusted preparation; never constructed from an HTTP request body. */
+export interface EstimatedCostPreparedQuote {
+  actor: EstimatedCostActor;
+  quoteRequestId: string;
+  taskId: string;
+  /** Required for initial parking; null only for an already parked request refresh. */
+  leaseToken: string | null;
+  requestFingerprint: string;
+  bindingDigest: string;
+  critical: boolean;
+  quote: EstimatedCostQuote;
+  baseline: HistoricalUnknownBaselineRow[];
+}
+
+export type EstimatedCostPreparationResult =
+  | { ok: true; prepared: EstimatedCostPreparedQuote }
+  | EstimatedCostHttpError;
+
+/** Server-side model/routing preparation must never dispatch provider work. */
+export interface EstimatedCostQuotePreparer {
+  prepare(
+    actor: EstimatedCostActor,
+    request: EstimatedCostQuoteRequest,
+  ): Promise<EstimatedCostPreparationResult>;
+}
+
+/** Atomic persistence boundary. Implementations must recheck all canonical
+ * identities, policy/pricing bindings, baseline and exposure in their transaction.
+ * A successful initial store also parks the matching leased task without a hold.
+ * A successful approve atomically creates its receipt and escrow, and resumes
+ * only the original task. Replays must never allocate twice. */
+export interface EstimatedCostApprovalRepository {
+  getQuote(actor: EstimatedCostActor, operationId: string): Promise<EstimatedCostQuoteResponse>;
+  storePreparedQuote(prepared: EstimatedCostPreparedQuote): Promise<EstimatedCostQuoteResponse>;
+  decide(
+    actor: EstimatedCostActor,
+    decision: EstimatedCostDecision,
+  ): Promise<EstimatedCostDecisionResponse>;
+  getDecisionReceipt(
+    actor: EstimatedCostActor,
+    identity: { operationId: string; decisionId: string },
+  ): Promise<EstimatedCostDecisionResponse>;
+}
+
+/** Server-prepared quote and checkpoint identity; never accepted from an HTTP body. */
+export interface EstimatedCostParkInput {
+  actor: EstimatedCostActor;
+  taskId: string;
+  leaseToken: string;
+  requestFingerprint: string;
+  bindingDigest: string;
+  critical: boolean;
+  quote: EstimatedCostQuote;
+  baseline: HistoricalUnknownBaselineRow[];
+}
+
 /** Must be produced from canonical reservation records, not attempt metadata. */
 export interface CurrentBaselineReservation extends HistoricalUnknownBaselineRow {
   status: string;
