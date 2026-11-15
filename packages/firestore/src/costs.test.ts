@@ -18,6 +18,14 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore atomic cost led
     await disposeStore(store);
   });
 
+  it('returns structured ceiling information for a denied reservation', async () => {
+    const outcome = await costs.reserve({ source: 'model', estimatedUsd: 1.000001 });
+    expect(outcome).toMatchObject({
+      ok: false,
+      budget: { scope: 'daily', nextAttemptMicros: 1_000_001 },
+    });
+  });
+
   it('serializes competing reservations and never over-reserves the daily cap', async () => {
     const results = await Promise.all(
       Array.from({ length: 8 }, () => costs.reserve({ source: 'model', estimatedUsd: 0.3 })),

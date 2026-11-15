@@ -156,6 +156,7 @@ export class FirestoreCostRepository implements CostRepository {
           return {
             ok: false,
             reason: `${name} budget cannot cover this reservation`,
+            budget: { scope: name, nextAttemptMicros: amount },
             resumeAt: reset,
           };
         }
@@ -178,6 +179,7 @@ export class FirestoreCostRepository implements CostRepository {
           return {
             ok: false,
             reason: 'task budget cannot cover this reservation',
+            budget: { scope: 'task', nextAttemptMicros: amount },
             resumeAt: nextUtcDailyReset(now),
           };
         }

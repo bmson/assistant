@@ -53,6 +53,17 @@ describe('PostgreSQL idempotent cost events', () => {
     }
   });
 
+  it('returns structured ceiling information for a denied reservation', async () => {
+    const outcome = await createPostgresCostRepository(db).reserve({
+      source: 'model',
+      estimatedUsd: 4.000001,
+    });
+    expect(outcome).toMatchObject({
+      ok: false,
+      budget: { scope: 'daily', nextAttemptMicros: 4_000_001 },
+    });
+  });
+
   it('does not release a hold whose provider dispatch commits while stale cleanup waits', async () => {
     const costs = createPostgresCostRepository(db);
     const reservation = await costs.reserve({ source: 'model', estimatedUsd: 0.2, taskId });

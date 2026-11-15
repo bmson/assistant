@@ -48,7 +48,13 @@ export interface ReserveCostInput {
 
 export type ReserveOutcome =
   | { ok: true; reservationId: string }
-  | { ok: false; reason: string; resumeAt: Date };
+  | {
+      ok: false;
+      reason: string;
+      resumeAt: Date;
+      /** Present only for an actual configured budget ceiling, not a replay or storage error. */
+      budget?: { scope: 'daily' | 'monthly' | 'task'; nextAttemptMicros: number };
+    };
 
 export interface ReservationActual {
   evidence?: CostEvidence;

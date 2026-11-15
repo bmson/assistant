@@ -168,7 +168,12 @@ export async function costTotals(db: Db): Promise<CostTotals> {
 
 export type ReserveOutcome =
   | { ok: true; reservationId: string }
-  | { ok: false; reason: string; resumeAt: Date };
+  | {
+      ok: false;
+      reason: string;
+      resumeAt: Date;
+      budget?: { scope: 'daily' | 'monthly' | 'task'; nextAttemptMicros: number };
+    };
 
 /**
  * Pre-flight reservation against the ceiling hierarchy (monthly > daily >
@@ -238,6 +243,7 @@ export async function reserveCost(
       return {
         ok: false,
         reason: `monthly budget cannot cover this (spent $${totals.monthlySpentUsd.toFixed(2)} + held $${totals.heldUsd.toFixed(2)} + est $${estimateUsd.toFixed(2)} > cap $${monthlyCeiling.toFixed(2)}${input.critical ? ' including owner-reply carve-out' : ''})`,
+        budget: { scope: 'monthly', nextAttemptMicros: estimateMicros },
         resumeAt: nextMonthlyReset(),
       } as const;
     }
@@ -245,6 +251,7 @@ export async function reserveCost(
       return {
         ok: false,
         reason: `daily budget cannot cover this (spent $${totals.dailySpentUsd.toFixed(2)} + held $${totals.heldUsd.toFixed(2)} + est $${estimateUsd.toFixed(2)} > cap $${dailyCeiling.toFixed(2)}${input.critical ? ' including owner-reply carve-out' : ''})`,
+        budget: { scope: 'daily', nextAttemptMicros: estimateMicros },
         resumeAt: nextDailyReset(),
       } as const;
     }
@@ -287,6 +294,7 @@ export async function reserveCost(
         return {
           ok: false,
           reason: `task budget cannot cover this (spent $${Number(task.spent).toFixed(4)} + held $${heldForTask.toFixed(4)} + est $${estimateUsd.toFixed(4)} > cap $${taskCeiling.toFixed(4)}${input.critical ? ' including owner-reply carve-out' : ''})`,
+          budget: { scope: 'task', nextAttemptMicros: estimateMicros },
           resumeAt: nextDailyReset(),
         } as const;
       }

@@ -72,6 +72,7 @@ export * from './email-observer-identity.js';
 export * from './email-observer-validation.js';
 export * from './email-sync.js';
 export * from './embedding.js';
+export * from './estimated-cost-approval.js';
 export * from './exact-timestamp.js';
 export * from './execution.js';
 export * from './execution-context.js';
