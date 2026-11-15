@@ -38,7 +38,7 @@ Approval authorizes a bounded cumulative internal allowance for the named origin
 
 ## Rollout and verification
 
-All writers, dispatchers, settlement and stale-cleanup paths must understand escrow before the feature is enabled. The feature is off by default until compatible services and jobs are deployed and old writers are drained. A compatible feature-off recovery path must preserve active and unknown liabilities. Downgrade to escrow-unaware code is prohibited while incompatible live state exists.
+All writers, dispatchers, settlement and stale-cleanup paths must understand escrow before the feature is enabled. `ESTIMATED_COST_APPROVAL_ENABLED` defaults to false until compatible services and jobs are deployed and old writers are drained. The shared profile capability also excludes restore rehearsals and a fenced PostgreSQL writer. Explicit client capability is required before a chat request can be parked. A compatible feature-off recovery path must preserve active and unknown liabilities. Downgrade to escrow-unaware code is prohibited while incompatible live state exists.
 
 Required checks include PostgreSQL and Firestore parity; quote and decision expiry; exact receipt recovery; duplicate and conflicting decisions; concurrent grants, reservations, dispatch and cleanup; settlement conservation; pricing/policy/source drift; owner and installation changes; pending totals; and independent conversation sequences. Native and web clients need explicit pending, submitting, approved, declined, expired, changed, unavailable and unconfirmed states.
 

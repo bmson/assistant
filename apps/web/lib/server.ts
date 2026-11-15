@@ -105,6 +105,7 @@ import {
 } from '@assistant/application/profile';
 import { getProviderBilling } from '@assistant/application/provider-billing';
 import {
+  estimatedCostApprovalEnabled,
   loadConfig,
   parseFirestoreEmbeddingSpace,
   repoRoot,
@@ -140,6 +141,7 @@ import {
   createPostgresCardFormAdmissionRepository,
   createPostgresCardRefreshRepository,
   createPostgresEmailSyncRepository,
+  createPostgresEstimatedCostTurnParking,
   createPostgresGeneratedCardRepository,
   createPostgresGoogleCalendarConnectionRepository,
   createPostgresModelCatalogRepository,
@@ -159,6 +161,7 @@ import {
 import {
   assertPrivacyErasureFenceUnchanged,
   createFirestoreCardFormAdmissionRepository,
+  createFirestoreEstimatedCostTurnParking,
   createFirestoreExecutionPersistence,
   createFirestoreGoogleCalendarConnectionRepository,
   createFirestoreProfileMemoryCommandPersistence,
@@ -552,6 +555,17 @@ export function getCalendarDuplicateRouter(): ModelRouter {
     : getRouter();
 }
 
+/** Install the optional parking port only for the explicitly enabled profile.
+ * Client capability and exact router denial are checked by the application. */
+function getEstimatedCostTurnParking() {
+  const config = loadConfig();
+  if (!estimatedCostApprovalEnabled(config)) return undefined;
+  const options = { mutationsEnabled: () => estimatedCostApprovalEnabled(config) };
+  return config.PERSISTENCE_DRIVER === 'firestore'
+    ? createFirestoreEstimatedCostTurnParking(getFirestoreInstallationStore(), options)
+    : createPostgresEstimatedCostTurnParking(getDb(), options);
+}
+
 /**
  * The owner's timezone (from the agent row), for rendering local timestamps.
  * cache() dedupes it to one query per request across all server components.
@@ -829,7 +843,12 @@ function createApplication(options: { profileMemory?: ProfileMemoryCommandPersis
     cancelChatTurn: (input: { conversationId: string; clientOperationId: string }) =>
       cancelChatTurn(db, input),
     handleChatTurn: (request: Request) =>
-      handleChatTurn(request, { config: loadConfig(), db, router: getRouter() }),
+      handleChatTurn(request, {
+        config: loadConfig(),
+        db,
+        router: getRouter(),
+        estimatedCostTurnParking: getEstimatedCostTurnParking(),
+      }),
     checkReadiness: () => checkReadiness(db),
   };
 }
@@ -1664,7 +1683,13 @@ function createFirestoreChatApplication() {
     cancelChatTurn: (input: { conversationId: string; clientOperationId: string }) =>
       cancelChatTurn(chat, input),
     handleChatTurn: (request: Request) =>
-      handleChatTurn(request, { config, router, chat, persistence }),
+      handleChatTurn(request, {
+        config,
+        router,
+        chat,
+        persistence,
+        estimatedCostTurnParking: getEstimatedCostTurnParking(),
+      }),
     getChatUpdates: (input: Parameters<typeof waitForChatUpdates>[1]) =>
       waitForChatUpdates(chatReads, input),
     submitCardForm: async (submission: CardFormSubmission) => {

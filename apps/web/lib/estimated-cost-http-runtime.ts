@@ -1,7 +1,17 @@
 import { createEstimatedCostApprovalService } from '@assistant/application';
-import { loadConfig, validateAgentPersistenceConfig } from '@assistant/config';
-import { createPostgresEstimatedCostApprovalRepository } from '@assistant/db';
-import { createFirestoreEstimatedCostApprovalRepository } from '@assistant/firestore';
+import {
+  estimatedCostApprovalEnabled,
+  loadConfig,
+  validateAgentPersistenceConfig,
+} from '@assistant/config';
+import {
+  createPostgresEstimatedCostApprovalRepository,
+  createPostgresEstimatedCostQuotePreparer,
+} from '@assistant/db';
+import {
+  createFirestoreEstimatedCostApprovalRepository,
+  createFirestoreEstimatedCostQuotePreparer,
+} from '@assistant/firestore';
 import { isAuthed } from '@/auth';
 import {
   assertPostgresInstallationOwner,
@@ -11,26 +21,21 @@ import {
 import { isMobileAuthed } from '@/mobile-auth';
 import { handleEstimatedCostHttp } from './estimated-cost-http';
 
-/** Compatible OFF recovery reads the selected driver's durable state. It cannot
- * create a quote or grant until the full writer rollout is qualified. */
+/** The same capability gates preparation and transactional mutation. OFF keeps
+ * scoped durable readback and decline available without creating authority. */
 function service() {
   const config = loadConfig();
+  const enabled = () => estimatedCostApprovalEnabled(config);
+  const options = { mutationsEnabled: enabled };
+  const firestore = config.PERSISTENCE_DRIVER === 'firestore';
   return createEstimatedCostApprovalService({
-    repository:
-      config.PERSISTENCE_DRIVER === 'firestore'
-        ? createFirestoreEstimatedCostApprovalRepository(getFirestoreInstallationStore())
-        : createPostgresEstimatedCostApprovalRepository(getDb()),
-    preparer: {
-      async prepare(_actor, request) {
-        return {
-          ok: false,
-          outcome: 'unavailable',
-          operationId: request.operationId,
-          message: 'Estimated cost approval is unavailable.',
-        };
-      },
-    },
-    enabled: () => false,
+    repository: firestore
+      ? createFirestoreEstimatedCostApprovalRepository(getFirestoreInstallationStore(), options)
+      : createPostgresEstimatedCostApprovalRepository(getDb(), options),
+    preparer: firestore
+      ? createFirestoreEstimatedCostQuotePreparer(getFirestoreInstallationStore(), options)
+      : createPostgresEstimatedCostQuotePreparer(getDb(), options),
+    enabled,
   });
 }
 
