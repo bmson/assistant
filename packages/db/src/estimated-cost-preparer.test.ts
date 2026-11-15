@@ -438,10 +438,17 @@ describe('PostgreSQL independently parked spending permission', () => {
             reasoning: 'disabled' as const,
           },
         };
+        if (role === 'draft')
+          expect(
+            await beginPostgresEstimatedCostGrantAttempt(db, {
+              ...input,
+              routingDigest: 'f'.repeat(64),
+            }),
+          ).toBe(false);
         expect(await beginPostgresEstimatedCostGrantAttempt(db, input)).toBe(true);
         expect(await beginPostgresEstimatedCostGrantAttempt(db, input)).toBe(false);
       };
-      await attempt('draft', 300_000, 'b');
+      await attempt('draft', 300_000, 'a');
       await attempt('plan', 100_000, 'c');
     } finally {
       if (oldPlan) await db.update(modelRoles).set(oldPlan).where(eq(modelRoles.role, 'plan'));

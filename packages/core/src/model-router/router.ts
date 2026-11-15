@@ -1,4 +1,5 @@
-import { createHash } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { createHash, randomUUID } from 'node:crypto';
 import { loadConfig } from '@assistant/config';
 import { createPostgresModelRoutingRepository, type Db } from '@assistant/db';
 import {
@@ -935,7 +936,63 @@ export class ModelCallFallbackAttemptError extends Error {
   }
 }
 
+export interface EstimatedCostGrantContext {
+  actor: import('@assistant/persistence').EstimatedCostActor;
+  operationId: string;
+  taskId: string;
+  grantId: string;
+  bindingDigest: string;
+  leaseToken: string;
+}
+
+export function estimatedCostGrantContextForTask(
+  task: import('@assistant/persistence').TaskLease,
+  installationId: string,
+): EstimatedCostGrantContext | null {
+  const state =
+    task.state && typeof task.state === 'object' && !Array.isArray(task.state)
+      ? (task.state as Record<string, unknown>)
+      : null;
+  const marker = state?.estimatedCostApproval;
+  if (marker == null) return null;
+  if (!marker || typeof marker !== 'object' || Array.isArray(marker))
+    throw new Error('Invalid estimated cost checkpoint');
+  const row = marker as Record<string, unknown>;
+  if (
+    row.status !== 'approved' ||
+    typeof row.operationId !== 'string' ||
+    typeof row.grantId !== 'string' ||
+    typeof row.bindingDigest !== 'string' ||
+    !task.leaseToken ||
+    !installationId
+  )
+    throw new Error('Estimated cost checkpoint is unavailable');
+  return {
+    actor: { installationId, ownerId: task.agentId },
+    operationId: row.operationId,
+    taskId: task.id,
+    grantId: row.grantId,
+    bindingDigest: row.bindingDigest,
+    leaseToken: task.leaseToken,
+  };
+}
+
 export class ModelRouter {
+  private readonly grantContext = new AsyncLocalStorage<EstimatedCostGrantContext>();
+  private readonly grantReservations = new Map<
+    string,
+    {
+      context: EstimatedCostGrantContext;
+      candidate: Awaited<ReturnType<ModelRouter['prepareEstimatedCostCandidate']>>;
+    }
+  >();
+  /** Scope the approved original task to all router calls in this async execution. */
+  withEstimatedCostGrant<T>(
+    context: EstimatedCostGrantContext,
+    work: () => Promise<T>,
+  ): Promise<T> {
+    return this.grantContext.run(context, work);
+  }
   private readonly providers: ModelProviderSet;
   private readonly persistence: ModelRoutingRepository;
   private readonly configuredEmbeddingSpace?: Readonly<EmbeddingSpace>;
@@ -1478,7 +1535,22 @@ export class ModelRouter {
         opts.requestProfile?.tools !== undefined && opts.requestProfile.tools !== 'none',
       ),
     } as const;
-    if (!(await beginCostAttempt(this.persistence.costs, reservationId, metadata))) {
+    const grant = this.grantReservations.get(reservationId);
+    if (grant) this.grantReservations.delete(reservationId);
+    const began = grant
+      ? await this.persistence.costs.beginEstimatedCostGrantAttempt?.({
+          ...grant.context,
+          reservationId,
+          role,
+          critical: opts.critical === true,
+          modelId: route.modelId,
+          nextAttemptMicros: grant.candidate.nextAttemptMicros,
+          routingDigest: grant.candidate.routingDigest,
+          requestDigest: grant.candidate.requestDigest,
+          metadata,
+        })
+      : await beginCostAttempt(this.persistence.costs, reservationId, metadata);
+    if (!began) {
       throw new Error('Provider attempt reservation was already dispatched or closed');
     }
   }
@@ -1506,6 +1578,41 @@ export class ModelRouter {
         estimatedUsd: number;
       }
   > {
+    const grant = this.grantContext.getStore();
+    if (grant) {
+      if (
+        opts.taskId !== grant.taskId ||
+        !this.persistence.costs.drawEstimatedCostGrant ||
+        !this.persistence.costs.beginEstimatedCostGrantAttempt
+      )
+        throw new Error('Estimated cost grant context is unavailable');
+      const candidate = await this.prepareEstimatedCostCandidate(role, opts, toolCall);
+      const route = await this.resolveRoute(role, opts, {
+        mode: 'fallback',
+        reason: 'approved estimated cost',
+      });
+      if (route.modelId !== candidate.modelId)
+        throw new Error('Estimated cost grant route changed');
+      const budget = this.modelCallBudget(role, route, opts, toolCall);
+      const id = randomUUID();
+      const drawn = await this.persistence.costs.drawEstimatedCostGrant({
+        ...grant,
+        attemptId: id,
+        source: 'model',
+        estimatedMicros: candidate.nextAttemptMicros,
+        description: `${role}:${route.modelId} preflight`,
+      });
+      if (!drawn.ok) throw new Error(`Estimated cost grant unavailable: ${drawn.reason}`);
+      this.grantReservations.set(drawn.reservationId, { context: grant, candidate });
+      return {
+        ok: true,
+        route,
+        reservationId: drawn.reservationId,
+        maxOutputTokens: budget.maxOutputTokens,
+        providerOptions: budget.providerOptions,
+        estimatedUsd: candidate.nextAttemptMicros / 1_000_000,
+      };
+    }
     const attempt = async (forceFallback: boolean) => {
       const route = await this.route(role, { ...opts, forceFallback });
       if (!route.ok) return { ok: false as const, decision: route.decision };
@@ -2760,6 +2867,8 @@ export class ModelRouter {
       expectedSpace?: EmbeddingSpace;
     } = {},
   ): Promise<number[][]> {
+    if (this.grantContext.getStore())
+      throw new Error('Embedding is unavailable for an estimated cost grant');
     const expectedSpace = opts.expectedSpace
       ? Object.freeze({ ...opts.expectedSpace })
       : this.configuredEmbeddingSpace;

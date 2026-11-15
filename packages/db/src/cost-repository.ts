@@ -994,6 +994,25 @@ export async function beginPostgresEstimatedCostGrantAttempt(
       !allowed.modelRows.some((entry) => entry.id === input.modelId)
     )
       return false;
+    const [priorDispatch] = await tx
+      .select({ id: costReservations.id })
+      .from(costReservations)
+      .where(
+        and(
+          eq(costReservations.costGrantId, grant.id),
+          sql`${costReservations.attemptStartedAt} IS NOT NULL`,
+        ),
+      )
+      .limit(1);
+    const firstDispatch = !priorDispatch;
+    if (
+      firstDispatch &&
+      (input.role !== binding.role ||
+        input.modelId !== binding.selectedModelId ||
+        input.routingDigest !== binding.routingDigest ||
+        input.nextAttemptMicros !== quote.nextAttemptMicros)
+    )
+      return false;
     const [escrow] = await tx
       .select()
       .from(costReservations)
@@ -1388,6 +1407,8 @@ export function createPostgresCostRepository(db: Db): CostRepository {
     totals: () => costTotals(db),
     reserve: (input) => reserveCost(db, input),
     beginAttempt: (id, metadata) => beginCostAttempt(db, id, metadata),
+    drawEstimatedCostGrant: (input) => drawEstimatedCostGrant(db, input),
+    beginEstimatedCostGrantAttempt: (input) => beginPostgresEstimatedCostGrantAttempt(db, input),
     markAttemptUnknown: (id, reason, receipt) => markCostAttemptUnknown(db, id, reason, receipt),
     record: (input) => recordCostEvent(db, input),
     reconcile: (id, actual) => reconcileReservation(db, id, actual),

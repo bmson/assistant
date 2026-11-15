@@ -196,4 +196,73 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('agent task repository rou
       expect.objectContaining({ config: dependencies.config, router: dependencies.router }),
     );
   });
+
+  it('scopes an approved resumed chat to its original grant and current lease', async () => {
+    const agentId = randomUUID(),
+      conversationId = randomUUID(),
+      operationId = randomUUID();
+    const created = await tasks.createTask({
+      agentId,
+      conversationId,
+      type: 'chat_turn',
+      trust: 'owner',
+      trigger: {
+        source: 'chat',
+        agentId,
+        conversationId,
+        trust: 'owner',
+        payload: {
+          text: 'A',
+          chatAdmission: {
+            protocol: 'owner-chat-v1',
+            clientOperationId: operationId,
+            requestHash: 'a'.repeat(64),
+            triggerMessageId: randomUUID(),
+            phase: 'streaming',
+            triageOutcome: 'conversational',
+          },
+        },
+      },
+    });
+    await store
+      .doc('tasks', created.task.id)
+      .update({
+        state: {
+          estimatedCostApproval: {
+            status: 'approved',
+            operationId,
+            grantId: 'grant',
+            bindingDigest: 'binding',
+          },
+        },
+      });
+    const dependencies = deps({
+      taskHandlerFor: () => undefined,
+      taskKindUnavailable: () => null,
+      emailObservers: [],
+    } as unknown as InstalledModuleSet);
+    dependencies.config = {
+      PERSISTENCE_DRIVER: 'firestore',
+      FIRESTORE_AGENT_ID: agentId,
+      ASSISTANT_WORKSPACE_ID: store.installationId,
+      ESTIMATED_COST_APPROVAL_ENABLED: true,
+      RESTORE_REHEARSAL: false,
+    } as AgentDeps['config'];
+    const scope = vi.fn(async (_context, run: () => Promise<number>) => run());
+    dependencies.router = { withEstimatedCostGrant: scope } as unknown as AgentDeps['router'];
+    expect(await executeAgentTask(dependencies, created.task.id, 0)).toEqual({
+      outcome: 'admission_recovered',
+      status: 200,
+    });
+    expect(scope).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actor: { installationId: store.installationId, ownerId: agentId },
+        operationId,
+        taskId: created.task.id,
+        grantId: 'grant',
+        leaseToken: expect.any(String),
+      }),
+      expect.any(Function),
+    );
+  });
 });

@@ -1,4 +1,5 @@
 import { type ExecutorDeps, firestoreCodeJobUnavailable } from '@assistant/core';
+import { estimatedCostApprovalEnabled } from '@assistant/config';
 import { calendarModule, googleModule } from '@assistant/modules';
 import {
   type FinalChannelDeliveryResult,
@@ -52,6 +53,9 @@ export function executorDeps(deps: AgentDeps): ExecutorDeps {
     documentExtractionRepository: deps.documentExtractionRepository,
     importJobRepository: deps.importJobRepository,
     router: deps.router,
+    estimatedCostInstallationId: estimatedCostApprovalEnabled(deps.config)
+      ? deps.config.ASSISTANT_WORKSPACE_ID
+      : undefined,
     repairRepositoryReader: repairRepositoryReader(deps),
     dispatcher: deps.dispatcher,
     workspace: deps.workspace,

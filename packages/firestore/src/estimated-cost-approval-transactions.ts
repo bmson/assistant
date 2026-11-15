@@ -163,6 +163,15 @@ export async function beginFirestoreEstimatedCostGrantAttempt(
       !allowed.modelRows.some((model) => model.id === input.modelId)
     )
       return false;
+    const firstDispatch = grant.get('firstDispatchRecorded') !== true;
+    if (
+      firstDispatch &&
+      (input.role !== binding.role ||
+        input.modelId !== binding.selectedModelId ||
+        input.routingDigest !== binding.routingDigest ||
+        input.nextAttemptMicros !== quote.nextAttemptMicros)
+    )
+      return false;
     const source = await firestoreEstimatedCostSourceBinding(tx, store, {
       actor: input.actor,
       taskId: input.taskId,
@@ -216,6 +225,8 @@ export async function beginFirestoreEstimatedCostGrantAttempt(
       attemptMetadata: input.metadata,
       attemptRoutingDigest: input.routingDigest,
     });
+    if (firstDispatch)
+      tx.update(store.doc('estimatedCostGrants', input.grantId), { firstDispatchRecorded: true });
     tx.set(store.doc('coordination', 'budget-holds'), { heldMicros });
     return true;
   });

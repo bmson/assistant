@@ -628,6 +628,68 @@ describe('ModelRouter.object provider-capability fallback', () => {
     expect(parkEstimatedCost).not.toHaveBeenCalled();
   });
 
+  it('draws and fences each call against the scoped original task grant', async () => {
+    const { router, route } = makeRouter();
+    const fallback = await route.getMockImplementation()?.('reason', { forceFallback: true });
+    if (!fallback?.ok) throw new Error('missing route');
+    vi.spyOn(router as any, 'resolveRoute').mockResolvedValue(fallback);
+    vi.spyOn(router, 'prepareEstimatedCostCandidate').mockResolvedValue({
+      role: 'reason',
+      critical: true,
+      modelId: fallback.modelId,
+      nextAttemptMicros: 50,
+      routingDigest: 'a'.repeat(64),
+      requestDigest: 'b'.repeat(64),
+    });
+    const draw = vi.fn(async (input: { attemptId: string }) => ({
+      ok: true as const,
+      reservationId: input.attemptId,
+    }));
+    const begin = vi.fn(async () => true);
+    const persistence = (router as any).persistence;
+    persistence.costs.drawEstimatedCostGrant = draw;
+    persistence.costs.beginEstimatedCostGrantAttempt = begin;
+    stubs.generateText.mockResolvedValue(stepResult());
+    const grant = {
+      actor: { installationId: 'install', ownerId: 'owner' },
+      operationId: 'operation',
+      taskId: 'task-a',
+      grantId: 'grant',
+      bindingDigest: 'binding',
+      leaseToken: 'lease',
+    };
+    await router.withEstimatedCostGrant(grant, async () => {
+      expect(
+        (
+          await router.step('reason', {
+            taskId: 'task-a',
+            prompt: 'one',
+            critical: true,
+            tools: {},
+          })
+        ).ok,
+      ).toBe(true);
+      expect(
+        (
+          await router.step('reason', {
+            taskId: 'task-a',
+            prompt: 'two',
+            critical: true,
+            tools: {},
+          })
+        ).ok,
+      ).toBe(true);
+      await expect(
+        router.step('reason', { taskId: 'task-b', prompt: 'wrong task', tools: {} }),
+      ).rejects.toThrow('grant context');
+    });
+    expect(draw).toHaveBeenCalledTimes(2);
+    expect(begin).toHaveBeenCalledTimes(2);
+    expect(draw.mock.calls[0]?.[0].attemptId).not.toBe(draw.mock.calls[1]?.[0].attemptId);
+    expect(stubs.reserveCost).not.toHaveBeenCalled();
+    expect(stubs.beginCostAttempt).not.toHaveBeenCalled();
+  });
+
   it('object() still surfaces transient errors without a model switch', async () => {
     const { router } = makeRouter();
     stubs.generateObject.mockRejectedValue(capabilityError('Rate limit exceeded'));

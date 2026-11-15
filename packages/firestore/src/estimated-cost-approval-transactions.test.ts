@@ -288,7 +288,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore estimated cost 
         await costs.drawEstimatedCostGrant({
           ...common,
           attemptId: 'classify-attempt',
-          estimatedMicros: 300_000,
+          estimatedMicros: critical ? 300_001 : 300_000,
           description: 'classify',
         }),
       ).toMatchObject({ ok: true });
@@ -342,7 +342,18 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore estimated cost 
           reasoning: 'disabled' as const,
         },
       });
-      const classify = makeAttempt('classify', 'classify-attempt', 300_000, 'b');
+      const classify = makeAttempt(
+        'classify',
+        'classify-attempt',
+        critical ? 300_001 : 300_000,
+        'a',
+      );
+      expect(
+        await beginFirestoreEstimatedCostGrantAttempt(store, {
+          ...classify,
+          routingDigest: 'f'.repeat(64),
+        }),
+      ).toBe(false);
       if (!critical)
         expect(
           await beginFirestoreEstimatedCostGrantAttempt(store, { ...classify, critical: true }),
