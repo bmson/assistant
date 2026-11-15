@@ -303,6 +303,32 @@ describe('display calendar duplicate assessment', () => {
     });
     expect(result).toEqual({ groups: [group], revisedLead });
     expect(model.object.mock.calls[0]![1].system).toContain('security notices');
+    const omitted = mockRouter([group], 'Soccer practice is at 5:30 PM today.');
+    await expect(
+      assessCalendarDuplicates({
+        ownerId: 'display-missing-security',
+        router: omitted.router,
+        ...request,
+        lead,
+      }),
+    ).rejects.toThrow();
+  });
+
+  it('rejects changing the concrete security notice', async () => {
+    const lead =
+      'Soccer Practice and Blue Fall Practice overlap today at 5:30 PM, and you have several security notices requiring review.';
+    const model = mockRouter(
+      [group],
+      'Soccer practice is at 5:30 PM today; one security notice requires review.',
+    );
+    await expect(
+      assessCalendarDuplicates({
+        ownerId: 'display-changed-security',
+        router: model.router,
+        ...request,
+        lead,
+      }),
+    ).rejects.toThrow();
   });
 
   it('fails safely for missing or empty rewrites and ignores rewrites without accepted groups', async () => {

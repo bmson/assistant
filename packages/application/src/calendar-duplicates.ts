@@ -276,6 +276,15 @@ export async function assessCalendarDuplicates(
       !revisedLead?.trim()
     )
       throw new CalendarDuplicateUnavailable();
+    // Preserve the concrete security-review notice even if a model omits it.
+    // This is not a general verifier for the rest of the generated lead.
+    if (
+      'mode' in parsed &&
+      acceptedGroups.length > 0 &&
+      /\bseveral security notices requiring review\b/iu.test(parsed.lead ?? '') &&
+      !/\bseveral security notices (?:require|requiring) review\b/iu.test(revisedLead ?? '')
+    )
+      throw new CalendarDuplicateUnavailable();
     const accepted: Result = {
       groups: acceptedGroups,
       ...(revisedLead === undefined ? {} : { revisedLead }),

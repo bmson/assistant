@@ -43,6 +43,13 @@ describe('mobile calendar duplicate route', () => {
     expect((await POST(request({ events: [events[0], events[0]] }))).status).toBe(400);
     expect(state.assess).not.toHaveBeenCalled();
   });
+  it('rejects oversized request bodies before assessment', async () => {
+    const { POST } = await import('./route');
+    state.auth.mockResolvedValue({ ownerId: 'owner' });
+    state.assess.mockClear();
+    expect((await POST(request({ padding: 'x'.repeat(24_001) }))).status).toBe(413);
+    expect(state.assess).not.toHaveBeenCalled();
+  });
   it('returns owner-bound assessments and exposes failures as unavailable', async () => {
     const { POST } = await import('./route');
     state.auth.mockResolvedValue({ ownerId: 'owner' });
