@@ -1,5 +1,9 @@
 import { googleCalendarReleaseCallback } from '../infra/gcp/google-calendar-release-config.mjs';
 import { disabled, retiredCurrentCondition } from './owner-release-current-snapshot.js';
+import {
+  matchesNativeServiceDigest,
+  nativeServiceDefaults,
+} from './owner-release-native-service-defaults.js';
 /** Unwired raw-response projection. No IO, credentials or supplied-proof acceptance. */
 
 import {
@@ -258,10 +262,14 @@ const OUTPUT = new Set([
   'etag',
   'template',
 ]);
+function stableConfiguration(raw: unknown) {
+  return Object.fromEntries(Object.entries(nativeObject(raw)).filter(([k]) => !OUTPUT.has(k)));
+}
 export function nativeStableConfigurationDigest(raw: unknown) {
-  return digest(
-    Object.fromEntries(Object.entries(nativeObject(raw)).filter(([k]) => !OUTPUT.has(k))),
-  );
+  return digest(nativeServiceDefaults(stableConfiguration(raw)));
+}
+export function matchesNativeStableConfigurationDigest(raw: unknown, expected: string) {
+  return matchesNativeServiceDigest(stableConfiguration(raw), expected, digest);
 }
 /** Bind the reviewed current provider default without changing either raw capture. */
 function currentSemanticTemplate(

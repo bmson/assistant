@@ -110,6 +110,21 @@ describe('sanitized native current web profile compatibility', () => {
     expect(fixture.revision.name).toBe(`${WEB_SERVICE}/revisions/${canonical}`);
   });
 
+  it('keeps native projection stable across sshEnabled absent/false and rejects true drift', () => {
+    const { service, revision, context } = prepareCurrentProfile();
+    const before = JSON.stringify(service);
+    const absent = { ...service };
+    delete absent.sshEnabled;
+    const explicit = { ...absent, sshEnabled: false };
+    expect(project(absent, revision, context)).toEqual(project(explicit, revision, context));
+    expect(JSON.stringify(service)).toBe(before);
+    expect(project({ ...absent, sshEnabled: true }, revision, context).stableConfigSha256).not.toBe(
+      project(absent, revision, context).stableConfigSha256,
+    );
+    for (const value of [null, 0, 'false'])
+      expect(() => project({ ...absent, sshEnabled: value }, revision, context)).toThrow('held');
+  });
+
   it('projects and captures the reviewed current service URLs and defaulted container name', () => {
     const { service, revision, context } = prepareCurrentProfile(),
       beforeService = clone(service),

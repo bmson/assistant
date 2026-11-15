@@ -472,6 +472,59 @@ describe('reviewed current snapshot and bootstrap restoration', () => {
     expect(calls).toEqual(['intent', 'patch', 'intent']);
     expect(records).toMatchObject([{ outcome: 'attempted' }, { outcome: 'unknown' }]);
   });
+  it.each([true, false])(
+    'preserves raw scaling receipts across sshEnabled default flaps (before explicit=%s)',
+    async (explicit) => {
+      const f = fixture();
+      let current: Record<string, unknown> = {
+        ...clone(f.service),
+        ...(explicit ? { sshEnabled: false } : {}),
+      };
+      const original = clone(current);
+      // The action-time reread may use the opposite default representation from its raw pin.
+      const pin = bootstrapDigest(explicit ? f.service : { ...f.service, sshEnabled: false });
+      const records: Record<string, unknown>[] = [];
+      let writes = 0;
+      const io = {
+        now: () => 0,
+        sleep: async () => {},
+        recordIntent: async (value: unknown) => {
+          records.push(value as Record<string, unknown>);
+        },
+        request: async (url: string, opt: { method: string; body?: string }) => {
+          if (opt.method === 'PATCH') {
+            writes++;
+            const body = JSON.parse(opt.body ?? 'null');
+            current = {
+              ...current,
+              scaling: body.scaling,
+              etag: 'etag-3',
+              generation: '3',
+              observedGeneration: '3',
+            };
+            if (explicit) delete current.sshEnabled;
+            else current.sshEnabled = false;
+            return new Response(
+              JSON.stringify({
+                name: 'projects/bmson-assistant/locations/us-west1/operations/op-1',
+                done: true,
+                response: { name: current.name },
+              }),
+            );
+          }
+          return new Response(JSON.stringify(url.includes('/revisions/') ? f.native : current));
+        },
+      };
+      const result = await restoreScaling(io, f.receipt, 'web', f.expected, false, undefined, pin);
+      expect(writes).toBe(1);
+      expect(result.before).toEqual(original);
+      expect(records[0]?.beforeSha256).toBe(bootstrapDigest(original));
+      expect(records[1]?.afterSha256).toBe(bootstrapDigest(result.after));
+      expect(records[1]?.outcome).toBe('completed');
+      expect(bootstrapDigest(result.before)).not.toBe(bootstrapDigest(result.after));
+    },
+  );
+
   it('restores captured automatic scaling with an etag-only scaling mask and preserves every other setting', async () => {
     const f = fixture();
     let current = clone(f.service);

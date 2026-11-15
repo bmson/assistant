@@ -1,3 +1,4 @@
+import { nativeServiceDefaults } from './owner-release-native-service-defaults.js';
 /** Fixed-service BASIC5 rollout barrier. Called only by the protected paired release. */
 
 import { createHash } from 'node:crypto';
@@ -28,6 +29,7 @@ import {
   runPairedWebLifecyclePhase,
 } from './owner-web-release-native-controller.js';
 import {
+  matchesNativeStableConfigurationDigest,
   nativeStableConfigurationDigest,
   projectNativeWebSnapshot,
   TEMPLATE_FIELDS,
@@ -584,7 +586,10 @@ export async function runWebTagAdmission(mode: string | undefined) {
         accepted.image !== rec(rec(manifest.components).agent).image ||
         accepted.manifest !== manifestDigest ||
         accepted.uidSha256 !== bootstrapDigest(revision.uid) ||
-        accepted.serviceStableConfigSha256 !== nativeStableConfigurationDigest(beforeScaling)
+        !matchesNativeStableConfigurationDigest(
+          beforeScaling,
+          String(accepted.serviceStableConfigSha256),
+        )
       )
         throw new Error('Agent successor receipt/config changed');
       const template = { ...rec(beforeScaling.template) };
@@ -621,7 +626,11 @@ export async function runWebTagAdmission(mode: string | undefined) {
       restoredConfiguration,
       bootstrapDigest(beforeScaling),
     );
-    if (role === 'web' && bootstrapDigest(result.before) !== bootstrapDigest(result.after)) {
+    if (
+      role === 'web' &&
+      bootstrapDigest(nativeServiceDefaults(result.before)) !==
+        bootstrapDigest(nativeServiceDefaults(result.after))
+    ) {
       const native: Record<string, unknown> = {};
       for (const name of Object.keys(state.snapshot.revisions))
         native[name] = await io.readRevision(name);

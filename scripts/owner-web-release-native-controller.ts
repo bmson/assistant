@@ -1,4 +1,5 @@
 import { googleCalendarReleaseCallback } from '../infra/gcp/google-calendar-release-config.mjs';
+import { matchesNativeServiceDigest } from './owner-release-native-service-defaults.js';
 /** Fixed BASIC5 paired web lifecycle controller; caller supplies protected transport and operator hold verifier. */
 
 import { nativeWebCreationFixtureClient } from './owner-web-release-creation-client.js';
@@ -144,7 +145,11 @@ export function initializePairedWebLifecycle(
   const rows = traffic as Array<Record<string, unknown>>;
   if (context.currentBinding) {
     if (
-      reconciliationDigest(rawService) !== context.currentBinding.serviceSha256 ||
+      !matchesNativeServiceDigest(
+        rawService,
+        context.currentBinding.serviceSha256,
+        reconciliationDigest,
+      ) ||
       reconciliationDigest(nativeRevisions[context.canonical]) !==
         context.currentBinding.revisionSha256 ||
       rows.some((row) => row.revision !== context.canonical) ||
