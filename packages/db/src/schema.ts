@@ -2187,11 +2187,33 @@ export const estimatedCostRequests = pgTable('estimated_cost_requests', {
     .references(() => tasks.id),
   requestFingerprint: text('request_fingerprint').notNull(),
   bindingDigest: text('binding_digest').notNull(),
+  sourceBinding: jsonb('source_binding').notNull(),
   state: text('state').notNull(),
   quote: jsonb('quote').notNull(),
   baseline: jsonb('baseline').notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+/** Durable identity for quote preparation retries; a refresh never mints twice. */
+export const estimatedCostQuoteRequests = pgTable('estimated_cost_quote_requests', {
+  quoteRequestId: text('quote_request_id').primaryKey(),
+  operationId: text('operation_id')
+    .notNull()
+    .references(() => estimatedCostRequests.operationId),
+  requestDigest: text('request_digest').notNull(),
+  quoteId: text('quote_id').notNull(),
+  quoteVersion: text('quote_version').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+/** Frozen before activation; digest is SHA-256 of JSON.stringify(sorted canonical rows). */
+export const estimatedCostBaselines = pgTable('estimated_cost_baselines', {
+  installationId: text('installation_id').primaryKey(),
+  ownerId: text('owner_id').notNull(),
+  digest: text('digest').notNull(),
+  rows: jsonb('rows').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
 export const estimatedCostDecisions = pgTable('estimated_cost_decisions', {

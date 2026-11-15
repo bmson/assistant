@@ -805,11 +805,27 @@ export interface Records {
     taskId: string;
     requestFingerprint: string;
     bindingDigest: string;
+    sourceBinding: unknown;
     state: string;
     quote: unknown;
     baseline: unknown;
     createdAt: Date;
     updatedAt: Date;
+  };
+  estimatedCostBaselines: {
+    installationId: string;
+    ownerId: string;
+    digest: string;
+    rows: unknown;
+    createdAt: Date;
+  };
+  estimatedCostQuoteRequests: {
+    quoteRequestId: string;
+    operationId: string;
+    requestDigest: string;
+    quoteId: string;
+    quoteVersion: string;
+    createdAt: Date;
   };
   estimatedCostDecisions: {
     decisionId: string;

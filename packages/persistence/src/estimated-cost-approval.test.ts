@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
+  canonicalEstimatedCostJson,
   type EstimatedCostHeadroom,
   estimatedCostAllowance,
   estimatedCostAllowanceExpiry,
+  estimatedCostConnectionId,
   estimatedCostQuoteMatches,
   parseEstimatedCostQuote,
+  parseHistoricalUnknownBaseline,
   verifiedHistoricalUnknownMicros,
 } from './estimated-cost-approval.js';
 
@@ -22,6 +25,34 @@ const snapshot: EstimatedCostHeadroom = {
 };
 
 describe('estimated cost allowance', () => {
+  it('canonicalizes bound rows without implicit non-JSON coercion', () => {
+    expect(canonicalEstimatedCostJson({ z: [2, { b: true, a: null }], a: 'x' })).toBe(
+      '{"a":"x","z":[2,{"a":null,"b":true}]}',
+    );
+    expect(() => canonicalEstimatedCostJson({ changed: undefined })).toThrow();
+    expect(() => canonicalEstimatedCostJson(new Date())).toThrow();
+    expect(() => canonicalEstimatedCostJson(Number.NaN)).toThrow();
+    expect(
+      ['vertex:model', 'openai:model', 'gw:private:model', 'other/model'].map(
+        estimatedCostConnectionId,
+      ),
+    ).toEqual(['vertex', 'openai', 'private', 'openrouter']);
+  });
+  it('accepts only a bounded, sorted, unambiguous frozen baseline', () => {
+    const row = { reservationId: 'old', estimatedMicros: 10 };
+    expect(parseHistoricalUnknownBaseline([row])).toEqual([row]);
+    expect(parseHistoricalUnknownBaseline([row, row])).toBeNull();
+    expect(parseHistoricalUnknownBaseline([{ ...row, estimatedMicros: 0 }])).toBeNull();
+    expect(parseHistoricalUnknownBaseline([{ ...row, unknown: true }])).toBeNull();
+    expect(
+      parseHistoricalUnknownBaseline(
+        Array.from({ length: 501 }, (_, index) => ({
+          reservationId: String(index),
+          estimatedMicros: 1,
+        })),
+      ),
+    ).toBeNull();
+  });
   it('requires a quote to match all current exposure components exactly', () => {
     const current = { ...snapshot, pendingOtherMicros: 100 };
     const quote = {

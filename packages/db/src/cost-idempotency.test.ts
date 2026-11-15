@@ -155,6 +155,7 @@ describe('PostgreSQL idempotent cost events', () => {
       taskId,
       requestFingerprint: 'request',
       bindingDigest: 'binding',
+      sourceBinding: {},
       state: 'approved',
       quote,
       baseline: {},
@@ -198,6 +199,7 @@ describe('PostgreSQL idempotent cost events', () => {
       taskId,
       requestFingerprint: 'other-request',
       bindingDigest: 'other-binding',
+      sourceBinding: {},
       state: 'pending',
       quote: { ...quote, operationId: pendingOperationId, quoteId: 'other-quote' },
       baseline: {},
@@ -444,19 +446,18 @@ describe('PostgreSQL idempotent cost events', () => {
     await db
       .insert(tasks)
       .values({ id: otherTaskId, agentId, type: 'chat_turn', trust: 'owner', status: 'pending' });
-    await db
-      .insert(estimatedCostRequests)
-      .values({
-        operationId,
-        installationId: 'install',
-        ownerId: agentId,
-        taskId,
-        requestFingerprint: fingerprint,
-        bindingDigest: 'binding',
-        state: 'pending',
-        quote,
-        baseline: [],
-      });
+    await db.insert(estimatedCostRequests).values({
+      operationId,
+      installationId: 'install',
+      ownerId: agentId,
+      taskId,
+      requestFingerprint: fingerprint,
+      bindingDigest: 'binding',
+      sourceBinding: {},
+      state: 'pending',
+      quote,
+      baseline: [],
+    });
     const repo = createPostgresEstimatedCostApprovalRepository(db);
     const actor = { installationId: 'install', ownerId: agentId };
     const decision = {
@@ -572,6 +573,58 @@ describe('PostgreSQL idempotent cost events', () => {
       .where(eq(costEvents.reservationId, reservation.reservationId));
     expect(events).toHaveLength(1);
     expect(events[0]?.usd).toBe('0.100000');
+  });
+
+  it('serializes an unknown transition with the cost ledger fence', async () => {
+    const costs = createPostgresCostRepository(db);
+    const reservation = await costs.reserve({ source: 'model', estimatedUsd: 0.2, taskId });
+    if (!reservation.ok) throw new Error('Fixture failed to reserve');
+    reservationIds.push(reservation.reservationId);
+    await db
+      .update(costReservations)
+      .set({ status: 'dispatching', attemptStartedAt: new Date() })
+      .where(eq(costReservations.id, reservation.reservationId));
+    let unlock!: () => void;
+    let locked!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      locked = resolve;
+    });
+    const release = new Promise<void>((resolve) => {
+      unlock = resolve;
+    });
+    const blocker = db.transaction(async (tx) => {
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtext('assistant:cost-reservations'))`);
+      locked();
+      await release;
+    });
+    await ready;
+    const transition = costs.markAttemptUnknown(reservation.reservationId, 'uncertain');
+    try {
+      let waiting = false;
+      for (let i = 0; i < 100; i++) {
+        const rows = await db.execute(
+          sql`select 1 from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock' and query ilike '%pg_advisory_xact_lock%'`,
+        );
+        if (rows.length) {
+          waiting = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(waiting).toBe(true);
+    } finally {
+      unlock();
+      await blocker;
+    }
+    await transition;
+    expect(
+      (
+        await db
+          .select()
+          .from(costReservations)
+          .where(eq(costReservations.id, reservation.reservationId))
+      )[0]?.status,
+    ).toBe('unknown');
   });
 
   it('records one ledger event and one task-spend increment after replay', async () => {

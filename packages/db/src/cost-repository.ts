@@ -538,7 +538,8 @@ export interface CostEventInput {
  * spend before a reconciliation commits and held reservations afterward,
  * briefly counting the same provider call as neither held nor spent.
  */
-async function lockCostLedger(db: Db): Promise<void> {
+/** Shared by the dedicated estimated-cost transaction module. */
+export async function lockCostLedger(db: Db): Promise<void> {
   await db.execute(sql`select pg_advisory_xact_lock(hashtext('assistant:cost-reservations'))`);
 }
 
@@ -826,24 +827,27 @@ export async function markCostAttemptUnknown(
   reason: string,
   providerReceipt?: { requestId?: string; endpoint?: string },
 ): Promise<void> {
-  await db
-    .update(costReservations)
-    .set({
-      status: 'unknown',
-      unknownReason: reason.slice(0, 500),
-      ...(providerReceipt
-        ? {
-            attemptMetadata: sql`coalesce(${costReservations.attemptMetadata}, '{}'::jsonb) || ${JSON.stringify(providerReceipt)}::jsonb`,
-          }
-        : {}),
-    })
-    .where(
-      and(
-        eq(costReservations.id, reservationId),
-        eq(costReservations.reservationKind, 'attempt'),
-        inArray(costReservations.status, ['dispatching', 'unknown']),
-      ),
-    );
+  await db.transaction(async (tx) => {
+    await lockCostLedger(tx as unknown as Db);
+    await tx
+      .update(costReservations)
+      .set({
+        status: 'unknown',
+        unknownReason: reason.slice(0, 500),
+        ...(providerReceipt
+          ? {
+              attemptMetadata: sql`coalesce(${costReservations.attemptMetadata}, '{}'::jsonb) || ${JSON.stringify(providerReceipt)}::jsonb`,
+            }
+          : {}),
+      })
+      .where(
+        and(
+          eq(costReservations.id, reservationId),
+          eq(costReservations.reservationKind, 'attempt'),
+          inArray(costReservations.status, ['dispatching', 'unknown']),
+        ),
+      );
+  });
 }
 
 /** Reconcile a held reservation to actuals: release the hold, write the ledger row. */

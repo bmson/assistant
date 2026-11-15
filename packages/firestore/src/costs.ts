@@ -727,6 +727,14 @@ export class FirestoreCostRepository implements CostRepository {
           !['dispatching', 'unknown'].includes(String(reservation.get('status')))
         )
           return;
+        const holdsRef = this.store.doc('coordination', 'budget-holds');
+        const holds = await tx.get(holdsRef);
+        if (
+          !holds.exists ||
+          integer(holds, 'heldMicros') < storedLedgerUsdToMicros(reservation.get('estimatedUsd'))
+        )
+          throw new Error('Missing budget hold for unknown attempt');
+        tx.set(holdsRef, { heldMicros: integer(holds, 'heldMicros') });
         tx.update(ref, {
           status: 'unknown',
           unknownReason: reason.slice(0, 500),
@@ -991,6 +999,14 @@ export class FirestoreCostRepository implements CostRepository {
               current.get('reservationKind') !== 'attempt')
           )
             return false;
+          const holdsRef = this.store.doc('coordination', 'budget-holds');
+          const holds = await tx.get(holdsRef);
+          if (
+            !holds.exists ||
+            integer(holds, 'heldMicros') < storedLedgerUsdToMicros(current.get('estimatedUsd'))
+          )
+            throw new Error('Missing budget hold for unknown attempt');
+          tx.set(holdsRef, { heldMicros: integer(holds, 'heldMicros') });
           tx.update(ref, {
             status: 'unknown',
             unknownReason: 'provider dispatch exceeded reconciliation window',

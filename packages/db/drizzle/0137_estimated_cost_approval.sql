@@ -1,3 +1,11 @@
+CREATE TABLE "estimated_cost_baselines" (
+	"installation_id" text PRIMARY KEY NOT NULL,
+	"owner_id" text NOT NULL,
+	"digest" text NOT NULL,
+	"rows" jsonb NOT NULL,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
 CREATE TABLE "estimated_cost_decisions" (
 	"decision_id" text PRIMARY KEY NOT NULL,
 	"operation_id" text NOT NULL,
@@ -24,6 +32,7 @@ CREATE TABLE "estimated_cost_requests" (
 	"task_id" uuid NOT NULL,
 	"request_fingerprint" text NOT NULL,
 	"binding_digest" text NOT NULL,
+	"source_binding" jsonb NOT NULL,
 	"state" text NOT NULL,
 	"quote" jsonb NOT NULL,
 	"baseline" jsonb NOT NULL,
@@ -33,6 +42,17 @@ CREATE TABLE "estimated_cost_requests" (
 --> statement-breakpoint
 ALTER TABLE "cost_reservations" ADD COLUMN "reservation_kind" text DEFAULT 'attempt' NOT NULL;--> statement-breakpoint
 ALTER TABLE "cost_reservations" ADD COLUMN "cost_grant_id" uuid;--> statement-breakpoint
+CREATE TABLE "estimated_cost_quote_requests" (
+	"quote_request_id" text PRIMARY KEY NOT NULL,
+	"operation_id" text NOT NULL,
+	"request_digest" text NOT NULL,
+	"quote_id" text NOT NULL,
+	"quote_version" text NOT NULL,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
+ALTER TABLE "estimated_cost_quote_requests" ADD CONSTRAINT "estimated_cost_quote_requests_operation_id_estimated_cost_requests_operation_id_fk" FOREIGN KEY ("operation_id") REFERENCES "public"."estimated_cost_requests"("operation_id") ON DELETE no action ON UPDATE no action;
+--> statement-breakpoint
 ALTER TABLE "estimated_cost_decisions" ADD CONSTRAINT "estimated_cost_decisions_operation_id_estimated_cost_requests_operation_id_fk" FOREIGN KEY ("operation_id") REFERENCES "public"."estimated_cost_requests"("operation_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "estimated_cost_grants" ADD CONSTRAINT "estimated_cost_grants_operation_id_estimated_cost_requests_operation_id_fk" FOREIGN KEY ("operation_id") REFERENCES "public"."estimated_cost_requests"("operation_id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "estimated_cost_grants" ADD CONSTRAINT "estimated_cost_grants_escrow_reservation_id_cost_reservations_id_fk" FOREIGN KEY ("escrow_reservation_id") REFERENCES "public"."cost_reservations"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint

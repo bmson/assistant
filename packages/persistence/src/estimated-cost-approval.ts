@@ -479,6 +479,33 @@ export interface HistoricalUnknownBaselineRow {
   estimatedMicros: number;
 }
 
+/** Exact canonical frozen IDs and microdollar estimates, sorted by ID. The
+ * stored digest is SHA-256 over UTF-8 JSON.stringify of the parsed rows. */
+export function parseHistoricalUnknownBaseline(
+  value: unknown,
+): HistoricalUnknownBaselineRow[] | null {
+  if (!Array.isArray(value) || value.length > 500) return null;
+  const rows: HistoricalUnknownBaselineRow[] = [];
+  let previous = '';
+  for (const item of value) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+    const row = item as Record<string, unknown>;
+    if (
+      Object.keys(row).length !== 2 ||
+      typeof row.reservationId !== 'string' ||
+      !row.reservationId ||
+      row.reservationId <= previous ||
+      typeof row.estimatedMicros !== 'number' ||
+      !Number.isSafeInteger(row.estimatedMicros) ||
+      row.estimatedMicros <= 0
+    )
+      return null;
+    previous = row.reservationId;
+    rows.push({ reservationId: row.reservationId, estimatedMicros: row.estimatedMicros });
+  }
+  return rows;
+}
+
 /** Internal trusted preparation; never constructed from an HTTP request body. */
 export interface EstimatedCostPreparedQuote {
   actor: EstimatedCostActor;
@@ -488,9 +515,46 @@ export interface EstimatedCostPreparedQuote {
   leaseToken: string | null;
   requestFingerprint: string;
   bindingDigest: string;
+  /** Hashes of canonical source rows and the router's captured request digest. */
+  sourceBinding: EstimatedCostSourceBinding;
   critical: boolean;
   quote: EstimatedCostQuote;
   baseline: HistoricalUnknownBaselineRow[];
+}
+
+export interface EstimatedCostSourceBinding {
+  role: string;
+  selectedModelId: string;
+  routingDigest: string;
+  roleRowDigest: string;
+  modelRows: { id: string; digest: string }[];
+  connectionRows: { id: string; digest: string }[];
+  budgetRows: { scope: 'daily' | 'monthly'; digest: string }[];
+  privacyGeneration: string | null;
+}
+
+/** Canonical JSON for hashing source rows. Only JSON values are accepted; no
+ * undefined, NaN, Date objects or implicit coercion can change a binding. */
+export function canonicalEstimatedCostJson(value: unknown): string {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean')
+    return JSON.stringify(value);
+  if (typeof value === 'number' && Number.isFinite(value)) return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalEstimatedCostJson).join(',')}]`;
+  if (!value || typeof value !== 'object' || Object.getPrototypeOf(value) !== Object.prototype)
+    throw new Error('Invalid binding value');
+  const object = value as Record<string, unknown>;
+  return `{${Object.keys(object)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${canonicalEstimatedCostJson(object[key])}`)
+    .join(',')}}`;
+}
+
+/** Must agree with the model router's configured connection selection. */
+export function estimatedCostConnectionId(modelId: string): string {
+  if (/^vertex[:/]/i.test(modelId)) return 'vertex';
+  if (modelId.startsWith('openai:')) return 'openai';
+  const gateway = /^gw:([^:]+):/.exec(modelId);
+  return gateway?.[1] ?? 'openrouter';
 }
 
 /** Internal chat-turn boundary. The candidate is produced by the server router,
@@ -567,6 +631,31 @@ export interface EstimatedCostParkInput {
 export interface CurrentBaselineReservation extends HistoricalUnknownBaselineRow {
   status: string;
   provenance: 'proven-historical-unapproved' | 'grant-linked' | 'unrecognized';
+}
+
+/** Re-read every frozen row. Settled rows contribute zero; missing or changed
+ * rows make the whole subtotal unavailable rather than creating credit. */
+export function currentHistoricalUnknownMicros(
+  baseline: readonly HistoricalUnknownBaselineRow[],
+  current: readonly CurrentBaselineReservation[],
+): number | null {
+  if (baseline.length !== current.length) return null;
+  const byId = new Map(current.map((row) => [row.reservationId, row]));
+  if (byId.size !== current.length) return null;
+  let total = 0;
+  for (const expected of baseline) {
+    const row = byId.get(expected.reservationId);
+    if (
+      row?.provenance !== 'proven-historical-unapproved' ||
+      row.estimatedMicros !== expected.estimatedMicros
+    )
+      return null;
+    if (row.status === 'reconciled' || row.status === 'released') continue;
+    if (row.status !== 'unknown') return null;
+    total += row.estimatedMicros;
+    if (!Number.isSafeInteger(total)) return null;
+  }
+  return total;
 }
 
 /** Verify the exact frozen baseline before using it in a new quote or decision. */
