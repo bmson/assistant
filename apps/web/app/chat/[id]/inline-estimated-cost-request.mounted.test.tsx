@@ -1,7 +1,11 @@
 // @vitest-environment jsdom
 
 import { webcrypto } from 'node:crypto';
-import type { EstimatedCostDecision, EstimatedCostQuote } from '@assistant/persistence';
+import type {
+  EstimatedCostBudgetTracking,
+  EstimatedCostDecision,
+  EstimatedCostQuote,
+} from '@assistant/persistence';
 import { act, StrictMode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -34,14 +38,32 @@ function quote(operationId = 'request-a'): EstimatedCostQuote {
     canApprove: true,
   };
 }
+function tracking(
+  overrides: Partial<EstimatedCostBudgetTracking> = {},
+): EstimatedCostBudgetTracking {
+  return {
+    observedAt: new Date().toISOString(),
+    complete: true,
+    recordedDailyMicros: 270_000,
+    recordedMonthlyMicros: 2_710_000,
+    totalHeldMicros: 5_760_000,
+    historicalUnknownMicros: 5_760_000,
+    pendingApprovalMicros: 200_000,
+    dailyPlannedExposureMicros: 6_230_000,
+    monthlyPlannedExposureMicros: 8_670_000,
+    ...overrides,
+  };
+}
 function transport(): EstimatedCostTransport {
   return {
     read: vi.fn<EstimatedCostTransport['read']>(async (operationId) => ({
       ok: true,
+      tracking: tracking(),
       request: { status: 'pending', operationId, quote: quote(operationId) },
     })),
     refresh: vi.fn<EstimatedCostTransport['refresh']>(async ({ operationId }) => ({
       ok: true,
+      tracking: tracking(),
       request: {
         status: 'pending',
         operationId,
@@ -93,11 +115,136 @@ async function mount(api: EstimatedCostTransport) {
 }
 
 describe('mounted request-scoped estimated spending approval', () => {
+  it('does not reuse an old complete balance after a newer canonical check fails', async () => {
+    const api = transport();
+    await mount(api);
+    expect(
+      [...container.querySelectorAll('button')].find((b) => b.textContent?.includes('Approve'))
+        ?.disabled,
+    ).toBe(false);
+    api.read = vi.fn<EstimatedCostTransport['read']>(async () => {
+      throw new Error('Budget read unavailable');
+    });
+    await click('Check request');
+    expect(container.textContent).toContain('Current budget tracking is unavailable');
+    expect(
+      [...container.querySelectorAll('button')].find((b) => b.textContent?.includes('Approve'))
+        ?.disabled,
+    ).toBe(true);
+    expect(
+      [...container.querySelectorAll('button')].find((b) => b.textContent?.includes('Decline'))
+        ?.disabled,
+    ).toBe(false);
+    expect(api.decide).not.toHaveBeenCalled();
+  });
+  it('shows live B spending separately from A’s immutable quote and moves an approved A out of pending exactly once', async () => {
+    const api = transport();
+    const current = tracking({
+      recordedDailyMicros: 280_000,
+      recordedMonthlyMicros: 2_720_000,
+      dailyPlannedExposureMicros: 6_240_000,
+      monthlyPlannedExposureMicros: 8_680_000,
+    });
+    api.read = vi.fn<EstimatedCostTransport['read']>(async (operationId) => ({
+      ok: true,
+      request: { status: 'pending', operationId, quote: quote() },
+      tracking: current,
+    }));
+    await mount(api);
+    expect(container.textContent).toContain('budget changed');
+    expect(container.textContent).toContain('$6.24');
+    expect(
+      [...container.querySelectorAll('button')].find((b) => b.textContent?.includes('Approve'))
+        ?.disabled,
+    ).toBe(true);
+    const revised = {
+      ...quote(),
+      quoteId: 'revised',
+      recordedDailyMicros: 280_000,
+      recordedMonthlyMicros: 2_720_000,
+      dailyProjectedGrossMicros: 6_240_000,
+      monthlyProjectedGrossMicros: 8_680_000,
+    };
+    api.refresh = vi.fn<EstimatedCostTransport['refresh']>(async ({ operationId }) => ({
+      ok: true,
+      request: { status: 'pending', operationId, quote: revised },
+      tracking: current,
+    }));
+    await click('Refresh estimate');
+    api.decide = vi.fn<EstimatedCostTransport['decide']>(async (decision) => ({
+      ok: true,
+      receipt: {
+        operationId: decision.operationId,
+        quoteId: decision.quoteId,
+        decisionId: decision.decisionId,
+        status: 'approved',
+        allowanceMicros: 200_000,
+        expiresAt: new Date(Date.now() + 600_000).toISOString(),
+      },
+    }));
+    api.read = vi.fn<EstimatedCostTransport['read']>(async (operationId) => ({
+      ok: true,
+      request: {
+        status: 'approved',
+        operationId,
+        quote: revised,
+        grantExpiresAt: new Date(Date.now() + 600_000).toISOString(),
+      },
+      tracking: { ...current, totalHeldMicros: 5_960_000, pendingApprovalMicros: 0 },
+    }));
+    await click('Approve $0.20');
+    await click('Approve $0.20?');
+    const pendingRow = [...container.querySelectorAll('tr')].find((row) =>
+      row.textContent?.includes('Awaiting approval'),
+    );
+    expect(pendingRow?.textContent).toBe('Awaiting approval · planned$0.00$0.00');
+    const heldRow = [...container.querySelectorAll('tr')].find((row) =>
+      row.textContent?.includes('Reserved or unresolved'),
+    );
+    expect(heldRow?.textContent).toBe('Reserved or unresolved$5.96$5.96');
+    expect(container.textContent).toContain('$6.24');
+    expect(api.decide).toHaveBeenCalledTimes(1);
+  });
+
+  it('never replaces missing live tracking or a null amount with a historical quote balance or zero', async () => {
+    const api = transport();
+    api.read = vi.fn<EstimatedCostTransport['read']>(async (operationId) => ({
+      ok: true,
+      request: { status: 'pending', operationId, quote: quote() },
+      tracking: null,
+    }));
+    await mount(api);
+    expect(container.textContent).toContain('Current budget tracking is unavailable');
+    expect(container.textContent).not.toContain('Planned total');
+    expect(
+      [...container.querySelectorAll('button')].find((b) => b.textContent?.includes('Approve'))
+        ?.disabled,
+    ).toBe(true);
+    api.read = vi.fn<EstimatedCostTransport['read']>(async (operationId) => ({
+      ok: true,
+      request: { status: 'pending', operationId, quote: quote() },
+      tracking: tracking({
+        complete: false,
+        recordedDailyMicros: null,
+        dailyPlannedExposureMicros: null,
+      }),
+    }));
+    await click('Check request');
+    const row = [...container.querySelectorAll('tr')].find((row) =>
+      row.textContent?.includes('Recorded spending'),
+    );
+    expect(row?.textContent).toBe('Recorded spendingUnavailable$2.71');
+    expect(
+      [...container.querySelectorAll('button')].find((b) => b.textContent?.includes('Approve'))
+        ?.disabled,
+    ).toBe(true);
+  });
   it('stops presenting unused approved authority as available when its clock expires without a refresh', async () => {
     vi.useFakeTimers();
     const api = transport();
     api.read = vi.fn<EstimatedCostTransport['read']>(async (operationId) => ({
       ok: true,
+      tracking: tracking(),
       request: {
         status: 'approved',
         operationId,
@@ -112,7 +259,7 @@ describe('mounted request-scoped estimated spending approval', () => {
     });
     expect(container.textContent).toContain('Unused allowance expired');
     expect(container.textContent).not.toContain('Available until');
-    expect(container.textContent).not.toContain('Planned total');
+    expect(container.textContent).toContain('Budget last checked');
     expect(api.read).toHaveBeenCalledTimes(1);
     expect(api.decide).not.toHaveBeenCalled();
   });
@@ -167,6 +314,7 @@ describe('mounted request-scoped estimated spending approval', () => {
     // A generic approved read is not a receipt for this client's decision.
     api.read = vi.fn<EstimatedCostTransport['read']>(async (operationId) => ({
       ok: true,
+      tracking: tracking(),
       request: {
         status: 'approved',
         operationId,
@@ -236,6 +384,7 @@ describe('mounted request-scoped estimated spending approval', () => {
     // This is a later canonical lifecycle, not proof of the decision POST itself.
     api.read = vi.fn<EstimatedCostTransport['read']>(async (operationId) => ({
       ok: true,
+      tracking: null,
       request: { status: 'cancelled', operationId, quote: quote() },
     }));
     await click('Approve $0.20');
@@ -246,6 +395,7 @@ describe('mounted request-scoped estimated spending approval', () => {
     const next = { ...quote(), quoteId: 'next-quote', quoteVersion: 'v2' };
     api.read = vi.fn<EstimatedCostTransport['read']>(async (operationId) => ({
       ok: true,
+      tracking: tracking(),
       request: { status: 'pending', operationId, quote: next },
     }));
     await act(async () =>
@@ -301,6 +451,7 @@ describe('mounted request-scoped estimated spending approval', () => {
       )
       .mockImplementation(async (operationId) => ({
         ok: true,
+        tracking: tracking(),
         request: { status: 'pending', operationId, quote: quote(operationId) },
       }));
     await mount(api);
@@ -319,6 +470,7 @@ describe('mounted request-scoped estimated spending approval', () => {
     await act(async () =>
       resolveOld({
         ok: true,
+        tracking: tracking(),
         request: { status: 'declined', operationId: 'request-a', quote: quote() },
       }),
     );
@@ -331,6 +483,7 @@ describe('mounted request-scoped estimated spending approval', () => {
     const api = transport();
     api.read = vi.fn<EstimatedCostTransport['read']>(async (operationId) => ({
       ok: true,
+      tracking: tracking(),
       request: {
         status: 'pending',
         operationId,

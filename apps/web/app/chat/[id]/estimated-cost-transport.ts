@@ -1,5 +1,6 @@
 import {
   ESTIMATED_COST_ROUTES,
+  type EstimatedCostBudgetTracking,
   type EstimatedCostDecision,
   type EstimatedCostDecisionResponse,
   type EstimatedCostQuoteRequest,
@@ -26,6 +27,29 @@ const outcomes = new Set([
   'unavailable',
   'unconfirmed',
 ]);
+
+const trackingAmounts = [
+  'recordedDailyMicros',
+  'recordedMonthlyMicros',
+  'totalHeldMicros',
+  'historicalUnknownMicros',
+  'pendingApprovalMicros',
+  'dailyPlannedExposureMicros',
+  'monthlyPlannedExposureMicros',
+] as const;
+function trackingPayload(value: unknown): value is EstimatedCostBudgetTracking {
+  return (
+    record(value) &&
+    typeof value.observedAt === 'string' &&
+    Number.isFinite(Date.parse(value.observedAt)) &&
+    typeof value.complete === 'boolean' &&
+    trackingAmounts.every(
+      (key) =>
+        (value[key] === null && !value.complete) ||
+        (typeof value[key] === 'number' && Number.isSafeInteger(value[key]) && value[key] >= 0),
+    )
+  );
+}
 
 function validError(value: Record<string, unknown>, operationId: string): boolean {
   return (
@@ -75,6 +99,11 @@ function quoteResponse(value: unknown, operationId: string): EstimatedCostQuoteR
   if (status === 'unavailable' && typeof request.reason !== 'string') {
     throw new Error('The request state is unavailable.');
   }
+  if (value.tracking !== null && value.tracking !== undefined && !trackingPayload(value.tracking))
+    throw new Error('Current budget tracking could not be read.');
+  // An older compatible read without tracking is unknown, never a zero balance.
+  if (value.tracking === undefined)
+    return { ...value, tracking: null } as EstimatedCostQuoteResponse;
   return value as EstimatedCostQuoteResponse;
 }
 

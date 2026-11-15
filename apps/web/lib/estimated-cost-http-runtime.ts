@@ -1,12 +1,38 @@
-import { createUnavailableEstimatedCostApprovalService } from '@assistant/application';
+import { createEstimatedCostApprovalService } from '@assistant/application';
 import { loadConfig, validateAgentPersistenceConfig } from '@assistant/config';
+import { createPostgresEstimatedCostApprovalRepository } from '@assistant/db';
+import { createFirestoreEstimatedCostApprovalRepository } from '@assistant/firestore';
 import { isAuthed } from '@/auth';
-import { assertPostgresInstallationOwner, getDb } from '@/lib/server';
+import {
+  assertPostgresInstallationOwner,
+  getDb,
+  getFirestoreInstallationStore,
+} from '@/lib/server';
 import { isMobileAuthed } from '@/mobile-auth';
 import { handleEstimatedCostHttp } from './estimated-cost-http';
 
-/** Always unavailable until durable storage, pricing binding, and rollout barriers are wired. */
-const service = createUnavailableEstimatedCostApprovalService();
+/** Compatible OFF recovery reads the selected driver's durable state. It cannot
+ * create a quote or grant until the full writer rollout is qualified. */
+function service() {
+  const config = loadConfig();
+  return createEstimatedCostApprovalService({
+    repository:
+      config.PERSISTENCE_DRIVER === 'firestore'
+        ? createFirestoreEstimatedCostApprovalRepository(getFirestoreInstallationStore())
+        : createPostgresEstimatedCostApprovalRepository(getDb()),
+    preparer: {
+      async prepare(_actor, request) {
+        return {
+          ok: false,
+          outcome: 'unavailable',
+          operationId: request.operationId,
+          message: 'Estimated cost approval is unavailable.',
+        };
+      },
+    },
+    enabled: () => false,
+  });
+}
 
 export function estimatedCostHandler(
   request: Request,
@@ -40,6 +66,6 @@ export function estimatedCostHandler(
         ownerId: await assertPostgresInstallationOwner(getDb()),
       };
     },
-    service: () => service,
+    service,
   });
 }

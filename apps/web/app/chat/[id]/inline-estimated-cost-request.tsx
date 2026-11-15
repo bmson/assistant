@@ -1,6 +1,7 @@
 'use client';
 
 import type {
+  EstimatedCostBudgetTracking,
   EstimatedCostDecision,
   EstimatedCostDecisionReceipt,
   EstimatedCostQuote,
@@ -47,6 +48,7 @@ export function InlineEstimatedCostRequest(props: Props) {
 
 function CostRequest({ part, formSessionScope, transport = defaultTransport, storage }: Props) {
   const [request, setRequest] = useState<EstimatedCostRequestProjection | null>(null);
+  const [tracking, setTracking] = useState<EstimatedCostBudgetTracking | null>(null);
   const [unresolved, setUnresolved] = useState<EstimatedCostDecision | null>(null);
   const [receipt, setReceipt] = useState<EstimatedCostDecisionReceipt | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -93,6 +95,7 @@ function CostRequest({ part, formSessionScope, transport = defaultTransport, sto
         if (!current()) return;
         if (!result.ok) throw new Error(result.message);
         setRequest(result.request);
+        setTracking(result.tracking);
         if (pending) {
           const recovery = await transport.receipt(part.operationId, pending.decisionId);
           if (!current()) return;
@@ -112,10 +115,8 @@ function CostRequest({ part, formSessionScope, transport = defaultTransport, sto
       }
     };
     void read();
-    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
     return () => {
       active.current = false;
-      window.clearInterval(timer);
     };
   }, [acceptReceipt, formSessionScope, part.operationId, scope, storage, transport]);
 
@@ -138,14 +139,38 @@ function CostRequest({ part, formSessionScope, transport = defaultTransport, sto
   }
 
   async function readCurrent() {
+    setTracking(null);
     const result = await transport.read(part.operationId);
     if (!active.current) return;
     if (!result.ok) throw new Error(result.message);
     setRequest(result.request);
+    setTracking(result.tracking);
   }
 
   const quote = request?.quote ?? part;
   const pending = request?.status === 'pending';
+  const expiry =
+    request?.status === 'approved' ? request.grantExpiresAt : pending ? quote.expiresAt : null;
+  useEffect(() => {
+    if (!expiry) return;
+    const update = () => setNow(Date.now());
+    update();
+    const remaining = Date.parse(expiry) - Date.now();
+    const timer =
+      remaining > 0 ? window.setTimeout(update, Math.min(2_147_483_647, remaining + 1)) : null;
+    document.addEventListener('visibilitychange', update);
+    return () => {
+      if (timer !== null) window.clearTimeout(timer);
+      document.removeEventListener('visibilitychange', update);
+    };
+  }, [expiry]);
+  const quoteCurrent =
+    tracking?.complete &&
+    tracking.recordedDailyMicros === quote.recordedDailyMicros &&
+    tracking.recordedMonthlyMicros === quote.recordedMonthlyMicros &&
+    tracking.totalHeldMicros === quote.totalHeldMicros &&
+    tracking.historicalUnknownMicros === quote.eligibleHistoricalUnknownMicros &&
+    tracking.pendingApprovalMicros === quote.pendingApprovalMicros;
   const endedHere =
     receipt?.quoteId === quote.quoteId &&
     (receipt?.status === 'approved' || receipt?.status === 'declined');
@@ -153,7 +178,7 @@ function CostRequest({ part, formSessionScope, transport = defaultTransport, sto
 
   function decide(choice: 'approve' | 'decline') {
     if (!canDecide || !journal.current) return;
-    if (choice === 'approve' && !canApproveCostQuote(quote, Date.now())) return;
+    if (choice === 'approve' && (!canApproveCostQuote(quote, Date.now()) || !quoteCurrent)) return;
     void run(choice, async () => {
       const decision: EstimatedCostDecision = {
         operationId: part.operationId,
@@ -165,6 +190,7 @@ function CostRequest({ part, formSessionScope, transport = defaultTransport, sto
       // No POST can start unless this exact intent survived a durable local readback.
       retainCostDecision(journal.current as CostDecisionStorage, scope, decision);
       setUnresolved(decision);
+      setTracking(null);
       const result = await transport.decide(decision);
       if (!active.current) return;
       if (!result.ok)
@@ -249,18 +275,16 @@ function CostRequest({ part, formSessionScope, transport = defaultTransport, sto
             </p>
           ) : null}
         </div>
-        {(pending && Date.parse(quote.expiresAt) <= now) || grantExpired ? (
-          <p role="status" className="mt-3 text-xs text-muted">
-            Check this request for current budget tracking after expiry.
+        <BudgetSummary tracking={tracking} />
+        {pending && tracking?.complete && !quoteCurrent ? (
+          <p role="status" className="mt-2 text-xs text-muted">
+            The budget changed after this estimate. Refresh it before approving.
           </p>
-        ) : endedHere && request?.status !== receipt?.status ? (
-          <p role="status" className="mt-3 text-xs text-muted">
-            Updating budget tracking after this decision. The previous planned total is no longer
-            current.
-          </p>
-        ) : (
-          <BudgetSummary quote={quote} />
-        )}
+        ) : null}
+        <p className="mt-2 text-xs text-muted">
+          Ceilings when estimated: {formatCostMicros(quote.dailyCeilingMicros)} today and{' '}
+          {formatCostMicros(quote.monthlyCeilingMicros)} this month, in UTC periods.
+        </p>
         {receipt ? (
           <p role="status" className="mt-3 text-xs text-muted">
             {receipt.status === 'approved'
@@ -301,10 +325,10 @@ function CostRequest({ part, formSessionScope, transport = defaultTransport, sto
           {pending && !endedHere ? (
             <>
               <ConfirmButton
-                key={quote.quoteId}
+                key={`${quote.quoteId}:${quote.quoteVersion}`}
                 variant="primary"
                 size="sm"
-                disabled={!canDecide || !canApproveCostQuote(quote, now)}
+                disabled={!canDecide || !canApproveCostQuote(quote, now) || !quoteCurrent}
                 pending={action === 'approve'}
                 pendingLabel="Approving…"
                 confirmLabel={`Approve ${formatCostMicros(quote.allowanceMicros)}?`}
@@ -355,6 +379,7 @@ function CostRequest({ part, formSessionScope, transport = defaultTransport, sto
               disabled={!!action}
               onClick={() =>
                 void run('refresh', async () => {
+                  setTracking(null);
                   const result = await transport.refresh({
                     operationId: part.operationId,
                     quoteRequestId: await costQuoteRefreshId(quote),
@@ -362,6 +387,7 @@ function CostRequest({ part, formSessionScope, transport = defaultTransport, sto
                   if (!active.current) return;
                   if (!result.ok) throw new Error(result.message);
                   setRequest(result.request);
+                  setTracking(result.tracking);
                   setReceipt(null);
                 })
               }
@@ -390,19 +416,28 @@ function message(cause: unknown) {
   return cause instanceof Error ? cause.message : 'This request could not be checked.';
 }
 
-function BudgetSummary({ quote }: { quote: EstimatedCostQuote }) {
+function BudgetSummary({ tracking }: { tracking: EstimatedCostBudgetTracking | null }) {
+  if (!tracking)
+    return (
+      <div className="mt-3 rounded-xl border border-edge/60 bg-sunken p-3">
+        <p role="status" className="text-xs text-muted">
+          Current budget tracking is unavailable. Check this request before approving; an
+          unavailable amount is not zero.
+        </p>
+      </div>
+    );
   const rows = [
-    ['Recorded spending', quote.recordedDailyMicros, quote.recordedMonthlyMicros],
-    ['Reserved or unresolved', quote.totalHeldMicros, quote.totalHeldMicros],
-    ['Awaiting approval · planned', quote.pendingApprovalMicros, quote.pendingApprovalMicros],
-    ['Planned total', quote.dailyProjectedGrossMicros, quote.monthlyProjectedGrossMicros],
-    ['Spending limit', quote.dailyCeilingMicros, quote.monthlyCeilingMicros],
+    ['Recorded spending', tracking.recordedDailyMicros, tracking.recordedMonthlyMicros],
+    ['Reserved or unresolved', tracking.totalHeldMicros, tracking.totalHeldMicros],
+    ['Awaiting approval · planned', tracking.pendingApprovalMicros, tracking.pendingApprovalMicros],
+    ['Planned total', tracking.dailyPlannedExposureMicros, tracking.monthlyPlannedExposureMicros],
   ] as const;
   return (
     <div className="mt-3 overflow-x-auto rounded-xl border border-edge/60 bg-sunken p-3">
       <table className="w-full text-left text-xs tabular-nums">
         <caption className="mb-2 text-left font-medium">
-          Budget tracking · UTC periods{quote.complete ? '' : ' · incomplete'}
+          Budget last checked {new Date(tracking.observedAt).toLocaleTimeString()} · UTC periods
+          {tracking.complete ? '' : ' · incomplete'}
         </caption>
         <thead>
           <tr>
@@ -423,16 +458,20 @@ function BudgetSummary({ quote }: { quote: EstimatedCostQuote }) {
               <th scope="row" className="py-2 pr-2 font-normal">
                 {label}
               </th>
-              <td className="px-2 py-2 text-right">{formatCostMicros(daily)}</td>
-              <td className="py-2 pl-2 text-right">{formatCostMicros(monthly)}</td>
+              <td className="px-2 py-2 text-right">
+                {daily === null ? 'Unavailable' : formatCostMicros(daily)}
+              </td>
+              <td className="py-2 pl-2 text-right">
+                {monthly === null ? 'Unavailable' : formatCostMicros(monthly)}
+              </td>
             </tr>
           ))}
         </tbody>
       </table>
-      {quote.eligibleHistoricalUnknownMicros > 0 ? (
+      {tracking.historicalUnknownMicros !== null && tracking.historicalUnknownMicros > 0 ? (
         <p className="mt-2 text-xs text-muted">
-          Reserved or unresolved includes {formatCostMicros(quote.eligibleHistoricalUnknownMicros)}{' '}
-          in historical estimates with an unknown outcome. These are included once and have not been
+          Reserved or unresolved includes {formatCostMicros(tracking.historicalUnknownMicros)} in
+          historical estimates with an unknown outcome. These are included once and have not been
           cleared or confirmed as charges.
         </p>
       ) : null}
