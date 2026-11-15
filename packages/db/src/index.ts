@@ -26,6 +26,10 @@ export { createPostgresEmailAttachmentCustodyRepository } from './email-attachme
 export { createPostgresEmailSyncRepository } from './email-sync-repository.js';
 export * from './entities.js';
 export { capturePostgresEstimatedCostSourceBinding } from './estimated-cost-approval-transactions.js';
+export {
+  createPostgresEstimatedCostQuotePreparer,
+  createPostgresEstimatedCostTurnParking,
+} from './estimated-cost-preparer.js';
 export { createPostgresExecutionContextRepository } from './execution-context-repository.js';
 export { createPostgresExecutionEvidenceRepository } from './execution-evidence-repository.js';
 export { createPostgresExecutionJobRepository } from './execution-jobs-repository.js';

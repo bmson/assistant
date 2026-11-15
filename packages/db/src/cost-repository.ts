@@ -14,10 +14,14 @@ import {
   type EstimatedCostDecisionResponse,
   type EstimatedCostGrantDraw,
   type EstimatedCostGrantDrawResult,
+  type EstimatedCostGrantAttempt,
   type EstimatedCostRequestProjection,
   ledgerUsdToMicros,
   MAX_LEDGER_USD_MICROS,
   matchesEstimatedCostParkedTask,
+  estimatedCostConnectionId,
+  canonicalEstimatedCostJson,
+  type EstimatedCostSourceBinding,
   microsToUsd,
   nextDailyReset,
   nextMonthlyReset,
@@ -859,6 +863,268 @@ export async function reserveCost(
       .returning({ id: costReservations.id });
     if (!row) throw new Error('reservation insert failed');
     return { ok: true, reservationId: row.id } as const;
+  });
+}
+
+/** One grant-backed dispatch; all authority and source checks precede the transition. */
+export async function beginPostgresEstimatedCostGrantAttempt(
+  db: Db,
+  input: EstimatedCostGrantAttempt,
+): Promise<boolean> {
+  if (
+    !/^[a-f0-9]{64}$/.test(input.routingDigest) ||
+    !/^[a-f0-9]{64}$/.test(input.requestDigest) ||
+    !Number.isSafeInteger(input.nextAttemptMicros) ||
+    input.nextAttemptMicros <= 0 ||
+    input.metadata.role !== input.role ||
+    input.metadata.model !== input.modelId ||
+    input.metadata.requestDigest !== input.requestDigest ||
+    input.metadata.provider !== estimatedCostConnectionId(input.modelId)
+  )
+    return false;
+  return db.transaction(async (raw) => {
+    const tx = raw as unknown as Db;
+    const [initial] = await tx
+      .select()
+      .from(estimatedCostRequests)
+      .where(
+        and(
+          eq(estimatedCostRequests.operationId, input.operationId),
+          eq(estimatedCostRequests.installationId, input.actor.installationId),
+          eq(estimatedCostRequests.ownerId, input.actor.ownerId),
+        ),
+      );
+    if (!initial) return false;
+    const binding = initial.sourceBinding as EstimatedCostSourceBinding;
+    if (
+      !binding ||
+      !Array.isArray(binding.additionalRoutes) ||
+      typeof binding.critical !== 'boolean'
+    )
+      return false;
+    const { capturePostgresEstimatedCostSourceBinding } = await import(
+      './estimated-cost-approval-transactions.js'
+    );
+    const source = await capturePostgresEstimatedCostSourceBinding(tx, {
+      actor: input.actor,
+      taskId: input.taskId,
+      role: binding.role,
+      selectedModelId: binding.selectedModelId,
+      routingDigest: binding.routingDigest,
+      critical: binding.critical,
+      additionalRoles: binding.additionalRoutes.map((entry) => entry.role),
+    });
+    if (
+      canonicalEstimatedCostJson(source) !== canonicalEstimatedCostJson(binding) ||
+      createHash('sha256').update(canonicalEstimatedCostJson(binding)).digest('hex') !==
+        initial.bindingDigest
+    )
+      return false;
+    const [request] = await tx
+      .select()
+      .from(estimatedCostRequests)
+      .where(eq(estimatedCostRequests.operationId, input.operationId))
+      .for('update');
+    const [task] = await tx.select().from(tasks).where(eq(tasks.id, input.taskId)).for('update');
+    const [grant] = await tx
+      .select()
+      .from(estimatedCostGrants)
+      .where(eq(estimatedCostGrants.id, input.grantId))
+      .for('update');
+    const [reservation] = await tx
+      .select()
+      .from(costReservations)
+      .where(eq(costReservations.id, input.reservationId))
+      .for('update');
+    if (
+      !request ||
+      request.installationId !== input.actor.installationId ||
+      request.ownerId !== input.actor.ownerId ||
+      request.taskId !== input.taskId ||
+      request.state !== 'approved' ||
+      request.bindingDigest !== initial.bindingDigest ||
+      canonicalEstimatedCostJson(request.sourceBinding) !== canonicalEstimatedCostJson(binding) ||
+      !task ||
+      task.status !== 'running' ||
+      task.leaseToken !== input.leaseToken ||
+      !task.lockedUntil ||
+      !grant ||
+      grant.operationId !== input.operationId ||
+      !reservation ||
+      reservation.status !== 'held' ||
+      reservation.reservationKind !== 'attempt' ||
+      reservation.costGrantId !== input.grantId ||
+      reservation.taskId !== input.taskId ||
+      storedLedgerUsdToMicros(reservation.estimatedUsd) !== input.nextAttemptMicros
+    )
+      return false;
+    const quote = parseEstimatedCostQuote(request.quote);
+    const state =
+      task.state && typeof task.state === 'object' && !Array.isArray(task.state)
+        ? (task.state as Record<string, unknown>)
+        : null;
+    const marker = state?.estimatedCostApproval as Record<string, unknown> | undefined;
+    if (
+      !quote ||
+      grant.quoteId !== quote.quoteId ||
+      !marker ||
+      marker.operationId !== input.operationId ||
+      marker.quoteId !== quote.quoteId ||
+      marker.bindingDigest !== request.bindingDigest ||
+      marker.grantId !== grant.id ||
+      marker.status !== 'approved' ||
+      !matchesEstimatedCostParkedTask(
+        { ...task, status: 'waiting_estimated_cost' },
+        {
+          actor: input.actor,
+          taskId: input.taskId,
+          operationId: input.operationId,
+          requestFingerprint: request.requestFingerprint,
+        },
+      )
+    )
+      return false;
+    const allowed =
+      binding.role === input.role
+        ? binding
+        : binding.additionalRoutes.find((entry) => entry.role === input.role);
+    if (
+      !allowed ||
+      (input.critical && !binding.critical) ||
+      !allowed.modelRows.some((entry) => entry.id === input.modelId)
+    )
+      return false;
+    const [escrow] = await tx
+      .select()
+      .from(costReservations)
+      .where(eq(costReservations.id, grant.escrowReservationId))
+      .for('update');
+    if (
+      !escrow ||
+      escrow.status !== 'held' ||
+      escrow.reservationKind !== 'escrow' ||
+      escrow.costGrantId !== grant.id ||
+      escrow.taskId !== task.id
+    )
+      return false;
+    const [frozen] = await tx
+      .select()
+      .from(estimatedCostBaselines)
+      .where(eq(estimatedCostBaselines.installationId, input.actor.installationId))
+      .for('share');
+    const rows = parseHistoricalUnknownBaseline(frozen?.rows);
+    if (
+      !frozen ||
+      frozen.ownerId !== input.actor.ownerId ||
+      !rows ||
+      createHash('sha256').update(JSON.stringify(rows)).digest('hex') !== frozen.digest
+    )
+      return false;
+    const currentRows = rows.length
+      ? await tx
+          .select()
+          .from(costReservations)
+          .where(
+            inArray(
+              costReservations.id,
+              rows.map((entry) => entry.reservationId),
+            ),
+          )
+          .for('share')
+      : [];
+    const current: CurrentBaselineReservation[] = currentRows.map((row) => ({
+      reservationId: row.id,
+      estimatedMicros: storedLedgerUsdToMicros(row.estimatedUsd),
+      status: row.status,
+      provenance:
+        row.reservationKind === 'attempt' &&
+        row.costGrantId === null &&
+        row.createdAt <= frozen.createdAt
+          ? 'proven-historical-unapproved'
+          : 'unrecognized',
+    }));
+    const unknown = currentHistoricalUnknownMicros(rows, current);
+    if (unknown === null) return false;
+    const unknownIds = new Set(
+      current.filter((row) => row.status === 'unknown').map((row) => row.reservationId),
+    );
+    if (
+      canonicalEstimatedCostJson(rows.filter((row) => unknownIds.has(row.reservationId))) !==
+      canonicalEstimatedCostJson(request.baseline)
+    )
+      return false;
+    const [clock] = await tx.execute<{ valid: boolean; day: string; month: string }>(
+      sql`select ${grant.expiresAt.toISOString()}::timestamptz > clock_timestamp() and ${task.lockedUntil.toISOString()}::timestamptz > clock_timestamp() as valid, to_char(clock_timestamp() at time zone 'UTC','YYYY-MM-DD') as day, to_char(clock_timestamp() at time zone 'UTC','YYYY-MM') as month`,
+    );
+    if (clock?.valid !== true) return false;
+    const day = new Date(`${clock.day}T00:00:00.000Z`),
+      month = new Date(`${clock.month}-01T00:00:00.000Z`);
+    const [policies, [daily], [monthly], [held], [taskHeld]] = await Promise.all([
+      tx
+        .select()
+        .from(budgets)
+        .where(inArray(budgets.scope, ['daily', 'monthly']))
+        .for('share'),
+      tx
+        .select({ total: sum(costEvents.usd) })
+        .from(costEvents)
+        .where(gte(costEvents.createdAt, day)),
+      tx
+        .select({ total: sum(costEvents.usd) })
+        .from(costEvents)
+        .where(gte(costEvents.createdAt, month)),
+      tx
+        .select({ total: sum(costReservations.estimatedUsd) })
+        .from(costReservations)
+        .where(inArray(costReservations.status, ['held', 'dispatching', 'unknown'])),
+      tx
+        .select({ total: sum(costReservations.estimatedUsd) })
+        .from(costReservations)
+        .where(
+          and(
+            eq(costReservations.taskId, task.id),
+            inArray(costReservations.status, ['held', 'dispatching', 'unknown']),
+          ),
+        ),
+    ]);
+    const dailyPolicy = policies.find((row) => row.scope === 'daily'),
+      monthlyPolicy = policies.find((row) => row.scope === 'monthly');
+    if (!dailyPolicy || !monthlyPolicy) return false;
+    const heldMicros = storedUsdToMicros(held?.total ?? '0');
+    if (unknown > heldMicros) return false;
+    const ceiling = (value: unknown) => {
+      const amount = storedUsdToMicros(value);
+      return input.critical ? Number((BigInt(amount) * 11n) / 10n) : amount;
+    };
+    if (
+      addMicros(storedUsdToMicros(daily?.total ?? '0'), heldMicros - unknown) >
+        ceiling(dailyPolicy.limitUsd) ||
+      addMicros(storedUsdToMicros(monthly?.total ?? '0'), heldMicros - unknown) >
+        ceiling(monthlyPolicy.limitUsd) ||
+      addMicros(storedUsdToMicros(task.spentUsd), storedUsdToMicros(taskHeld?.total ?? '0')) >
+        ceiling(task.budgetUsdLimit)
+    )
+      return false;
+    const [final] = await tx.execute<{ valid: boolean }>(
+      sql`select ${grant.expiresAt.toISOString()}::timestamptz > clock_timestamp() and ${task.lockedUntil.toISOString()}::timestamptz > clock_timestamp() and to_char(clock_timestamp() at time zone 'UTC','YYYY-MM-DD') = ${clock.day} as valid`,
+    );
+    if (final?.valid !== true) return false;
+    const [updated] = await tx
+      .update(costReservations)
+      .set({
+        status: 'dispatching',
+        attemptStartedAt: sql`clock_timestamp()`,
+        attemptMetadata: input.metadata,
+      })
+      .where(
+        and(
+          eq(costReservations.id, reservation.id),
+          eq(costReservations.status, 'held'),
+          eq(costReservations.costGrantId, grant.id),
+        ),
+      )
+      .returning({ id: costReservations.id });
+    return Boolean(updated);
   });
 }
 

@@ -101,6 +101,7 @@ async function prepare(
         const lockedUntil = taskData.lockedUntil;
         if (
           taskData.status !== 'running' ||
+          taskData.conversationId !== input.input.conversationId ||
           taskData.leaseToken !== input.input.leaseToken ||
           !(lockedUntil instanceof Date) ||
           lockedUntil.getTime() <= now.getTime()

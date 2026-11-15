@@ -158,7 +158,7 @@ export async function beginFirestoreEstimatedCostGrantAttempt(
         : binding.additionalRoutes.find((route) => route.role === input.role);
     if (
       !allowed ||
-      (input.critical && (!binding.critical || input.role !== binding.role)) ||
+      (input.critical && !binding.critical) ||
       !Array.isArray(allowed.modelRows) ||
       !allowed.modelRows.some((model) => model.id === input.modelId)
     )
