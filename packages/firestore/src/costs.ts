@@ -139,6 +139,7 @@ export class FirestoreCostRepository implements CostRepository {
       )
         throw new Error('Invalid grant escrow balance');
       if (input.estimatedMicros > balance) return { ok: false, reason: 'exhausted' };
+      if (expiry.getTime() <= this.store.now().getTime()) return { ok: false, reason: 'expired' };
       tx.update(escrowRef, {
         estimatedUsd: microsToUsd(balance - input.estimatedMicros).toFixed(6),
       });

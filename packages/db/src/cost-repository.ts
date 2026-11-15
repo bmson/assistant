@@ -66,7 +66,7 @@ export async function drawEstimatedCostGrant(
     )
       return { ok: false, reason: 'unavailable' };
     const [clock] = await tx.execute<{ valid: boolean }>(
-      sql`select expires_at > now() as valid from estimated_cost_grants where id = ${input.grantId}`,
+      sql`select expires_at > clock_timestamp() as valid from estimated_cost_grants where id = ${input.grantId}`,
     );
     if (clock?.valid !== true) return { ok: false, reason: 'expired' };
     const [existing] = await tx
@@ -140,7 +140,7 @@ export async function expireEstimatedCostGrant(db: Db, grantId: string): Promise
       .where(eq(estimatedCostGrants.id, grantId));
     if (!grant) return false;
     const [clock] = await tx.execute<{ expired: boolean }>(
-      sql`select expires_at <= now() as expired from estimated_cost_grants where id = ${grantId}`,
+      sql`select expires_at <= clock_timestamp() as expired from estimated_cost_grants where id = ${grantId}`,
     );
     if (clock?.expired !== true) return false;
     const [escrow] = await tx

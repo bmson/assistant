@@ -205,11 +205,44 @@ describe('PostgreSQL idempotent cost events', () => {
       ).toEqual({ ok: true, reservationId: unknownId });
       await db
         .update(estimatedCostGrants)
-        .set({ expiresAt: new Date(Date.now() - 1_000) })
+        .set({ expiresAt: new Date(Date.now() + 300) })
         .where(eq(estimatedCostGrants.id, grantId));
-      expect(
-        await drawEstimatedCostGrant(db, { ...input, attemptId: success.reservationId }),
-      ).toEqual({ ok: false, reason: 'expired' });
+      let unlock!: () => void;
+      let locked!: () => void;
+      const lockReady = new Promise<void>((resolve) => {
+        locked = resolve;
+      });
+      const releaseLock = new Promise<void>((resolve) => {
+        unlock = resolve;
+      });
+      const blocker = db.transaction(async (tx) => {
+        await tx.execute(
+          sql`select pg_advisory_xact_lock(hashtext('assistant:cost-reservations'))`,
+        );
+        locked();
+        await releaseLock;
+      });
+      await lockReady;
+      const delayed = drawEstimatedCostGrant(db, { ...input, attemptId: success.reservationId });
+      try {
+        let waiting = false;
+        for (let i = 0; i < 100; i++) {
+          const rows = await db.execute(
+            sql`select 1 from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock' and query ilike '%pg_advisory_xact_lock%'`,
+          );
+          if (rows.length) {
+            waiting = true;
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        expect(waiting).toBe(true);
+        await new Promise((resolve) => setTimeout(resolve, 350));
+      } finally {
+        unlock();
+        await blocker;
+      }
+      expect(await delayed).toEqual({ ok: false, reason: 'expired' });
       await db
         .update(costReservations)
         .set({ status: 'unknown' })
