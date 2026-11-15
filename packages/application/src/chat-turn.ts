@@ -58,8 +58,8 @@ import type {
   ApplicationChatMessage,
   ApplicationChatPersistence,
   ChatTurnAdmissionResult,
-  ExecutionPersistence,
   EstimatedCostTurnParking,
+  ExecutionPersistence,
   TaskLease,
 } from '@assistant/persistence';
 import {
@@ -870,9 +870,8 @@ export async function handleChatTurn(
   // overrides, and budget selection without making a provider request. A budget
   // park/block is still a normal route outcome; executor admission keeps its
   // existing budget semantics.
-  let initialRoute: Awaited<ReturnType<ModelRouter['route']>>;
   try {
-    initialRoute = await router.route('draft', {
+    await router.route('draft', {
       taskId: dependencies.resumeTask?.id,
       modelOverride: existingConversation?.modelOverride ?? undefined,
       modelOverrideResolved: true,
@@ -995,54 +994,9 @@ export async function handleChatTurn(
     });
   }
   if (!admittedTask) throw new Error('New chat admission did not return its lease');
-  // Only a server route can trigger this boundary; neither model output nor
-  // the client supplies prices. A resumed task belongs to its original grant
-  // and must not be parked as a new request while that grant is dispatched.
-  if (!initialRoute.ok && dependencies.estimatedCostTurnParking && !dependencies.resumeTask) {
-    let candidate: Awaited<ReturnType<ModelRouter['prepareEstimatedCostCandidate']>> | undefined;
-    try {
-      candidate = await router.prepareEstimatedCostCandidate('draft', {
-        taskId: admittedTask.id,
-        prompt: userText,
-        modelOverride: conversation.modelOverride ?? undefined,
-        modelOverrideResolved: true,
-      });
-    } catch {
-      // No parking was attempted; retain the existing budget behavior.
-    }
-    if (candidate && admittedTask.leaseToken) {
-      let result: Awaited<ReturnType<EstimatedCostTurnParking['park']>>;
-      try {
-        result = await dependencies.estimatedCostTurnParking.park({
-          actor: { installationId: config.ASSISTANT_WORKSPACE_ID, ownerId: agent.id },
-          operationId: clientOperationId,
-          conversationId: conversation.id,
-          taskId: admittedTask.id,
-          leaseToken: admittedTask.leaseToken,
-          requestFingerprint: requestHash,
-          quoteRequestId: clientOperationId,
-          candidate,
-        });
-      } catch {
-        // A thrown write may have committed. Never continue the original turn
-        // or fabricate a receipt when the parking outcome is uncertain.
-        return Response.json({ error: 'The request status could not be confirmed.', code: 'estimated_cost_unconfirmed', conversationId: conversation.id, taskId: admittedTask.id, clientOperationId }, { status: 503 });
-      }
-      if (result.ok && result.status === 'pending' && result.operationId === clientOperationId &&
-          result.taskId === admittedTask.id && result.quoteId && result.quoteVersion) {
-        return acceptedStreamResponse(admittedTask.id, {
-          'x-conversation-id': conversation.id,
-          'x-async-task': admittedTask.id,
-          'x-message-cursor': messageCursor,
-          'x-owner-message-id': persistedUser.id,
-          'x-estimated-cost-operation-id': clientOperationId,
-        });
-      }
-      if (result.ok || result.outcome !== 'unavailable') {
-        return Response.json({ error: 'The request status could not be confirmed.', code: 'estimated_cost_unconfirmed', conversationId: conversation.id, taskId: admittedTask.id, clientOperationId }, { status: 503 });
-      }
-    }
-  }
+  // The preflight does not yet have the full blocked call or its attempt history.
+  // Do not request a spending quote from a prompt-only estimate. A future router
+  // handoff must bind the exact blocked attempt before using the optional hook.
   const refreshCardId = savedCardRefreshId(userText);
   const cardRefresh = dependencies.db ?? dependencies.persistence?.cardRefresh;
   if (refreshCardId && cardRefresh) {
