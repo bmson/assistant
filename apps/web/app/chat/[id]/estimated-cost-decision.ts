@@ -82,6 +82,21 @@ export function isCostQuotePayload(value: unknown): value is EstimatedCostQuote 
   );
 }
 
+export const estimatedCostQuoteKey = (quote: EstimatedCostQuote): string =>
+  JSON.stringify([quote.operationId, quote.quoteId, quote.quoteVersion]);
+
+/** Transcript revisions remain durable; one current review is shown per original request. */
+export function latestEstimatedCostQuotes(
+  messages: readonly { parts: readonly unknown[] }[],
+): Map<string, string> {
+  const latest = new Map<string, string>();
+  for (const message of messages)
+    for (const part of message.parts) {
+      if (isCostQuotePayload(part)) latest.set(part.operationId, estimatedCostQuoteKey(part));
+    }
+  return latest;
+}
+
 export function isReviewableCostQuote(quote: EstimatedCostQuote, now: number): boolean {
   return (
     isCostQuotePayload(quote) &&

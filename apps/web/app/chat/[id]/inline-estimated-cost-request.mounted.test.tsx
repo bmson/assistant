@@ -115,6 +115,31 @@ async function mount(api: EstimatedCostTransport) {
 }
 
 describe('mounted request-scoped estimated spending approval', () => {
+  it('requires a fresh quote after a confirmed stale decision even if money totals have not changed', async () => {
+    const api = transport();
+    api.decide = vi.fn<EstimatedCostTransport['decide']>(async (decision) => ({
+      ok: true,
+      receipt: {
+        operationId: decision.operationId,
+        quoteId: decision.quoteId,
+        decisionId: decision.decisionId,
+        status: 'stale',
+      },
+    }));
+    await mount(api);
+    await click('Approve $0.20');
+    await click('Approve $0.20?');
+    expect(
+      [...container.querySelectorAll('button')].find((b) => b.textContent?.includes('Approve'))
+        ?.disabled,
+    ).toBe(true);
+    await click('Refresh estimate');
+    expect(
+      [...container.querySelectorAll('button')].find((b) => b.textContent?.includes('Approve'))
+        ?.disabled,
+    ).toBe(false);
+    expect(api.decide).toHaveBeenCalledTimes(1);
+  });
   it('does not reuse an old complete balance after a newer canonical check fails', async () => {
     const api = transport();
     await mount(api);

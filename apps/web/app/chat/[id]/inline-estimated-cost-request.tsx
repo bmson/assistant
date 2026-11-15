@@ -174,11 +174,16 @@ function CostRequest({ part, formSessionScope, transport = defaultTransport, sto
   const endedHere =
     receipt?.quoteId === quote.quoteId &&
     (receipt?.status === 'approved' || receipt?.status === 'declined');
+  const staleHere = receipt?.status === 'stale' && receipt.quoteId === quote.quoteId;
   const canDecide = pending && !endedHere && !unresolved && !action;
 
   function decide(choice: 'approve' | 'decline') {
     if (!canDecide || !journal.current) return;
-    if (choice === 'approve' && (!canApproveCostQuote(quote, Date.now()) || !quoteCurrent)) return;
+    if (
+      choice === 'approve' &&
+      (!canApproveCostQuote(quote, Date.now()) || !quoteCurrent || staleHere)
+    )
+      return;
     void run(choice, async () => {
       const decision: EstimatedCostDecision = {
         operationId: part.operationId,
@@ -328,7 +333,9 @@ function CostRequest({ part, formSessionScope, transport = defaultTransport, sto
                 key={`${quote.quoteId}:${quote.quoteVersion}`}
                 variant="primary"
                 size="sm"
-                disabled={!canDecide || !canApproveCostQuote(quote, now) || !quoteCurrent}
+                disabled={
+                  !canDecide || !canApproveCostQuote(quote, now) || !quoteCurrent || staleHere
+                }
                 pending={action === 'approve'}
                 pendingLabel="Approving…"
                 confirmLabel={`Approve ${formatCostMicros(quote.allowanceMicros)}?`}

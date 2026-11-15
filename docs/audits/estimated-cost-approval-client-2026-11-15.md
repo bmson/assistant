@@ -8,7 +8,7 @@ The local journal retains an exact explicit decision before POST. An uncertain o
 
 Executed checks:
 
-- 35 focused tests passed across web journal/transport, mounted client interactions, and application orchestration. Includes clock-crossing expiry, changed session, later quote, storage failure, ambiguous response, exact receipt recovery, failed canonical read, null tracking, and A moving from pending to held after B spends without double counting.
+- 45 focused tests passed across web journal/transport, transcript controls, mounted client interactions, and application orchestration. Includes clock-crossing expiry, changed session, later quote, storage failure, ambiguous response, exact receipt recovery, failed canonical read, null tracking, A moving from pending to held after B spends without double counting, and requiring a fresh quote after a confirmed stale decision. New quote revisions replace obsolete full review cards for the same operation without hiding an independent request or newer chat text.
 - Web and application typechecks passed. Design and QA reviewed the changed source; no additional actionable concerns remained within their reviewed scope.
 - Six synthetic browser captures passed at widths 320, 390, and 1280 in light and dark appearance, using the actual component and shared CSS. No viewport overflow or page errors were observed. The browser permitted loopback requests only.
 - A synthetic interaction left A's decision unconfirmed, completed independent B with its newer draft preserved, then read A's exact receipt with only one decision POST. This verifies client behavior against a fixture; it does not verify server parking, durable financial accounting, or provider spending.

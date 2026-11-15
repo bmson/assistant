@@ -7,9 +7,11 @@ import { describe, expect, it } from 'vitest';
 import {
   clearCostDecisionAfterReceipt,
   costQuoteRefreshId,
+  estimatedCostQuoteKey,
   formatCostMicros,
   isReceiptForCostDecision,
   isReviewableCostQuote,
+  latestEstimatedCostQuotes,
   readCostDecision,
   retainCostDecision,
 } from './estimated-cost-decision';
@@ -132,6 +134,18 @@ describe('estimated-cost decision recovery', () => {
 });
 
 describe('estimated-cost review values', () => {
+  it('keeps only the latest quote revision per operation without hiding another waiting request', () => {
+    const a = quote();
+    const next = { ...a, quoteId: 'next-a' };
+    const b = { ...a, operationId: 'request-b', quoteId: 'quote-b' };
+    const latest = latestEstimatedCostQuotes([
+      { parts: [a] },
+      { parts: [b] },
+      { parts: [{ type: 'text', text: 'B completes independently' }] },
+      { parts: [next] },
+    ]);
+    expect([...latest.values()]).toEqual([estimatedCostQuoteKey(next), estimatedCostQuoteKey(b)]);
+  });
   it('binds refresh retries to the same request and quote across reloads', async () => {
     const first = await costQuoteRefreshId(quote());
     expect(await costQuoteRefreshId(quote())).toBe(first);
