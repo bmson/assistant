@@ -493,6 +493,34 @@ export interface EstimatedCostPreparedQuote {
   baseline: HistoricalUnknownBaselineRow[];
 }
 
+/** Internal chat-turn boundary. The candidate is produced by the server router,
+ * and park succeeds only after the quote and original leased task are committed. */
+export interface EstimatedCostTurnParkInput {
+  actor: EstimatedCostActor;
+  operationId: string;
+  conversationId: string;
+  taskId: string;
+  leaseToken: string;
+  requestFingerprint: string;
+  quoteRequestId: string;
+  candidate: { modelId: string; nextAttemptMicros: number; routingDigest: string };
+}
+
+export type EstimatedCostTurnParkResult =
+  | {
+      ok: true;
+      operationId: string;
+      taskId: string;
+      quoteId: string;
+      quoteVersion: string;
+      status: 'pending';
+    }
+  | EstimatedCostHttpError;
+
+export interface EstimatedCostTurnParking {
+  park(input: EstimatedCostTurnParkInput): Promise<EstimatedCostTurnParkResult>;
+}
+
 export type EstimatedCostPreparationResult =
   | { ok: true; prepared: EstimatedCostPreparedQuote }
   | EstimatedCostHttpError;
