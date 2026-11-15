@@ -30,9 +30,16 @@
     "estimated-cost-client-application-tests.txt": "87ffa32f037b8b6bd0659b28d9fcc7bec55af6959f8315c1d4e96e0cb3396ad3",
     "browser.txt": "d748fc0cb93074165f88ce5b4e9b9e464e618edcd3fd4aa559fa8769f574fda8",
     "estimated-cost-application-typecheck.txt": "65216846afa1a25419cb9df86238aa857e6dff3ba7102ec381f0fd99314d8b53",
-    "browser-results.json": "7a008e8bad1e2b7e8397f37240d80a1f56f657b99110b6ca8d88712ffcc975b3",
+    "browser-results.json": "12a642011dee5105160f9dc98b1f410d729f18561f1ce55c1b9459f211938eb3",
     "estimated-cost-web-typecheck.txt": "f901b55f0f6c4f285ed84e0eb05dcb8d23b66507763ecaafdf7f16e11d7923bc",
     "1280-light.png": "98756dafdbb838259870dda42d933d443c0db6f369f156043d926115362b276a",
     "320-light.png": "58d846da529b72cbd18df2b6a4408aaed8ede236b61fe7c8902af917ea156c15"
+  },
+  "assetWhitespaceChanges": {
+    "browser-results.json": {
+      "originalSha256": "7a008e8bad1e2b7e8397f37240d80a1f56f657b99110b6ca8d88712ffcc975b3",
+      "formattedSha256": "12a642011dee5105160f9dc98b1f410d729f18561f1ce55c1b9459f211938eb3",
+      "meaningUnchanged": true
+    }
   }
 }

@@ -19,6 +19,7 @@ import {
   correctOwnerKnowledgeGraphFactFromRepository,
   createCardFormAdmissionService,
   createChatConversation,
+  createEstimatedCostApprovalService,
   createMcpConnection,
   decideApproval,
   deleteApprovalPolicy,
@@ -141,6 +142,8 @@ import {
   createPostgresCardFormAdmissionRepository,
   createPostgresCardRefreshRepository,
   createPostgresEmailSyncRepository,
+  createPostgresEstimatedCostApprovalRepository,
+  createPostgresEstimatedCostQuotePreparer,
   createPostgresEstimatedCostTurnParking,
   createPostgresGeneratedCardRepository,
   createPostgresGoogleCalendarConnectionRepository,
@@ -162,6 +165,8 @@ import {
 import {
   assertPrivacyErasureFenceUnchanged,
   createFirestoreCardFormAdmissionRepository,
+  createFirestoreEstimatedCostApprovalRepository,
+  createFirestoreEstimatedCostQuotePreparer,
   createFirestoreEstimatedCostTurnParking,
   createFirestoreExecutionPersistence,
   createFirestoreGoogleCalendarConnectionRepository,
@@ -576,6 +581,26 @@ function getEstimatedCostTurnParking() {
 
 export function getEstimatedCostRuntimeProviderSource() {
   return estimatedCostProviderSource(loadConfig(), process.env.BUILD_SHA);
+}
+
+/** OFF preserves scoped readback and decline without minting new authority. */
+export function getEstimatedCostApprovalService() {
+  const config = loadConfig();
+  const enabled = () => estimatedCostApprovalEnabled(config);
+  const options = {
+    mutationsEnabled: enabled,
+    providerSource: getEstimatedCostRuntimeProviderSource(),
+  };
+  const firestore = config.PERSISTENCE_DRIVER === 'firestore';
+  return createEstimatedCostApprovalService({
+    repository: firestore
+      ? createFirestoreEstimatedCostApprovalRepository(getFirestoreInstallationStore(), options)
+      : createPostgresEstimatedCostApprovalRepository(getDb(), options),
+    preparer: firestore
+      ? createFirestoreEstimatedCostQuotePreparer(getFirestoreInstallationStore(), options)
+      : createPostgresEstimatedCostQuotePreparer(getDb(), options),
+    enabled,
+  });
 }
 
 /**

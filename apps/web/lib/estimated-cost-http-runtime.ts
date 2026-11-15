@@ -1,47 +1,12 @@
-import { createEstimatedCostApprovalService } from '@assistant/application';
-import {
-  estimatedCostApprovalEnabled,
-  loadConfig,
-  validateAgentPersistenceConfig,
-} from '@assistant/config';
-import {
-  createPostgresEstimatedCostApprovalRepository,
-  createPostgresEstimatedCostQuotePreparer,
-} from '@assistant/db';
-import {
-  createFirestoreEstimatedCostApprovalRepository,
-  createFirestoreEstimatedCostQuotePreparer,
-} from '@assistant/firestore';
+import { loadConfig, validateAgentPersistenceConfig } from '@assistant/config';
 import { isAuthed } from '@/auth';
 import {
   assertPostgresInstallationOwner,
   getDb,
-  getEstimatedCostRuntimeProviderSource,
-  getFirestoreInstallationStore,
+  getEstimatedCostApprovalService,
 } from '@/lib/server';
 import { isMobileAuthed } from '@/mobile-auth';
 import { handleEstimatedCostHttp } from './estimated-cost-http';
-
-/** The same capability gates preparation and transactional mutation. OFF keeps
- * scoped durable readback and decline available without creating authority. */
-function service() {
-  const config = loadConfig();
-  const enabled = () => estimatedCostApprovalEnabled(config);
-  const options = {
-    mutationsEnabled: enabled,
-    providerSource: getEstimatedCostRuntimeProviderSource(),
-  };
-  const firestore = config.PERSISTENCE_DRIVER === 'firestore';
-  return createEstimatedCostApprovalService({
-    repository: firestore
-      ? createFirestoreEstimatedCostApprovalRepository(getFirestoreInstallationStore(), options)
-      : createPostgresEstimatedCostApprovalRepository(getDb(), options),
-    preparer: firestore
-      ? createFirestoreEstimatedCostQuotePreparer(getFirestoreInstallationStore(), options)
-      : createPostgresEstimatedCostQuotePreparer(getDb(), options),
-    enabled,
-  });
-}
 
 export function estimatedCostHandler(
   request: Request,
@@ -75,6 +40,6 @@ export function estimatedCostHandler(
         ownerId: await assertPostgresInstallationOwner(getDb()),
       };
     },
-    service,
+    service: getEstimatedCostApprovalService,
   });
 }
