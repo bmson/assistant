@@ -5216,13 +5216,14 @@ final class AppModel {
         return message.parts.contains { part in
             (part.type == "text" && !(part.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 || (part.type == "data-card" && MessageResponseCard(part: part, formRendererAvailable: true) != nil)
+                || (part.type == "estimated-cost-approval" && !(part.operationId ?? "").isEmpty)
         }
     }
 
     private func pollForReply(taskId: String?, streamID: String, ordinaryTurnToken: UUID? = nil) async {
         guard let client, let conversationId else { return }
         let version = connectionVersion
-        let settled = Set(["done", "failed", "cancelled", "waiting_approval", "waiting_budget", "needs_attention"])
+        let settled = Set(["done", "failed", "cancelled", "waiting_approval", "waiting_budget", "waiting_estimated_cost", "needs_attention"])
         let attention = Set(["waiting_approval", "waiting_budget", "needs_attention"])
         var grace = 0
         var finalStatus: String?
@@ -5406,7 +5407,11 @@ final class AppModel {
         let reply = messages.reversed().first(where: {
             currentReplyMessageIDs.contains($0.id) && $0.role == .assistant && !$0.text.isEmpty
         })?.text
-        if let finalStatus, attention.contains(finalStatus) {
+        if finalStatus == "waiting_estimated_cost" {
+            setActivityThought(.needsYou, proposedDetail: receivedCurrentReply
+                ? "Review spending permission for this request."
+                : "This request is waiting for spending review; its card is not available yet.")
+        } else if let finalStatus, attention.contains(finalStatus) {
             let matchingApproval = finalStatus == "waiting_approval"
                 ? overview?.approvals.pending.first(where: { $0.approval.taskId == taskId })
                 : nil

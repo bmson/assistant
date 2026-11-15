@@ -59,6 +59,7 @@ import type {
   ApplicationChatPersistence,
   ChatTurnAdmissionResult,
   ExecutionPersistence,
+  EstimatedCostTurnParking,
   TaskLease,
 } from '@assistant/persistence';
 import {
@@ -105,6 +106,8 @@ export interface ChatTurnDependencies {
   persistence?: ExecutionPersistence;
   /** A worker-owned lease used to resume an admitted turn after a crashed request. */
   resumeTask?: TaskLease;
+  /** Optional durable request-specific parking; omitted until the rollout is wired. */
+  estimatedCostTurnParking?: EstimatedCostTurnParking;
 }
 
 function hasBackgroundPart(parts: unknown): boolean {
@@ -261,6 +264,8 @@ function taskStatusLabel(status: string): string {
       return 'waiting for approval';
     case 'waiting_budget':
       return 'waiting for a budget decision';
+    case 'waiting_estimated_cost':
+      return 'waiting for spending permission for this request';
     case 'sleeping':
       return 'waiting until its next run';
     case 'waiting_event':
@@ -499,6 +504,9 @@ async function taskContinuationReply(
         break;
       case 'waiting_budget':
         state = 'waiting for a budget decision';
+        break;
+      case 'waiting_estimated_cost':
+        state = 'waiting for spending permission for this request';
         break;
       case 'needs_attention':
         state = 'needs your attention in Activity';
@@ -862,8 +870,9 @@ export async function handleChatTurn(
   // overrides, and budget selection without making a provider request. A budget
   // park/block is still a normal route outcome; executor admission keeps its
   // existing budget semantics.
+  let initialRoute: Awaited<ReturnType<ModelRouter['route']>>;
   try {
-    await router.route('draft', {
+    initialRoute = await router.route('draft', {
       taskId: dependencies.resumeTask?.id,
       modelOverride: existingConversation?.modelOverride ?? undefined,
       modelOverrideResolved: true,
@@ -986,6 +995,54 @@ export async function handleChatTurn(
     });
   }
   if (!admittedTask) throw new Error('New chat admission did not return its lease');
+  // Only a server route can trigger this boundary; neither model output nor
+  // the client supplies prices. A resumed task belongs to its original grant
+  // and must not be parked as a new request while that grant is dispatched.
+  if (!initialRoute.ok && dependencies.estimatedCostTurnParking && !dependencies.resumeTask) {
+    let candidate: Awaited<ReturnType<ModelRouter['prepareEstimatedCostCandidate']>> | undefined;
+    try {
+      candidate = await router.prepareEstimatedCostCandidate('draft', {
+        taskId: admittedTask.id,
+        prompt: userText,
+        modelOverride: conversation.modelOverride ?? undefined,
+        modelOverrideResolved: true,
+      });
+    } catch {
+      // No parking was attempted; retain the existing budget behavior.
+    }
+    if (candidate && admittedTask.leaseToken) {
+      let result: Awaited<ReturnType<EstimatedCostTurnParking['park']>>;
+      try {
+        result = await dependencies.estimatedCostTurnParking.park({
+          actor: { installationId: config.ASSISTANT_WORKSPACE_ID, ownerId: agent.id },
+          operationId: clientOperationId,
+          conversationId: conversation.id,
+          taskId: admittedTask.id,
+          leaseToken: admittedTask.leaseToken,
+          requestFingerprint: requestHash,
+          quoteRequestId: clientOperationId,
+          candidate,
+        });
+      } catch {
+        // A thrown write may have committed. Never continue the original turn
+        // or fabricate a receipt when the parking outcome is uncertain.
+        return Response.json({ error: 'The request status could not be confirmed.', code: 'estimated_cost_unconfirmed', conversationId: conversation.id, taskId: admittedTask.id, clientOperationId }, { status: 503 });
+      }
+      if (result.ok && result.status === 'pending' && result.operationId === clientOperationId &&
+          result.taskId === admittedTask.id && result.quoteId && result.quoteVersion) {
+        return acceptedStreamResponse(admittedTask.id, {
+          'x-conversation-id': conversation.id,
+          'x-async-task': admittedTask.id,
+          'x-message-cursor': messageCursor,
+          'x-owner-message-id': persistedUser.id,
+          'x-estimated-cost-operation-id': clientOperationId,
+        });
+      }
+      if (result.ok || result.outcome !== 'unavailable') {
+        return Response.json({ error: 'The request status could not be confirmed.', code: 'estimated_cost_unconfirmed', conversationId: conversation.id, taskId: admittedTask.id, clientOperationId }, { status: 503 });
+      }
+    }
+  }
   const refreshCardId = savedCardRefreshId(userText);
   const cardRefresh = dependencies.db ?? dependencies.persistence?.cardRefresh;
   if (refreshCardId && cardRefresh) {

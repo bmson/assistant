@@ -451,6 +451,103 @@ function queuedPayload() {
 }
 
 describe('chat needs-action triage', () => {
+  it.each([false, true])('parks a typed or spoken A, allows B, and resumes only A (spoken=%s)', async (spoken) => {
+    const a = '00000000-0000-4000-8000-0000000000a1';
+    const b = '00000000-0000-4000-8000-0000000000b1';
+    const textA = 'Explain the original topic A.';
+    const textB = 'Explain the separate topic B.';
+    const store = chatStore();
+    let activeTask: string | undefined;
+    const admit = store.chat.admitChatTurn.bind(store.chat);
+    store.chat.admitChatTurn = async (input) => {
+      if (activeTask) throw new Error('another turn is active');
+      const result = await admit(input);
+      if (result.kind === 'admitted') activeTask = result.task.id;
+      return result;
+    };
+    const complete = store.chat.completeDirectChatTask.bind(store.chat);
+    store.chat.completeDirectChatTask = async (input) => {
+      const result = await complete(input);
+      activeTask = undefined;
+      return result;
+    };
+    const scripted = scriptedRouter({ draft: 'Synthetic answer.' });
+    scripted.route.mockResolvedValueOnce({ ok: false, decision: { mode: 'block', reason: 'synthetic' } } as never);
+    const candidate = { modelId: 'server/model', nextAttemptMicros: 1234, routingDigest: 'd'.repeat(64) };
+    const prepare = vi.fn().mockResolvedValue(candidate);
+    Object.assign(scripted.router, { prepareEstimatedCostCandidate: prepare });
+    let parked: Parameters<import('@assistant/persistence').EstimatedCostTurnParking['park']>[0] | undefined;
+    const park = vi.fn(async (input: NonNullable<typeof parked>) => {
+      parked = input;
+      expect(activeTask).toBe(input.taskId);
+      activeTask = undefined; // Synthetic transaction commits A and releases its active slot.
+      return { ok: true as const, status: 'pending' as const, operationId: input.operationId,
+        taskId: input.taskId, quoteId: 'quote-a', quoteVersion: 'v1' };
+    });
+    const deps = { config: config(), router: scripted.router, chat: store.chat,
+      persistence: { tasks: {}, ownerContext: {} } as never, estimatedCostTurnParking: { park } };
+    const parkedResponse = await handleChatTurn(send(textA, { clientOperationId: a, spoken }), deps);
+    expect(parkedResponse.status).toBe(200);
+    expect(parkedResponse.headers.get('x-estimated-cost-operation-id')).toBe(a);
+    expect(parked).toMatchObject({ operationId: a, taskId: 'task-1', conversationId: CONVERSATION,
+      leaseToken: 'lease-task-1', quoteRequestId: a, candidate });
+    expect(parked?.requestFingerprint).toBe(createHash('sha256').update(JSON.stringify([textA, false, false, spoken])).digest('hex'));
+    expect(prepare).toHaveBeenCalledWith('draft', expect.objectContaining({ taskId: 'task-1', prompt: textA }));
+    expect(scripted.object).not.toHaveBeenCalled();
+    expect(scripted.stream).not.toHaveBeenCalled();
+    expect(activeTask).toBeUndefined();
+
+    const responseB = await handleChatTurn(send(textB, { clientOperationId: b }), deps);
+    expect(responseB.status).toBe(200);
+    expect(scripted.stream).toHaveBeenCalledOnce();
+    expect(park).toHaveBeenCalledOnce();
+    const messageA = store.messages.find((m) => m.taskId === 'task-1')!;
+    const resumedTask = {
+      id: 'task-1', agentId: AGENT, conversationId: CONVERSATION, type: 'chat_turn', trust: 'owner',
+      status: 'running', lockedUntil: new Date(Date.now() + 60_000), leaseToken: 'resumed-a', maxSteps: 12,
+      createdAt: messageA.createdAt,
+      trigger: { source: 'chat', payload: { text: textA, spoken, chatAdmission: {
+        protocol: 'owner-chat-v1', clientOperationId: a, requestHash: parked!.requestFingerprint,
+        triggerMessageId: messageA.id, phase: 'classifying',
+      } } },
+    } as never;
+    await expect(resumeAdmittedChatTask(resumedTask, deps)).resolves.toBe(200);
+    expect(park).toHaveBeenCalledOnce();
+    expect(scripted.stream).toHaveBeenCalledTimes(2);
+    const options = scripted.stream.mock.calls[1]![1] as unknown as { taskId: string; messages: unknown };
+    expect(options.taskId).toBe('task-1');
+    expect(JSON.stringify(options.messages)).toContain(textA);
+    expect(JSON.stringify(options.messages)).not.toContain(textB);
+  });
+  it('does not continue a turn when the parking result is ambiguous', async () => {
+    const store = chatStore();
+    const scripted = scriptedRouter({ draft: 'Must not run.' });
+    scripted.route.mockResolvedValueOnce({ ok: false, decision: { mode: 'block', reason: 'synthetic' } } as never);
+    Object.assign(scripted.router, { prepareEstimatedCostCandidate: vi.fn().mockResolvedValue({
+      modelId: 'server/model', nextAttemptMicros: 1234, routingDigest: 'd'.repeat(64),
+    }) });
+    const response = await handleChatTurn(send('Explain topic A.'), { config: config(), router: scripted.router,
+      chat: store.chat, persistence: { tasks: {}, ownerContext: {} } as never,
+      estimatedCostTurnParking: { park: async () => { throw new Error('unknown commit'); } } });
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ code: 'estimated_cost_unconfirmed', taskId: 'task-1' });
+    expect(scripted.object).not.toHaveBeenCalled();
+    expect(scripted.stream).not.toHaveBeenCalled();
+  });
+  it('retains existing behavior when parking is unavailable', async () => {
+    const store = chatStore();
+    const scripted = scriptedRouter({ draft: 'Synthetic answer.' });
+    scripted.route.mockResolvedValueOnce({ ok: false, decision: { mode: 'block', reason: 'synthetic' } } as never);
+    Object.assign(scripted.router, { prepareEstimatedCostCandidate: vi.fn().mockResolvedValue({
+      modelId: 'server/model', nextAttemptMicros: 1234, routingDigest: 'd'.repeat(64),
+    }) });
+    const response = await handleChatTurn(send('Explain topic A.'), { config: config(), router: scripted.router,
+      chat: store.chat, persistence: { tasks: {}, ownerContext: {} } as never,
+      estimatedCostTurnParking: { park: async () => ({ ok: false, outcome: 'unavailable', message: 'off' }) } });
+    expect(response.status).toBe(200);
+    expect(response.headers.get('x-estimated-cost-operation-id')).toBeNull();
+    expect(scripted.stream).toHaveBeenCalledOnce();
+  });
   it.each([false, true])(
     'revalidates direct-stream recovery against the current task lease (postgres=%s)',
     async (postgres) => {
