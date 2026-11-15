@@ -54,7 +54,7 @@ async function dropOwnedDatabase(
 }
 
 it.skipIf(!imagesReceipt)(
-  'qualifies the schema 136 migration image, runtime readiness, and generic write compatibility',
+  'qualifies the schema 137 migration image, runtime readiness, and generic write compatibility',
   async () => {
     assertAllocatedTestTarget({
       databaseUrl: process.env.DATABASE_URL,
@@ -82,7 +82,7 @@ it.skipIf(!imagesReceipt)(
       | undefined;
     try {
       await admin`SET statement_timeout = '15s'`;
-      prefixDir = await mkdtemp(join(tmpdir(), 'assistant-memory-witness-role-136-'));
+      prefixDir = await mkdtemp(join(tmpdir(), 'assistant-memory-witness-role-137-'));
       await admin.unsafe(`CREATE DATABASE "${target.databaseName}"`);
       created = true;
       await admin.unsafe(
@@ -96,11 +96,12 @@ it.skipIf(!imagesReceipt)(
       await client`SET statement_timeout = '30s'`;
 
       // The populated historical 0134 prefix remains unchanged. The current
-      // candidate must apply exactly the witness and personal Calendar tail.
+      // candidate must apply exactly the witness, personal Calendar and estimated cost tail.
       const forwardEntries = journal.entries.slice(135);
       expect(forwardEntries.map((entry: { tag: string }) => entry.tag)).toEqual([
         '0135_memory_write_witness',
         '0136_google_calendar_connections',
+        '0137_estimated_cost_approval',
       ]);
       const expectedForwardLedger = await Promise.all(
         forwardEntries.map(async (entry: { tag: string; when: number }) => ({
@@ -131,6 +132,7 @@ it.skipIf(!imagesReceipt)(
 
       const owner = randomUUID();
       const legacyMemoryId = randomUUID();
+      const legacyReservationId = randomUUID();
       const legacyContent = 'Legacy owner corrected note at migration 0134';
       const contentHash = createHash('sha256').update(legacyContent).digest('hex');
       const priorContentHash = 'a'.repeat(64);
@@ -154,6 +156,9 @@ it.skipIf(!imagesReceipt)(
       SELECT count(*)::int AS count FROM information_schema.columns
       WHERE table_schema='public' AND table_name='memories' AND column_name='memory_write_witness'`;
       expect(preMigrationColumn?.count).toBe(0);
+      await client`
+        INSERT INTO cost_reservations (id,source,estimated_usd,status,unknown_reason)
+        VALUES (${legacyReservationId},'model',0.125001,'unknown','synthetic pre-migration outcome')`;
       await client.end({ timeout: 5 });
       client = undefined;
 
@@ -166,7 +171,7 @@ it.skipIf(!imagesReceipt)(
       });
       await client`SET statement_timeout = '15s'`;
       const firstForward = expectedForwardLedger[0];
-      if (!firstForward) throw new Error('Schema 136 forward migration tail is missing.');
+      if (!firstForward) throw new Error('Schema 137 forward migration tail is missing.');
       const forwardLedger = await client`
         SELECT hash,created_at::text AS "createdAt" FROM drizzle.__drizzle_migrations
         WHERE created_at >= ${firstForward.createdAt}
@@ -187,6 +192,28 @@ it.skipIf(!imagesReceipt)(
       const [calendarAfter] =
         await client`SELECT state FROM google_calendar_connections WHERE agent_id=${owner}`;
       expect(calendarAfter?.state).toEqual(calendarState);
+      const budgetTables = await client`
+        SELECT table_name AS "tableName" FROM information_schema.tables
+        WHERE table_schema='public' AND table_name LIKE 'estimated_cost_%'
+        ORDER BY table_name`;
+      expect(budgetTables.map((row) => row.tableName)).toEqual([
+        'estimated_cost_baselines',
+        'estimated_cost_decisions',
+        'estimated_cost_grants',
+        'estimated_cost_quote_requests',
+        'estimated_cost_requests',
+      ]);
+      const [legacyReservation] = await client`
+        SELECT status,estimated_usd::text AS "estimatedUsd",reservation_kind AS "kind",
+          cost_grant_id AS "grantId",unknown_reason AS "unknownReason"
+        FROM cost_reservations WHERE id=${legacyReservationId}`;
+      expect(legacyReservation).toEqual({
+        status: 'unknown',
+        estimatedUsd: '0.125001',
+        kind: 'attempt',
+        grantId: null,
+        unknownReason: 'synthetic pre-migration outcome',
+      });
       const [legacyAfter] = await client`
       SELECT content,content_hash AS "contentHash",owner_correction AS "ownerCorrection",
         memory_write_witness IS NULL AS "witnessIsSqlNull"
@@ -210,7 +237,7 @@ it.skipIf(!imagesReceipt)(
       const proofDirectory = process.env.ASSISTANT_MEMORY_WITNESS_PROOF_DIR;
       if (proofDirectory) {
         await writeFile(
-          join(proofDirectory, 'schema-136-forward-upgrade.json'),
+          join(proofDirectory, 'schema-137-forward-upgrade.json'),
           `${JSON.stringify(
             {
               prefixLastMigration: prefixEntries.at(-1)?.tag,
@@ -218,6 +245,8 @@ it.skipIf(!imagesReceipt)(
               appliedForwardLedger: [...forwardLedger],
               calendarTable: calendarTable?.tableName,
               disconnectedCalendarStateReadback: calendarAfter?.state,
+              estimatedCostTables: budgetTables.map((row) => row.tableName),
+              historicalUnknownReservationReadback: legacyReservation,
               legacyMemoryWitnessRemainsSqlNull: legacyAfter?.witnessIsSqlNull,
             },
             null,
