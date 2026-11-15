@@ -150,13 +150,15 @@ final class GoogleCalendarConnectionTests: XCTestCase {
         let client = APIClient(configuration: .init(baseURL: URL(string: "https://assistant.example.com")!, token: "mobile-key"), session: session)
         StubURLProtocol.prime([.failure(URLError(.timedOut))])
         do { _ = try await client.connectGoogleCalendar(); XCTFail("Expected uncertain result") }
-        catch { XCTAssertEqual((error as? URLError)?.code, .timedOut) }
+        catch let APIError.transport(error) { XCTAssertEqual(error.code, .timedOut) }
+        catch { XCTFail("Expected a timeout transport error, got \(error).") }
         XCTAssertEqual(StubURLProtocol.attempts, ["POST"])
         XCTAssertEqual(StubURLProtocol.urls.first?.path, "/api/mobile/v1/connections/google-calendar/connect")
         XCTAssertEqual(StubURLProtocol.headers.first?.first(where: { $0.key.caseInsensitiveCompare("authorization") == .orderedSame })?.value, "Bearer mobile-key")
         StubURLProtocol.prime([.failure(URLError(.timedOut))])
         do { try await client.disconnectGoogleCalendar(); XCTFail("Expected uncertain result") }
-        catch { XCTAssertEqual((error as? URLError)?.code, .timedOut) }
+        catch let APIError.transport(error) { XCTAssertEqual(error.code, .timedOut) }
+        catch { XCTFail("Expected a timeout transport error, got \(error).") }
         XCTAssertEqual(StubURLProtocol.attempts, ["DELETE"])
     }
 }
