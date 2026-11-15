@@ -92,6 +92,18 @@ jobs:
           echo "$RUNNER_TEMP/memory-witness-bin" >> "$GITHUB_PATH"
           [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
           timeout --signal=TERM --kill-after=2s 10s docker version --format '{{json .Server}}' > "$PROOF/docker-server.json"
+      - name: Install checksum-pinned Buildx
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p -m 700 "$DOCKER_CONFIG/cli-plugins"
+          target="$DOCKER_CONFIG/cli-plugins/docker-buildx"
+          curl --fail --location --silent --show-error --retry 2 --connect-timeout 10 --max-time 60 \
+            https://github.com/docker/buildx/releases/download/v0.38.1/buildx-v0.38.1.linux-amd64 \
+            --output "$target"
+          echo 'e25d5cd675092bb5d1d03632fdc46cdf3fede7b514dc5f023a105e00d3ce5ad4  '"$target" | sha256sum --check --status
+          chmod 700 "$target"
       - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa
         timeout-minutes: 2
         with:
