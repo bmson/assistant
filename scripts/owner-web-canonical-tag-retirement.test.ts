@@ -96,7 +96,107 @@ function retiredState(f: ReturnType<typeof fixture>) {
   };
 }
 
+function reviewedImageFixture() {
+  const f = fixture();
+  const container = f.currentNative.containers[0];
+  if (!container) throw new Error('Missing current container');
+  container.image = f.proof.image;
+  container.env = container.env.filter((row) => row.name !== 'ASSISTANT_RELEASE_SOURCE_SHA');
+  f.service.template.containers = structuredClone(f.currentNative.containers);
+  return f;
+}
+
 describe('fixed historical alias beside canonical untagged traffic', () => {
+  it('uses only the reviewed immutable image source when both native source aliases are absent', () => {
+    const f = reviewedImageFixture();
+    const approved = plan(f);
+    expect(approved.current.releaseSource).toBe('0c9a7ad7fc9c62b7ff166fe85bd023013ee88d43');
+    expect(approved.current.image).toBe(f.proof.image);
+    expect(approved.patch).toEqual({
+      name: WEB_SERVICE,
+      etag: f.service.etag,
+      traffic: [f.service.traffic.at(-1)],
+    });
+    expect(approved.drainSeconds).toBe(600);
+  });
+
+  it.each(['ASSISTANT_RELEASE_SOURCE_SHA', 'RELEASE_SHA', 'BUILD_SHA'])(
+    'requires a present %s to agree with the reviewed image source',
+    (name) => {
+      const f = reviewedImageFixture();
+      f.currentNative.containers[0]?.env.push({ name, value: f.proof.source });
+      expect(plan(f).current.releaseSource).toBe(f.proof.source);
+      const row = f.currentNative.containers[0]?.env.at(-1);
+      if (!row) throw new Error('Missing source');
+      row.value = 'f'.repeat(40);
+      expect(() => plan(f)).toThrow('Current native proof refused');
+    },
+  );
+
+  it.each(['ASSISTANT_RELEASE_SOURCE_SHA', 'RELEASE_SHA', 'BUILD_SHA'])(
+    'does not bypass malformed, duplicate or secret-backed %s for the reviewed image',
+    (name) => {
+      for (const kind of ['malformed', 'nonstring', 'duplicate', 'valueSource', 'valueFrom']) {
+        const f = reviewedImageFixture();
+        const env = f.currentNative.containers[0]?.env;
+        if (!env) throw new Error('Missing environment');
+        const row = { name, value: f.proof.source };
+        if (kind === 'malformed') row.value = '';
+        if (kind === 'nonstring') Object.assign(row, { value: 42 });
+        if (kind === 'valueSource' || kind === 'valueFrom')
+          Object.assign(row, { [kind]: { secretKeyRef: {} } });
+        env.push(row);
+        if (kind === 'duplicate') env.push({ ...row });
+        expect(() => plan(f), `${name}: ${kind}`).toThrow('Current native proof refused');
+      }
+    },
+  );
+
+  it('rejects disagreement between source aliases even for the reviewed image', () => {
+    const f = reviewedImageFixture();
+    f.currentNative.containers[0]?.env.push(
+      { name: 'ASSISTANT_RELEASE_SOURCE_SHA', value: f.proof.source },
+      { name: 'RELEASE_SHA', value: 'f'.repeat(40) },
+    );
+    expect(() => plan(f)).toThrow('Current native proof refused');
+  });
+
+  it.each(['different-digest', 'different-repository', 'image-tag'])(
+    'does not infer missing source from %s',
+    (kind) => {
+      const f = reviewedImageFixture();
+      const container = f.currentNative.containers[0];
+      if (!container) throw new Error('Missing current container');
+      container.image =
+        kind === 'different-digest'
+          ? container.image.replace('6e8e1f2b', '7e8e1f2b')
+          : kind === 'different-repository'
+            ? container.image.replace('/assistant/web@', '/other/web@')
+            : container.image.replace(/@sha256:.+$/, ':0c9a7ad7');
+      f.service.template.containers = structuredClone(f.currentNative.containers);
+      expect(() => plan(f)).toThrow('Current native proof refused');
+    },
+  );
+
+  it('still rejects current identity and native drift when using the reviewed image proof', async () => {
+    const f = reviewedImageFixture();
+    const approved = plan(f);
+    f.currentNative.uid = 'changed-current-uid';
+    const patchTraffic = vi.fn(async () => ({}));
+    await expect(
+      executeOwnedWebTagRetirement(approved, {
+        readService: async () => f.service,
+        readRevision: async (name) => f.native[name],
+        patchTraffic,
+        waitOperation: async () => {},
+        drain: async () => {},
+      }),
+    ).rejects.toThrow();
+    expect(patchTraffic).not.toHaveBeenCalled();
+    f.service.latestReadyRevision = 'assistant-web-other';
+    expect(() => plan(f)).toThrow();
+  });
+
   it('removes only the proven zero-percent alias and retains the exact current100 row', () => {
     const f = fixture();
     const approved = plan(f);

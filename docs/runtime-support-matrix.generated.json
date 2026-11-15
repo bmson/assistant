@@ -2,16 +2,16 @@
   "format": 1,
   "purpose": "Source composition and route drift evidence only; not a deployment or configured-runtime receipt.",
   "runtimeSources": {
-    "packages/config/src/index.ts": "1775232bbff153dc4bbfb9dc9fec659a38fd0afdce7f0e67f50d8c6c1822c6d7",
+    "packages/config/src/index.ts": "8993f5611033b5a6bac2901f2cc3ca57b4496c981817e0387f0e3464e4f21ae9",
     "apps/agent/src/deps.ts": "fb30df8600bbcf24da0d5cfa9ef1c92e28700b663429cdbbe37d65ecee0ea655",
     "apps/agent/src/index.ts": "bc65b1a16ba83c6351a74e2c071189fb4288d5d3ec2c4425accc185da77fe6ab",
-    "apps/web/lib/server.ts": "5009e538f4c30067e22395a115f69460ff93081aff8616facb0885a341145665",
-    "apps/web/proxy.ts": "5d2c387c27a2c478a40d2f562af933fcac19343c2abbf6149cd256530d3023fd",
-    "packages/db/drizzle/meta/_journal.json": "fbed73a21a85cebefb245c9612f417ef82899c00d61fb167ab1840173fd000a3",
-    "infra/gcp/release-contracts.json": "f2d306ef0f8898c41c1ea4e701961210b825237177a6f4546d756400788efac8"
+    "apps/web/lib/server.ts": "32c28a39d0cfe21c9e8fe1ac3ae8a32a9ea6aa76c3fb2ba09c0ccd156f0ed721",
+    "apps/web/proxy.ts": "2a381233e47b3d4dd4db2b9fce2e267b4fdfb8b0474f75c36e563661d8de58b6",
+    "packages/db/drizzle/meta/_journal.json": "2522abfe44f13041cf19173d00f21a69563248a9dc76d0915e9f49e5e1163fed",
+    "infra/gcp/release-contracts.json": "7757e8d4ca04c64df2ac9669ceb8e9d3539d9e8c8428c74dc445fc382ea65054"
   },
-  "latestPostgresMigration": "0135_memory_write_witness",
-  "postgresSchemaVersion": 135,
+  "latestPostgresMigration": "0136_google_calendar_connections",
+  "postgresSchemaVersion": 136,
   "releaseContracts": {
     "agent": {
       "apiContract": 1,
@@ -20,8 +20,8 @@
         "max": 1
       },
       "postgresSchema": {
-        "min": 135,
-        "max": 135
+        "min": 136,
+        "max": 136
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -32,8 +32,8 @@
         "max": 1
       },
       "postgresSchema": {
-        "min": 135,
-        "max": 135
+        "min": 136,
+        "max": 136
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -45,7 +45,7 @@
       },
       "postgresSchema": {
         "min": 135,
-        "max": 135
+        "max": 136
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -57,7 +57,7 @@
       },
       "postgresSchema": {
         "min": 135,
-        "max": 135
+        "max": 136
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -69,13 +69,13 @@
       },
       "postgresSchema": {
         "min": 135,
-        "max": 135
+        "max": 136
       },
       "currentPostgresSchemaCompatible": true
     }
   },
   "agentWebSchemaCompatible": true,
-  "webApiRouteCount": 104,
+  "webApiRouteCount": 108,
   "routes": {
     "apps/web/app/api/audit/[id]/route.ts": {
       "methods": ["GET"],
@@ -204,6 +204,18 @@
     "apps/web/app/api/mobile/v1/chats/route.ts": {
       "methods": ["POST"],
       "sha256": "b78060a118ab1fb0907c54077c60e6c0e3a45f7efa2179e53a2b5f4563d611b6"
+    },
+    "apps/web/app/api/mobile/v1/connections/google-calendar/connect/route.ts": {
+      "methods": ["POST"],
+      "sha256": "67263185c06a899b6cccd81a73e9dd8dc6015e97722f7208fd323ba7c4b1c823"
+    },
+    "apps/web/app/api/mobile/v1/connections/google-calendar/flow/route.ts": {
+      "methods": ["DELETE", "GET"],
+      "sha256": "e29a3f9f6fb10222e7b12d174d6a2ec96f034e849e597d571bae9d2d4b942c0a"
+    },
+    "apps/web/app/api/mobile/v1/connections/google-calendar/route.ts": {
+      "methods": ["DELETE", "GET"],
+      "sha256": "42a24a8698be3eb4e336187ecda5a41f9701eedf753bedb9f1805cea6d0c84f6"
     },
     "apps/web/app/api/mobile/v1/costs/route.ts": {
       "methods": ["PATCH"],
@@ -424,6 +436,10 @@
     "apps/web/app/api/mobile/v1/workspace/sections/[section]/route.ts": {
       "methods": ["GET"],
       "sha256": "505529d5a57e7cb906d1fceb30c68463374e687aa82a746e2b07d7c92f27f996"
+    },
+    "apps/web/app/api/oauth/google-calendar/callback/route.ts": {
+      "methods": ["GET"],
+      "sha256": "be0bf6d4b8eb1dac4b1ae0a22440dc006f64c6ea733fb77489f1c8df43e28c3d"
     },
     "apps/web/app/api/owner/browser-signout/route.ts": {
       "methods": ["POST"],

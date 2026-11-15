@@ -1,3 +1,4 @@
+import { googleCalendarReleaseCallback } from '../infra/gcp/google-calendar-release-config.mjs';
 /** Pure source-only BASIC5 lifecycle. No IO, transport, credentials or production caller. */
 import { operationName } from './owner-web-tag-native.js';
 import { tagHash, WEB_CANONICAL_URL, WEB_SERVICE } from './owner-web-tag-retirement.js';
@@ -243,9 +244,16 @@ function context(c: Context) {
       c.image,
     ),
   );
-  assert(equal(Object.keys(c.releaseEnv).sort(), [...ENV].sort()));
-  for (const v of Object.values(c.releaseEnv))
-    assert(typeof v === 'string' && /^[A-Za-z0-9_.:-]{1,128}$/.test(v));
+  const callbackKey = 'GOOGLE_CALENDAR_OAUTH_CALLBACK_URL';
+  const callback = googleCalendarReleaseCallback(c.releaseEnv[callbackKey]);
+  assert(!Object.hasOwn(c.releaseEnv, callbackKey) || callback !== undefined);
+  assert(
+    equal(Object.keys(c.releaseEnv).sort(), [...ENV, ...(callback ? [callbackKey] : [])].sort()),
+  );
+  for (const key of ENV)
+    assert(
+      typeof c.releaseEnv[key] === 'string' && /^[A-Za-z0-9_.:-]{1,128}$/.test(c.releaseEnv[key]),
+    );
   assert(
     c.releaseEnv.ASSISTANT_RELEASE_MANIFEST === c.manifest &&
       c.releaseEnv.ASSISTANT_RELEASE_SOURCE_SHA === c.source &&

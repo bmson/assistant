@@ -138,7 +138,7 @@ private final class NativeCardFormProjectionReadiness: @unchecked Sendable {
     func setEnabled(_ value: Bool) { lock.withLock { enabled = value } }
 }
 
-struct APIClient: Sendable {
+struct APIClient: Sendable, GoogleCalendarConnectionService {
     let configuration: APIConfiguration
     let clientID: String?
     /// A test seam. Production passes nothing and reads `Transport.shared` on
@@ -1340,6 +1340,38 @@ struct APIClient: Sendable {
         )
         request.httpMethod = "DELETE"
         _ = try await perform(request, as: OkPayload.self)
+    }
+
+    func googleCalendarStatus(flowID: String? = nil) async throws -> GoogleCalendarStatus {
+        var url = configuration.baseURL.appending(path: "api/mobile/v1/connections/google-calendar")
+        if let flowID {
+            url = url.appending(path: "flow").appending(queryItems: [URLQueryItem(name: "flowId", value: flowID)])
+        }
+        return try await perform(makeRequest(url: url), as: GoogleCalendarStatus.self)
+    }
+
+    func connectGoogleCalendar() async throws -> GoogleCalendarConnectResponse {
+        var request = makeRequest(url: configuration.baseURL.appending(path: "api/mobile/v1/connections/google-calendar/connect"))
+        request.httpMethod = "POST"
+        return try await perform(request, as: GoogleCalendarConnectResponse.self)
+    }
+
+    func cancelGoogleCalendarFlow(id: String) async throws {
+        let url = configuration.baseURL.appending(path: "api/mobile/v1/connections/google-calendar/flow")
+            .appending(queryItems: [URLQueryItem(name: "flowId", value: id)])
+        try await googleCalendarDelete(url)
+    }
+
+    func disconnectGoogleCalendar() async throws {
+        try await googleCalendarDelete(configuration.baseURL.appending(path: "api/mobile/v1/connections/google-calendar"))
+    }
+
+    private func googleCalendarDelete(_ url: URL) async throws {
+        var request = makeRequest(url: url)
+        request.httpMethod = "DELETE"
+        let (data, response) = try await load(request)
+        guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
+        try await validate(http, data: data)
     }
 
     func modelProviders() async throws -> ModelProviderSettings {

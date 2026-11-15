@@ -273,6 +273,7 @@ JSON
  : >"$STUB_DRAIN_CALLS"
  : >"$STUB_ADMISSION_CALLS"
  TEST_BASIC5_CAPABILITY=false
+ unset GOOGLE_CALENDAR_OAUTH_CALLBACK_URL
  unset RELEASE_EMAIL_OBSERVER_WORKER_ENABLED
  export RELEASE_COMPONENTS=agent,web RELEASE_MODULES=none RELEASE_PERSISTENCE_DRIVER=postgres
  export PROJECT=test-project REGION=us-west1 REPO=assistant IMAGE_ROOT=us-west1-docker.pkg.dev/test-project/assistant
@@ -335,6 +336,25 @@ import json,sys
 import os
 s=json.load(open(sys.argv[1])); env=s['assistant-agent']['env']; live=s['assistant-agent']['revisions']['agent-old']['env']; current=os.environ['POSTGRES_SCHEMA_VERSION']; old=os.environ['POSTGRES_PREVIOUS_SCHEMA_VERSION']; assert env['ASSISTANT_RELEASE_SCHEMA_MIN']==current; assert env['ASSISTANT_RELEASE_SCHEMA_MAX']==current; assert live['ASSISTANT_RELEASE_SCHEMA_MIN']==old; assert live['ASSISTANT_RELEASE_SCHEMA_MAX']==old
 PYCONTROL
+for invalid_callback in 'http://bot.bmson.com/api/oauth/google-calendar/callback' 'https://bot.bmson.com/api/oauth/google-calendar/callback,PRIVATE=replace' 'https://bot.bmson.com/wrong'; do
+ reset_case; export GOOGLE_CALENDAR_OAUTH_CALLBACK_URL="$invalid_callback"
+ if release_staged_services; then fail 'invalid Calendar callback must fail'; fi
+ [[ ! -s "$STUB_SERVICE_UPDATE_CALLS" ]] || fail 'invalid Calendar callback mutated a service'
+done
+reset_case; export GOOGLE_CALENDAR_OAUTH_CALLBACK_URL='https://bot.bmson.com/api/oauth/google-calendar/callback'
+release_staged_services || fail 'optional Calendar callback should stage the pair'
+python3 - "$STUB_SERVICE_UPDATE_CALLS" <<'PYTEST'
+import json,sys
+calls=[json.loads(line) for line in open(sys.argv[1])]
+for service in ['assistant-agent','assistant-web']:
+ call=next(x for x in calls if x[3]==service)
+ assert 'GOOGLE_CALENDAR_OAUTH_CALLBACK_URL=https://bot.bmson.com/api/oauth/google-calendar/callback' in call[call.index('--update-env-vars')+1]
+ assert '--no-traffic' in call
+PYTEST
+reset_case; export GOOGLE_CALENDAR_OAUTH_CALLBACK_URL='https://bot.bmson.com/api/oauth/google-calendar/callback' RELEASE_COMPONENTS=web RELEASE_SCHEMA_UNCHANGED=true
+if release_staged_services; then fail 'Calendar configuration must reject web-only release'; fi
+[[ ! -s "$STUB_SERVICE_UPDATE_CALLS" ]] || fail 'web-only Calendar configuration mutated a service'
+reset_case
 reset_case; export RELEASE_EMAIL_OBSERVER_WORKER_ENABLED=bogus
 if release_staged_services; then fail 'invalid worker flag must fail before staging'; fi
 [[ ! -s "$STUB_SERVICE_UPDATE_CALLS" && ! -s "$STUB_RELEASE_CALLS" ]] || fail 'invalid worker flag reached a staging or traffic mutation'
@@ -934,4 +954,5 @@ export FAIL_BOOTSTRAP_UNKNOWN=1
 if release_staged_services >/dev/null 2>&1; then fail 'unknown scaling restoration must fail closed'; fi
 if rg -q '^native-phase:restoreC' "$STUB_ADMISSION_CALLS"; then fail 'unknown scaling outcome resumed legacy traffic'; fi
 unset FAIL_BOOTSTRAP_UNKNOWN OWNER_RELEASE_BOOTSTRAP_RECEIPT OWNER_RELEASE_BOOTSTRAP_SHA256
+bash "$ROOT/google-calendar-release-config.test.sh"
 echo 'staged release protocol tests passed'

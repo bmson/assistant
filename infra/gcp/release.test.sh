@@ -18,7 +18,7 @@ LEGACY_RELEASE_ROOT="$TEST_ROOT/legacy-release-source"
 mkdir -p "$LEGACY_RELEASE_ROOT/infra/gcp" "$LEGACY_RELEASE_ROOT/packages/db/drizzle/meta"
 LEGACY_RELEASE_ROOT="$(cd "$LEGACY_RELEASE_ROOT" && pwd -P)"
 for file in release-firestore.sh release-fast.sh release-persistence.sh release-staged-services.sh release-legacy-bootstrap.sh \
-  release-schema-version.mjs release-manifest.mjs release-contracts.json; do
+  release-schema-version.mjs release-manifest.mjs release-contracts.json google-calendar-release-config.mjs; do
   cp "$ROOT/$file" "$LEGACY_RELEASE_ROOT/infra/gcp/$file"
 done
 cp "${ROOT%/infra/gcp}/packages/db/drizzle/meta/_journal.json" \

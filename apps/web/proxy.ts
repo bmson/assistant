@@ -177,6 +177,12 @@ export function proxy(request: NextRequest) {
   const securityReviewIdPath = /^\/api\/mobile\/v1\/security-reviews\/([^/]+)$/;
   if (
     path.startsWith('/api/auth/') ||
+    (path === '/api/oauth/google-calendar/callback' && request.method === 'GET') ||
+    (path === '/api/mobile/v1/connections/google-calendar' &&
+      ['GET', 'DELETE'].includes(request.method)) ||
+    (path === '/api/mobile/v1/connections/google-calendar/connect' && request.method === 'POST') ||
+    (path === '/api/mobile/v1/connections/google-calendar/flow' &&
+      ['GET', 'DELETE'].includes(request.method)) ||
     // Passkey owner auth; each route returns 404 unless OWNER_AUTH_MODE=passkey.
     (path.startsWith('/api/owner/') && ['GET', 'POST', 'DELETE'].includes(request.method)) ||
     (['/setup', '/signin', '/security'].includes(path) && request.method === 'GET') ||

@@ -250,19 +250,42 @@ function releaseLiteral(native: unknown, name: string): string {
   return matches[0].value;
 }
 
+// Reviewed registry bytes: the image manifest hashes to this image digest and
+// names this config digest; the verified config bytes contain exactly one
+// BUILD_SHA with this source. The existing historical tag proof binds the same
+// image/source. This is one immutable image proof, never a tag/name/health inference.
+const REVIEWED_CURRENT_IMAGE_SOURCE = {
+  image: `${IMAGE}6e8e1f2ba42ac11e846062bdaad1943bf4ce5a18cf07f16aa5b9f40f481c2dff`,
+  configDigest: 'sha256:9f0f6212fc66935ac80ea76b695b78df6da375ea650b55c69be6e0fc3177189d',
+  source: '0c9a7ad7fc9c62b7ff166fe85bd023013ee88d43',
+} as const;
+
 function nativeReleaseSource(native: unknown): string {
   const containers = object(native).containers;
-  const env = Array.isArray(containers) ? object(containers[0]).env : undefined;
+  if (!Array.isArray(containers) || containers.length !== 1)
+    throw new Error('Current native proof refused');
+  const container = object(containers[0]);
+  const env = container.env;
   if (!Array.isArray(env)) throw new Error('Current native proof refused');
+  const reviewed = container.image === REVIEWED_CURRENT_IMAGE_SOURCE.image;
+  // A native override must not contradict the BUILD_SHA sealed into that image.
+  if (
+    reviewed &&
+    env.map(object).some((row) => row.name === 'BUILD_SHA') &&
+    releaseLiteral(native, 'BUILD_SHA') !== REVIEWED_CURRENT_IMAGE_SOURCE.source
+  )
+    throw new Error('Current native proof refused');
   const names = ['ASSISTANT_RELEASE_SOURCE_SHA', 'RELEASE_SHA'].filter((name) =>
     env.map(object).some((row) => row.name === name),
   );
+  if (names.length === 0 && reviewed) return REVIEWED_CURRENT_IMAGE_SOURCE.source;
   const sources = names.map((name) => releaseLiteral(native, name));
   const source = sources[0];
   if (
     source === undefined ||
     sources.some((value) => !/^[a-f0-9]{40}$/.test(value)) ||
-    new Set(sources).size !== 1
+    new Set(sources).size !== 1 ||
+    (reviewed && source !== REVIEWED_CURRENT_IMAGE_SOURCE.source)
   )
     throw new Error('Current native proof refused');
   return source;

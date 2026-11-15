@@ -105,6 +105,11 @@ struct MoreView: View {
 
             Section("Services") {
                 NavigationLink {
+                    GoogleCalendarConnectionView()
+                } label: {
+                    Label("Google Calendar", systemImage: "calendar.badge.plus")
+                }
+                NavigationLink {
                     PhoneCalendarsView()
                 } label: {
                     Label("iPhone calendars", systemImage: "calendar")

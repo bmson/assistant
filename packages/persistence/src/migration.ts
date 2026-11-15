@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { ExactTimestamp, parseExactTimestamp } from './exact-timestamp.js';
+import { parseGoogleCalendarConnection } from './google-calendar-connection.js';
 import {
   ownerCallGrantOperationMatchesSlot,
   parseOwnerCallGrantOperation,
@@ -18,6 +19,12 @@ const FINGERPRINT = /^[a-f0-9]{64}$/;
  * here so a manifest cannot claim completeness while silently omitting it.
  */
 export const MIGRATION_TABLES = [
+  {
+    table: 'google_calendar_connections',
+    collection: 'googleCalendarConnections',
+    id: 'agent_id',
+    scope: 'agent',
+  },
   { table: 'agents', collection: 'agents', id: 'id', scope: 'agent' },
   { table: 'ambient_snapshots', collection: 'ambientSnapshots', id: 'id', scope: 'agent' },
   { table: 'anomalies', collection: 'anomalies', id: 'id', scope: 'agent' },
@@ -1001,6 +1008,15 @@ export function validateMigrationReferences(
     'writing_samples',
   ]);
   for (const record of records) {
+    if (record.table === 'google_calendar_connections') {
+      if (record.id !== sourceAgentId || record.data.agentId !== sourceAgentId)
+        throw new Error('Invalid Google Calendar migration owner');
+      try {
+        parseGoogleCalendarConnection(decodedData(record).state, sourceAgentId);
+      } catch {
+        throw new Error('Invalid Google Calendar migration state');
+      }
+    }
     if (record.table === 'contacts') parseContactIdentityAuthority(record.data.identityAuthority);
     if (
       record.table !== 'agents' &&
