@@ -94,8 +94,12 @@ describe('single-attempt model calls', () => {
       const candidate = await router.prepareEstimatedCostCandidate('draft', {
         prompt: 'Price this request.',
       });
+      const changed = await router.prepareEstimatedCostCandidate('draft', {
+        prompt: 'Price a different request.',
+      });
       expect(candidate.nextAttemptMicros).toBeGreaterThan(0);
       expect(candidate.routingDigest).toMatch(/^[a-f0-9]{64}$/);
+      expect(changed.routingDigest).not.toBe(candidate.routingDigest);
       expect(fetch).not.toHaveBeenCalled();
       const after = await db.select({ id: costReservations.id }).from(costReservations);
       expect(after).toHaveLength(before.length);
