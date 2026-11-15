@@ -6,6 +6,7 @@ import {
   type EmbeddingSpace,
   embeddingModelId,
   embeddingSpaceIdentityKey,
+  ledgerUsdToMicros,
   type ModelRoutingRepository,
   POSTGRES_EMBEDDING_DIMENSIONS,
   validateEmbeddingSpace,
@@ -1060,6 +1061,15 @@ export class ModelRouter {
       return { ok: false, decision };
     }
 
+    return this.resolveRoute(role, opts, decision);
+  }
+
+  /** Candidate resolution is private so quote preparation cannot authorize a call. */
+  private async resolveRoute(
+    role: ModelRole,
+    opts: RouteOptions,
+    decision: Extract<BudgetDecision, { mode: 'primary' | 'fallback' }>,
+  ): Promise<Extract<Route, { ok: true }>> {
     const roleRow = await this.persistence.role(role);
     if (!roleRow) throw new Error(`no model_roles row for role: ${role}`);
 
@@ -1324,6 +1334,60 @@ export class ModelRouter {
         modelId: route.modelId,
       }),
     };
+  }
+
+  /** Select and price a candidate without a reservation or provider request.
+   * This result is evidence for a quote, not authority to dispatch. */
+  async prepareEstimatedCostCandidate(
+    role: Exclude<ModelRole, 'embed'>,
+    opts: CallOptions,
+    toolCall = false,
+  ): Promise<{ modelId: string; nextAttemptMicros: number; routingDigest: string }> {
+    await this.providers.refresh();
+    const budget = evaluateBudget(await this.budgetSnapshot(opts.taskId), {
+      critical: opts.critical,
+    });
+    const decision: Extract<BudgetDecision, { mode: 'primary' | 'fallback' }> =
+      budget.mode === 'block' || budget.mode === 'park'
+        ? { mode: 'fallback', reason: 'estimate candidate under budget pressure' }
+        : budget;
+    const route = await this.resolveRoute(role, opts, decision);
+    const { maxOutputTokens } = this.modelCallBudget(role, route, opts, toolCall);
+    const inputTokens = estimatedInputTokens(opts);
+    const estimatedUsd = Math.max(
+      0.000001,
+      ((inputTokens * route.promptCostPerMTok + maxOutputTokens * route.completionCostPerMTok) /
+        1_000_000) *
+        ESTIMATE_SAFETY_FACTOR,
+    );
+    assertEstimatedCostWithinLimit(estimatedUsd, opts.maxEstimatedCostUsd);
+    const nextAttemptMicros = ledgerUsdToMicros(estimatedUsd);
+    const routingDigest = createHash('sha256')
+      .update(
+        JSON.stringify({
+          role,
+          taskId: opts.taskId ?? null,
+          modelId: route.modelId,
+          degraded: route.degraded,
+          promptCostPerMTok: route.promptCostPerMTok,
+          completionCostPerMTok: route.completionCostPerMTok,
+          params: route.params,
+          requestProfile: route.requestProfile,
+          maxOutputTokens,
+          inputTokens,
+          reasoning: this.reasoningMode(role, route, toolCall),
+          critical: opts.critical === true,
+          toolCall,
+          maxEstimatedCostUsd: opts.maxEstimatedCostUsd ?? null,
+          requestDigest: createHash('sha256')
+            .update(
+              JSON.stringify({ system: opts.system, prompt: opts.prompt, messages: opts.messages }),
+            )
+            .digest('hex'),
+        }),
+      )
+      .digest('hex');
+    return { modelId: route.modelId, nextAttemptMicros, routingDigest };
   }
 
   private async reserveModelCall(

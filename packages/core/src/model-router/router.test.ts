@@ -77,6 +77,36 @@ describe('objectFailureAuditOutput', () => {
 });
 
 describe('single-attempt model calls', () => {
+  it('prices a candidate under held-budget pressure without reserving or calling a provider', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const [held] = await db
+      .insert(costReservations)
+      .values({ source: 'model', estimatedUsd: '4.000000' })
+      .returning();
+    if (!held) throw new Error('Missing fixture hold');
+    const fetch = vi
+      .spyOn(globalThis, 'fetch')
+      .mockRejectedValue(new Error('unexpected provider request'));
+    try {
+      const before = await db.select({ id: costReservations.id }).from(costReservations);
+      const router = new ModelRouter(db, 'unused');
+      expect((await router.route('draft')).ok).toBe(false);
+      const candidate = await router.prepareEstimatedCostCandidate('draft', {
+        prompt: 'Price this request.',
+      });
+      expect(candidate.nextAttemptMicros).toBeGreaterThan(0);
+      expect(candidate.routingDigest).toMatch(/^[a-f0-9]{64}$/);
+      expect(fetch).not.toHaveBeenCalled();
+      const after = await db.select({ id: costReservations.id }).from(costReservations);
+      expect(after).toHaveLength(before.length);
+      const rows = await db.select().from(costReservations).where(eq(costReservations.id, held.id));
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.status).toBe('held');
+    } finally {
+      fetch.mockRestore();
+      await db.delete(costReservations).where(eq(costReservations.id, held.id));
+    }
+  });
   it('suppresses timeout retries only when requested', async (ctx) => {
     if (!dbUp) return ctx.skip();
     const router = new ModelRouter(db, 'unused');
