@@ -5,6 +5,8 @@ import {
   type CostEventInput,
   type CostRepository,
   type CostTotals,
+  type CurrentBaselineReservation,
+  currentHistoricalUnknownMicros,
   type EstimatedCostActor,
   type EstimatedCostApprovalRepository,
   type EstimatedCostBudgetTracking,
@@ -22,6 +24,7 @@ import {
   nextUtcMonthlyReset,
   parseEstimatedCostQuote,
   parseEstimatedCostReceipt,
+  parseHistoricalUnknownBaseline,
   projectEstimatedCostRequest,
   type Records,
   type ReservationActual,
@@ -306,6 +309,9 @@ export class FirestoreCostRepository implements CostRepository {
         const unknown = await tx.get(
           this.store.collection('costReservations').where('status', '==', 'unknown').limit(1),
         );
+        const baseline = await tx.get(
+          this.store.doc('estimatedCostBaselines', actor.installationId),
+        );
         if (
           new Date(now).toISOString().slice(0, 10) !== this.store.now().toISOString().slice(0, 10)
         )
@@ -336,7 +342,43 @@ export class FirestoreCostRepository implements CostRepository {
           }
         // A positive aggregate without a complete provenance inventory cannot prove
         // that an omitted/malformed reservation is not an unknown liability.
-        const historicalUnknownMicros = unknown.empty && heldMicros === 0 ? 0 : null;
+        let historicalUnknownMicros: number | null = unknown.empty && heldMicros === 0 ? 0 : null;
+        if (baseline.exists) {
+          historicalUnknownMicros = null;
+          const frozen = parseHistoricalUnknownBaseline(decodeRecord(baseline.get('rows')));
+          if (
+            baseline.get('ownerId') === actor.ownerId &&
+            frozen &&
+            createHash('sha256').update(JSON.stringify(frozen)).digest('hex') ===
+              baseline.get('digest')
+          ) {
+            const currentDocs = frozen.length
+              ? await tx.getAll(
+                  ...frozen.map((entry) => this.store.doc('costReservations', entry.reservationId)),
+                )
+              : [];
+            try {
+              const current: CurrentBaselineReservation[] = currentDocs
+                .filter((doc) => doc.exists)
+                .map((doc) => ({
+                  reservationId: String(doc.get('id') ?? ''),
+                  estimatedMicros: storedLedgerUsdToMicros(doc.get('estimatedUsd')),
+                  status: String(doc.get('status') ?? ''),
+                  provenance:
+                    (doc.get('reservationKind') === undefined ||
+                      doc.get('reservationKind') === 'attempt') &&
+                    doc.get('costGrantId') == null
+                      ? 'proven-historical-unapproved'
+                      : 'unrecognized',
+                }));
+              const subtotal = currentHistoricalUnknownMicros(frozen, current);
+              if (subtotal !== null && heldMicros !== null && subtotal <= heldMicros)
+                historicalUnknownMicros = subtotal;
+            } catch {
+              historicalUnknownMicros = null;
+            }
+          }
+        }
         const tracking: EstimatedCostBudgetTracking = {
           observedAt: new Date(now).toISOString(),
           complete:

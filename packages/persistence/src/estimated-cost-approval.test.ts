@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   canonicalEstimatedCostJson,
+  currentHistoricalUnknownMicros,
   type EstimatedCostHeadroom,
   estimatedCostAllowance,
   estimatedCostAllowanceExpiry,
@@ -96,6 +97,11 @@ describe('estimated cost allowance', () => {
     };
     const current = [canonical];
     expect(verifiedHistoricalUnknownMicros(baseline, current, true)).toBe(10);
+    expect(currentHistoricalUnknownMicros(baseline, current)).toBe(10);
+    expect(currentHistoricalUnknownMicros(baseline, [{ ...canonical, status: 'reconciled' }])).toBe(
+      0,
+    );
+    expect(currentHistoricalUnknownMicros(baseline, [])).toBeNull();
     expect(() => verifiedHistoricalUnknownMicros(baseline, current, false)).toThrow();
     expect(() => verifiedHistoricalUnknownMicros(baseline, [], true)).toThrow();
     expect(() =>

@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { FirestoreCostRepository } from './costs.js';
 import type { InstallationStore } from './store.js';
@@ -255,6 +255,38 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore atomic cost led
     expect(await costs.expireEstimatedCostGrant(grantId)).toBe(false);
     expect((await store.doc('costReservations', unknownId).get()).get('status')).toBe('unknown');
     expect((await costs.totals()).heldUsd).toBeCloseTo(before.heldUsd - 0.19);
+    const old = await costs.reserve({ source: 'model', estimatedUsd: 0.1 });
+    if (!old.ok) throw new Error('Expected historical hold');
+    await store.doc('costReservations', old.reservationId).update({ status: 'unknown' });
+    const frozen = [{ reservationId: old.reservationId, estimatedMicros: 100_000 }];
+    await store
+      .doc('estimatedCostBaselines', 'install')
+      .set({
+        installationId: 'install',
+        ownerId: 'owner',
+        rows: frozen,
+        digest: createHash('sha256').update(JSON.stringify(frozen)).digest('hex'),
+      });
+    expect((await costs.readEstimatedCostView(input.actor, operationId))?.tracking).toMatchObject({
+      historicalUnknownMicros: 100_000,
+      totalHeldMicros: 110_000,
+    });
+    await costs.reconcile(old.reservationId, { usd: 0.05 });
+    expect((await costs.readEstimatedCostView(input.actor, operationId))?.tracking).toMatchObject({
+      historicalUnknownMicros: 0,
+      totalHeldMicros: 10_000,
+    });
+    const invalid = [{ reservationId: unknownId, estimatedMicros: 10_000 }];
+    await store
+      .doc('estimatedCostBaselines', 'install')
+      .update({
+        rows: invalid,
+        digest: createHash('sha256').update(JSON.stringify(invalid)).digest('hex'),
+      });
+    expect(
+      (await costs.readEstimatedCostView(input.actor, operationId))?.tracking
+        .historicalUnknownMicros,
+    ).toBeNull();
   });
 
   it('closes only the selected expired parked request and replays the exact decline receipt', async () => {
@@ -292,38 +324,32 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore atomic cost led
         },
       },
     };
-    await store
-      .doc('tasks', taskId)
-      .set({
-        id: taskId,
-        agentId: 'owner',
-        type: 'chat_turn',
-        trust: 'owner',
-        status: 'waiting_estimated_cost',
-        trigger,
-      });
-    await store
-      .doc('tasks', 'other-task')
-      .set({
-        id: 'other-task',
-        agentId: 'owner',
-        type: 'chat_turn',
-        trust: 'owner',
-        status: 'pending',
-      });
-    await store
-      .doc('estimatedCostRequests', operationId)
-      .set({
-        operationId,
-        installationId: 'install',
-        ownerId: 'owner',
-        taskId,
-        requestFingerprint: fingerprint,
-        bindingDigest: 'binding',
-        state: 'pending',
-        quote,
-        baseline: [],
-      });
+    await store.doc('tasks', taskId).set({
+      id: taskId,
+      agentId: 'owner',
+      type: 'chat_turn',
+      trust: 'owner',
+      status: 'waiting_estimated_cost',
+      trigger,
+    });
+    await store.doc('tasks', 'other-task').set({
+      id: 'other-task',
+      agentId: 'owner',
+      type: 'chat_turn',
+      trust: 'owner',
+      status: 'pending',
+    });
+    await store.doc('estimatedCostRequests', operationId).set({
+      operationId,
+      installationId: 'install',
+      ownerId: 'owner',
+      taskId,
+      requestFingerprint: fingerprint,
+      bindingDigest: 'binding',
+      state: 'pending',
+      quote,
+      baseline: [],
+    });
     const repo = costs.estimatedCostApprovalRepository();
     const actor = { installationId: 'install', ownerId: 'owner' };
     const decision = {

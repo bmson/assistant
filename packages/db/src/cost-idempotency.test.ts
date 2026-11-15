@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { eq, inArray, sql } from 'drizzle-orm';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createDb, type Db } from './client.js';
@@ -16,6 +16,7 @@ import {
   agents,
   costEvents,
   costReservations,
+  estimatedCostBaselines,
   estimatedCostDecisions,
   estimatedCostGrants,
   estimatedCostRequests,
@@ -390,7 +391,47 @@ describe('PostgreSQL idempotent cost events', () => {
         .where(eq(costReservations.id, unknownId));
       expect(child?.status).toBe('unknown');
       expect((await costs.totals()).heldUsd).toBeCloseTo(before.heldUsd - 0.19);
+      const old = await costs.reserve({ source: 'model', estimatedUsd: 0.1 });
+      if (!old.ok) throw new Error('Expected historical hold');
+      reservationIds.push(old.reservationId);
+      await db
+        .update(costReservations)
+        .set({ status: 'unknown' })
+        .where(eq(costReservations.id, old.reservationId));
+      const frozen = [{ reservationId: old.reservationId, estimatedMicros: 100_000 }];
+      await db
+        .insert(estimatedCostBaselines)
+        .values({
+          installationId: 'install',
+          ownerId: 'owner',
+          rows: frozen,
+          digest: createHash('sha256').update(JSON.stringify(frozen)).digest('hex'),
+        });
+      expect((await readEstimatedCostView(db, input.actor, operationId))?.tracking).toMatchObject({
+        historicalUnknownMicros: 100_000,
+        totalHeldMicros: 110_000,
+      });
+      await costs.reconcile(old.reservationId, { usd: 0.05 });
+      expect((await readEstimatedCostView(db, input.actor, operationId))?.tracking).toMatchObject({
+        historicalUnknownMicros: 0,
+        totalHeldMicros: 10_000,
+      });
+      const invalid = [{ reservationId: unknownId, estimatedMicros: 10_000 }];
+      await db
+        .update(estimatedCostBaselines)
+        .set({
+          rows: invalid,
+          digest: createHash('sha256').update(JSON.stringify(invalid)).digest('hex'),
+        })
+        .where(eq(estimatedCostBaselines.installationId, 'install'));
+      expect(
+        (await readEstimatedCostView(db, input.actor, operationId))?.tracking
+          .historicalUnknownMicros,
+      ).toBeNull();
     } finally {
+      await db
+        .delete(estimatedCostBaselines)
+        .where(eq(estimatedCostBaselines.installationId, 'install'));
       await db
         .delete(estimatedCostRequests)
         .where(eq(estimatedCostRequests.operationId, pendingOperationId));

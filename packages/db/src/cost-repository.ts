@@ -3,6 +3,8 @@ import {
   addLedgerMicros,
   addMicros,
   type CostRepository,
+  type CurrentBaselineReservation,
+  currentHistoricalUnknownMicros,
   DEFAULT_RATES,
   type EstimatedCostActor,
   type EstimatedCostApprovalRepository,
@@ -21,6 +23,7 @@ import {
   nextMonthlyReset,
   parseEstimatedCostQuote,
   parseEstimatedCostReceipt,
+  parseHistoricalUnknownBaseline,
   projectEstimatedCostRequest,
   storedLedgerUsdToMicros,
   storedTaskBudgetToMicros,
@@ -32,6 +35,7 @@ import {
   budgets,
   costEvents,
   costReservations,
+  estimatedCostBaselines,
   estimatedCostDecisions,
   estimatedCostGrants,
   estimatedCostRequests,
@@ -122,7 +126,7 @@ export async function readEstimatedCostView(
       });
       const day = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
       const month = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-      const [[daily], [monthly], [held], unknown, pending] = await Promise.all([
+      const [[daily], [monthly], [held], unknown, baselineRows, pending] = await Promise.all([
         tx
           .select({ total: sum(costEvents.usd) })
           .from(costEvents)
@@ -139,6 +143,11 @@ export async function readEstimatedCostView(
           .select({ id: costReservations.id })
           .from(costReservations)
           .where(eq(costReservations.status, 'unknown'))
+          .limit(1),
+        tx
+          .select()
+          .from(estimatedCostBaselines)
+          .where(eq(estimatedCostBaselines.installationId, actor.installationId))
           .limit(1),
         tx
           .select({
@@ -173,8 +182,44 @@ export async function readEstimatedCostView(
           if (Date.parse(pendingQuote.expiresAt) > now.getTime())
             pendingMicros = addMicros(pendingMicros, pendingQuote.allowanceMicros);
         }
-      // Without a proven installation-wide baseline, unknown rows cannot be classified as historical.
-      const historicalUnknownMicros = unknown.length === 0 ? 0 : null;
+      let historicalUnknownMicros: number | null = unknown.length === 0 ? 0 : null;
+      const baseline = baselineRows[0];
+      if (baseline) {
+        historicalUnknownMicros = null;
+        const frozen = parseHistoricalUnknownBaseline(baseline.rows);
+        if (
+          baseline.ownerId === actor.ownerId &&
+          frozen &&
+          createHash('sha256').update(JSON.stringify(frozen)).digest('hex') === baseline.digest
+        ) {
+          const rows = frozen.length
+            ? await tx
+                .select()
+                .from(costReservations)
+                .where(
+                  inArray(
+                    costReservations.id,
+                    frozen.map((entry) => entry.reservationId),
+                  ),
+                )
+            : [];
+          try {
+            const current: CurrentBaselineReservation[] = rows.map((row) => ({
+              reservationId: row.id,
+              estimatedMicros: storedLedgerUsdToMicros(row.estimatedUsd),
+              status: row.status,
+              provenance:
+                row.reservationKind === 'attempt' && row.costGrantId === null
+                  ? 'proven-historical-unapproved'
+                  : 'unrecognized',
+            }));
+            const subtotal = currentHistoricalUnknownMicros(frozen, current);
+            if (subtotal !== null && subtotal <= heldMicros) historicalUnknownMicros = subtotal;
+          } catch {
+            historicalUnknownMicros = null;
+          }
+        }
+      }
       const tracking: EstimatedCostBudgetTracking = {
         observedAt: now.toISOString(),
         complete: pendingMicros !== null && historicalUnknownMicros !== null,

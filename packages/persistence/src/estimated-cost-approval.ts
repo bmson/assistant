@@ -524,6 +524,7 @@ export interface EstimatedCostPreparedQuote {
 
 export interface EstimatedCostSourceBinding {
   role: string;
+  critical: boolean;
   selectedModelId: string;
   routingDigest: string;
   roleRowDigest: string;
@@ -585,6 +586,16 @@ export interface EstimatedCostTurnParking {
   park(input: EstimatedCostTurnParkInput): Promise<EstimatedCostTurnParkResult>;
 }
 
+/** Nested at task.state.estimatedCostApproval; merge with the checkpoint.
+ * This marker is a locator only: dispatch must revalidate the canonical grant. */
+export interface EstimatedCostTaskMarker {
+  operationId: string;
+  quoteId: string;
+  bindingDigest: string;
+  status: 'pending' | 'approved';
+  grantId?: string;
+}
+
 export type EstimatedCostPreparationResult =
   | { ok: true; prepared: EstimatedCostPreparedQuote }
   | EstimatedCostHttpError;
@@ -643,7 +654,16 @@ export function currentHistoricalUnknownMicros(
   const byId = new Map(current.map((row) => [row.reservationId, row]));
   if (byId.size !== current.length) return null;
   let total = 0;
+  const seen = new Set<string>();
   for (const expected of baseline) {
+    if (
+      !expected.reservationId ||
+      seen.has(expected.reservationId) ||
+      !Number.isSafeInteger(expected.estimatedMicros) ||
+      expected.estimatedMicros <= 0
+    )
+      return null;
+    seen.add(expected.reservationId);
     const row = byId.get(expected.reservationId);
     if (
       row?.provenance !== 'proven-historical-unapproved' ||
