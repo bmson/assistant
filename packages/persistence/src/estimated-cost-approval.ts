@@ -78,7 +78,7 @@ export type EstimatedCostDecisionResponse =
   | { ok: true; receipt: EstimatedCostDecisionReceipt }
   | EstimatedCostHttpError;
 
-/** Status mapping: invalid=400, unauthorized=401, not_found=404, conflict=409,
+/** Status mapping: invalid=400, unauthorized=401, forbidden=403, not_found=404, conflict=409,
  * unavailable=503, unconfirmed=503. An unconfirmed decision must be read back
  * with the same operationId and decisionId, never retried as a new decision.
  * A stale decision is a durable receipt returned with HTTP 409 and ok: true.
@@ -87,7 +87,14 @@ export type EstimatedCostDecisionResponse =
  */
 export type EstimatedCostHttpError = {
   ok: false;
-  outcome: 'invalid' | 'unauthorized' | 'not_found' | 'conflict' | 'unavailable' | 'unconfirmed';
+  outcome:
+    | 'invalid'
+    | 'unauthorized'
+    | 'forbidden'
+    | 'not_found'
+    | 'conflict'
+    | 'unavailable'
+    | 'unconfirmed';
   operationId?: string;
   decisionId?: string;
   message: string;
