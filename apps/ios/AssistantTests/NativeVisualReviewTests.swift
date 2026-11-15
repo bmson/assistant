@@ -557,16 +557,59 @@ final class NativeVisualReviewTests: XCTestCase {
             let transcript = try XCTUnwrap(descendants(window).compactMap { $0 as? UIScrollView }
                 .filter { !($0 is UITextView) }.max { $0.bounds.height < $1.bounds.height })
             let viewport = transcript.frame
-            let top = -transcript.adjustedContentInset.top
-            var bottom = max(top, transcript.contentSize.height - transcript.bounds.height
-                + transcript.adjustedContentInset.bottom)
-            for _ in 0..<4 where abs(transcript.contentOffset.y - bottom) > 1 {
-                transcript.setContentOffset(CGPoint(x: transcript.contentOffset.x, y: bottom), animated: false)
-                try await Task.sleep(for: .milliseconds(100))
-                window.layoutIfNeeded()
-                bottom = max(top, transcript.contentSize.height - transcript.bounds.height
-                    + transcript.adjustedContentInset.bottom)
+            // A UIKit offset request can race SwiftUI's deferred initial bottom
+            // positioning or lazy-row layout. Require actual stable geometry,
+            // not a fixed delay or a test-only follow/Jump state override.
+            func settleTranscript(atNewest: Bool) async throws -> Bool {
+                let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+                var previous: [CGFloat]?
+                var stableSamples = 0
+                var offsetRequests = 0
+                while ContinuousClock.now < deadline {
+                    window.layoutIfNeeded()
+                    let minimum = -transcript.adjustedContentInset.top
+                    let maximum = max(minimum, transcript.contentSize.height - transcript.bounds.height
+                        + transcript.adjustedContentInset.bottom)
+                    let target = atNewest ? maximum : minimum
+                    if abs(transcript.contentOffset.y - target) > 1 {
+                        transcript.setContentOffset(CGPoint(x: transcript.contentOffset.x, y: target), animated: false)
+                        offsetRequests += 1
+                        stableSamples = 0
+                        previous = nil
+                    }
+                    // Yield to the main run loop so queued SwiftUI positioning
+                    // and geometry observers can compete before we sample again.
+                    try await Task.sleep(for: .milliseconds(16))
+                    window.layoutIfNeeded()
+                    let currentMinimum = -transcript.adjustedContentInset.top
+                    let currentMaximum = max(currentMinimum, transcript.contentSize.height - transcript.bounds.height
+                        + transcript.adjustedContentInset.bottom)
+                    let currentTarget = atNewest ? currentMaximum : currentMinimum
+                    let presentedOffset = transcript.layer.presentation()?.bounds.minY ?? transcript.bounds.minY
+                    let geometry = [transcript.contentOffset.y, presentedOffset, transcript.contentSize.height,
+                        transcript.bounds.height, transcript.frame.minY, transcript.frame.height,
+                        currentMinimum, currentMaximum]
+                    let atTarget = abs(transcript.contentOffset.y - currentTarget) <= 1
+                        && abs(presentedOffset - currentTarget) <= 1
+                    let idle = !transcript.isTracking && !transcript.isDragging && !transcript.isDecelerating
+                    let unchanged = previous.map { prior in
+                        zip(prior, geometry).allSatisfy { abs($0.0 - $0.1) <= 0.5 }
+                    } ?? false
+                    stableSamples = atTarget && idle && unchanged ? stableSamples + 1 : 0
+                    previous = geometry
+                    // No offset writes occur during these consecutive samples.
+                    if stableSamples >= 4 {
+                        print("FULLHEIGHT_SCROLL_SETTLED variant=\(variant) newest=\(atNewest) offset=\(transcript.contentOffset.y) requests=\(offsetRequests) stableSamples=\(stableSamples)")
+                        return true
+                    }
+                }
+                print("FULLHEIGHT_SCROLL_TIMEOUT variant=\(variant) newest=\(atNewest) offset=\(transcript.contentOffset.y) requests=\(offsetRequests) stableSamples=\(stableSamples)")
+                return false
             }
+            let newestSettled = try await settleTranscript(atNewest: true)
+            let top = -transcript.adjustedContentInset.top
+            let bottom = max(top, transcript.contentSize.height - transcript.bounds.height
+                + transcript.adjustedContentInset.bottom)
             let newestOffset = transcript.contentOffset.y
             func attach(_ state: String) {
                 var rendered = false
@@ -670,6 +713,7 @@ final class NativeVisualReviewTests: XCTestCase {
             // so a failing simulator run remains reviewable.
             attach("newest-recovery")
             logScrollGeometry("newest-before-assertions")
+            XCTAssertTrue(newestSettled, "Newest transcript geometry must settle before capture")
             XCTAssertLessThanOrEqual(abs(newestOffset - bottom), 1,
                 "The newest-state capture must begin at the actual transcript bottom")
             XCTAssertEqual(transcript.frame.height, viewport.height, accuracy: 1)
@@ -677,16 +721,17 @@ final class NativeVisualReviewTests: XCTestCase {
                 "The dedicated fixture must contain enough distinct rows to scroll")
             XCTAssertTrue(model.hasComposerRecovery(in: scope))
 
-            transcript.setContentOffset(CGPoint(x: transcript.contentOffset.x, y: top), animated: false)
-            try await Task.sleep(for: .milliseconds(350))
-            window.layoutIfNeeded()
+            let olderSettled = try await settleTranscript(atNewest: false)
             let olderOffset = transcript.contentOffset.y
             attach("older-transcript")
             logScrollGeometry("older-before-assertions", olderOffset: olderOffset)
+            XCTAssertTrue(olderSettled, "Older transcript geometry must settle without further offset writes before capture")
             XCTAssertEqual(transcript.frame.height, viewport.height, accuracy: 1,
                 "Floating recovery and Jump controls must not reserve a transcript viewport lane")
             XCTAssertLessThan(olderOffset, newestOffset - 2,
                 "The older capture must be a real scroll position away from newest")
+            XCTAssertLessThan(transcript.contentOffset.y, newestOffset - 2,
+                "Rendering the older capture must preserve its actual scroll position")
 
             if variant == "contrast-accessibility3" {
                 let composer = descendants(window).compactMap { $0 as? UITextView }
