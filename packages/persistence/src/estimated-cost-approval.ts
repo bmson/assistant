@@ -327,6 +327,23 @@ export type EstimatedCostGrantDrawResult =
   | { ok: true; reservationId: string }
   | { ok: false; reason: 'unavailable' | 'expired' | 'exhausted' | 'closed' };
 
+/** Internal dispatch fence, supplied only by the server's freshly priced route. */
+export interface EstimatedCostGrantAttempt {
+  actor: EstimatedCostActor;
+  operationId: string;
+  taskId: string;
+  grantId: string;
+  reservationId: string;
+  leaseToken: string;
+  role: string;
+  critical: boolean;
+  modelId: string;
+  nextAttemptMicros: number;
+  routingDigest: string;
+  requestDigest: string;
+  metadata: import('./contracts.js').CostAttemptMetadata;
+}
+
 /** Application boundary used by the web and mobile HTTP handlers.
  * Implementations own authorization, durable idempotency and all ledger decisions. */
 export interface EstimatedCostApprovalService {
@@ -350,6 +367,17 @@ export interface EstimatedCostApprovalService {
 
 export const ESTIMATED_COST_QUOTE_LIFETIME_MS = 10 * 60_000;
 export const ESTIMATED_COST_ALLOWANCE_LIFETIME_MS = 30 * 60_000;
+
+export function estimatedCostQuoteExpiry(createdAt: Date): Date {
+  const now = createdAt.getTime();
+  if (!Number.isFinite(now)) throw new Error('Invalid quote time');
+  const nextDay = Date.UTC(
+    createdAt.getUTCFullYear(),
+    createdAt.getUTCMonth(),
+    createdAt.getUTCDate() + 1,
+  );
+  return new Date(Math.min(now + ESTIMATED_COST_QUOTE_LIFETIME_MS, nextDay));
+}
 
 /** A grant never crosses a UTC accounting period. */
 export function estimatedCostAllowanceExpiry(decidedAt: Date): Date {
@@ -435,10 +463,13 @@ export interface EstimatedCostQuoteCheck extends EstimatedCostHeadroom {
   pendingOtherMicros: number;
 }
 
-/** A changed financial snapshot must receive a new quote and owner decision. */
+/** A changed financial snapshot must receive a new quote and owner decision.
+ * allowOrdinaryCapacity is valid only for a verified already-parked request's
+ * explicit refresh or decision. Initial parking must still require historical pressure. */
 export function estimatedCostQuoteMatches(
   quote: EstimatedCostQuote,
   current: EstimatedCostQuoteCheck,
+  options: { allowOrdinaryCapacity?: boolean } = {},
 ): boolean {
   const { pendingOtherMicros, ...headroom } = current;
   if (!Number.isSafeInteger(pendingOtherMicros) || pendingOtherMicros < 0)
@@ -459,7 +490,7 @@ export function estimatedCostQuoteMatches(
     quote.complete &&
     quote.canApprove &&
     canApprove &&
-    blockedByHistorical &&
+    (blockedByHistorical || options.allowOrdinaryCapacity === true) &&
     quote.recordedDailyMicros === current.dailySpentMicros &&
     quote.recordedMonthlyMicros === current.monthlySpentMicros &&
     quote.totalHeldMicros === current.heldMicros &&
@@ -530,6 +561,14 @@ export interface EstimatedCostSourceBinding {
   roleRowDigest: string;
   modelRows: { id: string; digest: string }[];
   connectionRows: { id: string; digest: string }[];
+  /** Other configured roles this same request may use under its cumulative allowance.
+   * These bind routing and prices, not the initial call's prompt digest. */
+  additionalRoutes: {
+    role: string;
+    roleRowDigest: string;
+    modelRows: { id: string; digest: string }[];
+    connectionRows: { id: string; digest: string }[];
+  }[];
   budgetRows: { scope: 'daily' | 'monthly'; digest: string }[];
   privacyGeneration: string | null;
 }

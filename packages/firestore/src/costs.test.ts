@@ -89,7 +89,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore atomic cost led
       .doc('costReservations', reservation.reservationId)
       .update({ reservationKind: 'escrow', costGrantId: grantId });
     await store.doc('estimatedCostRequests', operationId).set({
-      installationId: 'install',
+      installationId: store.installationId,
       ownerId: 'owner',
       taskId,
       bindingDigest: 'binding',
@@ -114,7 +114,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore atomic cost led
     };
     await store.doc('estimatedCostDecisions', 'decision').set({ operationId, receipt });
     const input = {
-      actor: { installationId: 'install', ownerId: 'owner' },
+      actor: { installationId: store.installationId, ownerId: 'owner' },
       operationId,
       grantId,
       bindingDigest: 'binding',
@@ -127,7 +127,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore atomic cost led
     const pendingOperationId = 'pending-other';
     await store.doc('estimatedCostRequests', pendingOperationId).set({
       operationId: pendingOperationId,
-      installationId: 'install',
+      installationId: store.installationId,
       ownerId: 'owner',
       taskId,
       state: 'pending',
@@ -259,14 +259,12 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore atomic cost led
     if (!old.ok) throw new Error('Expected historical hold');
     await store.doc('costReservations', old.reservationId).update({ status: 'unknown' });
     const frozen = [{ reservationId: old.reservationId, estimatedMicros: 100_000 }];
-    await store
-      .doc('estimatedCostBaselines', 'install')
-      .set({
-        installationId: 'install',
-        ownerId: 'owner',
-        rows: frozen,
-        digest: createHash('sha256').update(JSON.stringify(frozen)).digest('hex'),
-      });
+    await store.doc('estimatedCostBaselines', store.installationId).set({
+      installationId: store.installationId,
+      ownerId: 'owner',
+      rows: frozen,
+      digest: createHash('sha256').update(JSON.stringify(frozen)).digest('hex'),
+    });
     expect((await costs.readEstimatedCostView(input.actor, operationId))?.tracking).toMatchObject({
       historicalUnknownMicros: 100_000,
       totalHeldMicros: 110_000,
@@ -277,12 +275,10 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore atomic cost led
       totalHeldMicros: 10_000,
     });
     const invalid = [{ reservationId: unknownId, estimatedMicros: 10_000 }];
-    await store
-      .doc('estimatedCostBaselines', 'install')
-      .update({
-        rows: invalid,
-        digest: createHash('sha256').update(JSON.stringify(invalid)).digest('hex'),
-      });
+    await store.doc('estimatedCostBaselines', store.installationId).update({
+      rows: invalid,
+      digest: createHash('sha256').update(JSON.stringify(invalid)).digest('hex'),
+    });
     expect(
       (await costs.readEstimatedCostView(input.actor, operationId))?.tracking
         .historicalUnknownMicros,
@@ -332,6 +328,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore atomic cost led
       status: 'waiting_estimated_cost',
       trigger,
     });
+    await store.doc('coordination', 'budget-holds').set({ heldMicros: 0 });
     await store.doc('tasks', 'other-task').set({
       id: 'other-task',
       agentId: 'owner',
@@ -341,7 +338,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore atomic cost led
     });
     await store.doc('estimatedCostRequests', operationId).set({
       operationId,
-      installationId: 'install',
+      installationId: store.installationId,
       ownerId: 'owner',
       taskId,
       requestFingerprint: fingerprint,
@@ -351,7 +348,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore atomic cost led
       baseline: [],
     });
     const repo = costs.estimatedCostApprovalRepository();
-    const actor = { installationId: 'install', ownerId: 'owner' };
+    const actor = { installationId: store.installationId, ownerId: 'owner' };
     const decision = {
       operationId,
       quoteId: 'quote',

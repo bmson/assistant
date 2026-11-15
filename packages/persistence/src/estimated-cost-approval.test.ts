@@ -6,6 +6,7 @@ import {
   estimatedCostAllowance,
   estimatedCostAllowanceExpiry,
   estimatedCostConnectionId,
+  estimatedCostQuoteExpiry,
   estimatedCostQuoteMatches,
   parseEstimatedCostQuote,
   parseHistoricalUnknownBaseline,
@@ -86,6 +87,18 @@ describe('estimated cost allowance', () => {
     expect(estimatedCostQuoteMatches(quote, { ...current, pendingOtherMicros: 101 })).toBe(false);
     expect(estimatedCostQuoteMatches({ ...quote, complete: false }, current)).toBe(false);
     expect(estimatedCostQuoteMatches({ ...quote, allowanceMicros: 451 }, current)).toBe(false);
+    const ordinary = { ...current, heldMicros: 100, historicalUnknownMicros: 0 };
+    const refreshed = {
+      ...quote,
+      totalHeldMicros: 100,
+      eligibleHistoricalUnknownMicros: 0,
+      dailyProjectedGrossMicros: 850,
+      monthlyProjectedGrossMicros: 1150,
+    };
+    expect(estimatedCostQuoteMatches(refreshed, ordinary)).toBe(false);
+    expect(estimatedCostQuoteMatches(refreshed, ordinary, { allowOrdinaryCapacity: true })).toBe(
+      true,
+    );
   });
   it('accepts only the exact complete, proven historical unknown baseline', () => {
     const row = { reservationId: 'old', estimatedMicros: 10 };
@@ -119,6 +132,9 @@ describe('estimated cost allowance', () => {
     ).toThrow();
   });
   it('limits an approved allowance to 30 minutes and the next UTC day', () => {
+    expect(estimatedCostQuoteExpiry(new Date('2026-11-30T23:55:00Z')).toISOString()).toBe(
+      '2026-12-01T00:00:00.000Z',
+    );
     expect(estimatedCostAllowanceExpiry(new Date('2026-11-15T12:00:00Z')).toISOString()).toBe(
       '2026-11-15T12:30:00.000Z',
     );

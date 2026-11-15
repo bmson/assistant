@@ -1,0 +1,317 @@
+import { createHash } from 'node:crypto';
+import { canonicalEstimatedCostJson, estimatedCostCardMessageId } from '@assistant/persistence';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { FirestoreCostRepository } from './costs.js';
+import {
+  approveFirestoreEstimatedCost,
+  beginFirestoreEstimatedCostGrantAttempt,
+  storePreparedFirestoreQuote,
+} from './estimated-cost-approval-transactions.js';
+import { firestoreEstimatedCostSourceBinding } from './estimated-cost-binding.js';
+import type { InstallationStore } from './store.js';
+import { disposeStore, emulatorStore, seedBudget } from './test-store.js';
+
+describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore estimated cost parking', () => {
+  let store: InstallationStore;
+  const now = new Date('2026-11-15T12:00:00Z');
+  beforeEach(async () => {
+    store = emulatorStore(() => now);
+    await seedBudget(store);
+    await Promise.all([
+      store.doc('tasks', 'a').set({
+        id: 'a',
+        agentId: 'owner',
+        conversationId: 'conversation',
+        type: 'chat_turn',
+        trust: 'owner',
+        status: 'running',
+        leaseToken: 'lease',
+        lockedUntil: new Date(now.getTime() + 600_000),
+        spentUsd: '0',
+        budgetUsdLimit: '0.5',
+        queueGeneration: 0,
+        state: { original: 'checkpoint' },
+        trigger: {
+          payload: {
+            text: 'A',
+            chatAdmission: {
+              protocol: 'owner-chat-v1',
+              clientOperationId: 'operation-a',
+              requestHash: 'fingerprint',
+            },
+          },
+        },
+      }),
+      store.doc('taskBudgetHolds', 'a').set({ heldMicros: 0 }),
+      store
+        .doc('conversations', 'conversation')
+        .set({ id: 'conversation', agentId: 'owner', modelOverride: null }),
+      store
+        .doc('modelRoles', 'draft')
+        .set({ role: 'draft', primaryModel: 'primary', fallbackModel: 'fallback', params: {} }),
+      store
+        .doc('modelRoles', 'classify')
+        .set({ role: 'classify', primaryModel: 'primary', fallbackModel: 'fallback', params: {} }),
+      store
+        .doc('modelRoles', 'plan')
+        .set({ role: 'plan', primaryModel: 'primary', fallbackModel: 'fallback', params: {} }),
+      store
+        .doc('models', 'primary')
+        .set({ id: 'primary', enabled: true, promptCostPerMTok: '1.0000' }),
+      store
+        .doc('models', 'fallback')
+        .set({ id: 'fallback', enabled: true, promptCostPerMTok: '0.5000' }),
+      store
+        .doc('modelConnections', 'openrouter')
+        .set({ id: 'openrouter', kind: 'openrouter', apiKeyEncrypted: 'synthetic', enabled: true }),
+    ]);
+  });
+  afterEach(async () => {
+    await disposeStore(store);
+  });
+  it('parks A without a hold, lets B spend, and requires a new quote for A', async () => {
+    const costs = new FirestoreCostRepository(store);
+    const old = await costs.reserve({ source: 'model', estimatedUsd: 0.8 });
+    if (!old.ok) throw new Error('Expected historical hold');
+    await store.doc('costReservations', old.reservationId).update({ status: 'unknown' });
+    const baseline = [{ reservationId: old.reservationId, estimatedMicros: 800_000 }];
+    const actor = { installationId: store.installationId, ownerId: 'owner' };
+    await store.doc('estimatedCostBaselines', store.installationId).set({
+      installationId: store.installationId,
+      ownerId: 'owner',
+      rows: baseline,
+      digest: createHash('sha256').update(JSON.stringify(baseline)).digest('hex'),
+    });
+    const sourceInput = {
+      actor,
+      taskId: 'a',
+      role: 'classify',
+      selectedModelId: 'fallback',
+      routingDigest: 'a'.repeat(64),
+      critical: false,
+      additionalRoles: ['draft', 'plan'],
+    };
+    const sourceBinding = await store.db.runTransaction(
+      (tx) => firestoreEstimatedCostSourceBinding(tx, store, sourceInput),
+      { readOnly: true },
+    );
+    const bindingDigest = createHash('sha256')
+      .update(canonicalEstimatedCostJson(sourceBinding))
+      .digest('hex');
+    const quote = {
+      type: 'estimated-cost-approval' as const,
+      operationId: 'operation-a',
+      taskId: 'a',
+      requestText: 'A',
+      quoteId: 'quote-a',
+      quoteVersion: 'v1',
+      expiresAt: new Date(now.getTime() + 300_000).toISOString(),
+      nextAttemptMicros: 300_000,
+      allowanceMicros: 500_000,
+      recordedDailyMicros: 0,
+      recordedMonthlyMicros: 0,
+      totalHeldMicros: 800_000,
+      eligibleHistoricalUnknownMicros: 800_000,
+      pendingApprovalMicros: 500_000,
+      dailyCeilingMicros: 1_000_000,
+      monthlyCeilingMicros: 10_000_000,
+      dailyProjectedGrossMicros: 1_300_000,
+      monthlyProjectedGrossMicros: 1_300_000,
+      complete: true,
+      canApprove: true,
+    };
+    const prepared = {
+      actor,
+      quoteRequestId: 'prepare-a',
+      taskId: 'a',
+      leaseToken: 'lease',
+      requestFingerprint: 'fingerprint',
+      bindingDigest,
+      sourceBinding,
+      critical: false,
+      quote,
+      baseline,
+    };
+    const parked = await storePreparedFirestoreQuote(store, prepared);
+    expect(parked).toMatchObject({
+      ok: true,
+      request: { status: 'pending', operationId: 'operation-a' },
+    });
+    expect((await store.doc('tasks', 'a').get()).data()).toMatchObject({
+      status: 'waiting_estimated_cost',
+      state: { original: 'checkpoint' },
+    });
+    const firstCard = await store
+      .doc('messages', estimatedCostCardMessageId('operation-a', 'quote-a', 'v1'))
+      .get();
+    expect(firstCard.data()).toMatchObject({
+      taskId: 'a',
+      conversationId: 'conversation',
+      role: 'assistant',
+      parts: [quote],
+    });
+    expect(firstCard.get('appendedAt')).toBeDefined();
+    expect((await costs.totals()).heldUsd).toBe(0.8);
+    expect(await storePreparedFirestoreQuote(store, prepared)).toEqual(parked);
+    const b = await costs.reserve({ source: 'model', estimatedUsd: 0.1 });
+    if (!b.ok) throw new Error('B must remain eligible');
+    await costs.reconcile(b.reservationId, { usd: 0.01 });
+    expect((await costs.readEstimatedCostView(actor, 'operation-a'))?.tracking).toMatchObject({
+      recordedDailyMicros: 10_000,
+      totalHeldMicros: 800_000,
+      pendingApprovalMicros: 500_000,
+      dailyPlannedExposureMicros: 1_310_000,
+    });
+    expect(
+      await approveFirestoreEstimatedCost(store, actor, {
+        operationId: 'operation-a',
+        quoteId: 'quote-a',
+        quoteVersion: 'v1',
+        decisionId: 'stale-after-b',
+        decision: 'approve',
+      }),
+    ).toMatchObject({ ok: true, receipt: { status: 'stale' } });
+    expect((await costs.totals()).heldUsd).toBe(0.8);
+    const refreshed = {
+      ...prepared,
+      quoteRequestId: 'prepare-refresh',
+      leaseToken: null,
+      quote: {
+        ...quote,
+        quoteId: 'quote-b',
+        quoteVersion: 'v2',
+        recordedDailyMicros: 10_000,
+        recordedMonthlyMicros: 10_000,
+        dailyProjectedGrossMicros: 1_310_000,
+        monthlyProjectedGrossMicros: 1_310_000,
+      },
+    };
+    expect(await storePreparedFirestoreQuote(store, refreshed)).toMatchObject({
+      ok: true,
+      request: { status: 'pending', quote: { quoteId: 'quote-b' } },
+    });
+    expect(
+      (
+        await store
+          .doc('messages', estimatedCostCardMessageId('operation-a', 'quote-b', 'v2'))
+          .get()
+      ).exists,
+    ).toBe(true);
+    expect(await storePreparedFirestoreQuote(store, prepared)).toMatchObject({
+      ok: false,
+      outcome: 'conflict',
+    });
+    const decision = {
+      operationId: 'operation-a',
+      quoteId: 'quote-b',
+      quoteVersion: 'v2',
+      decisionId: 'decision-one',
+      decision: 'approve' as const,
+    };
+    const decisions = await Promise.all([
+      approveFirestoreEstimatedCost(store, actor, decision),
+      approveFirestoreEstimatedCost(store, actor, { ...decision, decisionId: 'decision-two' }),
+    ]);
+    const winner = decisions.find((item) => item.ok && item.receipt.status === 'approved');
+    expect(winner?.ok).toBe(true);
+    expect(decisions.filter((item) => !item.ok)).toHaveLength(1);
+    if (!winner?.ok) throw new Error('Expected approval receipt');
+    expect(
+      await approveFirestoreEstimatedCost(store, actor, {
+        ...decision,
+        decisionId: winner.receipt.decisionId,
+      }),
+    ).toEqual(winner);
+    const task = await store.doc('tasks', 'a').get();
+    expect(task.get('status')).toBe('pending');
+    const marker = task.get('state').estimatedCostApproval as { grantId: string };
+    expect((await costs.readEstimatedCostView(actor, 'operation-a'))?.tracking).toMatchObject({
+      recordedDailyMicros: 10_000,
+      totalHeldMicros: 1_300_000,
+      historicalUnknownMicros: 800_000,
+      pendingApprovalMicros: 0,
+      dailyPlannedExposureMicros: 1_310_000,
+    });
+    const common = {
+      actor,
+      operationId: 'operation-a',
+      grantId: marker.grantId,
+      bindingDigest,
+      taskId: 'a',
+      source: 'model' as const,
+    };
+    expect(
+      await costs.drawEstimatedCostGrant({
+        ...common,
+        attemptId: 'classify-attempt',
+        estimatedMicros: 300_000,
+        description: 'classify',
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      await costs.drawEstimatedCostGrant({
+        ...common,
+        attemptId: 'plan-attempt',
+        estimatedMicros: 100_000,
+        description: 'plan',
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      await costs.drawEstimatedCostGrant({
+        ...common,
+        attemptId: 'draft-attempt',
+        estimatedMicros: 100_000,
+        description: 'draft',
+      }),
+    ).toMatchObject({ ok: true });
+    expect((await costs.totals()).heldUsd).toBe(1.3);
+    await store.doc('tasks', 'a').update({
+      status: 'running',
+      leaseToken: 'resume-lease',
+      lockedUntil: new Date(now.getTime() + 600_000),
+    });
+    const makeAttempt = (role: string, reservationId: string, amount: number, digest: string) => ({
+      actor,
+      operationId: 'operation-a',
+      taskId: 'a',
+      grantId: marker.grantId,
+      reservationId,
+      leaseToken: 'resume-lease',
+      role,
+      critical: false,
+      modelId: 'fallback',
+      nextAttemptMicros: amount,
+      routingDigest: digest.repeat(64),
+      requestDigest: digest.repeat(64),
+      metadata: {
+        provider: 'openrouter',
+        model: 'fallback',
+        role,
+        requestDigest: digest.repeat(64),
+        inputTokenEstimate: 1,
+        outputTokenLimit: 1,
+        reasoning: 'disabled' as const,
+      },
+    });
+    const classify = makeAttempt('classify', 'classify-attempt', 300_000, 'b');
+    expect(
+      await beginFirestoreEstimatedCostGrantAttempt(store, { ...classify, critical: true }),
+    ).toBe(false);
+    expect(await beginFirestoreEstimatedCostGrantAttempt(store, classify)).toBe(true);
+    expect(await beginFirestoreEstimatedCostGrantAttempt(store, classify)).toBe(false);
+    await costs.markAttemptUnknown('classify-attempt', 'uncertain');
+    expect(
+      await beginFirestoreEstimatedCostGrantAttempt(
+        store,
+        makeAttempt('plan', 'plan-attempt', 100_000, 'c'),
+      ),
+    ).toBe(true);
+    await store.doc('models', 'fallback').update({ promptCostPerMTok: '0.6000' });
+    expect(
+      await beginFirestoreEstimatedCostGrantAttempt(
+        store,
+        makeAttempt('draft', 'draft-attempt', 100_000, 'd'),
+      ),
+    ).toBe(false);
+  }, 30_000);
+});

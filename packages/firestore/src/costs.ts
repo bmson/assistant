@@ -5,8 +5,6 @@ import {
   type CostEventInput,
   type CostRepository,
   type CostTotals,
-  type CurrentBaselineReservation,
-  currentHistoricalUnknownMicros,
   type EstimatedCostActor,
   type EstimatedCostApprovalRepository,
   type EstimatedCostBudgetTracking,
@@ -24,7 +22,6 @@ import {
   nextUtcMonthlyReset,
   parseEstimatedCostQuote,
   parseEstimatedCostReceipt,
-  parseHistoricalUnknownBaseline,
   projectEstimatedCostRequest,
   type Records,
   type ReservationActual,
@@ -36,6 +33,7 @@ import {
 } from '@assistant/persistence';
 import type { DocumentSnapshot, Transaction } from '@google-cloud/firestore';
 import { withEmulatorTransactionRetry } from './emulator-transaction.js';
+import { firestoreEstimatedCostBaseline } from './estimated-cost-baseline.js';
 import { decodeRecord, encodeRecord, type InstallationStore } from './store.js';
 
 interface Policy {
@@ -118,6 +116,13 @@ export class FirestoreCostRepository implements CostRepository {
     actor: EstimatedCostActor,
     decision: EstimatedCostDecision,
   ): Promise<EstimatedCostDecisionResponse> {
+    if (actor.installationId !== this.store.installationId)
+      return {
+        ok: false,
+        outcome: 'not_found',
+        operationId: decision.operationId,
+        message: 'Request not found.',
+      };
     const bodyDigest = createHash('sha256')
       .update(
         JSON.stringify([
@@ -214,6 +219,17 @@ export class FirestoreCostRepository implements CostRepository {
           decisionId: decision.decisionId,
           message: 'Request could not be closed.',
         };
+      const holdsRef = this.store.doc('coordination', 'budget-holds');
+      const holds = await tx.get(holdsRef);
+      if (!holds.exists || typeof holds.get('heldMicros') !== 'number')
+        return {
+          ok: false,
+          outcome: 'unavailable',
+          operationId: decision.operationId,
+          decisionId: decision.decisionId,
+          message: 'Request could not be closed.',
+        };
+      const heldMicros = integer(holds, 'heldMicros');
       const receipt = {
         operationId: decision.operationId,
         decisionId: decision.decisionId,
@@ -229,6 +245,7 @@ export class FirestoreCostRepository implements CostRepository {
         updatedAt: now,
       });
       tx.update(requestRef, { state: 'declined', updatedAt: now });
+      tx.set(holdsRef, { heldMicros });
       tx.create(decisionRef, {
         decisionId: decision.decisionId,
         operationId: decision.operationId,
@@ -256,6 +273,7 @@ export class FirestoreCostRepository implements CostRepository {
     request: EstimatedCostRequestProjection;
     tracking: EstimatedCostBudgetTracking;
   } | null> {
+    if (actor.installationId !== this.store.installationId) return null;
     return this.store.db.runTransaction(
       async (tx) => {
         const now = this.store.now().getTime();
@@ -344,40 +362,11 @@ export class FirestoreCostRepository implements CostRepository {
         // that an omitted/malformed reservation is not an unknown liability.
         let historicalUnknownMicros: number | null = unknown.empty && heldMicros === 0 ? 0 : null;
         if (baseline.exists) {
-          historicalUnknownMicros = null;
-          const frozen = parseHistoricalUnknownBaseline(decodeRecord(baseline.get('rows')));
-          if (
-            baseline.get('ownerId') === actor.ownerId &&
-            frozen &&
-            createHash('sha256').update(JSON.stringify(frozen)).digest('hex') ===
-              baseline.get('digest')
-          ) {
-            const currentDocs = frozen.length
-              ? await tx.getAll(
-                  ...frozen.map((entry) => this.store.doc('costReservations', entry.reservationId)),
-                )
-              : [];
-            try {
-              const current: CurrentBaselineReservation[] = currentDocs
-                .filter((doc) => doc.exists)
-                .map((doc) => ({
-                  reservationId: String(doc.get('id') ?? ''),
-                  estimatedMicros: storedLedgerUsdToMicros(doc.get('estimatedUsd')),
-                  status: String(doc.get('status') ?? ''),
-                  provenance:
-                    (doc.get('reservationKind') === undefined ||
-                      doc.get('reservationKind') === 'attempt') &&
-                    doc.get('costGrantId') == null
-                      ? 'proven-historical-unapproved'
-                      : 'unrecognized',
-                }));
-              const subtotal = currentHistoricalUnknownMicros(frozen, current);
-              if (subtotal !== null && heldMicros !== null && subtotal <= heldMicros)
-                historicalUnknownMicros = subtotal;
-            } catch {
-              historicalUnknownMicros = null;
-            }
-          }
+          const verified =
+            heldMicros === null
+              ? null
+              : await firestoreEstimatedCostBaseline(tx, this.store, actor, heldMicros);
+          historicalUnknownMicros = verified?.eligibleMicros ?? null;
         }
         const tracking: EstimatedCostBudgetTracking = {
           observedAt: new Date(now).toISOString(),
@@ -412,6 +401,7 @@ export class FirestoreCostRepository implements CostRepository {
     actor: EstimatedCostActor,
     identity: { operationId: string; decisionId: string },
   ): Promise<EstimatedCostDecisionReceipt | null> {
+    if (actor.installationId !== this.store.installationId) return null;
     return this.store.db.runTransaction(
       async (tx) => {
         const [request, decision] = await tx.getAll(
@@ -438,6 +428,8 @@ export class FirestoreCostRepository implements CostRepository {
   async drawEstimatedCostGrant(
     input: EstimatedCostGrantDraw,
   ): Promise<EstimatedCostGrantDrawResult> {
+    if (input.actor.installationId !== this.store.installationId)
+      return { ok: false, reason: 'unavailable' };
     if (!Number.isSafeInteger(input.estimatedMicros) || input.estimatedMicros <= 0)
       throw new Error('Invalid grant draw amount');
     const requestRef = this.store.doc('estimatedCostRequests', input.operationId);

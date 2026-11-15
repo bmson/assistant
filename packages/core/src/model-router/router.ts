@@ -1342,7 +1342,12 @@ export class ModelRouter {
     role: Exclude<ModelRole, 'embed'>,
     opts: CallOptions,
     toolCall = false,
-  ): Promise<{ modelId: string; nextAttemptMicros: number; routingDigest: string }> {
+  ): Promise<{
+    modelId: string;
+    nextAttemptMicros: number;
+    routingDigest: string;
+    requestDigest: string;
+  }> {
     await this.providers.refresh();
     const budget = evaluateBudget(await this.budgetSnapshot(opts.taskId), {
       critical: opts.critical,
@@ -1362,6 +1367,9 @@ export class ModelRouter {
     );
     assertEstimatedCostWithinLimit(estimatedUsd, opts.maxEstimatedCostUsd);
     const nextAttemptMicros = ledgerUsdToMicros(estimatedUsd);
+    const requestDigest = createHash('sha256')
+      .update(JSON.stringify({ system: opts.system, prompt: opts.prompt, messages: opts.messages }))
+      .digest('hex');
     const routingDigest = createHash('sha256')
       .update(
         JSON.stringify({
@@ -1379,15 +1387,11 @@ export class ModelRouter {
           critical: opts.critical === true,
           toolCall,
           maxEstimatedCostUsd: opts.maxEstimatedCostUsd ?? null,
-          requestDigest: createHash('sha256')
-            .update(
-              JSON.stringify({ system: opts.system, prompt: opts.prompt, messages: opts.messages }),
-            )
-            .digest('hex'),
+          requestDigest,
         }),
       )
       .digest('hex');
-    return { modelId: route.modelId, nextAttemptMicros, routingDigest };
+    return { modelId: route.modelId, nextAttemptMicros, routingDigest, requestDigest };
   }
 
   private async reserveModelCall(
