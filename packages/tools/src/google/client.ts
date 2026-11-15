@@ -29,6 +29,23 @@ export interface GoogleClientOptions {
   clientId: string;
   clientSecret: string;
   refreshToken: string;
+  /** Optional connected-account authority, checked before every provider request. */
+  tokenProvider?: {
+    accessToken(
+      forceRefresh?: boolean,
+      rejectedAccessToken?: string,
+    ): Promise<string | { accessToken: string; credentialVersion: number }>;
+    /** Final provider failure, after bounded 401 refresh/retries; never logged by the client. */
+    requestFailed?(failure: {
+      status: number;
+      body: string;
+      accessToken: string;
+      credentialVersion?: number;
+      url: string;
+    }): Promise<void>;
+    /** Secret bound to the connection identity and revision, never the access token. */
+    cursorSecret: string;
+  };
   fetch?: typeof globalThis.fetch;
   sleep?: (ms: number) => Promise<void>;
   timeoutMs?: number;
@@ -122,7 +139,10 @@ export class GoogleClient {
   }
 
   configured(): boolean {
-    return Boolean(this.opts.clientId && this.opts.clientSecret && this.opts.refreshToken);
+    return Boolean(
+      this.opts.tokenProvider ||
+        (this.opts.clientId && this.opts.clientSecret && this.opts.refreshToken),
+    );
   }
 
   /** Sign opaque provider cursors without exposing OAuth material in the token. */
@@ -158,8 +178,24 @@ export class GoogleClient {
 
   private opaqueTokenKey(): Buffer {
     return createHash('sha256')
-      .update(`${this.opts.clientId}\0${this.opts.clientSecret}\0${this.opts.refreshToken}`)
+      .update(
+        this.opts.tokenProvider
+          ? `connected-google\0${this.opts.tokenProvider.cursorSecret}`
+          : `${this.opts.clientId}\0${this.opts.clientSecret}\0${this.opts.refreshToken}`,
+      )
       .digest();
+  }
+
+  private async requestToken(
+    forceRefresh: boolean,
+    rejectedAccessToken?: string,
+  ): Promise<{ accessToken: string; credentialVersion?: number }> {
+    const credential = this.opts.tokenProvider
+      ? rejectedAccessToken === undefined
+        ? await this.opts.tokenProvider.accessToken(forceRefresh)
+        : await this.opts.tokenProvider.accessToken(forceRefresh, rejectedAccessToken)
+      : await this.token();
+    return typeof credential === 'string' ? { accessToken: credential } : credential;
   }
 
   private async token(): Promise<string> {
@@ -246,9 +282,16 @@ export class GoogleClient {
     const retryableRead = method === 'GET' || method === 'HEAD';
     let retries = 0;
     let refreshedAfterUnauthorized = false;
+    let forceTokenRefresh = false;
+    let rejectedAccessToken: string | undefined;
 
     while (true) {
-      const token = await withProviderSignal(this.token(), init.signal ?? undefined);
+      const credential = await withProviderSignal(
+        this.requestToken(forceTokenRefresh, rejectedAccessToken),
+        init.signal ?? undefined,
+      );
+      const token = credential.accessToken;
+      forceTokenRefresh = false;
       const headers = new Headers(init.headers);
       if (init.body && !headers.has('content-type'))
         headers.set('content-type', 'application/json');
@@ -291,6 +334,8 @@ export class GoogleClient {
         // to retry once after discarding the rejected access token.
         if (this.access?.token === token) this.access = undefined;
         refreshedAfterUnauthorized = true;
+        rejectedAccessToken = token;
+        forceTokenRefresh = true;
         continue;
       }
       if (retryableRead && isTransientStatus(res.status) && retries < this.maxRetries) {
@@ -302,7 +347,18 @@ export class GoogleClient {
           `Google mutation outcome is unknown after HTTP ${res.status}: ${text.slice(0, 200)}`,
         );
       }
-      if (!res.ok) throw new GoogleApiError(res.status, text, url);
+      if (!res.ok) {
+        await this.opts.tokenProvider?.requestFailed?.({
+          status: res.status,
+          body: text,
+          accessToken: token,
+          url,
+          ...(credential.credentialVersion !== undefined
+            ? { credentialVersion: credential.credentialVersion }
+            : {}),
+        });
+        throw new GoogleApiError(res.status, text, url);
+      }
       try {
         return (text ? JSON.parse(text) : {}) as T;
       } catch (error) {
@@ -338,9 +394,16 @@ export class GoogleClient {
     }
     let retries = 0;
     let refreshedAfterUnauthorized = false;
+    let forceTokenRefresh = false;
+    let rejectedAccessToken: string | undefined;
 
     while (true) {
-      const token = await withProviderSignal(this.token(), init.signal ?? undefined);
+      const credential = await withProviderSignal(
+        this.requestToken(forceTokenRefresh, rejectedAccessToken),
+        init.signal ?? undefined,
+      );
+      const token = credential.accessToken;
+      forceTokenRefresh = false;
       const headers = new Headers(init.headers);
       headers.set('authorization', `Bearer ${token}`);
       let res: Response;
@@ -360,6 +423,8 @@ export class GoogleClient {
         await res.body?.cancel().catch(() => {});
         if (this.access?.token === token) this.access = undefined;
         refreshedAfterUnauthorized = true;
+        rejectedAccessToken = token;
+        forceTokenRefresh = true;
         continue;
       }
       if (isTransientStatus(res.status) && retries < this.maxRetries) {
@@ -369,6 +434,15 @@ export class GoogleClient {
       }
       if (!res.ok) {
         const text = await boundedResponseText(res, this.maxResponseBytes);
+        await this.opts.tokenProvider?.requestFailed?.({
+          status: res.status,
+          body: text,
+          accessToken: token,
+          url,
+          ...(credential.credentialVersion !== undefined
+            ? { credentialVersion: credential.credentialVersion }
+            : {}),
+        });
         throw new GoogleApiError(res.status, text, url);
       }
       return {

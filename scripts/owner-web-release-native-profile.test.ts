@@ -376,8 +376,10 @@ describe('sanitized native current web profile compatibility', () => {
   it.each(['P', 'R'] as const)(
     'rejects provider-default container-name normalization for new %s service revisions',
     (role) => {
-      const { service, revision, context } = prepareCurrentProfile(),
-        current = project(service, revision, context),
+      const { service, revision, context } = prepareCurrentProfile();
+      context.releaseEnv.GOOGLE_CALENDAR_OAUTH_CALLBACK_URL =
+        'https://bot.bmson.com/api/oauth/google-calendar/callback';
+      const current = project(service, revision, context),
         planned = creationTemplate(current.template, context, role),
         candidate = releaseIdentity(context, role),
         next = clone(service),
@@ -400,6 +402,23 @@ describe('sanitized native current web profile compatibility', () => {
       const native = { [canonical]: revision, [candidate.revision]: candidateRevision };
       const valid = projectNativeWebSnapshot(clone(next), native, context);
       expect(valid.revisions[candidate.revision]?.templateSha256).toBe(digest(planned));
+
+      const candidateEnv = candidateRevision.containers[0].env;
+      candidateRevision.containers[0].env = candidateEnv.filter(
+        (entry: Obj) => entry.name !== 'GOOGLE_CALENDAR_OAUTH_CALLBACK_URL',
+      );
+      expect(() => projectNativeWebSnapshot(next, native, context)).toThrow(
+        'Native release validation held',
+      );
+      candidateRevision.containers[0].env = candidateEnv.map((entry: Obj) =>
+        entry.name === 'GOOGLE_CALENDAR_OAUTH_CALLBACK_URL'
+          ? { ...entry, value: 'https://other.example.com/api/oauth/google-calendar/callback' }
+          : entry,
+      );
+      expect(() => projectNativeWebSnapshot(next, native, context)).toThrow(
+        'Native release validation held',
+      );
+      candidateRevision.containers[0].env = candidateEnv;
 
       delete next.template.containers[0].name;
       expect(() => projectNativeWebSnapshot(next, native, context)).toThrow(

@@ -43,6 +43,7 @@ export { FirestoreGoalMutationRepository } from './goal-mutations.js';
 export { FirestoreGoalProgressRepository } from './goal-progress.js';
 export { FirestoreGoalRuntimeRepository } from './goal-runtime.js';
 export { FirestoreGoalReadRepository } from './goals.js';
+export * from './google-calendar-connections.js';
 export { FirestoreGraphCuriosityRepository } from './graph-curiosity.js';
 export { FirestoreGraphDateBackfillRepository } from './graph-date-backfill.js';
 export { FirestoreGraphRecallRepository } from './graph-recall.js';

@@ -7,6 +7,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ToolRegistry } from '../registry.js';
 import { registerCalendarReadTools, registerPhoneCalendarFallback } from './calendar.js';
+import { registerAccountAwareCalendarTools } from './calendar-connection.js';
 import { GoogleClient } from './client.js';
 
 const now = new Date('2026-10-19T12:00:00Z');
@@ -81,6 +82,42 @@ describe('iPhone calendar access through normal calendar tools', () => {
   });
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it('keeps the iPhone participant identity when a different Google account is connected', async () => {
+    const cache = cacheFixture();
+    await savePhoneCalendars(cache, 'owner', snapshot(), now);
+    const client = new GoogleClient({
+      clientId: 'test',
+      clientSecret: 'secret',
+      refreshToken: 'refresh',
+    });
+    vi.spyOn(client, 'api').mockResolvedValue({ items: [] });
+    const registry = new ToolRegistry();
+    registerAccountAwareCalendarTools(
+      registry,
+      {
+        client,
+        botEmail: 'assistant@example.com',
+        ownerEmail: 'owner@example.com',
+        phoneCalendars: (id) => readPhoneCalendars(cache, id),
+        personalAccount: async () => ({
+          client,
+          subject: 'different-google-account',
+          email: 'other@example.com',
+        }),
+      },
+      { readOnly: true },
+    );
+    const result = await run(registry, 'calendar.list_events', {
+      ...window,
+      calendarIds: ['iphone:work'],
+    });
+    expect(result.events).toMatchObject([
+      {
+        ownerParticipation: { status: 'accepted', identityVerified: true, basis: 'attendee-email' },
+      },
+    ]);
   });
 
   it('reads, searches, and checks availability without Google OAuth', async () => {

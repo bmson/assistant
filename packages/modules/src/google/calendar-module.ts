@@ -1,7 +1,12 @@
 import { isModuleEnabled } from '@assistant/config/modules';
 import { readPhoneCalendars } from '@assistant/persistence';
-import { GoogleClient, registerCalendarReadTools } from '@assistant/tools/modules/google';
+import {
+  GoogleClient,
+  registerAccountAwareCalendarTools,
+  registerCalendarReadTools,
+} from '@assistant/tools/modules/google';
 import { defineModule } from '../platform.js';
+import { personalCalendarAccountResolver } from './calendar-connection.js';
 import { calendarMeta } from './calendar-meta.js';
 
 /** Calendar reads use Google OAuth and HTTP only; they never touch SQL. */
@@ -19,7 +24,21 @@ export const calendarModule = defineModule<GoogleClient>({
       // profiles, independent of module composition order.
       return { exports: client };
     }
-    if (!client.configured()) {
+    const personalAccount = personalCalendarAccountResolver(config, persistence);
+    if (personalAccount) {
+      registerAccountAwareCalendarTools(
+        registry,
+        {
+          client,
+          botEmail: config.ASSISTANT_EMAIL,
+          ownerEmail: config.OWNER_EMAIL,
+          googleAvailable: client.configured(),
+          phoneCalendars: (agentId) => readPhoneCalendars(persistence.toolExecution, agentId),
+          personalAccount,
+        },
+        { readOnly: true },
+      );
+    } else if (!client.configured()) {
       console.warn('calendar module enabled but unavailable — configure Google OAuth credentials');
     } else {
       registerCalendarReadTools(registry, {

@@ -432,6 +432,7 @@ export async function runWebTagAdmission(mode: string | undefined) {
       };
     }
     const context = pairedWebContext({
+      googleCalendarOAuthCallbackUrl: process.env.GOOGLE_CALENDAR_OAUTH_CALLBACK_URL,
       source,
       runId: String(runId),
       attempt: String(runAttempt),

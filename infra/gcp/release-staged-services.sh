@@ -325,6 +325,18 @@ release_component_digest() {
   printf '%s' "$digest"
 }
 
+# Verify the tagged immutable candidate, not merely the mutable service template.
+release_verify_google_calendar_candidate() {
+  local service_json="$1" service="$2" tag="$3" revision candidate
+  [[ -n "${GOOGLE_CALENDAR_OAUTH_CALLBACK_URL:-}" ]] || return 0
+  revision="$(node -e 'const s=JSON.parse(process.argv[1]);const rows=(s.status?.traffic??[]).filter(x=>x.tag===process.argv[2]);if(rows.length!==1||!rows[0].revisionName)process.exit(2);process.stdout.write(rows[0].revisionName)' "$service_json" "$tag")" || return 1
+  candidate="$(release_revision_json "$service" "$revision")" || return 1
+  if [[ "$(release_service_env "$candidate" GOOGLE_CALENDAR_OAUTH_CALLBACK_URL)" != "$GOOGLE_CALENDAR_OAUTH_CALLBACK_URL" ]]; then
+    echo 'Candidate personal Calendar callback does not match the release configuration.' >&2
+    return 1
+  fi
+}
+
 release_validate_worker_override() {
   case "${RELEASE_EMAIL_OBSERVER_WORKER_ENABLED:-}" in
     ''|true|false) return 0 ;;
@@ -470,6 +482,7 @@ release_staged_services() {
   local live_agent_json live_agent_api live_agent_schema_driver live_agent_schema_min live_agent_schema_max
 
   release_validate_worker_override || return $?
+  node "${BASH_SOURCE[0]%/*}/google-calendar-release-config.mjs" || return $?
 
   case "$selected" in
     full|agent,web|web,agent) selected='agent,web' ;;
@@ -478,6 +491,10 @@ release_staged_services() {
   esac
   if [[ "$selected" == web && "${RELEASE_SCHEMA_UNCHANGED:-false}" != true ]]; then
     echo 'web-only release requires RELEASE_SCHEMA_UNCHANGED=true' >&2
+    return 2
+  fi
+  if [[ -n "${GOOGLE_CALENDAR_OAUTH_CALLBACK_URL:-}" && "$selected" != agent,web ]]; then
+    echo 'Personal Calendar configuration requires a paired agent,web release.' >&2
     return 2
   fi
   release_read_contract || return 1
@@ -569,11 +586,15 @@ release_staged_services() {
     if [[ -n "$worker_env_override" ]]; then
       agent_candidate_env="${agent_candidate_env},EMAIL_OBSERVER_WORKER_ENABLED=${worker_env_override}"
     fi
+    if [[ -n "${GOOGLE_CALENDAR_OAUTH_CALLBACK_URL:-}" ]]; then
+      agent_candidate_env="${agent_candidate_env},GOOGLE_CALENDAR_OAUTH_CALLBACK_URL=${GOOGLE_CALENDAR_OAUTH_CALLBACK_URL}"
+    fi
     gcloud run services update assistant-agent --project "$PROJECT" --region "$REGION" \
       --image "${IMAGE_ROOT}/agent@${agent_digest}" --no-traffic --tag "$staging_tag" \
       --update-env-vars "$agent_candidate_env" --quiet || return 1
     local staged_agent_json
     staged_agent_json="$(release_service_json assistant-agent)" || return 1
+    release_verify_google_calendar_candidate "$staged_agent_json" assistant-agent "$staging_tag" || return 1
     agent_candidate_url="$(release_tag_url "$staged_agent_json" "$staging_tag")" || return 1
     release_wait_http "$agent_candidate_url" /ready true ready || return 1
   fi
@@ -581,6 +602,9 @@ release_staged_services() {
   web_candidate_env="ASSISTANT_RELEASE_API_CONTRACT=${RELEASE_WEB_API},ASSISTANT_RELEASE_AGENT_API_MIN=${RELEASE_WEB_PEER_MIN},ASSISTANT_RELEASE_AGENT_API_MAX=${RELEASE_WEB_PEER_MAX},ASSISTANT_RELEASE_SCHEMA_DRIVER=${RELEASE_STORAGE_DRIVER},ASSISTANT_RELEASE_SCHEMA_MIN=${RELEASE_WEB_SCHEMA_MIN},ASSISTANT_RELEASE_SCHEMA_MAX=${RELEASE_WEB_SCHEMA_MAX},ASSISTANT_RELEASE_SCHEMA_VERSION=${RELEASE_SCHEMA_VERSION},ASSISTANT_RELEASE_MANIFEST=${manifest_sha},ASSISTANT_RELEASE_WRITES_PAUSED=${web_writes_paused}"
   if [[ "$basic_editor_forward_only" == true ]]; then
     web_candidate_env="${web_candidate_env},ASSISTANT_RELEASE_WORKFLOW_RUN_ID=${GITHUB_RUN_ID},ASSISTANT_RELEASE_WORKFLOW_RUN_ATTEMPT=${GITHUB_RUN_ATTEMPT},ASSISTANT_RELEASE_SOURCE_SHA=${TAG}"
+  fi
+  if [[ -n "${GOOGLE_CALENDAR_OAUTH_CALLBACK_URL:-}" ]]; then
+    web_candidate_env="${web_candidate_env},GOOGLE_CALENDAR_OAUTH_CALLBACK_URL=${GOOGLE_CALENDAR_OAUTH_CALLBACK_URL}"
   fi
   if [[ "$basic_editor_forward_only" == true ]]; then
     release_run_basic_web_phase createP "$TAG" "$manifest_path" "$manifest_sha" "$staging_tag" || return 1
@@ -595,6 +619,7 @@ release_staged_services() {
     release_run_basic_web_phase attachP "$TAG" "$manifest_path" "$manifest_sha" "$staging_tag" || return 1
     staged_web_json="$(release_service_json assistant-web)" || return 1
   fi
+  release_verify_google_calendar_candidate "$staged_web_json" assistant-web "$staging_tag" || return 1
   if [[ "$basic_editor_forward_only" == true ]]; then
     release_record_owned_web_tag candidate "$TAG" "$manifest_path" "$manifest_sha" "$staging_tag" || {
       echo '  could not record the freshly observed paused web candidate; refusing to promote it.' >&2

@@ -28,6 +28,7 @@ export { createPostgresExecutionJobRepository } from './execution-jobs-repositor
 export { createPostgresExecutionPersistence } from './execution-repository.js';
 export { createPostgresGeneratedCardRepository } from './generated-card-repository.js';
 export { createPostgresGoalRuntimeRepository } from './goal-runtime-repository.js';
+export * from './google-calendar-connection-repository.js';
 export {
   createPostgresGraphRecallRepository,
   postgresActiveGraphWhere,

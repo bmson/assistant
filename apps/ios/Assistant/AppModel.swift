@@ -799,6 +799,16 @@ final class AppModel {
         activityConnectionRevision == version && client != nil && bootstrap?.identity.id == ownerID
     }
 
+    func googleCalendarRequestContext() -> GoogleCalendarRequestContext? {
+        guard let client, let ownerID = bootstrap?.identity.id else { return nil }
+        return GoogleCalendarRequestContext(ownerID: ownerID, version: activityConnectionRevision, client: client)
+    }
+
+    func googleCalendarConnectionIsCurrent(_ context: GoogleCalendarRequestContext) -> Bool {
+        activityConnectionRevision == context.version && bootstrap?.identity.id == context.ownerID
+            && client?.configuration == context.client.configuration
+    }
+
     func securityReviewRequestContext() -> SecurityReviewRequestContext? {
         guard let client, let ownerID = bootstrap?.identity.id else { return nil }
         return SecurityReviewRequestContext(

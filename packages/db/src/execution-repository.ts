@@ -17,6 +17,7 @@ import { createPostgresExecutionEvidenceRepository } from './execution-evidence-
 import { createPostgresExecutionJobRepository } from './execution-jobs-repository.js';
 import { createPostgresGeneratedCardRepository } from './generated-card-repository.js';
 import { createPostgresGoalRuntimeRepository } from './goal-runtime-repository.js';
+import { createPostgresGoogleCalendarConnectionRepository } from './google-calendar-connection-repository.js';
 import { createPostgresGraphRecallRepository } from './graph-recall-repository.js';
 import { createPostgresHistoryRecallRepository } from './history-recall-repository.js';
 import { createPostgresKnowledgeGraphSyncRepository } from './knowledge-graph-sync-repository.js';
@@ -45,6 +46,7 @@ import { createPostgresWatchRepository } from './watch-repository.js';
 export function createPostgresExecutionPersistence(db: Db): ExecutionPersistence {
   return {
     driver: 'postgres',
+    googleCalendarConnection: createPostgresGoogleCalendarConnectionRepository(db),
     conversationSearch: createPostgresConversationSearchRepository(db),
     tasks: createPostgresTaskRepository(db),
     costs: createPostgresCostRepository(db),

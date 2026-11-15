@@ -3700,3 +3700,12 @@ export const calendarAccounts = pgTable('calendar_accounts', {
   lastError: text('last_error'),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull(),
 });
+
+/** Optional personal Calendar consent, credential, and single-use flow fence. */
+export const googleCalendarConnections = pgTable('google_calendar_connections', {
+  agentId: uuid('agent_id')
+    .primaryKey()
+    .references(() => agents.id, { onDelete: 'cascade' }),
+  state: jsonb('state').notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});

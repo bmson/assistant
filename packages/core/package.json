@@ -81,7 +81,8 @@
     "./workflow/repair-hosted": "./src/workflow/repair-hosted.ts",
     "./decisions/jev": "./src/decisions/jev.ts",
     "./memory/owner-family-fact": "./src/memory/owner-family-fact.ts",
-    "./memory/owner-family-presentation": "./src/memory/owner-family-presentation.ts"
+    "./memory/owner-family-presentation": "./src/memory/owner-family-presentation.ts",
+    "./google-calendar-oauth": "./src/google-calendar-oauth.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"

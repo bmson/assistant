@@ -1,3 +1,4 @@
+import { googleCalendarReleaseCallback } from '../infra/gcp/google-calendar-release-config.mjs';
 /** Fixed BASIC5 paired web lifecycle controller; caller supplies protected transport and operator hold verifier. */
 
 import { nativeWebCreationFixtureClient } from './owner-web-release-creation-client.js';
@@ -86,6 +87,7 @@ export function pairedWebContext(input: {
   attempt: string;
   manifestDigest: string;
   manifest: Record<string, unknown>;
+  googleCalendarOAuthCallbackUrl?: string;
   current?: { revision: string; binding: NonNullable<Context['currentBinding']> };
 }): Context {
   const component = input.manifest.components as Record<string, Record<string, unknown>>;
@@ -96,7 +98,9 @@ export function pairedWebContext(input: {
   const schema = web.schema as Record<string, unknown>;
   const image = web.image;
   if (typeof image !== 'string') throw new Error('Invalid web image identity');
+  const callback = googleCalendarReleaseCallback(input.googleCalendarOAuthCallbackUrl);
   const releaseEnv = {
+    ...(callback ? { GOOGLE_CALENDAR_OAUTH_CALLBACK_URL: callback } : {}),
     ASSISTANT_RELEASE_API_CONTRACT: String(web.apiContract),
     ASSISTANT_RELEASE_AGENT_API_MIN: String(peer?.min),
     ASSISTANT_RELEASE_AGENT_API_MAX: String(peer?.max),

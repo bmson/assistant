@@ -6,6 +6,7 @@ import type {
 import { readPhoneCalendars } from '@assistant/persistence';
 import {
   GoogleClient,
+  registerAccountAwareCalendarTools,
   registerApplicationTools,
   registerCalendarTools,
   registerDocsTools,
@@ -21,6 +22,7 @@ import {
   applicationPersistence,
   reapExpiredApplicationWatches,
 } from './application-confirmations.js';
+import { personalCalendarAccountResolver } from './calendar-connection.js';
 import { googleDurableEmailObservers } from './durable-email-observers.js';
 import { sweepEmailAttachmentCustodyCleanup } from './email-attachment-cleanup.js';
 import { cardFromEmail } from './email-cards.js';
@@ -271,6 +273,21 @@ export const googleModule = defineModule<GoogleClient>({
       },
     };
 
+    const personalAccount = personalCalendarAccountResolver(config, persistence);
+    if (personalAccount) {
+      registerAccountAwareCalendarTools(
+        registry,
+        {
+          client,
+          botEmail: config.ASSISTANT_EMAIL,
+          ownerEmail: config.OWNER_EMAIL,
+          googleAvailable: client.configured(),
+          phoneCalendars: (agentId) => readPhoneCalendars(persistence.toolExecution, agentId),
+          personalAccount,
+        },
+        { readOnly: !client.configured() },
+      );
+    }
     if (!client.configured()) {
       console.warn('google module enabled but unavailable — run pnpm auth:bot');
       return { exports: client, hooks };
@@ -293,12 +310,13 @@ export const googleModule = defineModule<GoogleClient>({
       workspace,
       prepareOutbound,
     });
-    registerCalendarTools(registry, {
-      client,
-      botEmail: config.ASSISTANT_EMAIL,
-      ownerEmail: config.OWNER_EMAIL,
-      phoneCalendars: (agentId) => readPhoneCalendars(persistence.toolExecution, agentId),
-    });
+    if (!personalAccount)
+      registerCalendarTools(registry, {
+        client,
+        botEmail: config.ASSISTANT_EMAIL,
+        ownerEmail: config.OWNER_EMAIL,
+        phoneCalendars: (agentId) => readPhoneCalendars(persistence.toolExecution, agentId),
+      });
     registerDocsTools(registry, {
       client,
       botEmail: config.ASSISTANT_EMAIL,

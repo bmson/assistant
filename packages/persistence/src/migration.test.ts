@@ -182,8 +182,8 @@ describe('workspace migration format', () => {
 
   it('enumerates the complete PostgreSQL schema without duplicate tables', async () => {
     const { MIGRATION_TABLES } = await import('./migration.js');
-    expect(MIGRATION_TABLES).toHaveLength(96);
-    expect(new Set(MIGRATION_TABLES.map(({ table }) => table))).toHaveProperty('size', 96);
+    expect(MIGRATION_TABLES).toHaveLength(97);
+    expect(new Set(MIGRATION_TABLES.map(({ table }) => table))).toHaveProperty('size', 97);
     expect(MIGRATION_TABLES.some(({ table }) => table === 'recall_surfaces')).toBe(true);
     expect(MIGRATION_TABLES.map(({ table }) => table)).toEqual(
       expect.arrayContaining([
@@ -196,6 +196,7 @@ describe('workspace migration format', () => {
         'mission_reports',
         'notification_outbox',
         'phone_calendar_sharing',
+        'google_calendar_connections',
         'memory_embedding_refreshes',
         'email_attachment_custodies',
         'email_observer_budgets',

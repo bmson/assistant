@@ -81,6 +81,7 @@ export * from './external-effect.js';
 export * from './final-channel-delivery.js';
 export * from './generated-cards.js';
 export * from './goals.js';
+export * from './google-calendar-connection.js';
 export * from './graph-curiosity.js';
 export * from './graph-date-backfill.js';
 export * from './graph-recall.js';

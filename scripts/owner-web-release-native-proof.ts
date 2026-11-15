@@ -1,3 +1,4 @@
+import { googleCalendarReleaseCallback } from '../infra/gcp/google-calendar-release-config.mjs';
 import { disabled, retiredCurrentCondition } from './owner-release-current-snapshot.js';
 /** Unwired raw-response projection. No IO, credentials or supplied-proof acceptance. */
 
@@ -66,7 +67,7 @@ function template(value: unknown): Obj {
   requireNative(Object.keys(t).every((k) => (TEMPLATE_FIELDS as readonly string[]).includes(k)));
   return t;
 }
-function environment(r: Obj): Record<string, string> {
+function environment(r: Obj, expectedCallback?: string): Record<string, string> {
   const containers = r.containers;
   requireNative(Array.isArray(containers) && containers.length === 1);
   const env = nativeObject(containers[0]).env;
@@ -78,6 +79,12 @@ function environment(r: Obj): Record<string, string> {
       name = text(entry.name, /^[A-Za-z_][A-Za-z0-9_]{0,127}$/);
     requireNative(!seen.has(name));
     seen.add(name);
+    if (name === 'GOOGLE_CALENDAR_OAUTH_CALLBACK_URL' && expectedCallback !== undefined) {
+      requireNative(Object.keys(entry).sort().join(',') === 'name,value');
+      const callback = googleCalendarReleaseCallback(entry.value);
+      requireNative(callback !== undefined);
+      result[name] = callback;
+    }
     if (name.startsWith('ASSISTANT_RELEASE_')) {
       requireNative(Object.keys(entry).sort().join(',') === 'name,value');
       result[name] = text(entry.value, /^[A-Za-z0-9_.:-]{1,128}$/);
@@ -115,7 +122,10 @@ function revisionProof(raw: unknown, name: string, c: Context): NativeProof {
       (r.reconciling === undefined || r.reconciling === false),
   );
   const uid = text(r.uid, /^[A-Za-z0-9-]{1,128}$/),
-    env = environment(r),
+    env = environment(
+      r,
+      name === c.canonical ? undefined : c.releaseEnv.GOOGLE_CALENDAR_OAUTH_CALLBACK_URL,
+    ),
     pin = HISTORICAL_WEB_TAGS.find((p) => p.revision === name && p.revision === c.canonical);
   let image: string,
     source: string,

@@ -169,6 +169,8 @@ const ConfigSchema = z.object({
   GOOGLE_OAUTH_CLIENT_ID: z.string().default(''),
   GOOGLE_OAUTH_CLIENT_SECRET: z.string().default(''),
   BOT_GOOGLE_REFRESH_TOKEN: z.string().default(''),
+  /** Personal Calendar OAuth is disabled until an HTTPS callback is explicitly configured. */
+  GOOGLE_CALENDAR_OAUTH_CALLBACK_URL: z.string().default(''),
   /** projects/<id>/topics/<name> — enables Gmail push; local dev polls instead. */
   GMAIL_PUBSUB_TOPIC: z.string().default(''),
   GCP_PROJECT: z.string().default(''),

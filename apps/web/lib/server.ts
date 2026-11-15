@@ -92,6 +92,7 @@ import {
 import { readAuditInvestigation } from '@assistant/application/audit-investigation';
 import type { CallsPorts } from '@assistant/application/calls';
 import type { GoalInput } from '@assistant/application/goals';
+import { createGoogleCalendarConnectionService } from '@assistant/application/google-calendar-connection';
 import { GRAPH_EXTRACTION_VERSION } from '@assistant/application/knowledge-graph';
 import type { ModelProviderPorts } from '@assistant/application/model-providers';
 import { listPeopleDirectoryPage, personSummaryFromStoredRow } from '@assistant/application/people';
@@ -115,6 +116,7 @@ import {
   getAgent,
   getOrCreatePrimaryConversation,
 } from '@assistant/core/chat';
+import { googleCalendarOAuthConfig } from '@assistant/core/google-calendar-oauth';
 import {
   decryptStoredCredential,
   encryptMcpBearerToken,
@@ -139,6 +141,7 @@ import {
   createPostgresCardRefreshRepository,
   createPostgresEmailSyncRepository,
   createPostgresGeneratedCardRepository,
+  createPostgresGoogleCalendarConnectionRepository,
   createPostgresModelCatalogRepository,
   createPostgresModelConnectionRepository,
   createPostgresRecallSurfacingRepository,
@@ -157,6 +160,7 @@ import {
   assertPrivacyErasureFenceUnchanged,
   createFirestoreCardFormAdmissionRepository,
   createFirestoreExecutionPersistence,
+  createFirestoreGoogleCalendarConnectionRepository,
   createFirestoreProfileMemoryCommandPersistence,
   createFirestoreSettingsPersistence,
   createInstallationStore,
@@ -2038,5 +2042,20 @@ export async function loadOwnerMemoryCorrectionAuthorizationState(
     if (!snapshot) return null;
     const context = await readFirestoreOwnerEditorIssuanceContext(store, ownerId, tx);
     return { snapshot, context };
+  });
+}
+
+/** Optional personal Calendar onboarding, using the installation's existing store. */
+export function getGoogleCalendarConnectionService() {
+  const config = loadConfig();
+  if (config.PERSISTENCE_DRIVER === 'firestore' && validateAgentPersistenceConfig(config).length)
+    throw new Error('Calendar connection unavailable');
+  const repository =
+    config.PERSISTENCE_DRIVER === 'firestore'
+      ? createFirestoreGoogleCalendarConnectionRepository(getFirestoreInstallationStore())
+      : createPostgresGoogleCalendarConnectionRepository(getDb());
+  return createGoogleCalendarConnectionService({
+    repository,
+    config: googleCalendarOAuthConfig(config),
   });
 }

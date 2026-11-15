@@ -13,6 +13,7 @@ import type { OwnerMemoryWriteWitness } from './owner-memory-write-witness.js';
 import type { OwnerCallActionGrantUsage } from './phone-call-owner-action-grant.js';
 
 export interface Records {
+  googleCalendarConnections: { agentId: string; state: unknown; updatedAt: Date };
   ownerEditorOperations: OwnerEditorOperationRecord;
   ownerCallGrantOperations: OwnerCallGrantOperation;
   ownerCallGrantOperationSlots: OwnerCallGrantOperationSlot;
