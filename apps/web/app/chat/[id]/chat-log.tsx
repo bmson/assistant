@@ -16,6 +16,7 @@
  * change. During a stream that leaves exactly one row re-rendering per token.
  */
 
+import type { EstimatedCostQuote } from '@assistant/persistence';
 import type { CardForm, CardFormValues } from '@assistant/persistence/card-form';
 import type { UIMessage } from 'ai';
 import Link from 'next/link';
@@ -39,8 +40,10 @@ import { ActionChips } from './action-chips';
 import { ApprovalGroup } from './approval-group';
 import { ApprovalSummaryCard } from './approval-summary';
 import type { CardFormDraft, CardFormIdentity } from './card-form-operations';
+import { isCostQuotePayload } from './estimated-cost-decision';
 import type { InlineApprovalPart } from './inline-approval';
 import { InlineBudgetRequest, type InlineBudgetRequestPart } from './inline-budget-request';
+import { InlineEstimatedCostRequest } from './inline-estimated-cost-request';
 import { type InlineSuggestionPart, SuggestionCard } from './inline-suggestion';
 import { MessageMarkdown } from './markdown';
 import {
@@ -115,7 +118,11 @@ const ChatMessageRow = memo(function ChatMessageRow({
   onDiscardForm,
 }: ChatMessageRowProps) {
   const parts = message.parts as Array<
-    UIMessage['parts'][number] | InlineApprovalPart | InlineBudgetRequestPart | InlineSuggestionPart
+    | UIMessage['parts'][number]
+    | InlineApprovalPart
+    | InlineBudgetRequestPart
+    | InlineSuggestionPart
+    | EstimatedCostQuote
   >;
   const approvalSummary = approvalSummaryOf(parts);
   const approvalParts = parts.filter(
@@ -124,6 +131,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
   const budgetParts = parts.filter(
     (part): part is InlineBudgetRequestPart => part.type === 'budget-request',
   );
+  const estimatedCostParts = parts.filter(isCostQuotePayload);
   const suggestionParts = parts.filter(
     (part): part is InlineSuggestionPart =>
       part.type === 'suggestion' &&
@@ -148,7 +156,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
   const visibleTextParts =
     approvalSummary !== null
       ? []
-      : approvalParts.length > 0 || budgetParts.length > 0
+      : approvalParts.length > 0 || budgetParts.length > 0 || estimatedCostParts.length > 0
         ? textParts.filter((part) => !isDecisionProseNotice(part.text))
         : textParts;
   // Whitespace-only text parts are the residue of a [break]
@@ -339,6 +347,13 @@ const ChatMessageRow = memo(function ChatMessageRow({
       {approvalParts.length > 0 ? <ApprovalGroup parts={approvalParts} /> : null}
       {budgetParts.map((part) => (
         <InlineBudgetRequest key={part.taskId} part={part} />
+      ))}
+      {estimatedCostParts.map((part) => (
+        <InlineEstimatedCostRequest
+          key={part.operationId}
+          part={part}
+          formSessionScope={formSessionScope}
+        />
       ))}
       <SuggestionCard parts={suggestionParts} timeZone={agentTimezone} />
       {approvalSummary ? <ApprovalSummaryCard summary={approvalSummary} /> : null}
