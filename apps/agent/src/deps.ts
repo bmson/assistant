@@ -1,6 +1,7 @@
 import path from 'node:path';
 import {
   type Config,
+  estimatedCostApprovalEnabled,
   loadConfig,
   parseFirestoreEmbeddingSpace,
   repoRoot,
@@ -68,6 +69,7 @@ import {
   smsModule,
 } from '@assistant/modules';
 import {
+  parseEstimatedCostRuntimeProviderSource,
   curiosityNudgeChannel,
   type DocumentExtractionRepository,
   drainNotificationOutbox,
@@ -740,10 +742,15 @@ function buildFirestoreDeps(config: Config): AgentDeps {
  * construction opens no SQL client.
  */
 export function composeFirestoreAgent(config: Config): AgentDeps {
+  const providerSource = (config as Config & { ESTIMATED_COST_PROVIDER_SOURCE?: string })
+    .ESTIMATED_COST_PROVIDER_SOURCE;
   const store = createInstallationStore({
     projectId: config.GCP_PROJECT,
     installationId: config.ASSISTANT_WORKSPACE_ID,
     databaseId: config.FIRESTORE_DATABASE_ID,
+    ...(estimatedCostApprovalEnabled(config) && providerSource
+      ? { estimatedCostProviderSource: parseEstimatedCostRuntimeProviderSource(providerSource) }
+      : {}),
   });
   const embeddingSpace = parseFirestoreEmbeddingSpace(config.FIRESTORE_EMBEDDING_SPACE);
   const persistence = createFirestoreExecutionPersistence(

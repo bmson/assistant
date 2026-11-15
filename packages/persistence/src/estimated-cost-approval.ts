@@ -573,6 +573,71 @@ export interface EstimatedCostSourceBinding {
   privacyGeneration: string | null;
 }
 
+/** Nonsecret deployment attestation. It is supplied only by trusted server
+ * composition after the deployment has verified its actual secret binding. */
+export interface EstimatedCostRuntimeProviderSource {
+  provider: 'openrouter';
+  endpoint: 'https://openrouter.ai/api/v1';
+  installationId: string;
+  projectId: string;
+  secretVersion: string;
+  sourceRelease: string;
+}
+
+export function validateEstimatedCostRuntimeProviderSource(
+  source: EstimatedCostRuntimeProviderSource,
+): void {
+  if (
+    !source ||
+    typeof source !== 'object' ||
+    Array.isArray(source) ||
+    Object.keys(source).sort().join(',') !==
+      ['endpoint', 'installationId', 'projectId', 'provider', 'secretVersion', 'sourceRelease']
+        .sort()
+        .join(',')
+  )
+    throw new Error('Invalid estimated cost runtime provider source');
+  const secret =
+    typeof source.secretVersion === 'string'
+      ? /^projects\/([^/]+)\/secrets\/[a-zA-Z0-9_-]+\/versions\/[1-9][0-9]*$/.exec(
+          source.secretVersion,
+        )
+      : null;
+  if (
+    source.provider !== 'openrouter' ||
+    source.endpoint !== 'https://openrouter.ai/api/v1' ||
+    !/^[a-z0-9][a-z0-9-]{0,62}$/.test(source.installationId) ||
+    !/^[a-z0-9][a-z0-9-]{0,62}$/.test(source.projectId) ||
+    !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(source.sourceRelease) ||
+    secret?.[1] !== source.projectId
+  )
+    throw new Error('Invalid estimated cost runtime provider source');
+}
+
+export function parseEstimatedCostRuntimeProviderSource(
+  raw: string,
+): EstimatedCostRuntimeProviderSource {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw new Error('Invalid estimated cost runtime provider source');
+  }
+  if (
+    !value ||
+    typeof value !== 'object' ||
+    Array.isArray(value) ||
+    Object.keys(value).sort().join(',') !==
+      ['endpoint', 'installationId', 'projectId', 'provider', 'secretVersion', 'sourceRelease']
+        .sort()
+        .join(',')
+  )
+    throw new Error('Invalid estimated cost runtime provider source');
+  const source = value as EstimatedCostRuntimeProviderSource;
+  validateEstimatedCostRuntimeProviderSource(source);
+  return Object.freeze({ ...source });
+}
+
 /** Canonical JSON for hashing source rows. Only JSON values are accepted; no
  * undefined, NaN, Date objects or implicit coercion can change a binding. */
 export function canonicalEstimatedCostJson(value: unknown): string {

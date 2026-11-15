@@ -13,7 +13,7 @@ import {
   createFirestoreEstimatedCostQuotePreparer,
   createFirestoreEstimatedCostTurnParking,
 } from './estimated-cost-preparer.js';
-import type { InstallationStore } from './store.js';
+import { InstallationStore } from './store.js';
 import { disposeStore, emulatorStore, seedBudget } from './test-store.js';
 
 describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore estimated cost parking', () => {
@@ -74,9 +74,32 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore estimated cost 
   afterEach(async () => {
     await disposeStore(store);
   });
-  it.each([false, true])(
-    'parks A and resumes configured roles with critical=%s',
-    async (critical) => {
+  it.each([
+    { critical: false, environment: false },
+    { critical: true, environment: false },
+    { critical: false, environment: true },
+  ])(
+    'parks A and resumes configured roles with %j',
+    async ({ critical, environment }) => {
+      const manifest = {
+        provider: 'openrouter' as const,
+        endpoint: 'https://openrouter.ai/api/v1' as const,
+        installationId: store.installationId,
+        projectId: 'demo-assistant-test',
+        secretVersion: 'projects/demo-assistant-test/secrets/openrouter-api-key/versions/7',
+        sourceRelease: 'a'.repeat(40),
+      };
+      if (environment) {
+        await store.doc('modelConnections', 'openrouter').delete();
+        store = new InstallationStore(
+          store.db,
+          store.installationId,
+          store.now,
+          manifest.projectId,
+          '(default)',
+          manifest,
+        );
+      }
       const allowance = critical ? 550_000 : 500_000;
       const projected = 800_000 + allowance;
       const planned = projected + 10_000;
@@ -348,6 +371,17 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore estimated cost 
         critical ? 300_001 : 300_000,
         'a',
       );
+      if (environment) {
+        const changed = new InstallationStore(
+          store.db,
+          store.installationId,
+          store.now,
+          manifest.projectId,
+          '(default)',
+          { ...manifest, secretVersion: manifest.secretVersion.replace('/7', '/8') },
+        );
+        expect(await beginFirestoreEstimatedCostGrantAttempt(changed, classify)).toBe(false);
+      }
       expect(
         await beginFirestoreEstimatedCostGrantAttempt(store, {
           ...classify,

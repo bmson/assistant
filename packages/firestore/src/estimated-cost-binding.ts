@@ -74,6 +74,26 @@ function configuredConnection(snapshot: DocumentSnapshot, id: string): boolean {
   );
 }
 
+function connectionDigest(
+  store: InstallationStore,
+  snapshot: DocumentSnapshot,
+  id: string,
+): string {
+  if (configuredConnection(snapshot, id)) return digest(snapshot);
+  // Only the absent built-in connection uses the environment fallback. A
+  // present but disabled/malformed row must never be bypassed by this witness.
+  if (id !== 'openrouter' || snapshot.exists || !store.estimatedCostProviderSource)
+    throw new Error('Unproven model connection');
+  return createHash('sha256')
+    .update(
+      canonicalEstimatedCostJson({
+        kind: 'deployment-provider-source-v1',
+        ...store.estimatedCostProviderSource,
+      }),
+    )
+    .digest('hex');
+}
+
 export interface FirestoreEstimatedCostBindingInput {
   actor: EstimatedCostActor;
   taskId: string;
@@ -152,11 +172,7 @@ export async function firestoreEstimatedCostSourceBinding(
     tx.getAll(...modelIds.map((id) => store.doc('models', id))),
     tx.getAll(...connectionIds.map((id) => store.doc('modelConnections', id))),
   ]);
-  if (
-    modelDocs.some((doc) => !doc.exists) ||
-    connectionDocs.some((doc, index) => !configuredConnection(doc, connectionIds[index] ?? ''))
-  )
-    throw new Error('Unproven model connection');
+  if (modelDocs.some((doc) => !doc.exists)) throw new Error('Unproven model connection');
   const selected = modelDocs[modelIds.indexOf(input.selectedModelId)];
   if (!selected?.exists || selected.get('enabled') !== true)
     throw new Error('Selected model unavailable');
@@ -189,10 +205,7 @@ export async function firestoreEstimatedCostSourceBinding(
     const extraConnections = await tx.getAll(
       ...connections.map((id) => store.doc('modelConnections', id)),
     );
-    if (
-      extraModels.some((doc) => !doc.exists) ||
-      extraConnections.some((doc, index) => !configuredConnection(doc, connections[index] ?? ''))
-    )
+    if (extraModels.some((doc) => !doc.exists))
       throw new Error('Unproven additional model connection');
     additionalRoutes.push({
       role: name,
@@ -203,7 +216,7 @@ export async function firestoreEstimatedCostSourceBinding(
       })),
       connectionRows: connections.map((id, index) => ({
         id,
-        digest: digest(extraConnections[index] as DocumentSnapshot),
+        digest: connectionDigest(store, extraConnections[index] as DocumentSnapshot, id),
       })),
     });
   }
@@ -219,7 +232,7 @@ export async function firestoreEstimatedCostSourceBinding(
     })),
     connectionRows: connectionIds.map((id, index) => ({
       id,
-      digest: digest(connectionDocs[index] as DocumentSnapshot),
+      digest: connectionDigest(store, connectionDocs[index] as DocumentSnapshot, id),
     })),
     additionalRoutes,
     budgetRows: [
