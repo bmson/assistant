@@ -67,9 +67,35 @@ struct EstimatedCostRequestProjection: Codable, Equatable, Sendable {
     }
 }
 
+struct EstimatedCostBudgetTracking: Codable, Equatable, Sendable {
+    let observedAt: String
+    let complete: Bool
+    let recordedDailyMicros: Int64?
+    let recordedMonthlyMicros: Int64?
+    let totalHeldMicros: Int64?
+    let historicalUnknownMicros: Int64?
+    let pendingApprovalMicros: Int64?
+    let dailyPlannedExposureMicros: Int64?
+    let monthlyPlannedExposureMicros: Int64?
+
+    var isValid: Bool {
+        let amounts = [recordedDailyMicros, recordedMonthlyMicros, totalHeldMicros, historicalUnknownMicros,
+                       pendingApprovalMicros, dailyPlannedExposureMicros, monthlyPlannedExposureMicros]
+        guard observedAt.assistantDate != nil,
+              amounts.allSatisfy({ $0.map { (0...9_007_199_254_740_991).contains($0) } ?? true }) else { return false }
+        if let historicalUnknownMicros, let totalHeldMicros, historicalUnknownMicros > totalHeldMicros { return false }
+        if let recordedDailyMicros, let totalHeldMicros, let pendingApprovalMicros, let dailyPlannedExposureMicros,
+           recordedDailyMicros + totalHeldMicros + pendingApprovalMicros != dailyPlannedExposureMicros { return false }
+        if let recordedMonthlyMicros, let totalHeldMicros, let pendingApprovalMicros, let monthlyPlannedExposureMicros,
+           recordedMonthlyMicros + totalHeldMicros + pendingApprovalMicros != monthlyPlannedExposureMicros { return false }
+        return true
+    }
+}
+
 struct EstimatedCostQuoteResponse: Codable, Sendable {
     let ok: Bool
     let request: EstimatedCostRequestProjection?
+    let tracking: EstimatedCostBudgetTracking?
 }
 struct EstimatedCostDecisionResponse: Codable, Sendable {
     let ok: Bool

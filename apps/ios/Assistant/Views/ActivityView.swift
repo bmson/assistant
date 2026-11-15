@@ -39,6 +39,7 @@ struct CostPermissionDisplay: Equatable {
     let dailyProjectedGross: String
     let monthlyProjectedGross: String
     let expiryDescription: String
+    let trackingDescription: String
     let unavailableReason: String?
     let quoteComplete: Bool
     let serverAllowsApproval: Bool
@@ -47,21 +48,28 @@ struct CostPermissionDisplay: Equatable {
     var canDecide: Bool { (state == .pending || state == .expired) && quoteComplete }
     var canApprove: Bool { state == .pending && quoteComplete && serverAllowsApproval }
 
-    init(quote: EstimatedCostQuote, state: CostPermissionDisplayState, now: Date = Date()) {
+    init(quote: EstimatedCostQuote, state: CostPermissionDisplayState,
+         tracking: EstimatedCostBudgetTracking? = nil, now: Date = Date()) {
         func usd(_ micros: Int64) -> String {
             guard quote.complete && quote.isValid else { return "Unavailable" }
+            return (Decimal(micros) / Decimal(1_000_000)).formatted(.currency(code: "USD").precision(.fractionLength(2...6)))
+        }
+        let current = tracking.flatMap { $0.isValid ? $0 : nil }
+        func currentUSD(_ micros: Int64?) -> String {
+            guard let micros else { return "Unavailable" }
             return (Decimal(micros) / Decimal(1_000_000)).formatted(.currency(code: "USD").precision(.fractionLength(2...6)))
         }
         requestName = quote.requestText
         estimatedNextAttempt = usd(quote.nextAttemptMicros)
         maximumAllowance = usd(quote.allowanceMicros)
-        recordedDailySpend = usd(quote.recordedDailyMicros)
-        recordedMonthlySpend = usd(quote.recordedMonthlyMicros)
-        activeHeldEstimate = usd(quote.totalHeldMicros)
-        historicalUnknownEstimate = usd(quote.eligibleHistoricalUnknownMicros)
-        pendingApprovalEstimate = usd(quote.pendingApprovalMicros)
+        recordedDailySpend = currentUSD(current?.recordedDailyMicros)
+        recordedMonthlySpend = currentUSD(current?.recordedMonthlyMicros)
+        activeHeldEstimate = currentUSD(current?.totalHeldMicros)
+        historicalUnknownEstimate = currentUSD(current?.historicalUnknownMicros)
+        pendingApprovalEstimate = currentUSD(current?.pendingApprovalMicros)
         dailyLimit = usd(quote.dailyCeilingMicros); monthlyLimit = usd(quote.monthlyCeilingMicros)
-        dailyProjectedGross = usd(quote.dailyProjectedGrossMicros); monthlyProjectedGross = usd(quote.monthlyProjectedGrossMicros)
+        dailyProjectedGross = currentUSD(current?.dailyPlannedExposureMicros); monthlyProjectedGross = currentUSD(current?.monthlyPlannedExposureMicros)
+        trackingDescription = current.map { "Budget tracking observed \($0.observedAt)" + ($0.complete ? "." : "; some amounts are unavailable.") } ?? "Budget tracking is unavailable."
         expiryDescription = quote.expiry.map { "Quote expires \($0.formatted(date: .abbreviated, time: .shortened))" } ?? "Quote expiry unavailable"
         quoteComplete = quote.complete && quote.isValid
         unavailableReason = quote.unavailableReason
@@ -80,6 +88,7 @@ struct CostPermissionDisplay: Equatable {
         self.pendingApprovalEstimate = pendingApprovalEstimate; self.dailyLimit = dailyLimit; self.monthlyLimit = monthlyLimit
         self.dailyProjectedGross = dailyProjectedGross; self.monthlyProjectedGross = monthlyProjectedGross
         self.expiryDescription = expiryDescription; self.quoteComplete = quoteComplete
+        self.trackingDescription = "Budget tracking is unavailable."
         self.unavailableReason = unavailableReason
         self.serverAllowsApproval = serverAllowsApproval; self.state = state
     }
@@ -112,20 +121,22 @@ struct CostPermissionReviewCard: View {
             VStack(alignment: .leading, spacing: 16) {
                 Text("Allow up to \(display.maximumAllowance) for \(display.requestName)")
                     .font(.body.weight(.semibold)).fixedSize(horizontal: false, vertical: true)
+                Text("When estimated: next attempt \(display.estimatedNextAttempt); daily limit \(display.dailyLimit); monthly limit \(display.monthlyLimit).")
+                    .font(.subheadline).fixedSize(horizontal: false, vertical: true)
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Next attempt estimate: \(display.estimatedNextAttempt)")
-                    Text("Recorded today: \(display.recordedDailySpend) of \(display.dailyLimit)")
-                    Text("Recorded this month: \(display.recordedMonthlySpend) of \(display.monthlyLimit)")
+                    Text(display.trackingDescription).fontWeight(.semibold)
+                    Text("Recorded today: \(display.recordedDailySpend)")
+                    Text("Recorded this month: \(display.recordedMonthlySpend)")
                     Text("Total held estimates: \(display.activeHeldEstimate)")
                     Text("Eligible historical unknown estimates, included in held: \(display.historicalUnknownEstimate)")
                     Text("Awaiting-decision estimates: \(display.pendingApprovalEstimate)")
-                    Text("Projected gross today: \(display.dailyProjectedGross)")
-                    Text("Projected gross this month: \(display.monthlyProjectedGross)")
+                    Text("Planned exposure today: \(display.dailyProjectedGross)")
+                    Text("Planned exposure this month: \(display.monthlyProjectedGross)")
                 }
                 .font(.subheadline).fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .assistantPanel(in: colorScheme)
-                Text("Held and awaiting-decision amounts are estimates, not recorded spend. Projected gross includes the quote’s reported exposures; do not add these lines together.")
+                Text("Held and awaiting-decision amounts are estimates, not recorded spend. Planned exposure includes recorded spend, held and awaiting-decision estimates; do not add these lines together.")
                     .font(.subheadline).fixedSize(horizontal: false, vertical: true)
                 Text("This is an allowance for this request, not a charge or a provider spending cap. It does not raise your configured limits or approve tools or external actions. If it needs more, you may be asked again.")
                     .font(.subheadline).fixedSize(horizontal: false, vertical: true)
@@ -363,6 +374,7 @@ struct EstimatedCostReviewScreen: View {
     @State private var controller: CostPermissionController?
     @State private var displayedConnectionVersion: Int?
     @State private var standaloneProjection: EstimatedCostRequestProjection?
+    @State private var tracking: EstimatedCostBudgetTracking?
     @State private var loading = true
     @State private var unavailable = false
     @State private var quoteRequestID: String?
@@ -374,14 +386,15 @@ struct EstimatedCostReviewScreen: View {
             VStack(alignment: .leading, spacing: 16) {
                 if let controller, displayedConnectionVersion == model.activityConnectionVersion {
                     TimelineView(.periodic(from: .now, by: 1)) { timeline in
-                        let display = CostPermissionDisplay(quote: controller.quote, state: controller.state, now: timeline.date)
+                        let display = CostPermissionDisplay(quote: controller.quote, state: controller.state, tracking: tracking, now: timeline.date)
                         VStack(spacing: 16) {
                             CostPermissionReviewCard(display: display, canonicalNotice: controller.canonicalNotice,
                                 canonicalStatus: controller.canonicalStatus, canonicalGrantExpiry: controller.canonicalGrantExpiry,
                                 receipt: controller.receipt,
-                                approve: { await controller.decide("approve") },
-                                decline: { await controller.decide("decline") },
-                                check: { await controller.checkDecision() })
+                                approve: { tracking = nil; await controller.decide("approve") },
+                                decline: { tracking = nil; await controller.decide("decline") },
+                                check: { tracking = nil; await controller.checkDecision() })
+                                .disabled(loading)
                             if display.state == .expired || display.state == .changed {
                                 Button("Request an updated quote") { Task { await requestUpdatedQuote() } }
                                     .buttonStyle(AssistantActionButtonStyle(kind: .secondary, fillsWidth: true))
@@ -418,7 +431,7 @@ struct EstimatedCostReviewScreen: View {
             let version = model.activityConnectionVersion
             if sessionVersion != version {
                 sessionVersion = version
-                controller = nil; displayedConnectionVersion = nil; standaloneProjection = nil
+                controller = nil; displayedConnectionVersion = nil; standaloneProjection = nil; tracking = nil
                 quoteRequestID = nil; quoteRefreshUnconfirmed = false
             }
             await load()
@@ -427,6 +440,7 @@ struct EstimatedCostReviewScreen: View {
 
     private func load() async {
         guard controller?.state != .submitting else { return }
+        tracking = nil
         guard let context = model.checklistCorrectionRequestContext() else { loading = false; unavailable = true; return }
         loading = true
         let priorQuoteID = controller?.quote.quoteId
@@ -435,8 +449,10 @@ struct EstimatedCostReviewScreen: View {
         let saved: PendingCostPermissionDecision?
         do { saved = try store.load(ownerID: context.ownerID, operationID: operationID) }
         catch { loading = false; unavailable = true; return }
-        let projection = try? await context.client.estimatedCostQuote(operationID: operationID)
+        let response = try? await context.client.estimatedCostQuote(operationID: operationID)
         guard !Task.isCancelled, model.checklistCorrectionConnectionIsCurrent(ownerID: context.ownerID, version: context.connectionVersion) else { loading = false; return }
+        let projection = response?.request
+        tracking = response?.tracking.flatMap { $0.isValid ? $0 : nil }
         guard let quote = saved?.quote ?? projection?.quote else {
             controller = nil; standaloneProjection = projection; displayedConnectionVersion = context.connectionVersion
             loading = false; unavailable = projection == nil; return
@@ -469,10 +485,12 @@ struct EstimatedCostReviewScreen: View {
         let id = quoteRequestID ?? UUID().uuidString.lowercased()
         quoteRequestID = id
         loading = true
+        tracking = nil
         do {
-            let projection = try await context.client.requestEstimatedCostQuote(operationID: operationID, quoteRequestID: id)
+            let response = try await context.client.requestEstimatedCostQuote(operationID: operationID, quoteRequestID: id)
             guard !Task.isCancelled, model.checklistCorrectionConnectionIsCurrent(ownerID: context.ownerID, version: context.connectionVersion) else { loading = false; return }
-            controller?.apply(projection)
+            tracking = response.tracking.flatMap { $0.isValid ? $0 : nil }
+            if let projection = response.request { controller?.apply(projection) }
             quoteRequestID = nil
         } catch {
             guard !Task.isCancelled, model.checklistCorrectionConnectionIsCurrent(ownerID: context.ownerID, version: context.connectionVersion) else { loading = false; return }

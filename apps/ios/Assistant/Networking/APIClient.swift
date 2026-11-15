@@ -749,16 +749,16 @@ struct APIClient: Sendable, GoogleCalendarConnectionService {
         value.utf8.count == 36 && UUID(uuidString: value) != nil
     }
 
-    func estimatedCostQuote(operationID: String) async throws -> EstimatedCostRequestProjection {
+    func estimatedCostQuote(operationID: String) async throws -> EstimatedCostQuoteResponse {
         var components = URLComponents(url: configuration.baseURL.appending(path: "api/mobile/v1/chat/estimated-cost/quote"), resolvingAgainstBaseURL: false)
         components?.queryItems = [.init(name: "operationId", value: operationID)]
         guard let url = components?.url else { throw APIError.invalidServerURL }
         let envelope = try await perform(makeRequest(url: url), as: EstimatedCostQuoteResponse.self)
         guard envelope.ok, let projection = envelope.request, projection.isValid(for: operationID) else { throw APIError.invalidResponse }
-        return projection
+        return envelope
     }
 
-    func requestEstimatedCostQuote(operationID: String, quoteRequestID: String) async throws -> EstimatedCostRequestProjection {
+    func requestEstimatedCostQuote(operationID: String, quoteRequestID: String) async throws -> EstimatedCostQuoteResponse {
         struct Body: Encodable { let operationId: String; let quoteRequestId: String }
         var request = makeRequest(url: configuration.baseURL.appending(path: "api/mobile/v1/chat/estimated-cost/quote"))
         request.httpMethod = "POST"
@@ -766,7 +766,7 @@ struct APIClient: Sendable, GoogleCalendarConnectionService {
         request.httpBody = try JSONEncoder().encode(Body(operationId: operationID, quoteRequestId: quoteRequestID))
         let envelope = try await perform(request, as: EstimatedCostQuoteResponse.self)
         guard envelope.ok, let projection = envelope.request, projection.isValid(for: operationID) else { throw APIError.invalidResponse }
-        return projection
+        return envelope
     }
 
     func decideEstimatedCost(_ decision: EstimatedCostDecision) async throws -> EstimatedCostDecisionReceipt {

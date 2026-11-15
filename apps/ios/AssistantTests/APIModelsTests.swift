@@ -4,6 +4,33 @@ import CoreLocation
 @testable import Assistant
 
 extension APIModelsTests {
+    func testCostTrackingUsesCurrentSnapshotAndPreservesUnavailableAmounts() throws {
+        let quote = try JSONDecoder().decode(EstimatedCostQuote.self, from: Data(#"{"type":"estimated-cost-approval","operationId":"a","taskId":"task","requestText":"Request A","quoteId":"q","quoteVersion":"v","expiresAt":"2030-01-01T00:00:00Z","nextAttemptMicros":50000,"allowanceMicros":500000,"recordedDailyMicros":100000,"recordedMonthlyMicros":100000,"totalHeldMicros":0,"eligibleHistoricalUnknownMicros":0,"pendingApprovalMicros":500000,"dailyCeilingMicros":2000000,"monthlyCeilingMicros":2000000,"dailyProjectedGrossMicros":600000,"monthlyProjectedGrossMicros":600000,"complete":true,"canApprove":true}"#.utf8))
+        func snapshot(_ recorded: Int64, _ held: Int64, _ pending: Int64, _ exposure: Int64) -> EstimatedCostBudgetTracking {
+            .init(observedAt: "2029-01-01T00:00:00Z", complete: true, recordedDailyMicros: recorded,
+                  recordedMonthlyMicros: recorded, totalHeldMicros: held, historicalUnknownMicros: 0,
+                  pendingApprovalMicros: pending, dailyPlannedExposureMicros: exposure, monthlyPlannedExposureMicros: exposure)
+        }
+        let pending = CostPermissionDisplay(quote: quote, state: .pending, tracking: snapshot(100000, 0, 500000, 600000))
+        let bSpent = CostPermissionDisplay(quote: quote, state: .pending, tracking: snapshot(300000, 0, 500000, 800000))
+        let approved = CostPermissionDisplay(quote: quote, state: .approved, tracking: snapshot(300000, 500000, 0, 800000))
+        XCTAssertEqual(pending.pendingApprovalEstimate, "$0.50")
+        XCTAssertEqual(bSpent.recordedDailySpend, "$0.30")
+        XCTAssertEqual(approved.pendingApprovalEstimate, "$0.00")
+        XCTAssertEqual(approved.activeHeldEstimate, "$0.50")
+        XCTAssertEqual(approved.dailyProjectedGross, "$0.80", "The held grant is counted once")
+        let noTracking = CostPermissionDisplay(quote: quote, state: .approved)
+        XCTAssertEqual(noTracking.pendingApprovalEstimate, "Unavailable")
+        XCTAssertEqual(noTracking.activeHeldEstimate, "Unavailable")
+        let partial = try JSONDecoder().decode(EstimatedCostBudgetTracking.self, from: Data(#"{"observedAt":"2029-01-01T00:00:00Z","complete":false,"recordedDailyMicros":null,"recordedMonthlyMicros":300000,"totalHeldMicros":500000,"historicalUnknownMicros":null,"pendingApprovalMicros":0,"dailyPlannedExposureMicros":null,"monthlyPlannedExposureMicros":800000}"#.utf8))
+        let incomplete = CostPermissionDisplay(quote: quote, state: .approved, tracking: partial)
+        XCTAssertEqual(incomplete.recordedDailySpend, "Unavailable")
+        XCTAssertEqual(incomplete.historicalUnknownEstimate, "Unavailable")
+        XCTAssertEqual(incomplete.dailyProjectedGross, "Unavailable")
+        XCTAssertTrue(incomplete.trackingDescription.contains("some amounts are unavailable"))
+        let envelope = try JSONDecoder().decode(EstimatedCostQuoteResponse.self, from: Data(#"{"ok":true,"request":null,"tracking":null}"#.utf8))
+        XCTAssertNil(envelope.tracking)
+    }
     @MainActor func testCostPermissionRecoversOnlySameDecisionAfterUnknownResponse() async throws {
         @MainActor final class Store: CostPermissionRecoveryStore {
             var saved: PendingCostPermissionDecision?
