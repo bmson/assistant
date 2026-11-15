@@ -146,7 +146,7 @@ it.skipIf(!imagesReceipt)(
       INSERT INTO memories
         (id,agent_id,category,kind,content,content_hash,source,owner_confirmed,pinned,origin_trust,owner_correction)
       VALUES
-        (${legacyMemoryId},${owner},'knowledge','fact',${legacyContent},${contentHash},'manual',true,true,'owner',${JSON.stringify(ownerCorrection)}::jsonb)
+        (${legacyMemoryId},${owner},'knowledge','fact',${legacyContent},${contentHash},'manual',true,true,'owner',${client.json(ownerCorrection)}::jsonb)
     `;
       const [preMigrationColumn] = await client`
       SELECT count(*)::int AS count FROM information_schema.columns
@@ -181,7 +181,7 @@ it.skipIf(!imagesReceipt)(
         connection: null,
         flow: null,
       };
-      await client`INSERT INTO google_calendar_connections (agent_id,state) VALUES (${owner},${JSON.stringify(calendarState)}::jsonb)`;
+      await client`INSERT INTO google_calendar_connections (agent_id,state) VALUES (${owner},${client.json(calendarState)}::jsonb)`;
       const [calendarAfter] =
         await client`SELECT state FROM google_calendar_connections WHERE agent_id=${owner}`;
       expect(calendarAfter?.state).toEqual(calendarState);
