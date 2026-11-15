@@ -1151,6 +1151,8 @@ final class APIClientRetryTests: XCTestCase {
             "/api/mobile/v1/chats/11111111-1111-4111-8111-111111111111/messages/44444444-4444-4444-8444-444444444444",
         ])
         let chatBody = try XCTUnwrap(StubURLProtocol.bodies.first)
+        let chatHeaders = try XCTUnwrap(StubURLProtocol.headers.first)
+        XCTAssertEqual(chatHeaders.first { $0.key.caseInsensitiveCompare("X-Assistant-Estimated-Cost-Approval") == .orderedSame }?.value, "v1")
         let chat = try XCTUnwrap(JSONSerialization.jsonObject(with: chatBody) as? [String: Any])
         XCTAssertEqual(chat["clientId"] as? String, clientID)
         let deliveryBody = try XCTUnwrap(StubURLProtocol.bodies.last)

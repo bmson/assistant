@@ -90,6 +90,15 @@ struct EstimatedCostBudgetTracking: Codable, Equatable, Sendable {
            recordedMonthlyMicros + totalHeldMicros + pendingApprovalMicros != monthlyPlannedExposureMicros { return false }
         return true
     }
+
+    func matches(_ quote: EstimatedCostQuote) -> Bool {
+        isValid && complete && dailyPlannedExposureMicros != nil && monthlyPlannedExposureMicros != nil
+            && recordedDailyMicros == quote.recordedDailyMicros
+            && recordedMonthlyMicros == quote.recordedMonthlyMicros
+            && totalHeldMicros == quote.totalHeldMicros
+            && historicalUnknownMicros == quote.eligibleHistoricalUnknownMicros
+            && pendingApprovalMicros == quote.pendingApprovalMicros
+    }
 }
 
 struct EstimatedCostQuoteResponse: Codable, Sendable {

@@ -2008,6 +2008,7 @@ struct APIClient: Sendable, GoogleCalendarConnectionService {
         var request = makeRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.setValue("v1", forHTTPHeaderField: "X-Assistant-Estimated-Cost-Approval")
         if let encodedRequestBody {
             request.httpBody = encodedRequestBody
         } else {

@@ -4,6 +4,85 @@ import CoreLocation
 @testable import Assistant
 
 extension APIModelsTests {
+    @MainActor func testCostApprovalRequiresCurrentTrackingAndFreshQuoteAfterStale() async throws {
+        @MainActor final class Store: CostPermissionRecoveryStore {
+            var saved: PendingCostPermissionDecision?
+            var stale: StaleCostQuote?
+            var failStaleLoad = false
+            func load(ownerID: String, operationID: String) throws -> PendingCostPermissionDecision? { saved }
+            func save(_ pending: PendingCostPermissionDecision) throws { saved = pending }
+            func remove(ownerID: String, operationID: String) throws { saved = nil }
+            func loadStale(ownerID: String, operationID: String) throws -> StaleCostQuote? {
+                if failStaleLoad { throw APIError.invalidResponse }
+                return stale
+            }
+            func saveStale(_ quote: StaleCostQuote, ownerID: String, operationID: String) throws { stale = quote }
+        }
+        let raw = #"{"type":"estimated-cost-approval","operationId":"a","taskId":"task","requestText":"Request A","quoteId":"q1","quoteVersion":"v1","expiresAt":"2030-01-01T00:00:00Z","nextAttemptMicros":50000,"allowanceMicros":500000,"recordedDailyMicros":100000,"recordedMonthlyMicros":100000,"totalHeldMicros":0,"eligibleHistoricalUnknownMicros":0,"pendingApprovalMicros":500000,"dailyCeilingMicros":2000000,"monthlyCeilingMicros":2000000,"dailyProjectedGrossMicros":600000,"monthlyProjectedGrossMicros":600000,"complete":true,"canApprove":true}"#
+        let quote = try JSONDecoder().decode(EstimatedCostQuote.self, from: Data(raw.utf8))
+        func snapshot(complete: Bool = true, recorded: Int64? = 100000) -> EstimatedCostBudgetTracking {
+            .init(observedAt: "2029-01-01T00:00:00Z", complete: complete, recordedDailyMicros: recorded,
+                recordedMonthlyMicros: 100000, totalHeldMicros: 0, historicalUnknownMicros: 0,
+                pendingApprovalMicros: 500000, dailyPlannedExposureMicros: recorded.map { $0 + 500000 },
+                monthlyPlannedExposureMicros: 600000)
+        }
+        let store = Store()
+        var sent: [String] = []
+        func controller() -> CostPermissionController {
+            CostPermissionController(ownerID: "owner", quote: quote, store: store, connectionIsCurrent: { true },
+                send: { decision in
+                    sent.append(decision.decision)
+                    return .init(decisionId: decision.decisionId, operationId: decision.operationId,
+                        quoteId: decision.quoteId, status: decision.decision == "approve" ? "stale" : "declined",
+                        allowanceMicros: nil, expiresAt: nil)
+                }, readReceipt: { _ in nil }, decisionID: { UUID().uuidString })
+        }
+        let first = controller(); first.restore()
+        let missingExposure = EstimatedCostBudgetTracking(observedAt: "2029-01-01T00:00:00Z", complete: true,
+            recordedDailyMicros: 100000, recordedMonthlyMicros: 100000, totalHeldMicros: 0,
+            historicalUnknownMicros: 0, pendingApprovalMicros: 500000,
+            dailyPlannedExposureMicros: nil, monthlyPlannedExposureMicros: 600000)
+        for current: EstimatedCostBudgetTracking? in [nil, snapshot(complete: false), snapshot(recorded: nil),
+                                                       snapshot(recorded: 200000), missingExposure] {
+            first.updateTracking(current)
+            XCTAssertFalse(CostPermissionDisplay(quote: quote, state: .pending, tracking: current).canApprove)
+            await first.decide("approve")
+        }
+        XCTAssertTrue(sent.isEmpty)
+        first.updateTracking(snapshot())
+        XCTAssertTrue(CostPermissionDisplay(quote: quote, state: .pending, tracking: first.tracking).canApprove)
+        first.updateTracking(nil) // A failed newer read must clear the earlier matching snapshot.
+        await first.decide("approve")
+        XCTAssertTrue(sent.isEmpty)
+        first.updateTracking(snapshot())
+        await first.decide("approve")
+        XCTAssertEqual(sent, ["approve"])
+        XCTAssertEqual(first.state, .changed)
+        XCTAssertEqual(store.stale, StaleCostQuote(quoteId: "q1", quoteVersion: "v1"))
+        XCTAssertNil(store.saved)
+        let reopened = controller(); reopened.restore()
+        reopened.apply(.init(status: "pending", operationId: "a", quote: quote, grantExpiresAt: nil, reason: nil))
+        reopened.updateTracking(snapshot())
+        XCTAssertEqual(reopened.state, .changed)
+        await reopened.decide("approve")
+        XCTAssertEqual(sent, ["approve"])
+        reopened.updateTracking(nil)
+        await reopened.decide("decline")
+        XCTAssertEqual(sent, ["approve", "decline"], "Decline remains available without tracking")
+        let fresh = try JSONDecoder().decode(EstimatedCostQuote.self, from: Data(raw.replacingOccurrences(of: "q1", with: "q2").utf8))
+        let newController = CostPermissionController(ownerID: "owner", quote: fresh, store: store, connectionIsCurrent: { true },
+            send: { _ in nil }, readReceipt: { _ in nil })
+        newController.restore(); newController.updateTracking(snapshot())
+        XCTAssertEqual(newController.state, .pending)
+        XCTAssertTrue(CostPermissionDisplay(quote: fresh, state: newController.state, tracking: newController.tracking).canApprove)
+        store.failStaleLoad = true
+        let inaccessible = controller(); inaccessible.restore()
+        inaccessible.apply(.init(status: "pending", operationId: "a", quote: quote, grantExpiresAt: nil, reason: nil))
+        inaccessible.updateTracking(snapshot())
+        XCTAssertEqual(inaccessible.state, .unavailable)
+        await inaccessible.decide("approve")
+        XCTAssertEqual(sent, ["approve", "decline"])
+    }
     func testCostTrackingUsesCurrentSnapshotAndPreservesUnavailableAmounts() throws {
         let quote = try JSONDecoder().decode(EstimatedCostQuote.self, from: Data(#"{"type":"estimated-cost-approval","operationId":"a","taskId":"task","requestText":"Request A","quoteId":"q","quoteVersion":"v","expiresAt":"2030-01-01T00:00:00Z","nextAttemptMicros":50000,"allowanceMicros":500000,"recordedDailyMicros":100000,"recordedMonthlyMicros":100000,"totalHeldMicros":0,"eligibleHistoricalUnknownMicros":0,"pendingApprovalMicros":500000,"dailyCeilingMicros":2000000,"monthlyCeilingMicros":2000000,"dailyProjectedGrossMicros":600000,"monthlyProjectedGrossMicros":600000,"complete":true,"canApprove":true}"#.utf8))
         func snapshot(_ recorded: Int64, _ held: Int64, _ pending: Int64, _ exposure: Int64) -> EstimatedCostBudgetTracking {
@@ -34,9 +113,12 @@ extension APIModelsTests {
     @MainActor func testCostPermissionRecoversOnlySameDecisionAfterUnknownResponse() async throws {
         @MainActor final class Store: CostPermissionRecoveryStore {
             var saved: PendingCostPermissionDecision?
+            var stale: StaleCostQuote?
             func load(ownerID: String, operationID: String) throws -> PendingCostPermissionDecision? { saved }
             func save(_ pending: PendingCostPermissionDecision) throws { saved = pending }
             func remove(ownerID: String, operationID: String) throws { saved = nil }
+            func loadStale(ownerID: String, operationID: String) throws -> StaleCostQuote? { stale }
+            func saveStale(_ quote: StaleCostQuote, ownerID: String, operationID: String) throws { stale = quote }
         }
         let quote = try JSONDecoder().decode(EstimatedCostQuote.self, from: Data(#"{"type":"estimated-cost-approval","operationId":"op-1","taskId":"task-1","requestText":"Compare options","quoteId":"quote-1","quoteVersion":"v1","expiresAt":"2030-01-01T00:00:00Z","nextAttemptMicros":50000,"allowanceMicros":500000,"recordedDailyMicros":100000,"recordedMonthlyMicros":200000,"totalHeldMicros":30000,"eligibleHistoricalUnknownMicros":20000,"pendingApprovalMicros":50000,"dailyCeilingMicros":1000000,"monthlyCeilingMicros":10000000,"dailyProjectedGrossMicros":180000,"monthlyProjectedGrossMicros":280000,"complete":true,"canApprove":true}"#.utf8))
         let store = Store()
@@ -47,6 +129,10 @@ extension APIModelsTests {
                       status: "approved", allowanceMicros: 500000, expiresAt: "2030-01-01T00:20:00Z")
             }, decisionID: { "decision-1" })
         controller.restore()
+        controller.updateTracking(.init(observedAt: "2029-01-01T00:00:00Z", complete: true,
+            recordedDailyMicros: 100000, recordedMonthlyMicros: 200000, totalHeldMicros: 30000,
+            historicalUnknownMicros: 20000, pendingApprovalMicros: 50000,
+            dailyPlannedExposureMicros: 180000, monthlyPlannedExposureMicros: 280000))
         await controller.decide("approve")
         XCTAssertEqual(controller.state, .unconfirmed)
         XCTAssertEqual(store.saved?.decision.decisionId, "decision-1")
@@ -109,7 +195,7 @@ extension APIModelsTests {
                   historicalUnknownEstimate: "$0.02", pendingApprovalEstimate: "$0.05", dailyLimit: "$1.00",
                   monthlyLimit: "$10.00", dailyProjectedGross: "$0.20", monthlyProjectedGross: "$0.30",
                   expiryDescription: "Expires soon", quoteComplete: complete,
-                  serverAllowsApproval: allowed, state: .pending)
+                  serverAllowsApproval: allowed, trackingMatchesQuote: true, state: .pending)
         }
         XCTAssertTrue(display(complete: true, allowed: true).canApprove)
         XCTAssertFalse(display(complete: false, allowed: true).canDecide)

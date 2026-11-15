@@ -1003,7 +1003,10 @@ export async function handleChatTurn(
   // A resumed grant is not a fresh initial park; renewal requires its own
   // durable checkpoint and must not overwrite the earlier request.
   const parkEstimatedCost: CallOptions['parkEstimatedCost'] =
-    dependencies.estimatedCostTurnParking && !dependencies.resumeTask && admittedTask.leaseToken
+    dependencies.estimatedCostTurnParking &&
+    !dependencies.resumeTask &&
+    admittedTask.leaseToken &&
+    req.headers.get('x-assistant-estimated-cost-approval') === 'v1'
       ? async ({ candidate, providerAttempts }) => {
           if (providerAttempts !== 0) throw new Error('Unsafe parking attempt');
           const result = await dependencies.estimatedCostTurnParking!.park({

@@ -18,7 +18,7 @@ enum CostPermissionDisplayState: Equatable {
         case .approved: "An allowance was approved. The request’s result and actual cost are separate."
         case .declined: "Allowance declined."
         case .expired: "This quote expired. Review an updated quote before deciding."
-        case .changed: "This quote changed. Review the updated details before deciding."
+        case .changed: "This quote changed. Request an updated quote before approving."
         case .cancelled: "This request was cancelled."
         case .unavailable: "This request’s current state is unavailable."
         }
@@ -43,10 +43,11 @@ struct CostPermissionDisplay: Equatable {
     let unavailableReason: String?
     let quoteComplete: Bool
     let serverAllowsApproval: Bool
+    let trackingMatchesQuote: Bool
     let state: CostPermissionDisplayState
 
-    var canDecide: Bool { (state == .pending || state == .expired) && quoteComplete }
-    var canApprove: Bool { state == .pending && quoteComplete && serverAllowsApproval }
+    var canDecide: Bool { (state == .pending || state == .expired || state == .changed) && quoteComplete }
+    var canApprove: Bool { state == .pending && quoteComplete && serverAllowsApproval && trackingMatchesQuote }
 
     init(quote: EstimatedCostQuote, state: CostPermissionDisplayState,
          tracking: EstimatedCostBudgetTracking? = nil, now: Date = Date()) {
@@ -72,6 +73,7 @@ struct CostPermissionDisplay: Equatable {
         trackingDescription = current.map { "Budget tracking observed \($0.observedAt)" + ($0.complete ? "." : "; some amounts are unavailable.") } ?? "Budget tracking is unavailable."
         expiryDescription = quote.expiry.map { "Quote expires \($0.formatted(date: .abbreviated, time: .shortened))" } ?? "Quote expiry unavailable"
         quoteComplete = quote.complete && quote.isValid
+        trackingMatchesQuote = current?.matches(quote) == true
         unavailableReason = quote.unavailableReason
         serverAllowsApproval = quote.canApprove
         self.state = state == .pending && (quote.expiry.map { $0 <= now } ?? true) ? .expired : state
@@ -81,7 +83,8 @@ struct CostPermissionDisplay: Equatable {
          recordedDailySpend: String, recordedMonthlySpend: String, activeHeldEstimate: String,
          historicalUnknownEstimate: String, pendingApprovalEstimate: String, dailyLimit: String,
          monthlyLimit: String, dailyProjectedGross: String, monthlyProjectedGross: String,
-         expiryDescription: String, unavailableReason: String? = nil, quoteComplete: Bool, serverAllowsApproval: Bool, state: CostPermissionDisplayState) {
+         expiryDescription: String, unavailableReason: String? = nil, quoteComplete: Bool, serverAllowsApproval: Bool,
+         trackingMatchesQuote: Bool = false, state: CostPermissionDisplayState) {
         self.requestName = requestName; self.estimatedNextAttempt = estimatedNextAttempt; self.maximumAllowance = maximumAllowance
         self.recordedDailySpend = recordedDailySpend; self.recordedMonthlySpend = recordedMonthlySpend
         self.activeHeldEstimate = activeHeldEstimate; self.historicalUnknownEstimate = historicalUnknownEstimate
@@ -91,6 +94,7 @@ struct CostPermissionDisplay: Equatable {
         self.trackingDescription = "Budget tracking is unavailable."
         self.unavailableReason = unavailableReason
         self.serverAllowsApproval = serverAllowsApproval; self.state = state
+        self.trackingMatchesQuote = trackingMatchesQuote
     }
 }
 
@@ -152,6 +156,10 @@ struct CostPermissionReviewCard: View {
                     Text("This request cannot be approved with the available allowance.")
                         .font(.subheadline).fixedSize(horizontal: false, vertical: true)
                 }
+                if display.state == .pending && !display.trackingMatchesQuote {
+                    Text("Current spending details are unavailable or changed. Check this request or review an updated quote before approving.")
+                        .font(.subheadline).fixedSize(horizontal: false, vertical: true)
+                }
                 if let reason = display.unavailableReason, !reason.isEmpty {
                     Text(reason).font(.subheadline).fixedSize(horizontal: false, vertical: true)
                 }
@@ -205,6 +213,10 @@ struct PendingCostPermissionDecision: Codable, Equatable, Sendable {
     let quote: EstimatedCostQuote
     let decision: EstimatedCostDecision
 }
+struct StaleCostQuote: Codable, Equatable, Sendable {
+    let quoteId: String
+    let quoteVersion: String
+}
 
 /// Implementations must durably protect this record before returning from save.
 /// No storage adapter is supplied until the operation contract is available.
@@ -212,6 +224,8 @@ struct PendingCostPermissionDecision: Codable, Equatable, Sendable {
     func load(ownerID: String, operationID: String) throws -> PendingCostPermissionDecision?
     func save(_ pending: PendingCostPermissionDecision) throws
     func remove(ownerID: String, operationID: String) throws
+    func loadStale(ownerID: String, operationID: String) throws -> StaleCostQuote?
+    func saveStale(_ quote: StaleCostQuote, ownerID: String, operationID: String) throws
 }
 
 @MainActor final class KeychainCostPermissionRecoveryStore: CostPermissionRecoveryStore {
@@ -228,11 +242,11 @@ struct PendingCostPermissionDecision: Codable, Equatable, Sendable {
         } else { self.serverIdentity = serverIdentity }
     }
 
-    private func query(ownerID: String, operationID: String) throws -> [String: Any] {
+    private func query(ownerID: String, operationID: String, stale: Bool = false) throws -> [String: Any] {
         let identity = try JSONEncoder().encode([serverIdentity, ownerID, operationID])
         let account = SHA256.hash(data: identity).map { String(format: "%02x", $0) }.joined()
         return [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
-                kSecAttrAccount as String: account]
+                kSecAttrAccount as String: account + (stale ? ".stale" : "")]
     }
     func load(ownerID: String, operationID: String) throws -> PendingCostPermissionDecision? {
         var request = try query(ownerID: ownerID, operationID: operationID)
@@ -254,6 +268,30 @@ struct PendingCostPermissionDecision: Codable, Equatable, Sendable {
         let status = SecItemDelete(try query(ownerID: ownerID, operationID: operationID) as CFDictionary)
         guard status == errSecSuccess else { throw APIError.invalidResponse }
     }
+    func loadStale(ownerID: String, operationID: String) throws -> StaleCostQuote? {
+        var request = try query(ownerID: ownerID, operationID: operationID, stale: true)
+        request[kSecReturnData as String] = true
+        request[kSecMatchLimit as String] = kSecMatchLimitOne
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(request as CFDictionary, &result)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess, let data = result as? Data else { throw APIError.invalidResponse }
+        let marker = try JSONDecoder().decode(StaleCostQuote.self, from: data)
+        guard !marker.quoteId.isEmpty, marker.quoteId.utf8.count <= 200,
+              !marker.quoteVersion.isEmpty, marker.quoteVersion.utf8.count <= 200 else { throw APIError.invalidResponse }
+        return marker
+    }
+    func saveStale(_ quote: StaleCostQuote, ownerID: String, operationID: String) throws {
+        let key = try query(ownerID: ownerID, operationID: operationID, stale: true)
+        let data = try JSONEncoder().encode(quote)
+        let updated = SecItemUpdate(key as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+        if updated == errSecSuccess { return }
+        guard updated == errSecItemNotFound else { throw APIError.invalidResponse }
+        var request = key
+        request[kSecValueData as String] = data
+        request[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        guard SecItemAdd(request as CFDictionary, nil) == errSecSuccess else { throw APIError.invalidResponse }
+    }
 }
 
 @MainActor @Observable final class CostPermissionController {
@@ -264,6 +302,8 @@ struct PendingCostPermissionDecision: Codable, Equatable, Sendable {
     private(set) var canonicalStatus: String?
     private(set) var canonicalGrantExpiry: String?
     private(set) var canonicalNotice: String?
+    private(set) var tracking: EstimatedCostBudgetTracking?
+    private(set) var staleQuote: StaleCostQuote?
     @ObservationIgnored private let store: any CostPermissionRecoveryStore
     @ObservationIgnored private let connectionIsCurrent: @MainActor () -> Bool
     @ObservationIgnored private let send: @MainActor (EstimatedCostDecision) async -> EstimatedCostDecisionReceipt?
@@ -271,6 +311,7 @@ struct PendingCostPermissionDecision: Codable, Equatable, Sendable {
     @ObservationIgnored private let decisionID: @MainActor () -> String
     @ObservationIgnored private let now: @MainActor () -> Date
     @ObservationIgnored private var pending: PendingCostPermissionDecision?
+    @ObservationIgnored private var recoveryStoreReady = false
 
     init(ownerID: String, quote: EstimatedCostQuote, store: any CostPermissionRecoveryStore,
          connectionIsCurrent: @escaping @MainActor () -> Bool,
@@ -285,8 +326,10 @@ struct PendingCostPermissionDecision: Codable, Equatable, Sendable {
     }
 
     func restore() {
+        recoveryStoreReady = false
         guard connectionIsCurrent(), quote.isValid else { state = .unavailable; return }
         do {
+            staleQuote = try store.loadStale(ownerID: ownerID, operationID: quote.operationId)
             if let saved = try store.load(ownerID: ownerID, operationID: quote.operationId) {
                 guard saved.ownerID == ownerID, saved.quote.isValid,
                       ["approve", "decline"].contains(saved.decision.decision),
@@ -297,15 +340,17 @@ struct PendingCostPermissionDecision: Codable, Equatable, Sendable {
                       saved.decision.quoteVersion == saved.quote.quoteVersion else { state = .unavailable; return }
                 pending = saved
                 state = .unconfirmed
-            } else if let expiry = quote.expiry, expiry <= now() { state = .expired }
+            } else if staleQuote == StaleCostQuote(quoteId: quote.quoteId, quoteVersion: quote.quoteVersion) { state = .changed }
+            else if let expiry = quote.expiry, expiry <= now() { state = .expired }
             else { state = .pending }
+            recoveryStoreReady = true
         } catch { state = .unavailable }
     }
 
     /// A request projection can disable actions, but cannot settle an earlier
     /// ambiguous decision made by this device.
     func apply(_ projection: EstimatedCostRequestProjection) {
-        guard connectionIsCurrent(), projection.isValid(for: quote.operationId) else {
+        guard recoveryStoreReady, connectionIsCurrent(), projection.isValid(for: quote.operationId) else {
             state = pending == nil ? .unavailable : .unconfirmed
             return
         }
@@ -315,7 +360,9 @@ struct PendingCostPermissionDecision: Codable, Equatable, Sendable {
         if pending != nil { state = .unconfirmed; return }
         if let refreshed = projection.quote { quote = refreshed }
         switch projection.status {
-        case "pending": state = quote.expiry.map { $0 <= now() } == true ? .expired : .pending
+        case "pending":
+            if staleQuote == StaleCostQuote(quoteId: quote.quoteId, quoteVersion: quote.quoteVersion) { state = .changed }
+            else { state = quote.expiry.map { $0 <= now() } == true ? .expired : .pending }
         case "approved": state = .approved
         case "declined": state = .declined
         case "expired_or_needs_refresh": state = .expired
@@ -324,18 +371,25 @@ struct PendingCostPermissionDecision: Codable, Equatable, Sendable {
         }
     }
 
+    /// Passing nil on any failed or superseded read prevents use of old data.
+    func updateTracking(_ snapshot: EstimatedCostBudgetTracking?) {
+        tracking = snapshot.flatMap { $0.isValid ? $0 : nil }
+    }
+
     func decide(_ answer: String) async {
-        guard (state == .pending || (state == .expired && answer == "decline")), connectionIsCurrent(), quote.isValid, quote.complete,
+        guard recoveryStoreReady, (state == .pending || ((state == .expired || state == .changed) && answer == "decline")), connectionIsCurrent(), quote.isValid, quote.complete,
               ["approve", "decline"].contains(answer) else { return }
         guard let expiry = quote.expiry else { state = .unavailable; return }
         if expiry <= now() && answer == "approve" { state = .expired; return }
-        guard answer != "approve" || quote.canApprove else { return }
+        guard answer != "approve" || (quote.canApprove && tracking?.matches(quote) == true &&
+              staleQuote != StaleCostQuote(quoteId: quote.quoteId, quoteVersion: quote.quoteVersion)) else { return }
         let id = decisionID()
         guard !id.isEmpty, id.utf8.count <= 200 else { state = .unavailable; return }
         let decision = EstimatedCostDecision(operationId: quote.operationId, quoteId: quote.quoteId,
             quoteVersion: quote.quoteVersion, decisionId: id, decision: answer)
         let saved = PendingCostPermissionDecision(ownerID: ownerID, quote: quote, decision: decision)
         // Set the state before any suspension so two taps cannot race.
+        tracking = nil
         state = .submitting
         do { try store.save(saved) } catch { state = .unavailable; return }
         pending = saved
@@ -346,6 +400,7 @@ struct PendingCostPermissionDecision: Codable, Equatable, Sendable {
 
     func checkDecision() async {
         guard state == .unconfirmed, connectionIsCurrent(), let saved = pending else { return }
+        tracking = nil
         state = .submitting
         let receipt = await readReceipt(saved.decision)
         resolve(receipt, pending: saved)
@@ -355,7 +410,14 @@ struct PendingCostPermissionDecision: Codable, Equatable, Sendable {
         guard connectionIsCurrent(), let receipt, receipt.confirms(saved.decision, quote: saved.quote) else {
             state = .unconfirmed; return
         }
-        do { try store.remove(ownerID: saved.ownerID, operationID: saved.quote.operationId) }
+        do {
+            if receipt.status == "stale" {
+                let marker = StaleCostQuote(quoteId: saved.quote.quoteId, quoteVersion: saved.quote.quoteVersion)
+                try store.saveStale(marker, ownerID: saved.ownerID, operationID: saved.quote.operationId)
+                staleQuote = marker
+            }
+            try store.remove(ownerID: saved.ownerID, operationID: saved.quote.operationId)
+        }
         catch { state = .unconfirmed; return }
         pending = nil
         self.receipt = receipt
@@ -374,7 +436,6 @@ struct EstimatedCostReviewScreen: View {
     @State private var controller: CostPermissionController?
     @State private var displayedConnectionVersion: Int?
     @State private var standaloneProjection: EstimatedCostRequestProjection?
-    @State private var tracking: EstimatedCostBudgetTracking?
     @State private var loading = true
     @State private var unavailable = false
     @State private var quoteRequestID: String?
@@ -386,16 +447,17 @@ struct EstimatedCostReviewScreen: View {
             VStack(alignment: .leading, spacing: 16) {
                 if let controller, displayedConnectionVersion == model.activityConnectionVersion {
                     TimelineView(.periodic(from: .now, by: 1)) { timeline in
-                        let display = CostPermissionDisplay(quote: controller.quote, state: controller.state, tracking: tracking, now: timeline.date)
+                        let display = CostPermissionDisplay(quote: controller.quote, state: controller.state, tracking: controller.tracking, now: timeline.date)
                         VStack(spacing: 16) {
                             CostPermissionReviewCard(display: display, canonicalNotice: controller.canonicalNotice,
                                 canonicalStatus: controller.canonicalStatus, canonicalGrantExpiry: controller.canonicalGrantExpiry,
                                 receipt: controller.receipt,
-                                approve: { tracking = nil; await controller.decide("approve") },
-                                decline: { tracking = nil; await controller.decide("decline") },
-                                check: { tracking = nil; await controller.checkDecision() })
+                                approve: { await controller.decide("approve") },
+                                decline: { await controller.decide("decline") },
+                                check: { await controller.checkDecision() })
                                 .disabled(loading)
-                            if display.state == .expired || display.state == .changed {
+                            if display.state == .expired || display.state == .changed ||
+                                (display.state == .pending && controller.tracking != nil && !display.trackingMatchesQuote) {
                                 Button("Request an updated quote") { Task { await requestUpdatedQuote() } }
                                     .buttonStyle(AssistantActionButtonStyle(kind: .secondary, fillsWidth: true))
                                     .disabled(quoteRefreshUnconfirmed || loading)
@@ -431,7 +493,7 @@ struct EstimatedCostReviewScreen: View {
             let version = model.activityConnectionVersion
             if sessionVersion != version {
                 sessionVersion = version
-                controller = nil; displayedConnectionVersion = nil; standaloneProjection = nil; tracking = nil
+                controller = nil; displayedConnectionVersion = nil; standaloneProjection = nil
                 quoteRequestID = nil; quoteRefreshUnconfirmed = false
             }
             await load()
@@ -440,7 +502,7 @@ struct EstimatedCostReviewScreen: View {
 
     private func load() async {
         guard controller?.state != .submitting else { return }
-        tracking = nil
+        controller?.updateTracking(nil)
         guard let context = model.checklistCorrectionRequestContext() else { loading = false; unavailable = true; return }
         loading = true
         let priorQuoteID = controller?.quote.quoteId
@@ -452,7 +514,6 @@ struct EstimatedCostReviewScreen: View {
         let response = try? await context.client.estimatedCostQuote(operationID: operationID)
         guard !Task.isCancelled, model.checklistCorrectionConnectionIsCurrent(ownerID: context.ownerID, version: context.connectionVersion) else { loading = false; return }
         let projection = response?.request
-        tracking = response?.tracking.flatMap { $0.isValid ? $0 : nil }
         guard let quote = saved?.quote ?? projection?.quote else {
             controller = nil; standaloneProjection = projection; displayedConnectionVersion = context.connectionVersion
             loading = false; unavailable = projection == nil; return
@@ -468,6 +529,7 @@ struct EstimatedCostReviewScreen: View {
         next.restore()
         if let projection { next.apply(projection) }
         else if saved == nil { controller = nil; unavailable = true; loading = false; return }
+        next.updateTracking(response?.tracking)
         if quoteRefreshUnconfirmed, let refreshed = projection?.quote,
            refreshed.quoteId != priorQuoteID || refreshed.quoteVersion != priorVersion {
             quoteRefreshUnconfirmed = false
@@ -485,12 +547,12 @@ struct EstimatedCostReviewScreen: View {
         let id = quoteRequestID ?? UUID().uuidString.lowercased()
         quoteRequestID = id
         loading = true
-        tracking = nil
+        controller?.updateTracking(nil)
         do {
             let response = try await context.client.requestEstimatedCostQuote(operationID: operationID, quoteRequestID: id)
             guard !Task.isCancelled, model.checklistCorrectionConnectionIsCurrent(ownerID: context.ownerID, version: context.connectionVersion) else { loading = false; return }
-            tracking = response.tracking.flatMap { $0.isValid ? $0 : nil }
             if let projection = response.request { controller?.apply(projection) }
+            controller?.updateTracking(response.tracking)
             quoteRequestID = nil
         } catch {
             guard !Task.isCancelled, model.checklistCorrectionConnectionIsCurrent(ownerID: context.ownerID, version: context.connectionVersion) else { loading = false; return }

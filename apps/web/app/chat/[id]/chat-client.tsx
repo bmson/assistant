@@ -497,6 +497,7 @@ export function ChatClient({
           const isCardFormOperation =
             !!cardFormOperation && cardFormOperation.submission.operationId === operationId;
           const headers = new Headers(init?.headers);
+          headers.set('X-Assistant-Estimated-Cost-Approval', 'v1');
           if (isCardFormOperation) headers.set('x-chat-card-form', 'card-form-v1');
           const response = await fetch(info, { ...init, headers });
           if (

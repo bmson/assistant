@@ -330,9 +330,10 @@ function scriptedRouter(script: RouterScript) {
   };
 }
 
-function send(text: string, extra: Record<string, unknown> = {}) {
+function send(text: string, extra: Record<string, unknown> = {}, capable = false) {
   return new Request('https://assistant.example/api/chat', {
     method: 'POST',
+    ...(capable ? { headers: { 'X-Assistant-Estimated-Cost-Approval': 'v1' } } : {}),
     body: JSON.stringify({
       conversationId: CONVERSATION,
       messages: [{ id: 'u1', role: 'user', parts: [{ type: 'text', text }] }],
@@ -453,6 +454,25 @@ function queuedPayload() {
 }
 
 describe('chat needs-action triage', () => {
+  it.each([false, true])(
+    'does not install parking for a legacy client (spoken=%s)',
+    async (spoken) => {
+      const store = chatStore();
+      const router = scriptedRouter({ budgetBlocked: true });
+      const park = vi.fn();
+      const response = await handleChatTurn(send('Explain this request.', { spoken }), {
+        config: config(),
+        router: router.router,
+        chat: store.chat,
+        persistence: { tasks: {}, ownerContext: {} } as never,
+        estimatedCostTurnParking: { park },
+      });
+      expect(response.status).toBe(402);
+      expect(router.object.mock.calls[0]?.[1]).toMatchObject({ parkEstimatedCost: undefined });
+      expect(router.stream.mock.calls[0]?.[1]).toMatchObject({ parkEstimatedCost: undefined });
+      expect(park).not.toHaveBeenCalled();
+    },
+  );
   it.each([
     ['classify', false],
     ['classify', true],
@@ -519,7 +539,7 @@ describe('chat needs-action triage', () => {
         estimatedCostTurnParking: { park },
       };
       const result = await handleChatTurn(
-        send(original, { clientOperationId: operationId, spoken }),
+        send(original, { clientOperationId: operationId, spoken }, true),
         deps,
       );
       expect(result.status).toBe(200);
@@ -623,7 +643,7 @@ describe('chat needs-action triage', () => {
       };
       if (phase === 'classify') router.object.mockImplementationOnce(blocked as never);
       else router.stream.mockImplementationOnce(blocked as never);
-      const response = await handleChatTurn(send('Explain the original topic.'), {
+      const response = await handleChatTurn(send('Explain the original topic.', {}, true), {
         config: config(),
         router: router.router,
         chat: store.chat,
@@ -664,7 +684,7 @@ describe('chat needs-action triage', () => {
       ).toBe('not_parked');
       return { ok: true, object: { needsAction: false } };
     }) as never);
-    const response = await handleChatTurn(send('Explain the topic.'), {
+    const response = await handleChatTurn(send('Explain the topic.', {}, true), {
       config: config(),
       router: router.router,
       chat: store.chat,
