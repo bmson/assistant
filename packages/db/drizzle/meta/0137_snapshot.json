@@ -5381,6 +5381,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "quote_id": {
+          "name": "quote_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
         "escrow_reservation_id": {
           "name": "escrow_reservation_id",
           "type": "uuid",

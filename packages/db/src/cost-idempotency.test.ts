@@ -4,9 +4,12 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createDb, type Db } from './client.js';
 import {
   createPostgresCostRepository,
+  createPostgresEstimatedCostApprovalRepository,
   drawEstimatedCostGrant,
   expireEstimatedCostGrant,
   readEstimatedCostDecision,
+  readEstimatedCostRequest,
+  readEstimatedCostView,
   recordCostEvent,
 } from './cost-repository.js';
 import {
@@ -119,6 +122,28 @@ describe('PostgreSQL idempotent cost events', () => {
     reservationIds.push(reservation.reservationId);
     const grantId = randomUUID();
     const operationId = randomUUID();
+    const quote = {
+      type: 'estimated-cost-approval',
+      operationId,
+      taskId,
+      requestText: 'request',
+      quoteId: 'quote',
+      quoteVersion: 'v1',
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      nextAttemptMicros: 100_000,
+      allowanceMicros: 200_000,
+      recordedDailyMicros: 0,
+      recordedMonthlyMicros: 0,
+      totalHeldMicros: 500_000,
+      eligibleHistoricalUnknownMicros: 400_000,
+      pendingApprovalMicros: 200_000,
+      dailyCeilingMicros: 1_000_000,
+      monthlyCeilingMicros: 2_000_000,
+      dailyProjectedGrossMicros: 700_000,
+      monthlyProjectedGrossMicros: 700_000,
+      complete: true,
+      canApprove: true,
+    };
     await db
       .update(costReservations)
       .set({ reservationKind: 'escrow', costGrantId: grantId })
@@ -131,12 +156,13 @@ describe('PostgreSQL idempotent cost events', () => {
       requestFingerprint: 'request',
       bindingDigest: 'binding',
       state: 'approved',
-      quote: {},
+      quote,
       baseline: {},
     });
     await db.insert(estimatedCostGrants).values({
       id: grantId,
       operationId,
+      quoteId: 'quote',
       escrowReservationId: reservation.reservationId,
       allowanceMicros: 200_000,
       expiresAt: new Date(Date.now() + 60_000),
@@ -164,8 +190,60 @@ describe('PostgreSQL idempotent cost events', () => {
     };
     const firstId = randomUUID();
     const secondId = randomUUID();
+    const pendingOperationId = randomUUID();
+    await db.insert(estimatedCostRequests).values({
+      operationId: pendingOperationId,
+      installationId: 'install',
+      ownerId: 'owner',
+      taskId,
+      requestFingerprint: 'other-request',
+      bindingDigest: 'other-binding',
+      state: 'pending',
+      quote: { ...quote, operationId: pendingOperationId, quoteId: 'other-quote' },
+      baseline: {},
+    });
     reservationIds.push(firstId, secondId);
     try {
+      await db
+        .update(estimatedCostRequests)
+        .set({ quote: { quoteId: 'other' } })
+        .where(eq(estimatedCostRequests.operationId, operationId));
+      expect(await drawEstimatedCostGrant(db, { ...input, attemptId: firstId })).toEqual({
+        ok: false,
+        reason: 'unavailable',
+      });
+      await db
+        .update(estimatedCostRequests)
+        .set({ quote })
+        .where(eq(estimatedCostRequests.operationId, operationId));
+      expect(await readEstimatedCostRequest(db, input.actor, operationId)).toMatchObject({
+        status: 'approved',
+        operationId,
+        quote,
+      });
+      expect((await readEstimatedCostView(db, input.actor, operationId))?.tracking).toMatchObject({
+        totalHeldMicros: 200_000,
+        pendingApprovalMicros: 200_000,
+        dailyPlannedExposureMicros: 400_000,
+      });
+      await costs.record({ source: 'model', usd: 0.01, taskId });
+      expect((await readEstimatedCostView(db, input.actor, operationId))?.tracking).toMatchObject({
+        recordedDailyMicros: 10_000,
+        totalHeldMicros: 200_000,
+        pendingApprovalMicros: 200_000,
+        dailyPlannedExposureMicros: 410_000,
+      });
+      await db
+        .update(estimatedCostRequests)
+        .set({ state: 'declined' })
+        .where(eq(estimatedCostRequests.operationId, pendingOperationId));
+      expect((await readEstimatedCostView(db, input.actor, operationId))?.tracking).toMatchObject({
+        pendingApprovalMicros: 0,
+        dailyPlannedExposureMicros: 210_000,
+      });
+      expect(
+        await readEstimatedCostRequest(db, { ...input.actor, ownerId: 'other' }, operationId),
+      ).toBeNull();
       expect(
         await readEstimatedCostDecision(db, input.actor, { operationId, decisionId: 'decision' }),
       ).toEqual(receipt);
@@ -231,12 +309,27 @@ describe('PostgreSQL idempotent cost events', () => {
         .where(eq(estimatedCostGrants.id, grantId));
       expect(adjusted?.consumedMicros).toBe(150_000);
       expect((await costs.totals()).heldUsd).toBeCloseTo(before.heldUsd - 0.15);
+      const lowId = randomUUID();
+      reservationIds.push(lowId);
+      expect(
+        await drawEstimatedCostGrant(db, {
+          ...input,
+          estimatedMicros: 30_000,
+          attemptId: lowId,
+        }),
+      ).toEqual({ ok: true, reservationId: lowId });
+      await costs.reconcile(lowId, { usd: 0.01 });
+      const [afterLow] = await db
+        .select()
+        .from(estimatedCostGrants)
+        .where(eq(estimatedCostGrants.id, grantId));
+      expect(afterLow?.consumedMicros).toBe(180_000);
       const unknownId = randomUUID();
       reservationIds.push(unknownId);
       expect(
         await drawEstimatedCostGrant(db, {
           ...input,
-          estimatedMicros: 30_000,
+          estimatedMicros: 10_000,
           attemptId: unknownId,
         }),
       ).toEqual({ ok: true, reservationId: unknownId });
@@ -280,6 +373,9 @@ describe('PostgreSQL idempotent cost events', () => {
         await blocker;
       }
       expect(await delayed).toEqual({ ok: false, reason: 'expired' });
+      expect(await readEstimatedCostRequest(db, input.actor, operationId)).toMatchObject({
+        status: 'expired_or_needs_refresh',
+      });
       await db
         .update(costReservations)
         .set({ status: 'unknown' })
@@ -291,8 +387,11 @@ describe('PostgreSQL idempotent cost events', () => {
         .from(costReservations)
         .where(eq(costReservations.id, unknownId));
       expect(child?.status).toBe('unknown');
-      expect((await costs.totals()).heldUsd).toBeCloseTo(before.heldUsd - 0.17);
+      expect((await costs.totals()).heldUsd).toBeCloseTo(before.heldUsd - 0.19);
     } finally {
+      await db
+        .delete(estimatedCostRequests)
+        .where(eq(estimatedCostRequests.operationId, pendingOperationId));
       await db
         .delete(estimatedCostDecisions)
         .where(eq(estimatedCostDecisions.decisionId, 'decision'));
@@ -300,6 +399,118 @@ describe('PostgreSQL idempotent cost events', () => {
       await db
         .delete(estimatedCostRequests)
         .where(eq(estimatedCostRequests.operationId, operationId));
+    }
+  });
+
+  it('closes only the selected expired parked request and replays the exact decline receipt', async () => {
+    const operationId = randomUUID();
+    const otherTaskId = randomUUID();
+    const fingerprint = 'request-fingerprint';
+    const quote = {
+      type: 'estimated-cost-approval',
+      operationId,
+      taskId,
+      requestText: 'request',
+      quoteId: 'quote',
+      quoteVersion: 'v1',
+      expiresAt: new Date(Date.now() - 1000).toISOString(),
+      nextAttemptMicros: 100_000,
+      allowanceMicros: 200_000,
+      recordedDailyMicros: 0,
+      recordedMonthlyMicros: 0,
+      totalHeldMicros: 500_000,
+      eligibleHistoricalUnknownMicros: 400_000,
+      pendingApprovalMicros: 200_000,
+      dailyCeilingMicros: 1_000_000,
+      monthlyCeilingMicros: 2_000_000,
+      dailyProjectedGrossMicros: 700_000,
+      monthlyProjectedGrossMicros: 700_000,
+      complete: true,
+      canApprove: true,
+    };
+    const trigger = {
+      payload: {
+        chatAdmission: {
+          protocol: 'owner-chat-v1',
+          clientOperationId: operationId,
+          requestHash: fingerprint,
+        },
+      },
+    };
+    await db
+      .update(tasks)
+      .set({ status: 'waiting_estimated_cost', trigger })
+      .where(eq(tasks.id, taskId));
+    await db
+      .insert(tasks)
+      .values({ id: otherTaskId, agentId, type: 'chat_turn', trust: 'owner', status: 'pending' });
+    await db
+      .insert(estimatedCostRequests)
+      .values({
+        operationId,
+        installationId: 'install',
+        ownerId: agentId,
+        taskId,
+        requestFingerprint: fingerprint,
+        bindingDigest: 'binding',
+        state: 'pending',
+        quote,
+        baseline: [],
+      });
+    const repo = createPostgresEstimatedCostApprovalRepository(db);
+    const actor = { installationId: 'install', ownerId: agentId };
+    const decision = {
+      operationId,
+      quoteId: 'quote',
+      quoteVersion: 'v1',
+      decisionId: 'decline-one',
+      decision: 'decline' as const,
+    };
+    try {
+      expect(await repo.decide(actor, { ...decision, decision: 'approve' })).toMatchObject({
+        ok: false,
+        outcome: 'unavailable',
+      });
+      expect(await repo.decide({ ...actor, ownerId: 'other' }, decision)).toMatchObject({
+        ok: false,
+        outcome: 'not_found',
+      });
+      const stale = await repo.decide(actor, {
+        ...decision,
+        decisionId: 'stale',
+        quoteVersion: 'old',
+      });
+      expect(stale).toMatchObject({ ok: true, receipt: { status: 'stale' } });
+      const results = await Promise.all([
+        repo.decide(actor, decision),
+        repo.decide(actor, { ...decision, decisionId: 'decline-two' }),
+      ]);
+      const winner = results.find((result) => result.ok && result.receipt.status === 'declined');
+      expect(winner?.ok).toBe(true);
+      expect(results.filter((result) => !result.ok)).toHaveLength(1);
+      if (!winner?.ok) throw new Error('Expected decline receipt');
+      const replay = { ...decision, decisionId: winner.receipt.decisionId };
+      expect(await repo.decide(actor, replay)).toEqual(winner);
+      expect(
+        await repo.getDecisionReceipt(actor, { operationId, decisionId: replay.decisionId }),
+      ).toEqual(winner);
+      expect((await db.select().from(tasks).where(eq(tasks.id, taskId)))[0]?.status).toBe(
+        'cancelled',
+      );
+      expect((await db.select().from(tasks).where(eq(tasks.id, otherTaskId)))[0]?.status).toBe(
+        'pending',
+      );
+      expect(
+        await db.select().from(costReservations).where(eq(costReservations.taskId, taskId)),
+      ).toHaveLength(0);
+    } finally {
+      await db
+        .delete(estimatedCostDecisions)
+        .where(eq(estimatedCostDecisions.operationId, operationId));
+      await db
+        .delete(estimatedCostRequests)
+        .where(eq(estimatedCostRequests.operationId, operationId));
+      await db.delete(tasks).where(eq(tasks.id, otherTaskId));
     }
   });
 

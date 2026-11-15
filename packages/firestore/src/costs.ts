@@ -6,15 +6,24 @@ import {
   type CostRepository,
   type CostTotals,
   type EstimatedCostActor,
+  type EstimatedCostApprovalRepository,
+  type EstimatedCostBudgetTracking,
+  type EstimatedCostDecision,
   type EstimatedCostDecisionReceipt,
+  type EstimatedCostDecisionResponse,
   type EstimatedCostGrantDraw,
   type EstimatedCostGrantDrawResult,
+  type EstimatedCostRequestProjection,
   ledgerUsdToMicros,
   MAX_LEDGER_USD_MICROS,
+  matchesEstimatedCostParkedTask,
   microsToUsd,
   nextUtcDailyReset,
   nextUtcMonthlyReset,
+  parseEstimatedCostQuote,
   parseEstimatedCostReceipt,
+  projectEstimatedCostRequest,
+  type Records,
   type ReservationActual,
   type ReserveCostInput,
   type ReserveOutcome,
@@ -69,6 +78,293 @@ export class FirestoreCostRepository implements CostRepository {
 
   constructor(private readonly store: InstallationStore) {}
 
+  /** Compatible-off reads and declines; no new quote or approval is created. */
+  estimatedCostApprovalRepository(): EstimatedCostApprovalRepository {
+    const unavailable = {
+      ok: false,
+      outcome: 'unavailable',
+      message: 'Estimated cost approval is unavailable.',
+    } as const;
+    return {
+      getQuote: async (actor, operationId) => {
+        const view = await this.readEstimatedCostView(actor, operationId);
+        return view
+          ? { ok: true, ...view }
+          : { ok: false, outcome: 'not_found', operationId, message: 'Request not found.' };
+      },
+      storePreparedQuote: async () => unavailable,
+      decide: async (actor, decision) =>
+        decision.decision === 'decline'
+          ? this.declineEstimatedCostRequest(actor, decision)
+          : unavailable,
+      getDecisionReceipt: async (actor, identity) => {
+        const receipt = await this.readEstimatedCostDecision(actor, identity);
+        return receipt
+          ? { ok: true, receipt }
+          : {
+              ok: false,
+              outcome: 'not_found',
+              ...identity,
+              message: 'Decision receipt not found.',
+            };
+      },
+    };
+  }
+
+  private async declineEstimatedCostRequest(
+    actor: EstimatedCostActor,
+    decision: EstimatedCostDecision,
+  ): Promise<EstimatedCostDecisionResponse> {
+    const bodyDigest = createHash('sha256')
+      .update(
+        JSON.stringify([
+          decision.operationId,
+          decision.quoteId,
+          decision.quoteVersion,
+          decision.decisionId,
+          decision.decision,
+        ]),
+      )
+      .digest('hex');
+    const requestRef = this.store.doc('estimatedCostRequests', decision.operationId);
+    const decisionRef = this.store.doc('estimatedCostDecisions', decision.decisionId);
+    return this.store.db.runTransaction(async (tx) => {
+      const [request, prior] = await tx.getAll(requestRef, decisionRef);
+      if (
+        !request?.exists ||
+        request.get('installationId') !== actor.installationId ||
+        request.get('ownerId') !== actor.ownerId
+      )
+        return {
+          ok: false,
+          outcome: 'not_found',
+          operationId: decision.operationId,
+          message: 'Request not found.',
+        };
+      if (prior?.exists) {
+        if (
+          prior.get('operationId') !== decision.operationId ||
+          prior.get('bodyDigest') !== bodyDigest
+        )
+          return {
+            ok: false,
+            outcome: 'conflict',
+            operationId: decision.operationId,
+            decisionId: decision.decisionId,
+            message: 'Decision identity already used.',
+          };
+        const receipt = parseEstimatedCostReceipt(decodeRecord(prior.get('receipt')), decision);
+        if (!receipt) throw new Error('Invalid stored estimated cost receipt');
+        return { ok: true, receipt };
+      }
+      const quote = parseEstimatedCostQuote(decodeRecord(request.get('quote')));
+      const taskId: unknown = request.get('taskId');
+      const fingerprint: unknown = request.get('requestFingerprint');
+      if (
+        !quote ||
+        typeof taskId !== 'string' ||
+        typeof fingerprint !== 'string' ||
+        quote.operationId !== decision.operationId ||
+        quote.taskId !== taskId
+      )
+        throw new Error('Invalid stored estimated cost request');
+      if (quote.quoteId !== decision.quoteId || quote.quoteVersion !== decision.quoteVersion) {
+        const receipt = {
+          operationId: decision.operationId,
+          decisionId: decision.decisionId,
+          quoteId: decision.quoteId,
+          status: 'stale' as const,
+        };
+        tx.create(decisionRef, {
+          decisionId: decision.decisionId,
+          operationId: decision.operationId,
+          bodyDigest,
+          receipt,
+          createdAt: this.store.now(),
+        });
+        return { ok: true, receipt };
+      }
+      if (!['pending', 'expired_or_needs_refresh'].includes(String(request.get('state'))))
+        return {
+          ok: false,
+          outcome: 'conflict',
+          operationId: decision.operationId,
+          decisionId: decision.decisionId,
+          message: 'Request is already resolved.',
+        };
+      const taskRef = this.store.doc('tasks', taskId);
+      const snapshot = await tx.get(taskRef);
+      const task = snapshot.exists ? decodeRecord<Records['tasks']>(snapshot.data()) : null;
+      if (
+        !task ||
+        !matchesEstimatedCostParkedTask(task, {
+          actor,
+          taskId,
+          operationId: decision.operationId,
+          requestFingerprint: fingerprint,
+        })
+      )
+        return {
+          ok: false,
+          outcome: 'unavailable',
+          operationId: decision.operationId,
+          decisionId: decision.decisionId,
+          message: 'Request could not be closed.',
+        };
+      const receipt = {
+        operationId: decision.operationId,
+        decisionId: decision.decisionId,
+        quoteId: decision.quoteId,
+        status: 'declined' as const,
+      };
+      const now = this.store.now();
+      tx.update(taskRef, {
+        status: 'cancelled',
+        runAfter: null,
+        lockedUntil: null,
+        leaseToken: null,
+        updatedAt: now,
+      });
+      tx.update(requestRef, { state: 'declined', updatedAt: now });
+      tx.create(decisionRef, {
+        decisionId: decision.decisionId,
+        operationId: decision.operationId,
+        bodyDigest,
+        receipt,
+        createdAt: now,
+      });
+      return { ok: true, receipt };
+    });
+  }
+
+  /** Current request lifecycle; this does not confirm a particular device decision. */
+  async readEstimatedCostRequest(
+    actor: EstimatedCostActor,
+    operationId: string,
+  ): Promise<EstimatedCostRequestProjection | null> {
+    return (await this.readEstimatedCostView(actor, operationId))?.request ?? null;
+  }
+
+  /** Request and current totals are read in one transaction. */
+  async readEstimatedCostView(
+    actor: EstimatedCostActor,
+    operationId: string,
+  ): Promise<{
+    request: EstimatedCostRequestProjection;
+    tracking: EstimatedCostBudgetTracking;
+  } | null> {
+    return this.store.db.runTransaction(
+      async (tx) => {
+        const now = this.store.now().getTime();
+        if (!Number.isFinite(now)) throw new Error('Invalid store clock');
+        const request = await tx.get(this.store.doc('estimatedCostRequests', operationId));
+        if (
+          !request.exists ||
+          request.get('installationId') !== actor.installationId ||
+          request.get('ownerId') !== actor.ownerId
+        )
+          return null;
+        const quote = parseEstimatedCostQuote(decodeRecord(request.get('quote')));
+        const taskId: unknown = request.get('taskId');
+        const state: unknown = request.get('state');
+        if (!quote || typeof taskId !== 'string' || typeof state !== 'string')
+          throw new Error('Invalid stored estimated cost request');
+        let selected: { quoteId: string; expiresAt: string; expired: boolean } | undefined;
+        if (state === 'approved') {
+          const grants = await tx.get(
+            this.store
+              .collection('estimatedCostGrants')
+              .where('operationId', '==', operationId)
+              .limit(501),
+          );
+          if (grants.size >= 501) throw new Error('Incomplete estimated cost grants');
+          const matching = grants.docs.filter((doc) => doc.get('quoteId') === quote.quoteId);
+          if (matching.length !== 1 || !matching[0])
+            throw new Error('Invalid stored estimated cost grant');
+          const expiry = decodeRecord<Date>(matching[0].get('expiresAt'));
+          if (!(expiry instanceof Date) || !Number.isFinite(expiry.getTime()))
+            throw new Error('Invalid stored estimated cost grant expiry');
+          selected = {
+            quoteId: quote.quoteId,
+            expiresAt: expiry.toISOString(),
+            expired: expiry.getTime() <= now,
+          };
+        }
+        const projection = projectEstimatedCostRequest({
+          operationId,
+          taskId,
+          state,
+          quote,
+          quoteExpired: Date.parse(quote.expiresAt) <= now,
+          ...(selected ? { grant: selected } : {}),
+        });
+        const refs = this.refs(new Date(now));
+        const [holds, daily, monthly] = await tx.getAll(refs.holds, refs.daily, refs.monthly);
+        const pending = await tx.get(
+          this.store.collection('estimatedCostRequests').where('state', '==', 'pending').limit(501),
+        );
+        const unknown = await tx.get(
+          this.store.collection('costReservations').where('status', '==', 'unknown').limit(1),
+        );
+        if (
+          new Date(now).toISOString().slice(0, 10) !== this.store.now().toISOString().slice(0, 10)
+        )
+          throw new Error('Budget period changed during read');
+        const counter = (doc: DocumentSnapshot | undefined, field: string): number | null => {
+          if (!doc?.exists || typeof doc.get(field) !== 'number') return null;
+          const value = doc.get(field) as number;
+          return Number.isSafeInteger(value) && value >= 0 ? value : null;
+        };
+        const dailyMicros = counter(daily, 'spentMicros');
+        const monthlyMicros = counter(monthly, 'spentMicros');
+        const heldMicros = counter(holds, 'heldMicros');
+        let pendingMicros: number | null = pending.size >= 501 ? null : 0;
+        if (pendingMicros !== null)
+          for (const row of pending.docs) {
+            const pendingQuote = parseEstimatedCostQuote(decodeRecord(row.get('quote')));
+            if (
+              row.get('installationId') !== actor.installationId ||
+              !pendingQuote ||
+              row.get('operationId') !== pendingQuote.operationId ||
+              row.get('taskId') !== pendingQuote.taskId
+            ) {
+              pendingMicros = null;
+              break;
+            }
+            if (Date.parse(pendingQuote.expiresAt) > now)
+              pendingMicros = addMicros(pendingMicros, pendingQuote.allowanceMicros);
+          }
+        // A positive aggregate without a complete provenance inventory cannot prove
+        // that an omitted/malformed reservation is not an unknown liability.
+        const historicalUnknownMicros = unknown.empty && heldMicros === 0 ? 0 : null;
+        const tracking: EstimatedCostBudgetTracking = {
+          observedAt: new Date(now).toISOString(),
+          complete:
+            dailyMicros !== null &&
+            monthlyMicros !== null &&
+            heldMicros !== null &&
+            pendingMicros !== null &&
+            historicalUnknownMicros !== null,
+          recordedDailyMicros: dailyMicros,
+          recordedMonthlyMicros: monthlyMicros,
+          totalHeldMicros: heldMicros,
+          historicalUnknownMicros,
+          pendingApprovalMicros: pendingMicros,
+          dailyPlannedExposureMicros:
+            dailyMicros === null || heldMicros === null || pendingMicros === null
+              ? null
+              : addMicros(dailyMicros, heldMicros, pendingMicros),
+          monthlyPlannedExposureMicros:
+            monthlyMicros === null || heldMicros === null || pendingMicros === null
+              ? null
+              : addMicros(monthlyMicros, heldMicros, pendingMicros),
+        };
+        return { request: projection, tracking };
+      },
+      { readOnly: true },
+    );
+  }
+
   /** Canonical receipt read for the exact operation and decision, scoped to the owner. */
   async readEstimatedCostDecision(
     actor: EstimatedCostActor,
@@ -116,6 +412,14 @@ export class FirestoreCostRepository implements CostRepository {
         request.get('state') !== 'approved' ||
         !grant?.exists ||
         grant.get('operationId') !== input.operationId
+      )
+        return { ok: false, reason: 'unavailable' };
+      const storedQuote: unknown = request.get('quote');
+      if (
+        !storedQuote ||
+        typeof storedQuote !== 'object' ||
+        Array.isArray(storedQuote) ||
+        (storedQuote as { quoteId?: unknown }).quoteId !== grant.get('quoteId')
       )
         return { ok: false, reason: 'unavailable' };
       const expiry = decodeRecord<Date>(grant.get('expiresAt'));
@@ -698,4 +1002,10 @@ export class FirestoreCostRepository implements CostRepository {
     }
     return released;
   }
+}
+
+export function createFirestoreEstimatedCostApprovalRepository(
+  store: InstallationStore,
+): EstimatedCostApprovalRepository {
+  return new FirestoreCostRepository(store).estimatedCostApprovalRepository();
 }

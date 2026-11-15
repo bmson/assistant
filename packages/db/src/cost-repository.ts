@@ -1,20 +1,30 @@
 import { createHash } from 'node:crypto';
 import {
   addLedgerMicros,
+  addMicros,
   type CostRepository,
   DEFAULT_RATES,
   type EstimatedCostActor,
+  type EstimatedCostApprovalRepository,
+  type EstimatedCostBudgetTracking,
+  type EstimatedCostDecision,
   type EstimatedCostDecisionReceipt,
+  type EstimatedCostDecisionResponse,
   type EstimatedCostGrantDraw,
   type EstimatedCostGrantDrawResult,
+  type EstimatedCostRequestProjection,
   ledgerUsdToMicros,
   MAX_LEDGER_USD_MICROS,
+  matchesEstimatedCostParkedTask,
   microsToUsd,
   nextDailyReset,
   nextMonthlyReset,
+  parseEstimatedCostQuote,
   parseEstimatedCostReceipt,
+  projectEstimatedCostRequest,
   storedLedgerUsdToMicros,
   storedTaskBudgetToMicros,
+  storedUsdToMicros,
 } from '@assistant/persistence';
 import { and, eq, gte, inArray, sql, sum } from 'drizzle-orm';
 import type { Db } from './client.js';
@@ -39,6 +49,149 @@ export async function getRate(
   const fallback = DEFAULT_RATES[key];
   if (!fallback) throw new Error(`no rate for key: ${key}`);
   return fallback;
+}
+
+/** Current request lifecycle, independently scoped from any particular decision receipt. */
+export async function readEstimatedCostRequest(
+  db: Db,
+  actor: EstimatedCostActor,
+  operationId: string,
+): Promise<EstimatedCostRequestProjection | null> {
+  return (await readEstimatedCostView(db, actor, operationId))?.request ?? null;
+}
+
+/** Request and live accounting share a repeatable-read snapshot. */
+export async function readEstimatedCostView(
+  db: Db,
+  actor: EstimatedCostActor,
+  operationId: string,
+): Promise<{
+  request: EstimatedCostRequestProjection;
+  tracking: EstimatedCostBudgetTracking;
+} | null> {
+  return db.transaction(
+    async (tx) => {
+      const [clock] = await tx.execute<{ observed: string }>(
+        sql`select transaction_timestamp()::text as observed`,
+      );
+      const now = new Date(clock?.observed ?? '');
+      if (!Number.isFinite(now.getTime())) throw new Error('Invalid database clock');
+      const [request] = await tx
+        .select()
+        .from(estimatedCostRequests)
+        .where(
+          and(
+            eq(estimatedCostRequests.operationId, operationId),
+            eq(estimatedCostRequests.installationId, actor.installationId),
+            eq(estimatedCostRequests.ownerId, actor.ownerId),
+          ),
+        );
+      if (!request) return null;
+      const quote = parseEstimatedCostQuote(request.quote);
+      if (!quote) throw new Error('Invalid stored estimated cost quote');
+      let selected: { quoteId: string; expiresAt: string; expired: boolean } | undefined;
+      if (request.state === 'approved') {
+        const grants = await tx
+          .select()
+          .from(estimatedCostGrants)
+          .where(
+            and(
+              eq(estimatedCostGrants.operationId, operationId),
+              eq(estimatedCostGrants.quoteId, quote.quoteId),
+            ),
+          )
+          .limit(2);
+        if (grants.length !== 1 || !grants[0])
+          throw new Error('Invalid stored estimated cost grant');
+        const grant = grants[0];
+        if (!(grant.expiresAt instanceof Date) || !Number.isFinite(grant.expiresAt.getTime()))
+          throw new Error('Invalid stored estimated cost grant expiry');
+        selected = {
+          quoteId: grant.quoteId,
+          expiresAt: grant.expiresAt.toISOString(),
+          expired: grant.expiresAt.getTime() <= now.getTime(),
+        };
+      }
+      const projection = projectEstimatedCostRequest({
+        operationId,
+        taskId: request.taskId,
+        state: request.state,
+        quote,
+        quoteExpired: Date.parse(quote.expiresAt) <= now.getTime(),
+        ...(selected ? { grant: selected } : {}),
+      });
+      const day = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+      const month = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+      const [[daily], [monthly], [held], unknown, pending] = await Promise.all([
+        tx
+          .select({ total: sum(costEvents.usd) })
+          .from(costEvents)
+          .where(gte(costEvents.createdAt, day)),
+        tx
+          .select({ total: sum(costEvents.usd) })
+          .from(costEvents)
+          .where(gte(costEvents.createdAt, month)),
+        tx
+          .select({ total: sum(costReservations.estimatedUsd) })
+          .from(costReservations)
+          .where(inArray(costReservations.status, ['held', 'dispatching', 'unknown'])),
+        tx
+          .select({ id: costReservations.id })
+          .from(costReservations)
+          .where(eq(costReservations.status, 'unknown'))
+          .limit(1),
+        tx
+          .select({
+            operationId: estimatedCostRequests.operationId,
+            taskId: estimatedCostRequests.taskId,
+            quote: estimatedCostRequests.quote,
+          })
+          .from(estimatedCostRequests)
+          .where(
+            and(
+              eq(estimatedCostRequests.installationId, actor.installationId),
+              eq(estimatedCostRequests.state, 'pending'),
+            ),
+          )
+          .limit(501),
+      ]);
+      const dailyMicros = storedUsdToMicros(daily?.total ?? '0');
+      const monthlyMicros = storedUsdToMicros(monthly?.total ?? '0');
+      const heldMicros = storedUsdToMicros(held?.total ?? '0');
+      let pendingMicros: number | null = pending.length >= 501 ? null : 0;
+      if (pendingMicros !== null)
+        for (const row of pending) {
+          const pendingQuote = parseEstimatedCostQuote(row.quote);
+          if (
+            !pendingQuote ||
+            pendingQuote.operationId !== row.operationId ||
+            pendingQuote.taskId !== row.taskId
+          ) {
+            pendingMicros = null;
+            break;
+          }
+          if (Date.parse(pendingQuote.expiresAt) > now.getTime())
+            pendingMicros = addMicros(pendingMicros, pendingQuote.allowanceMicros);
+        }
+      // Without a proven installation-wide baseline, unknown rows cannot be classified as historical.
+      const historicalUnknownMicros = unknown.length === 0 ? 0 : null;
+      const tracking: EstimatedCostBudgetTracking = {
+        observedAt: now.toISOString(),
+        complete: pendingMicros !== null && historicalUnknownMicros !== null,
+        recordedDailyMicros: dailyMicros,
+        recordedMonthlyMicros: monthlyMicros,
+        totalHeldMicros: heldMicros,
+        historicalUnknownMicros,
+        pendingApprovalMicros: pendingMicros,
+        dailyPlannedExposureMicros:
+          pendingMicros === null ? null : addMicros(dailyMicros, heldMicros, pendingMicros),
+        monthlyPlannedExposureMicros:
+          pendingMicros === null ? null : addMicros(monthlyMicros, heldMicros, pendingMicros),
+      };
+      return { request: projection, tracking };
+    },
+    { isolationLevel: 'repeatable read', accessMode: 'read only' },
+  );
 }
 
 /** Canonical receipt read for the exact operation and decision, scoped to the owner. */
@@ -68,6 +221,164 @@ export async function readEstimatedCostDecision(
   return receipt;
 }
 
+/** Compatible-off reads and declines; approval and new quotes remain disabled. */
+export function createPostgresEstimatedCostApprovalRepository(
+  db: Db,
+): EstimatedCostApprovalRepository {
+  const unavailable = {
+    ok: false,
+    outcome: 'unavailable',
+    message: 'Estimated cost approval is unavailable.',
+  } as const;
+  return {
+    async getQuote(actor, operationId) {
+      const view = await readEstimatedCostView(db, actor, operationId);
+      return view
+        ? { ok: true, ...view }
+        : { ok: false, outcome: 'not_found', operationId, message: 'Request not found.' };
+    },
+    async storePreparedQuote() {
+      return unavailable;
+    },
+    async decide(actor, decision) {
+      if (decision.decision !== 'decline') return unavailable;
+      return declinePostgresEstimatedCostRequest(db, actor, decision);
+    },
+    async getDecisionReceipt(actor, identity) {
+      const receipt = await readEstimatedCostDecision(db, actor, identity);
+      return receipt
+        ? { ok: true, receipt }
+        : { ok: false, outcome: 'not_found', ...identity, message: 'Decision receipt not found.' };
+    },
+  };
+}
+
+async function declinePostgresEstimatedCostRequest(
+  db: Db,
+  actor: EstimatedCostActor,
+  decision: EstimatedCostDecision,
+): Promise<EstimatedCostDecisionResponse> {
+  const bodyDigest = createHash('sha256')
+    .update(
+      JSON.stringify([
+        decision.operationId,
+        decision.quoteId,
+        decision.quoteVersion,
+        decision.decisionId,
+        decision.decision,
+      ]),
+    )
+    .digest('hex');
+  return db.transaction(async (tx) => {
+    await lockCostLedger(tx as unknown as Db);
+    const [request] = await tx
+      .select()
+      .from(estimatedCostRequests)
+      .where(
+        and(
+          eq(estimatedCostRequests.operationId, decision.operationId),
+          eq(estimatedCostRequests.installationId, actor.installationId),
+          eq(estimatedCostRequests.ownerId, actor.ownerId),
+        ),
+      )
+      .for('update');
+    if (!request)
+      return {
+        ok: false,
+        outcome: 'not_found',
+        operationId: decision.operationId,
+        message: 'Request not found.',
+      };
+    const [prior] = await tx
+      .select()
+      .from(estimatedCostDecisions)
+      .where(eq(estimatedCostDecisions.decisionId, decision.decisionId));
+    if (prior) {
+      if (prior.operationId !== decision.operationId || prior.bodyDigest !== bodyDigest)
+        return {
+          ok: false,
+          outcome: 'conflict',
+          operationId: decision.operationId,
+          decisionId: decision.decisionId,
+          message: 'Decision identity already used.',
+        };
+      const receipt = parseEstimatedCostReceipt(prior.receipt, decision);
+      if (!receipt) throw new Error('Invalid stored estimated cost receipt');
+      return { ok: true, receipt };
+    }
+    const quote = parseEstimatedCostQuote(request.quote);
+    if (!quote || quote.operationId !== decision.operationId || quote.taskId !== request.taskId)
+      throw new Error('Invalid stored estimated cost quote');
+    if (quote.quoteId !== decision.quoteId || quote.quoteVersion !== decision.quoteVersion) {
+      const receipt = {
+        operationId: decision.operationId,
+        decisionId: decision.decisionId,
+        quoteId: decision.quoteId,
+        status: 'stale' as const,
+      };
+      await tx.insert(estimatedCostDecisions).values({
+        decisionId: decision.decisionId,
+        operationId: decision.operationId,
+        bodyDigest,
+        receipt,
+      });
+      return { ok: true, receipt };
+    }
+    if (!['pending', 'expired_or_needs_refresh'].includes(request.state))
+      return {
+        ok: false,
+        outcome: 'conflict',
+        operationId: decision.operationId,
+        decisionId: decision.decisionId,
+        message: 'Request is already resolved.',
+      };
+    const [task] = await tx.select().from(tasks).where(eq(tasks.id, request.taskId)).for('update');
+    if (
+      !task ||
+      !matchesEstimatedCostParkedTask(task, {
+        actor,
+        taskId: request.taskId,
+        operationId: decision.operationId,
+        requestFingerprint: request.requestFingerprint,
+      })
+    )
+      return {
+        ok: false,
+        outcome: 'unavailable',
+        operationId: decision.operationId,
+        decisionId: decision.decisionId,
+        message: 'Request could not be closed.',
+      };
+    const receipt = {
+      operationId: decision.operationId,
+      decisionId: decision.decisionId,
+      quoteId: decision.quoteId,
+      status: 'declined' as const,
+    };
+    await tx
+      .update(tasks)
+      .set({
+        status: 'cancelled',
+        runAfter: null,
+        lockedUntil: null,
+        leaseToken: null,
+        updatedAt: sql`now()`,
+      })
+      .where(eq(tasks.id, task.id));
+    await tx
+      .update(estimatedCostRequests)
+      .set({ state: 'declined', updatedAt: sql`now()` })
+      .where(eq(estimatedCostRequests.operationId, decision.operationId));
+    await tx.insert(estimatedCostDecisions).values({
+      decisionId: decision.decisionId,
+      operationId: decision.operationId,
+      bodyDigest,
+      receipt,
+    });
+    return { ok: true, receipt };
+  });
+}
+
 /** Move a grant allocation into one attempt without changing total held capacity. */
 export async function drawEstimatedCostGrant(
   db: Db,
@@ -95,6 +406,9 @@ export async function drawEstimatedCostGrant(
       !grant ||
       grant.operationId !== input.operationId
     )
+      return { ok: false, reason: 'unavailable' };
+    const storedQuote = request.quote as { quoteId?: unknown } | null;
+    if (!storedQuote || typeof storedQuote !== 'object' || storedQuote.quoteId !== grant.quoteId)
       return { ok: false, reason: 'unavailable' };
     const [clock] = await tx.execute<{ valid: boolean }>(
       sql`select expires_at > clock_timestamp() as valid from estimated_cost_grants where id = ${input.grantId}`,

@@ -2209,6 +2209,7 @@ export const estimatedCostGrants = pgTable('estimated_cost_grants', {
   operationId: text('operation_id')
     .notNull()
     .references(() => estimatedCostRequests.operationId),
+  quoteId: text('quote_id').notNull(),
   escrowReservationId: uuid('escrow_reservation_id')
     .notNull()
     .references(() => costReservations.id),

@@ -4,6 +4,7 @@ import {
   estimatedCostAllowance,
   estimatedCostAllowanceExpiry,
   estimatedCostQuoteMatches,
+  parseEstimatedCostQuote,
   verifiedHistoricalUnknownMicros,
 } from './estimated-cost-approval.js';
 
@@ -46,6 +47,9 @@ describe('estimated cost allowance', () => {
       canApprove: true,
     };
     expect(estimatedCostQuoteMatches(quote, current)).toBe(true);
+    expect(parseEstimatedCostQuote(quote)).toEqual(quote);
+    expect(parseEstimatedCostQuote({ ...quote, dailyProjectedGrossMicros: 1 })).toBeNull();
+    expect(parseEstimatedCostQuote({ ...quote, eligibleHistoricalUnknownMicros: 701 })).toBeNull();
     expect(estimatedCostQuoteMatches(quote, { ...current, heldMicros: 699 })).toBe(false);
     expect(estimatedCostQuoteMatches(quote, { ...current, pendingOtherMicros: 101 })).toBe(false);
     expect(estimatedCostQuoteMatches({ ...quote, complete: false }, current)).toBe(false);

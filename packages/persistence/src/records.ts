@@ -821,6 +821,7 @@ export interface Records {
   estimatedCostGrants: {
     id: string;
     operationId: string;
+    quoteId: string;
     escrowReservationId: string;
     allowanceMicros: number;
     consumedMicros: number;

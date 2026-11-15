@@ -9,6 +9,7 @@ CREATE TABLE "estimated_cost_decisions" (
 CREATE TABLE "estimated_cost_grants" (
 	"id" uuid PRIMARY KEY NOT NULL,
 	"operation_id" text NOT NULL,
+	"quote_id" text NOT NULL,
 	"escrow_reservation_id" uuid NOT NULL,
 	"allowance_micros" bigint NOT NULL,
 	"consumed_micros" bigint DEFAULT 0 NOT NULL,

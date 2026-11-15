@@ -63,6 +63,28 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore atomic cost led
     if (!reservation.ok) throw new Error('Fixture failed to reserve');
     const grantId = 'grant-one';
     const operationId = 'operation-one';
+    const quote = {
+      type: 'estimated-cost-approval',
+      operationId,
+      taskId,
+      requestText: 'request',
+      quoteId: 'quote',
+      quoteVersion: 'v1',
+      expiresAt: new Date(now.getTime() + 60_000).toISOString(),
+      nextAttemptMicros: 100_000,
+      allowanceMicros: 200_000,
+      recordedDailyMicros: 0,
+      recordedMonthlyMicros: 0,
+      totalHeldMicros: 500_000,
+      eligibleHistoricalUnknownMicros: 400_000,
+      pendingApprovalMicros: 200_000,
+      dailyCeilingMicros: 1_000_000,
+      monthlyCeilingMicros: 2_000_000,
+      dailyProjectedGrossMicros: 700_000,
+      monthlyProjectedGrossMicros: 700_000,
+      complete: true,
+      canApprove: true,
+    };
     await store
       .doc('costReservations', reservation.reservationId)
       .update({ reservationKind: 'escrow', costGrantId: grantId });
@@ -72,9 +94,11 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore atomic cost led
       taskId,
       bindingDigest: 'binding',
       state: 'approved',
+      quote,
     });
     await store.doc('estimatedCostGrants', grantId).set({
       operationId,
+      quoteId: 'quote',
       escrowReservationId: reservation.reservationId,
       allowanceMicros: 200_000,
       consumedMicros: 0,
@@ -100,6 +124,52 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore atomic cost led
       description: 'attempt',
     };
     const before = await costs.totals();
+    const pendingOperationId = 'pending-other';
+    await store.doc('estimatedCostRequests', pendingOperationId).set({
+      operationId: pendingOperationId,
+      installationId: 'install',
+      ownerId: 'owner',
+      taskId,
+      state: 'pending',
+      quote: { ...quote, operationId: pendingOperationId, quoteId: 'other-quote' },
+    });
+    await store
+      .doc('budgetPeriods', `day:${now.toISOString().slice(0, 10)}`)
+      .set({ spentMicros: 0 });
+    await store
+      .doc('budgetPeriods', `month:${now.toISOString().slice(0, 7)}`)
+      .set({ spentMicros: 0 });
+    await store.doc('estimatedCostRequests', operationId).update({ quote: { quoteId: 'other' } });
+    expect(await costs.drawEstimatedCostGrant({ ...input, attemptId: 'attempt-one' })).toEqual({
+      ok: false,
+      reason: 'unavailable',
+    });
+    await store.doc('estimatedCostRequests', operationId).update({ quote });
+    expect(await costs.readEstimatedCostRequest(input.actor, operationId)).toMatchObject({
+      status: 'approved',
+      operationId,
+      quote,
+    });
+    expect((await costs.readEstimatedCostView(input.actor, operationId))?.tracking).toMatchObject({
+      totalHeldMicros: 200_000,
+      pendingApprovalMicros: 200_000,
+      dailyPlannedExposureMicros: 400_000,
+    });
+    await costs.record({ source: 'model', usd: 0.01, taskId });
+    expect((await costs.readEstimatedCostView(input.actor, operationId))?.tracking).toMatchObject({
+      recordedDailyMicros: 10_000,
+      totalHeldMicros: 200_000,
+      pendingApprovalMicros: 200_000,
+      dailyPlannedExposureMicros: 410_000,
+    });
+    await store.doc('estimatedCostRequests', pendingOperationId).update({ state: 'declined' });
+    expect((await costs.readEstimatedCostView(input.actor, operationId))?.tracking).toMatchObject({
+      pendingApprovalMicros: 0,
+      dailyPlannedExposureMicros: 210_000,
+    });
+    expect(
+      await costs.readEstimatedCostRequest({ ...input.actor, ownerId: 'other' }, operationId),
+    ).toBeNull();
     expect(
       await costs.readEstimatedCostDecision(input.actor, { operationId, decisionId: 'decision' }),
     ).toEqual(receipt);
@@ -153,15 +223,30 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore atomic cost led
       150_000,
     );
     expect((await costs.totals()).heldUsd).toBeCloseTo(before.heldUsd - 0.15);
-    const unknownId = 'unknown-attempt';
+    const lowId = 'low-attempt';
     expect(
       await costs.drawEstimatedCostGrant({
         ...input,
         estimatedMicros: 30_000,
+        attemptId: lowId,
+      }),
+    ).toEqual({ ok: true, reservationId: lowId });
+    await costs.reconcile(lowId, { usd: 0.01 });
+    expect((await store.doc('estimatedCostGrants', grantId).get()).get('consumedMicros')).toBe(
+      180_000,
+    );
+    const unknownId = 'unknown-attempt';
+    expect(
+      await costs.drawEstimatedCostGrant({
+        ...input,
+        estimatedMicros: 10_000,
         attemptId: unknownId,
       }),
     ).toEqual({ ok: true, reservationId: unknownId });
     now = new Date(now.getTime() + 60_000);
+    expect(await costs.readEstimatedCostRequest(input.actor, operationId)).toMatchObject({
+      status: 'expired_or_needs_refresh',
+    });
     expect(
       await costs.drawEstimatedCostGrant({ ...input, attemptId: success.reservationId }),
     ).toEqual({ ok: false, reason: 'expired' });
@@ -169,7 +254,112 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore atomic cost led
     expect(await costs.expireEstimatedCostGrant(grantId)).toBe(true);
     expect(await costs.expireEstimatedCostGrant(grantId)).toBe(false);
     expect((await store.doc('costReservations', unknownId).get()).get('status')).toBe('unknown');
-    expect((await costs.totals()).heldUsd).toBeCloseTo(before.heldUsd - 0.17);
+    expect((await costs.totals()).heldUsd).toBeCloseTo(before.heldUsd - 0.19);
+  });
+
+  it('closes only the selected expired parked request and replays the exact decline receipt', async () => {
+    const taskId = 'parked-task';
+    const operationId = 'parked-operation';
+    const fingerprint = 'request-fingerprint';
+    const quote = {
+      type: 'estimated-cost-approval',
+      operationId,
+      taskId,
+      requestText: 'request',
+      quoteId: 'quote',
+      quoteVersion: 'v1',
+      expiresAt: new Date(now.getTime() - 1000).toISOString(),
+      nextAttemptMicros: 100_000,
+      allowanceMicros: 200_000,
+      recordedDailyMicros: 0,
+      recordedMonthlyMicros: 0,
+      totalHeldMicros: 500_000,
+      eligibleHistoricalUnknownMicros: 400_000,
+      pendingApprovalMicros: 200_000,
+      dailyCeilingMicros: 1_000_000,
+      monthlyCeilingMicros: 2_000_000,
+      dailyProjectedGrossMicros: 700_000,
+      monthlyProjectedGrossMicros: 700_000,
+      complete: true,
+      canApprove: true,
+    };
+    const trigger = {
+      payload: {
+        chatAdmission: {
+          protocol: 'owner-chat-v1',
+          clientOperationId: operationId,
+          requestHash: fingerprint,
+        },
+      },
+    };
+    await store
+      .doc('tasks', taskId)
+      .set({
+        id: taskId,
+        agentId: 'owner',
+        type: 'chat_turn',
+        trust: 'owner',
+        status: 'waiting_estimated_cost',
+        trigger,
+      });
+    await store
+      .doc('tasks', 'other-task')
+      .set({
+        id: 'other-task',
+        agentId: 'owner',
+        type: 'chat_turn',
+        trust: 'owner',
+        status: 'pending',
+      });
+    await store
+      .doc('estimatedCostRequests', operationId)
+      .set({
+        operationId,
+        installationId: 'install',
+        ownerId: 'owner',
+        taskId,
+        requestFingerprint: fingerprint,
+        bindingDigest: 'binding',
+        state: 'pending',
+        quote,
+        baseline: [],
+      });
+    const repo = costs.estimatedCostApprovalRepository();
+    const actor = { installationId: 'install', ownerId: 'owner' };
+    const decision = {
+      operationId,
+      quoteId: 'quote',
+      quoteVersion: 'v1',
+      decisionId: 'decline-one',
+      decision: 'decline' as const,
+    };
+    expect(await repo.decide(actor, { ...decision, decision: 'approve' })).toMatchObject({
+      ok: false,
+      outcome: 'unavailable',
+    });
+    expect(await repo.decide({ ...actor, ownerId: 'other' }, decision)).toMatchObject({
+      ok: false,
+      outcome: 'not_found',
+    });
+    expect(
+      await repo.decide(actor, { ...decision, decisionId: 'stale', quoteVersion: 'old' }),
+    ).toMatchObject({ ok: true, receipt: { status: 'stale' } });
+    const results = await Promise.all([
+      repo.decide(actor, decision),
+      repo.decide(actor, { ...decision, decisionId: 'decline-two' }),
+    ]);
+    const winner = results.find((result) => result.ok && result.receipt.status === 'declined');
+    expect(winner?.ok).toBe(true);
+    expect(results.filter((result) => !result.ok)).toHaveLength(1);
+    if (!winner?.ok) throw new Error('Expected decline receipt');
+    const replay = { ...decision, decisionId: winner.receipt.decisionId };
+    expect(await repo.decide(actor, replay)).toEqual(winner);
+    expect(
+      await repo.getDecisionReceipt(actor, { operationId, decisionId: replay.decisionId }),
+    ).toEqual(winner);
+    expect((await store.doc('tasks', taskId).get()).get('status')).toBe('cancelled');
+    expect((await store.doc('tasks', 'other-task').get()).get('status')).toBe('pending');
+    expect((await store.collection('costReservations').get()).empty).toBe(true);
   });
 
   it('serializes competing reservations and never over-reserves the daily cap', async () => {
