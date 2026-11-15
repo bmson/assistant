@@ -784,6 +784,37 @@ function schemaInputTokens(schema: ZodType): number {
   return estimatedSerializedTokens(z.toJSONSchema(schema));
 }
 
+/** Bind the model-visible schema and tool contract, not just their token count. */
+function estimatedCostRequestShape(opts: CallOptions): unknown {
+  const extended = opts as CallOptions & {
+    schema?: ZodType;
+    tools?: ToolSet;
+    toolChoice?: StepToolChoice;
+  };
+  return {
+    schema: extended.schema ? z.toJSONSchema(extended.schema) : null,
+    tools: extended.tools
+      ? Object.entries(extended.tools).map(([name, raw]) => {
+          const tool = raw as unknown as {
+            description?: string;
+            inputSchema?: ZodType;
+            parameters?: ZodType;
+          };
+          const schema = tool.inputSchema ?? tool.parameters;
+          if (!schema) throw new Error(`Tool ${name} does not expose a countable input schema`);
+          return {
+            name,
+            description: tool.description ?? '',
+            parameters: z.toJSONSchema(schema, { target: 'draft-7', io: 'input' }),
+          };
+        })
+      : null,
+    toolChoice: extended.toolChoice ?? null,
+    temperature: opts.temperature ?? null,
+    maxRetries: opts.maxRetries ?? null,
+  };
+}
+
 function toolInputTokens(tools: ToolSet): number {
   const requestSchema = Object.entries(tools).map(([name, raw]) => {
     const tool = raw as unknown as {
@@ -1471,6 +1502,7 @@ export class ModelRouter {
           toolCall,
           maxEstimatedCostUsd: opts.maxEstimatedCostUsd ?? null,
           requestDigest,
+          requestShape: estimatedCostRequestShape(opts),
         }),
       )
       .digest('hex');

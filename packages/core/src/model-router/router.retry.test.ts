@@ -690,6 +690,33 @@ describe('ModelRouter.object provider-capability fallback', () => {
     expect(stubs.beginCostAttempt).not.toHaveBeenCalled();
   });
 
+  it('binds equal-sized structured schemas to different quote digests', async () => {
+    const { router, route } = makeRouter();
+    const selected = await route.getMockImplementation()?.('extract', {});
+    if (!selected?.ok) throw new Error('missing route');
+    vi.spyOn(router as any, 'budgetSnapshot').mockResolvedValue({
+      dailyLimitUsd: 1,
+      monthlyLimitUsd: 1,
+      dailySpentUsd: 0,
+      monthlySpentUsd: 0,
+      heldUsd: 0,
+      softPct: 80,
+    });
+    vi.spyOn(router as any, 'resolveRoute').mockResolvedValue(selected);
+    const first = await router.prepareEstimatedCostCandidate('extract', {
+      prompt: 'same',
+      additionalInputTokens: 12,
+      schema: z.object({ one: z.string() }),
+    } as CallOptions);
+    const second = await router.prepareEstimatedCostCandidate('extract', {
+      prompt: 'same',
+      additionalInputTokens: 12,
+      schema: z.object({ two: z.string() }),
+    } as CallOptions);
+    expect(first.nextAttemptMicros).toBe(second.nextAttemptMicros);
+    expect(first.routingDigest).not.toBe(second.routingDigest);
+  });
+
   it('object() still surfaces transient errors without a model switch', async () => {
     const { router } = makeRouter();
     stubs.generateObject.mockRejectedValue(capabilityError('Rate limit exceeded'));
