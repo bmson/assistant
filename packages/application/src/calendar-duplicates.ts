@@ -320,6 +320,13 @@ export async function assessCalendarDuplicates(
     const acceptedGroups = result.data.groups.filter((group) => group.confidence >= 0.9);
     const revisedLead =
       'mode' in parsed ? removeMatchedOverlapSentences(parsed, acceptedGroups) : undefined;
+    if (
+      'mode' in parsed &&
+      acceptedGroups.length > 0 &&
+      parsed.lead?.trim() &&
+      !revisedLead?.trim()
+    )
+      throw new CalendarDuplicateUnavailable();
     const accepted: Result = {
       groups: acceptedGroups,
       ...(revisedLead === undefined ? {} : { revisedLead }),

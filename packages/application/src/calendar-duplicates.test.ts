@@ -288,12 +288,23 @@ describe('display calendar duplicate assessment', () => {
   it('keeps unrelated lead content and never rewrites without an accepted group', async () => {
     const model = mockRouter([group]);
     const lead = 'Soccer Practice and Blue Fall Practice overlap and bring water.';
-    expect(
-      await assessCalendarDuplicates({
-        ownerId: 'display-lead',
+    await expect(
+      assessCalendarDuplicates({ ownerId: 'display-lead', router: model.router, ...request, lead }),
+    ).rejects.toThrow();
+    await expect(
+      assessCalendarDuplicates({
+        ownerId: 'display-empty-rewrite',
         router: model.router,
         ...request,
-        lead,
+        lead: 'Soccer Practice and Blue Fall Practice overlap.',
+      }),
+    ).rejects.toThrow();
+    expect(
+      await assessCalendarDuplicates({
+        ownerId: 'display-no-lead',
+        router: model.router,
+        ...request,
+        lead: '',
       }),
     ).toEqual({ groups: [group] });
     const low = mockRouter([{ ...group, confidence: 0.89 }]);
