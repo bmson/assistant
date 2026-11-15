@@ -666,17 +666,15 @@ export async function storePreparedPostgresQuote(
       quoteId: quote.quoteId,
       quoteVersion: quote.quoteVersion,
     });
-    await tx
-      .insert(messages)
-      .values({
-        id: messageId,
-        conversationId: task.conversationId,
-        taskId: task.id,
-        role: 'assistant',
-        origin: 'assistant',
-        text: 'Review the estimated cost for this request.',
-        parts: [quote],
-      });
+    await tx.insert(messages).values({
+      id: messageId,
+      conversationId: task.conversationId,
+      taskId: task.id,
+      role: 'assistant',
+      origin: 'assistant',
+      text: 'Review the estimated cost for this request.',
+      parts: [quote],
+    });
     await tx
       .update(conversations)
       .set({ updatedAt: commitTime })

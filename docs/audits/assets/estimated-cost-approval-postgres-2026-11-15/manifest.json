@@ -12,5 +12,8 @@
   },
   "testTarget": "uniquely allocated loopback database, cleaned by canonical runner",
   "productionOrProviderActions": false,
-  "testsPassed": 10
+  "testsPassed": 10,
+  "formatOnlyFollowupSha256": {
+    "packages/db/src/estimated-cost-approval-transactions.ts": "a287b0ef8f59e849887c78db614779fe1698b7ae22043cc9cc73ff60f0b4f6e4"
+  }
 }
