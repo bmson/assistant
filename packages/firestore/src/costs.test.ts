@@ -26,6 +26,36 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore atomic cost led
     });
   });
 
+  it('never dispatches, reconciles, or cleans up an escrow as an ordinary reservation', async () => {
+    const reservation = await costs.reserve({ source: 'model', estimatedUsd: 0.2 });
+    if (!reservation.ok) throw new Error('Fixture failed to reserve');
+    const ref = store.doc('costReservations', reservation.reservationId);
+    await ref.update({
+      reservationKind: 'escrow',
+      createdAt: new Date(now.getTime() - 180 * 60_000),
+    });
+    expect(
+      await costs.beginAttempt(reservation.reservationId, {
+        provider: 'test',
+        model: 'test',
+        role: 'chat',
+        requestDigest: 'a'.repeat(64),
+        inputTokenEstimate: 1,
+        outputTokenLimit: 1,
+        reasoning: 'disabled',
+      }),
+    ).toBe(false);
+    await costs.release(reservation.reservationId);
+    await costs.reconcile(reservation.reservationId, { usd: 0.1 });
+    await costs.releaseStale(120, 500);
+    expect((await ref.get()).data()).toMatchObject({
+      status: 'held',
+      reservationKind: 'escrow',
+      estimatedUsd: '0.200000',
+    });
+    expect((await costs.totals()).heldUsd).toBe(0.2);
+  });
+
   it('serializes competing reservations and never over-reserves the daily cap', async () => {
     const results = await Promise.all(
       Array.from({ length: 8 }, () => costs.reserve({ source: 'model', estimatedUsd: 0.3 })),

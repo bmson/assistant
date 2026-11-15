@@ -794,7 +794,38 @@ export interface Records {
     reconciledAt: Date | null;
     attemptStartedAt: Date | null;
     attemptMetadata: unknown | null;
+    reservationKind: string;
+    costGrantId: string | null;
     unknownReason: string | null;
+  };
+  estimatedCostRequests: {
+    operationId: string;
+    installationId: string;
+    ownerId: string;
+    taskId: string;
+    requestFingerprint: string;
+    bindingDigest: string;
+    state: string;
+    quote: unknown;
+    baseline: unknown;
+    createdAt: Date;
+    updatedAt: Date;
+  };
+  estimatedCostDecisions: {
+    decisionId: string;
+    operationId: string;
+    bodyDigest: string;
+    receipt: unknown;
+    createdAt: Date;
+  };
+  estimatedCostGrants: {
+    id: string;
+    operationId: string;
+    escrowReservationId: string;
+    allowanceMicros: number;
+    consumedMicros: number;
+    expiresAt: Date;
+    createdAt: Date;
   };
   rateTable: { updatedAt: Date; unit: string; unitPriceUsd: string; key: string };
   budgets: {

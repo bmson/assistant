@@ -64,6 +64,40 @@ describe('PostgreSQL idempotent cost events', () => {
     });
   });
 
+  it('never dispatches, reconciles, or cleans up an escrow as an ordinary reservation', async () => {
+    const costs = createPostgresCostRepository(db);
+    const reservation = await costs.reserve({ source: 'model', estimatedUsd: 0.2, taskId });
+    if (!reservation.ok) throw new Error('Fixture failed to reserve');
+    reservationIds.push(reservation.reservationId);
+    await db
+      .update(costReservations)
+      .set({ reservationKind: 'escrow', createdAt: new Date(Date.now() - 180 * 60_000) })
+      .where(eq(costReservations.id, reservation.reservationId));
+    expect(
+      await costs.beginAttempt(reservation.reservationId, {
+        provider: 'test',
+        model: 'test',
+        role: 'chat',
+        requestDigest: 'a'.repeat(64),
+        inputTokenEstimate: 1,
+        outputTokenLimit: 1,
+        reasoning: 'disabled',
+      }),
+    ).toBe(false);
+    await costs.release(reservation.reservationId);
+    await costs.reconcile(reservation.reservationId, { usd: 0.1 });
+    await costs.releaseStale(120, 500);
+    const [row] = await db
+      .select()
+      .from(costReservations)
+      .where(eq(costReservations.id, reservation.reservationId));
+    expect(row).toMatchObject({
+      status: 'held',
+      reservationKind: 'escrow',
+      estimatedUsd: '0.200000',
+    });
+  });
+
   it('does not release a hold whose provider dispatch commits while stale cleanup waits', async () => {
     const costs = createPostgresCostRepository(db);
     const reservation = await costs.reserve({ source: 'model', estimatedUsd: 0.2, taskId });

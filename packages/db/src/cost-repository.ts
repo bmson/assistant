@@ -324,7 +324,14 @@ export async function beginCostAttempt(
   const [row] = await db
     .update(costReservations)
     .set({ status: 'dispatching', attemptStartedAt: sql`now()`, attemptMetadata: metadata })
-    .where(and(eq(costReservations.id, reservationId), eq(costReservations.status, 'held')))
+    .where(
+      and(
+        eq(costReservations.id, reservationId),
+        eq(costReservations.status, 'held'),
+        eq(costReservations.reservationKind, 'attempt'),
+        sql`${costReservations.costGrantId} IS NULL`,
+      ),
+    )
     .returning({ id: costReservations.id });
   return Boolean(row);
 }
@@ -350,6 +357,7 @@ export async function markCostAttemptUnknown(
     .where(
       and(
         eq(costReservations.id, reservationId),
+        eq(costReservations.reservationKind, 'attempt'),
         inArray(costReservations.status, ['dispatching', 'unknown']),
       ),
     );
@@ -384,6 +392,7 @@ export async function reconcileReservation(
       .where(
         and(
           eq(costReservations.id, reservationId),
+          eq(costReservations.reservationKind, 'attempt'),
           inArray(costReservations.status, ['held', 'dispatching', 'unknown']),
         ),
       )
@@ -413,7 +422,13 @@ export async function releaseReservation(db: Db, reservationId: string): Promise
     await tx
       .update(costReservations)
       .set({ status: 'released', reconciledAt: sql`now()` })
-      .where(and(eq(costReservations.id, reservationId), eq(costReservations.status, 'held')));
+      .where(
+        and(
+          eq(costReservations.id, reservationId),
+          eq(costReservations.status, 'held'),
+          eq(costReservations.reservationKind, 'attempt'),
+        ),
+      );
   });
 }
 
@@ -436,6 +451,7 @@ export async function releaseStaleReservations(
       .where(
         and(
           eq(costReservations.status, 'held'),
+          eq(costReservations.reservationKind, 'attempt'),
           sql`${costReservations.createdAt} < now() - (${olderThanMinutes} * interval '1 minute')`,
           sql`NOT EXISTS (
             SELECT 1 FROM call_sessions
@@ -451,7 +467,13 @@ export async function releaseStaleReservations(
       .set({ status: 'released', reconciledAt: sql`now()` })
       // A provider dispatch may have changed a selected row while this UPDATE
       // waited for its row lock; recheck its state on the locked row.
-      .where(and(inArray(costReservations.id, stale), eq(costReservations.status, 'held')))
+      .where(
+        and(
+          inArray(costReservations.id, stale),
+          eq(costReservations.status, 'held'),
+          eq(costReservations.reservationKind, 'attempt'),
+        ),
+      )
       .returning({ id: costReservations.id });
     const staleDispatches = await tx
       .select({ id: costReservations.id })
@@ -459,6 +481,7 @@ export async function releaseStaleReservations(
       .where(
         and(
           eq(costReservations.status, 'dispatching'),
+          eq(costReservations.reservationKind, 'attempt'),
           sql`${costReservations.attemptStartedAt} < now() - (${olderThanMinutes} * interval '1 minute')`,
         ),
       )
@@ -472,9 +495,13 @@ export async function releaseStaleReservations(
             unknownReason: 'provider dispatch exceeded reconciliation window',
           })
           .where(
-            inArray(
-              costReservations.id,
-              staleDispatches.map((row) => row.id),
+            and(
+              eq(costReservations.status, 'dispatching'),
+              eq(costReservations.reservationKind, 'attempt'),
+              inArray(
+                costReservations.id,
+                staleDispatches.map((row) => row.id),
+              ),
             ),
           )
           .returning({ id: costReservations.id })

@@ -210,6 +210,9 @@ export class FirestoreCostRepository implements CostRepository {
     return this.store.db.runTransaction(async (tx) => {
       const reservation = await tx.get(ref);
       if (!reservation.exists || reservation.get('status') !== 'held') return false;
+      const kind = reservation.get('reservationKind');
+      if ((kind !== undefined && kind !== 'attempt') || reservation.get('costGrantId') != null)
+        return false;
       tx.update(ref, {
         status: 'dispatching',
         attemptStartedAt: this.store.now(),
@@ -230,6 +233,8 @@ export class FirestoreCostRepository implements CostRepository {
         const reservation = await tx.get(ref);
         if (
           !reservation.exists ||
+          (reservation.get('reservationKind') !== undefined &&
+            reservation.get('reservationKind') !== 'attempt') ||
           !['dispatching', 'unknown'].includes(String(reservation.get('status')))
         )
           return;
@@ -261,9 +266,11 @@ export class FirestoreCostRepository implements CostRepository {
     const reservationRef = reservationId ? this.store.doc('costReservations', reservationId) : null;
     const reservation = reservationRef ? await tx.get(reservationRef) : null;
     const reservationStatus = reservation?.get('status');
+    const reservationKind = reservation?.get('reservationKind');
     if (
       reservationRef &&
       (!reservation?.exists ||
+        (reservationKind !== undefined && reservationKind !== 'attempt') ||
         (actual === null
           ? reservationStatus !== 'held'
           : !['held', 'dispatching', 'unknown'].includes(String(reservationStatus))))
@@ -433,7 +440,13 @@ export class FirestoreCostRepository implements CostRepository {
       const transitioned = await withEmulatorTransactionRetry(() =>
         this.store.db.runTransaction(async (tx) => {
           const current = await tx.get(ref);
-          if (!current.exists || current.get('status') !== 'dispatching') return false;
+          if (
+            !current.exists ||
+            current.get('status') !== 'dispatching' ||
+            (current.get('reservationKind') !== undefined &&
+              current.get('reservationKind') !== 'attempt')
+          )
+            return false;
           tx.update(ref, {
             status: 'unknown',
             unknownReason: 'provider dispatch exceeded reconciliation window',
