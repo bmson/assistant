@@ -27,6 +27,14 @@ describe('Firestore mobile and web ingress', () => {
     expect(status('/api/mobile/v1/calendars', 'PUT')).toBe(503);
   });
 
+  it('admits only the exact calendar comparison POST to its owner-authenticated handler', () => {
+    expect(status('/api/mobile/v1/calendar-duplicates', 'POST')).toBe(200);
+    expect(status('/api/mobile/v1/calendar-duplicates', 'GET')).toBe(503);
+    expect(status('/api/mobile/v1/calendar-duplicates/extra', 'POST')).toBe(503);
+    runtimeConfig.RESTORE_REHEARSAL = true;
+    expect(status('/api/mobile/v1/calendar-duplicates', 'POST')).toBe(503);
+  });
+
   it('passes repair reads, reports, and decisions to authenticated handlers', () => {
     for (const method of ['GET', 'POST'])
       expect(status('/api/mobile/v1/repairs', method)).toBe(200);
