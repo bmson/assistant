@@ -782,6 +782,7 @@ final class AppModel {
     }
 
     var activityConnectionVersion: Int { activityConnectionRevision }
+    private(set) var costTrackingRevision = 0
 
     func activityConnectionIsCurrent(version: Int) -> Bool {
         activityConnectionRevision == version && client != nil
@@ -2054,6 +2055,7 @@ final class AppModel {
         guard isSceneActive != isNowActive else { return }
         isSceneActive = isNowActive
         if isNowActive {
+            costTrackingRevision += 1
             edits.refreshConfirmed()
             discardStaleConnectionsIfNeeded()
             if let bootstrap {
@@ -5319,7 +5321,7 @@ final class AppModel {
                     if settled.contains(status) {
                         finalStatus = status
                         grace += 1
-                        if receivedCurrentReply || grace >= 4 { break }
+                        if status == "waiting_estimated_cost" || receivedCurrentReply || grace >= 4 { break }
                         if updates.hasMore { continue }
                     }
                 }
@@ -5367,6 +5369,7 @@ final class AppModel {
         toolActivity = []
         if let taskId, let finalStatus, ["done", "failed", "cancelled"].contains(finalStatus) {
             observeCardFormTask(finalStatus, taskId: taskId)
+            costTrackingRevision += 1
         }
         let settlement = notificationTurnSettlements.begin()
         let sendSettlementID = UUID()
@@ -5608,6 +5611,7 @@ final class AppModel {
             isVisibleDurableAssistantReply(message) ? message.id : nil
         })
         let newlyVisibleAssistantIDs = visibleAssistantIDsAfter.subtracting(visibleAssistantIDsBefore)
+        if !newlyVisibleAssistantIDs.isEmpty { costTrackingRevision += 1 }
         if let notice = missingTaskReplyNotice,
            notice.ownerID == ownerID,
            notice.conversationID == conversationId,

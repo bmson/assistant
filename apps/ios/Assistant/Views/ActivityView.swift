@@ -217,6 +217,11 @@ struct StaleCostQuote: Codable, Equatable, Sendable {
     let quoteId: String
     let quoteVersion: String
 }
+struct CostTrackingReadFence {
+    private(set) var generation = 0
+    mutating func invalidate() { generation += 1 }
+    func accepts(_ captured: Int) -> Bool { generation == captured }
+}
 
 /// Implementations must durably protect this record before returning from save.
 /// No storage adapter is supplied until the operation contract is available.
@@ -441,6 +446,9 @@ struct EstimatedCostReviewScreen: View {
     @State private var quoteRequestID: String?
     @State private var quoteRefreshUnconfirmed = false
     @State private var sessionVersion: Int?
+    @State private var trackingReadFence = CostTrackingReadFence()
+    @State private var needsTrackingReload = false
+    @State private var trackingReloadScheduled = false
 
     var body: some View {
         ScrollView {
@@ -498,6 +506,20 @@ struct EstimatedCostReviewScreen: View {
             }
             await load()
         }
+        .onChange(of: model.costTrackingRevision) { _, _ in
+            trackingReadFence.invalidate()
+            controller?.updateTracking(nil)
+            needsTrackingReload = true
+            reloadTrackingWhenReady()
+        }
+        .onChange(of: controller?.state) { _, _ in reloadTrackingWhenReady() }
+    }
+
+    private func reloadTrackingWhenReady() {
+        guard needsTrackingReload, !loading, !trackingReloadScheduled, controller?.state != .submitting else { return }
+        needsTrackingReload = false
+        trackingReloadScheduled = true
+        Task { trackingReloadScheduled = false; await load() }
     }
 
     private func load() async {
@@ -505,6 +527,7 @@ struct EstimatedCostReviewScreen: View {
         controller?.updateTracking(nil)
         guard let context = model.checklistCorrectionRequestContext() else { loading = false; unavailable = true; return }
         loading = true
+        let readGeneration = trackingReadFence.generation
         let priorQuoteID = controller?.quote.quoteId
         let priorVersion = controller?.quote.quoteVersion
         let store = KeychainCostPermissionRecoveryStore(serverIdentity: context.client.configuration.baseURL.absoluteString)
@@ -513,6 +536,7 @@ struct EstimatedCostReviewScreen: View {
         catch { loading = false; unavailable = true; return }
         let response = try? await context.client.estimatedCostQuote(operationID: operationID)
         guard !Task.isCancelled, model.checklistCorrectionConnectionIsCurrent(ownerID: context.ownerID, version: context.connectionVersion) else { loading = false; return }
+        guard trackingReadFence.accepts(readGeneration) else { loading = false; reloadTrackingWhenReady(); return }
         let projection = response?.request
         guard let quote = saved?.quote ?? projection?.quote else {
             controller = nil; standaloneProjection = projection; displayedConnectionVersion = context.connectionVersion
@@ -540,6 +564,7 @@ struct EstimatedCostReviewScreen: View {
         displayedConnectionVersion = context.connectionVersion
         loading = false
         unavailable = false
+        reloadTrackingWhenReady()
     }
 
     private func requestUpdatedQuote() async {
@@ -547,18 +572,20 @@ struct EstimatedCostReviewScreen: View {
         let id = quoteRequestID ?? UUID().uuidString.lowercased()
         quoteRequestID = id
         loading = true
+        let readGeneration = trackingReadFence.generation
         controller?.updateTracking(nil)
         do {
             let response = try await context.client.requestEstimatedCostQuote(operationID: operationID, quoteRequestID: id)
             guard !Task.isCancelled, model.checklistCorrectionConnectionIsCurrent(ownerID: context.ownerID, version: context.connectionVersion) else { loading = false; return }
             if let projection = response.request { controller?.apply(projection) }
-            controller?.updateTracking(response.tracking)
+            if trackingReadFence.accepts(readGeneration) { controller?.updateTracking(response.tracking) }
             quoteRequestID = nil
         } catch {
             guard !Task.isCancelled, model.checklistCorrectionConnectionIsCurrent(ownerID: context.ownerID, version: context.connectionVersion) else { loading = false; return }
             quoteRefreshUnconfirmed = true
         }
         loading = false
+        reloadTrackingWhenReady()
     }
 }
 

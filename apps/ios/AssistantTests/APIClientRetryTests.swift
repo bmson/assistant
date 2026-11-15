@@ -5770,6 +5770,32 @@ extension APIClientRetryTests {
     }
 
     @MainActor
+    func testParkedCostRequestReleasesSendBeforeAnotherTurnCompletes() async throws {
+        let model = try await notificationModel()
+        let first = "33333333-3333-4333-8333-333333333333"
+        let second = "44444444-4444-4444-8444-444444444444"
+        let path = "/api/mobile/v1/chat/status"
+        let waiting = try JSONEncoder().encode(ChatUpdates(taskStatus: "waiting_estimated_cost", messages: [],
+            refreshed: [], superseded: nil, nextCursor: nil, hasMore: false, activity: []))
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/chat": [.taskStream(body: Data("data: [DONE]\n\n".utf8), taskId: first),
+                                    .taskStream(body: Data("data: [DONE]\n\n".utf8), taskId: second)],
+            path: [.success(status: 200, body: waiting), .success(status: 200, body: try replyFinalFixture(taskID: second))],
+        ])
+        model.send("Synthetic request A")
+        let firstSettled = try await waitForReplyPollFixture { model.canAdmitOrdinarySend }
+        XCTAssertTrue(firstSettled)
+        XCTAssertEqual(StubURLProtocol.urls.filter { $0.path == path }.count, 1)
+        let revision = model.costTrackingRevision
+        model.send("Synthetic request B")
+        let secondSettled = try await waitForReplyPollFixture { model.messages.contains { $0.id == "final-\(second)" } && model.canAdmitOrdinarySend }
+        XCTAssertTrue(secondSettled)
+        XCTAssertGreaterThan(model.costTrackingRevision, revision)
+        model.scenePhaseDidChange(.active)
+        XCTAssertGreaterThan(model.costTrackingRevision, revision + 1)
+    }
+
+    @MainActor
     func testChangedActivityStartsAHeldFollowBeforeQuietBackoff() async throws {
         let model = try await notificationModel()
         let path = "/api/mobile/v1/chat/status"

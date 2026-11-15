@@ -100,6 +100,16 @@ describe('a poll that is not asked to wait', () => {
 });
 
 describe('a held poll returns the moment there is something to say', () => {
+  it('returns an already parked cost request immediately even when its card is behind the cursor', async () => {
+    const watched = watchableStore();
+    stubs.getChatUpdates.mockResolvedValue(
+      updates({ taskStatus: 'waiting_estimated_cost', messages: [] }),
+    );
+    const result = await waitForChatUpdates(watched.store, { ...TASK, waitMs: MAX_CHAT_WAIT_MS });
+    expect(result?.taskStatus).toBe('waiting_estimated_cost');
+    expect(stubs.getChatUpdates).toHaveBeenCalledOnce();
+    expect(watched.watchChatChanges).not.toHaveBeenCalled();
+  });
   it('does not open a watch without a task wait capability', async () => {
     const watched = watchableStore();
     stubs.getChatUpdates.mockResolvedValue(updates());

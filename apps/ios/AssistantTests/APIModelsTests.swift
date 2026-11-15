@@ -4,6 +4,14 @@ import CoreLocation
 @testable import Assistant
 
 extension APIModelsTests {
+    func testCostTrackingReadFenceRejectsPreInvalidationResponse() {
+        var fence = CostTrackingReadFence()
+        let olderRead = fence.generation
+        XCTAssertTrue(fence.accepts(olderRead))
+        fence.invalidate()
+        XCTAssertFalse(fence.accepts(olderRead))
+        XCTAssertTrue(fence.accepts(fence.generation))
+    }
     @MainActor func testCostApprovalRequiresCurrentTrackingAndFreshQuoteAfterStale() async throws {
         @MainActor final class Store: CostPermissionRecoveryStore {
             var saved: PendingCostPermissionDecision?
@@ -151,6 +159,8 @@ extension APIModelsTests {
         reopened.apply(.init(status: "approved", operationId: quote.operationId, quote: quote,
                              grantExpiresAt: "2030-01-01T00:20:00Z", reason: nil))
         XCTAssertEqual(reopened.state, .unconfirmed, "Another device's request projection is not this decision's receipt")
+        reopened.updateTracking(nil)
+        XCTAssertEqual(store.saved?.decision.decisionId, "decision-1", "Tracking invalidation must retain the exact pending decision")
         await reopened.checkDecision()
         XCTAssertEqual(reopened.state, .unconfirmed)
         XCTAssertNotNil(store.saved)
