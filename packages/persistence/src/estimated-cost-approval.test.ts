@@ -3,6 +3,7 @@ import {
   type EstimatedCostHeadroom,
   estimatedCostAllowance,
   estimatedCostAllowanceExpiry,
+  estimatedCostQuoteMatches,
   verifiedHistoricalUnknownMicros,
 } from './estimated-cost-approval.js';
 
@@ -20,6 +21,36 @@ const snapshot: EstimatedCostHeadroom = {
 };
 
 describe('estimated cost allowance', () => {
+  it('requires a quote to match all current exposure components exactly', () => {
+    const current = { ...snapshot, pendingOtherMicros: 100 };
+    const quote = {
+      type: 'estimated-cost-approval' as const,
+      operationId: 'operation',
+      taskId: 'task',
+      requestText: 'request',
+      quoteId: 'quote',
+      quoteVersion: 'v1',
+      expiresAt: '2026-11-15T12:00:00.000Z',
+      nextAttemptMicros: 300,
+      allowanceMicros: 450,
+      recordedDailyMicros: 200,
+      recordedMonthlyMicros: 500,
+      totalHeldMicros: 700,
+      eligibleHistoricalUnknownMicros: 600,
+      pendingApprovalMicros: 550,
+      dailyCeilingMicros: 1000,
+      monthlyCeilingMicros: 2000,
+      dailyProjectedGrossMicros: 1450,
+      monthlyProjectedGrossMicros: 1750,
+      complete: true,
+      canApprove: true,
+    };
+    expect(estimatedCostQuoteMatches(quote, current)).toBe(true);
+    expect(estimatedCostQuoteMatches(quote, { ...current, heldMicros: 699 })).toBe(false);
+    expect(estimatedCostQuoteMatches(quote, { ...current, pendingOtherMicros: 101 })).toBe(false);
+    expect(estimatedCostQuoteMatches({ ...quote, complete: false }, current)).toBe(false);
+    expect(estimatedCostQuoteMatches({ ...quote, allowanceMicros: 451 }, current)).toBe(false);
+  });
   it('accepts only the exact complete, proven historical unknown baseline', () => {
     const row = { reservationId: 'old', estimatedMicros: 10 };
     const baseline = [row];

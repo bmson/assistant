@@ -226,6 +226,50 @@ export interface EstimatedCostHeadroom {
   nextAttemptMicros: number;
 }
 
+/** Independently read current values required to accept a displayed quote. */
+export interface EstimatedCostQuoteCheck extends EstimatedCostHeadroom {
+  pendingOtherMicros: number;
+}
+
+/** A changed financial snapshot must receive a new quote and owner decision. */
+export function estimatedCostQuoteMatches(
+  quote: EstimatedCostQuote,
+  current: EstimatedCostQuoteCheck,
+): boolean {
+  const { pendingOtherMicros, ...headroom } = current;
+  if (!Number.isSafeInteger(pendingOtherMicros) || pendingOtherMicros < 0)
+    throw new Error('Invalid pending estimate subtotal');
+  const { allowanceMicros, canApprove } = estimatedCostAllowance(headroom);
+  const pending = pendingOtherMicros + allowanceMicros;
+  const daily = current.dailySpentMicros + current.heldMicros + pending;
+  const monthly = current.monthlySpentMicros + current.heldMicros + pending;
+  if (![pending, daily, monthly].every(Number.isSafeInteger))
+    throw new Error('Estimated exposure overflow');
+  const blockedByHistorical =
+    current.historicalUnknownMicros > 0 &&
+    (current.dailySpentMicros + current.heldMicros + current.nextAttemptMicros >
+      current.dailyCeilingMicros ||
+      current.monthlySpentMicros + current.heldMicros + current.nextAttemptMicros >
+        current.monthlyCeilingMicros);
+  return (
+    quote.complete &&
+    quote.canApprove &&
+    canApprove &&
+    blockedByHistorical &&
+    quote.recordedDailyMicros === current.dailySpentMicros &&
+    quote.recordedMonthlyMicros === current.monthlySpentMicros &&
+    quote.totalHeldMicros === current.heldMicros &&
+    quote.eligibleHistoricalUnknownMicros === current.historicalUnknownMicros &&
+    quote.nextAttemptMicros === current.nextAttemptMicros &&
+    quote.allowanceMicros === allowanceMicros &&
+    quote.dailyCeilingMicros === current.dailyCeilingMicros &&
+    quote.monthlyCeilingMicros === current.monthlyCeilingMicros &&
+    quote.pendingApprovalMicros === pending &&
+    quote.dailyProjectedGrossMicros === daily &&
+    quote.monthlyProjectedGrossMicros === monthly
+  );
+}
+
 export interface HistoricalUnknownBaselineRow {
   reservationId: string;
   estimatedMicros: number;
