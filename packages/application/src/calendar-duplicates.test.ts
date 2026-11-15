@@ -29,12 +29,10 @@ const base = [
   },
 ];
 function mockRouter(groups: unknown, revisedLead?: string) {
-  const object = vi
-    .fn()
-    .mockResolvedValue({
-      ok: true,
-      object: { groups, ...(revisedLead === undefined ? {} : { revisedLead }) },
-    });
+  const object = vi.fn().mockResolvedValue({
+    ok: true,
+    object: { groups, ...(revisedLead === undefined ? {} : { revisedLead }) },
+  });
   return { object, router: { object } as unknown as Pick<ModelRouter, 'object'> };
 }
 
