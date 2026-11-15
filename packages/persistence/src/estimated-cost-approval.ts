@@ -76,6 +76,30 @@ export type EstimatedCostHttpError = {
   message: string;
 };
 
+/** Supplied by trusted server authentication, never decoded from the request body. */
+export interface EstimatedCostActor {
+  installationId: string;
+  ownerId: string;
+}
+
+/** Application boundary used by the web and mobile HTTP handlers.
+ * Implementations own authorization, durable idempotency and all ledger decisions. */
+export interface EstimatedCostApprovalService {
+  getQuote(actor: EstimatedCostActor, operationId: string): Promise<EstimatedCostQuoteResponse>;
+  requestQuote(
+    actor: EstimatedCostActor,
+    request: EstimatedCostQuoteRequest,
+  ): Promise<EstimatedCostQuoteResponse>;
+  decide(
+    actor: EstimatedCostActor,
+    decision: EstimatedCostDecision,
+  ): Promise<EstimatedCostDecisionResponse>;
+  getDecisionReceipt(
+    actor: EstimatedCostActor,
+    identity: { operationId: string; decisionId: string },
+  ): Promise<EstimatedCostDecisionResponse>;
+}
+
 export const ESTIMATED_COST_QUOTE_LIFETIME_MS = 10 * 60_000;
 export const ESTIMATED_COST_ALLOWANCE_LIFETIME_MS = 30 * 60_000;
 
