@@ -54,8 +54,17 @@ export interface EstimatedCostQuoteRequest {
   quoteRequestId: string;
 }
 
+/** Canonical lifecycle for the original request, independent of any one client's decision. */
+export type EstimatedCostRequestProjection =
+  | { status: 'pending'; operationId: string; quote: EstimatedCostQuote }
+  | { status: 'approved'; operationId: string; quote: EstimatedCostQuote; grantExpiresAt: string }
+  | { status: 'declined'; operationId: string; quote: EstimatedCostQuote }
+  | { status: 'expired_or_needs_refresh'; operationId: string; quote: EstimatedCostQuote }
+  | { status: 'cancelled'; operationId: string; quote?: EstimatedCostQuote }
+  | { status: 'unavailable'; operationId: string; quote?: EstimatedCostQuote; reason: string };
+
 export type EstimatedCostQuoteResponse =
-  | { ok: true; quote: EstimatedCostQuote }
+  | { ok: true; request: EstimatedCostRequestProjection }
   | EstimatedCostHttpError;
 
 /** POST decision accepts EstimatedCostDecision; GET decision?operationId=...&decisionId=... reads its exact receipt. */
@@ -67,6 +76,8 @@ export type EstimatedCostDecisionResponse =
  * unavailable=503, unconfirmed=503. An unconfirmed decision must be read back
  * with the same operationId and decisionId, never retried as a new decision.
  * A stale decision is a durable receipt returned with HTTP 409 and ok: true.
+ * A 404 is not a decision receipt and does not prove an uncertain POST failed.
+ * HTTP 503 is not the same as a successfully read 'unavailable' lifecycle state.
  */
 export type EstimatedCostHttpError = {
   ok: false;
@@ -90,6 +101,9 @@ export interface EstimatedCostApprovalService {
     actor: EstimatedCostActor,
     request: EstimatedCostQuoteRequest,
   ): Promise<EstimatedCostQuoteResponse>;
+  /** Decline may close an expired quote only if it remains the current quote
+   * for the same unchanged original request; it never creates an allowance.
+   * Approval always requires a current, unexpired quote. */
   decide(
     actor: EstimatedCostActor,
     decision: EstimatedCostDecision,
