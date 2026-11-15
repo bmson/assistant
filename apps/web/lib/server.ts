@@ -541,6 +541,13 @@ export function getRouter(): ModelRouter {
   return globalCache.__assistantRouter;
 }
 
+/** The configured, budget-guarded router for the active persistence driver. */
+export function getCalendarDuplicateRouter(): ModelRouter {
+  return loadConfig().PERSISTENCE_DRIVER === 'firestore'
+    ? getFirestoreChatApplication().calendarDuplicateRouter
+    : getRouter();
+}
+
 /**
  * The owner's timezone (from the agent row), for rendering local timestamps.
  * cache() dedupes it to one query per request across all server components.
@@ -1502,6 +1509,7 @@ function createFirestoreChatApplication() {
     return embedSkillText(skillEmbeddingText(input));
   };
   return {
+    calendarDuplicateRouter: router,
     recordOwnerLocationPing: async (body: unknown) => {
       const agent = await chat.resolveAgent();
       return recordOwnerLocationPingWithRepository(

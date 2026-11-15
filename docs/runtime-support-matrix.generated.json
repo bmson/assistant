@@ -5,8 +5,8 @@
     "packages/config/src/index.ts": "1775232bbff153dc4bbfb9dc9fec659a38fd0afdce7f0e67f50d8c6c1822c6d7",
     "apps/agent/src/deps.ts": "fb30df8600bbcf24da0d5cfa9ef1c92e28700b663429cdbbe37d65ecee0ea655",
     "apps/agent/src/index.ts": "bc65b1a16ba83c6351a74e2c071189fb4288d5d3ec2c4425accc185da77fe6ab",
-    "apps/web/lib/server.ts": "eacc054e7610578df7316e81608536fcb65a1b2ef4452d0815286464ccd91809",
-    "apps/web/proxy.ts": "0d3bae71bd7a094b3e70615c89bd82db8b2fa1196e7ccde8a1d7b2e6c4872cc6",
+    "apps/web/lib/server.ts": "5009e538f4c30067e22395a115f69460ff93081aff8616facb0885a341145665",
+    "apps/web/proxy.ts": "5d2c387c27a2c478a40d2f562af933fcac19343c2abbf6149cd256530d3023fd",
     "packages/db/drizzle/meta/_journal.json": "fbed73a21a85cebefb245c9612f417ef82899c00d61fb167ab1840173fd000a3",
     "infra/gcp/release-contracts.json": "f2d306ef0f8898c41c1ea4e701961210b825237177a6f4546d756400788efac8"
   },
@@ -75,7 +75,7 @@
     }
   },
   "agentWebSchemaCompatible": true,
-  "webApiRouteCount": 103,
+  "webApiRouteCount": 104,
   "routes": {
     "apps/web/app/api/audit/[id]/route.ts": {
       "methods": ["GET"],
@@ -152,6 +152,10 @@
     "apps/web/app/api/mobile/v1/bootstrap/route.ts": {
       "methods": ["GET"],
       "sha256": "114f4f3803727c84617b59c30df2679159257e8bba5b9135ef0ba953d312123a"
+    },
+    "apps/web/app/api/mobile/v1/calendar-duplicates/route.ts": {
+      "methods": ["POST"],
+      "sha256": "cf4b3fb123339b040826433bdc6b92469e93d2366a34a69378141ffb2507ec11"
     },
     "apps/web/app/api/mobile/v1/calendars/route.ts": {
       "methods": ["DELETE", "GET", "POST", "PUT"],

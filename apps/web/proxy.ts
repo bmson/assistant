@@ -335,6 +335,7 @@ export function proxy(request: NextRequest) {
     (path === '/api/mobile/v1/memory/commitments' && ['GET', 'POST'].includes(request.method)) ||
     (path === '/api/mobile/v1/email-obligations' && ['GET', 'POST'].includes(request.method)) ||
     (path === '/api/mobile/v1/security-reviews' && request.method === 'GET') ||
+    (path === '/api/mobile/v1/calendar-duplicates' && request.method === 'POST') ||
     (securityReviewIdPath.test(path) &&
       isSecurityIncidentId(path.slice('/api/mobile/v1/security-reviews/'.length)) &&
       request.method === 'POST') ||
