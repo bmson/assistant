@@ -23,7 +23,7 @@ export async function POST(request: Request): Promise<Response> {
   try {
     const result = await assessCalendarDuplicates({
       ownerId: owner.ownerId,
-      events: parsed.data.events,
+      ...parsed.data,
       router: getCalendarDuplicateRouter(),
     });
     return mobileJson(result, { headers: { 'Cache-Control': 'no-store' } });

@@ -209,3 +209,99 @@ describe('calendar duplicate assessor', () => {
     ).toBe(false);
   });
 });
+
+describe('display calendar duplicate assessment', () => {
+  const events = [
+    {
+      id: 'family',
+      calendar: '',
+      title: 'Soccer Practice',
+      day: 'Thursday',
+      time: '5:30 PM',
+      location: '',
+    },
+    {
+      id: 'club',
+      calendar: '',
+      title: 'Blue Fall Practice',
+      day: 'Thursday',
+      time: '5:30 PM',
+      location: '',
+    },
+  ];
+  const group = { eventIds: ['family', 'club'], confidence: 0.95, reason: 'Same practice.' };
+  const request = {
+    mode: 'display' as const,
+    contextDate: 'Thursday, Nov 12',
+    lead: 'Soccer Practice and Blue Fall Practice overlap. Bring water.',
+    events,
+  };
+
+  it('preserves literal display dates and removes only the matched overlap sentence', async () => {
+    const model = mockRouter([group]);
+    const result = await assessCalendarDuplicates({
+      ownerId: 'display-match',
+      router: model.router,
+      ...request,
+    });
+    expect(result).toEqual({ groups: [group], revisedLead: 'Bring water.' });
+    const prompt = JSON.parse(model.object.mock.calls[0]![1].prompt);
+    expect(prompt).toEqual(request);
+    expect(JSON.stringify(prompt)).not.toContain('2026');
+  });
+
+  it('keys the cache by owner and the entire display snapshot', async () => {
+    const model = mockRouter([]);
+    const run = (ownerId: string, changes: Partial<typeof request> = {}) =>
+      assessCalendarDuplicates({ ownerId, router: model.router, ...request, ...changes });
+    await run('display-cache');
+    await run('display-cache');
+    await run('other-display-owner');
+    await run('display-cache', { contextDate: 'Friday, Nov 13' });
+    await run('display-cache', { lead: 'Another notice.' });
+    await run('display-cache', { events: [{ ...events[0]!, day: 'Friday' }, events[1]!] });
+    await run('display-cache', { events: [{ ...events[0]!, time: '6 PM' }, events[1]!] });
+    expect(model.object).toHaveBeenCalledTimes(6);
+  });
+
+  it('rejects uncertain or contradictory dates and times even if the model groups them', async () => {
+    const model = mockRouter([group]);
+    const variants = [
+      { ...request, contextDate: '' },
+      { ...request, events: [{ ...events[0]!, day: '' }, events[1]!] },
+      { ...request, events: [{ ...events[0]!, day: 'Friday' }, events[1]!] },
+      { ...request, events: [{ ...events[0]!, time: 'Unknown' }, events[1]!] },
+      { ...request, events: [{ ...events[0]!, time: '6 PM' }, events[1]!] },
+      { ...request, events: events.map((event) => ({ ...event, calendar: 'family' })) },
+    ];
+    for (const [index, variant] of variants.entries()) {
+      await expect(
+        assessCalendarDuplicates({
+          ownerId: `display-invalid-${index}`,
+          router: model.router,
+          ...variant,
+        }),
+      ).rejects.toThrow();
+    }
+  });
+
+  it('keeps unrelated lead content and never rewrites without an accepted group', async () => {
+    const model = mockRouter([group]);
+    const lead = 'Soccer Practice and Blue Fall Practice overlap and bring water.';
+    expect(
+      await assessCalendarDuplicates({
+        ownerId: 'display-lead',
+        router: model.router,
+        ...request,
+        lead,
+      }),
+    ).toEqual({ groups: [group] });
+    const low = mockRouter([{ ...group, confidence: 0.89 }]);
+    expect(
+      await assessCalendarDuplicates({ ownerId: 'display-low', router: low.router, ...request }),
+    ).toEqual({ groups: [] });
+    expect(
+      calendarDuplicateRequest.safeParse({ ...request, events: [events[0], events[0]] }).success,
+    ).toBe(false);
+  });
+});
