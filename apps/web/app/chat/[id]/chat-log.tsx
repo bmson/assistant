@@ -92,6 +92,7 @@ interface ChatMessageRowProps {
   conversationId?: string;
   formSessionScope?: string;
   visibleEstimatedCostQuoteKeys?: string;
+  costTrackingRefreshKey?: string;
   formDraft?: CardFormDraft | null;
   formError?: string | null;
   onChangeForm?: (identity: CardFormIdentity, form: CardForm, values: CardFormValues) => void;
@@ -116,6 +117,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
   conversationId,
   formSessionScope,
   visibleEstimatedCostQuoteKeys,
+  costTrackingRefreshKey,
   formDraft,
   formError,
   onChangeForm,
@@ -367,6 +369,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
           key={part.operationId}
           part={part}
           formSessionScope={formSessionScope}
+          trackingRefreshKey={costTrackingRefreshKey}
         />
       ))}
       <SuggestionCard parts={suggestionParts} timeZone={agentTimezone} />
@@ -483,6 +486,7 @@ export const ChatLog = memo(function ChatLog({
             onRunForReal={onRunForReal}
             conversationId={conversationId}
             formSessionScope={formSessionScope}
+            costTrackingRefreshKey={`${log.at(-1)?.id ?? ''}:${busy ? 'working' : 'settled'}`}
             visibleEstimatedCostQuoteKeys={(message.parts as readonly unknown[])
               .filter(isCostQuotePayload)
               .filter(

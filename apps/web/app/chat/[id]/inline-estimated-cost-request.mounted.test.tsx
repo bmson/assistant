@@ -115,6 +115,59 @@ async function mount(api: EstimatedCostTransport) {
 }
 
 describe('mounted request-scoped estimated spending approval', () => {
+  it('reads current totals when another turn settles without refreshing or deciding the quote', async () => {
+    const api = transport();
+    const original = quote();
+    const render = (key: string) =>
+      root.render(
+        <InlineEstimatedCostRequest
+          part={original}
+          formSessionScope={session}
+          transport={api}
+          trackingRefreshKey={key}
+        />,
+      );
+    await act(async () => render('request-b:working'));
+    api.read = vi.fn<EstimatedCostTransport['read']>(async (operationId) => ({
+      ok: true,
+      request: { status: 'pending', operationId, quote: original },
+      tracking: tracking({
+        recordedDailyMicros: 280_000,
+        dailyPlannedExposureMicros: 6_240_000,
+      }),
+    }));
+    await act(async () => render('request-b:settled'));
+    expect(api.read).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain('$6.24');
+    expect(container.textContent).toContain('budget changed');
+    expect(api.refresh).not.toHaveBeenCalled();
+    expect(api.decide).not.toHaveBeenCalled();
+    expect(
+      [...container.querySelectorAll('button')].find((b) => b.textContent?.includes('Approve'))
+        ?.disabled,
+    ).toBe(true);
+  });
+
+  it('removes stale approval eligibility if a foreground tracking read fails', async () => {
+    const api = transport();
+    await mount(api);
+    api.read = vi.fn<EstimatedCostTransport['read']>(async () => {
+      throw new Error('Current tracking unavailable');
+    });
+    await act(async () => window.dispatchEvent(new Event('focus')));
+    expect(api.read).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain('Current budget tracking is unavailable');
+    expect(
+      [...container.querySelectorAll('button')].find((b) => b.textContent?.includes('Approve'))
+        ?.disabled,
+    ).toBe(true);
+    expect(
+      [...container.querySelectorAll('button')].find((b) => b.textContent?.includes('Decline'))
+        ?.disabled,
+    ).toBe(false);
+    expect(api.decide).not.toHaveBeenCalled();
+  });
+
   it('requires a fresh quote after a confirmed stale decision even if money totals have not changed', async () => {
     const api = transport();
     api.decide = vi.fn<EstimatedCostTransport['decide']>(async (decision) => ({

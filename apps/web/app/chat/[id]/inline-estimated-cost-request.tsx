@@ -34,6 +34,8 @@ interface Props {
   formSessionScope?: string;
   transport?: EstimatedCostTransport;
   storage?: CostDecisionStorage;
+  /** Changes after conversation activity; this only invalidates read-only tracking. */
+  trackingRefreshKey?: string;
 }
 
 /** A parked request owns its decision state, never the composer's send state. */
@@ -46,7 +48,13 @@ export function InlineEstimatedCostRequest(props: Props) {
   );
 }
 
-function CostRequest({ part, formSessionScope, transport = defaultTransport, storage }: Props) {
+function CostRequest({
+  part,
+  formSessionScope,
+  transport = defaultTransport,
+  storage,
+  trackingRefreshKey,
+}: Props) {
   const [request, setRequest] = useState<EstimatedCostRequestProjection | null>(null);
   const [tracking, setTracking] = useState<EstimatedCostBudgetTracking | null>(null);
   const [unresolved, setUnresolved] = useState<EstimatedCostDecision | null>(null);
@@ -58,6 +66,7 @@ function CostRequest({ part, formSessionScope, transport = defaultTransport, sto
   const [now, setNow] = useState(Date.now);
   const active = useRef(false);
   const readGeneration = useRef(0);
+  const previousTrackingKey = useRef(trackingRefreshKey);
   const locked = useRef(true);
   const journal = useRef<CostDecisionStorage | null>(null);
   const scope = useMemo(
@@ -122,6 +131,7 @@ function CostRequest({ part, formSessionScope, transport = defaultTransport, sto
 
   async function run(kind: NonNullable<typeof action>, work: () => Promise<void>) {
     if (locked.current) return;
+    ++readGeneration.current;
     locked.current = true;
     setAction(kind);
     setError(null);
@@ -149,6 +159,40 @@ function CostRequest({ part, formSessionScope, transport = defaultTransport, sto
 
   const quote = request?.quote ?? part;
   const pending = request?.status === 'pending';
+  useEffect(() => {
+    const changed = previousTrackingKey.current !== trackingRefreshKey;
+    previousTrackingKey.current = trackingRefreshKey;
+    if (!pending || unresolved) return;
+    let disposed = false;
+    const update = async () => {
+      if (locked.current || document.visibilityState === 'hidden') return;
+      const generation = ++readGeneration.current;
+      const current = () =>
+        !disposed && active.current && !locked.current && readGeneration.current === generation;
+      setTracking(null);
+      try {
+        const result = await transport.read(part.operationId);
+        if (!current()) return;
+        if (!result.ok) throw new Error(result.message);
+        setRequest(result.request);
+        setTracking(result.tracking);
+        setError(null);
+      } catch (cause) {
+        if (current()) setError(message(cause));
+      }
+    };
+    if (changed) void update();
+    const timer = window.setInterval(() => void update(), 30_000);
+    const onFocus = () => void update();
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onFocus);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onFocus);
+    };
+  }, [part.operationId, pending, trackingRefreshKey, transport, unresolved]);
   const expiry =
     request?.status === 'approved' ? request.grantExpiresAt : pending ? quote.expiresAt : null;
   useEffect(() => {
