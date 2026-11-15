@@ -54,7 +54,7 @@ async function dropOwnedDatabase(
 }
 
 it.skipIf(!imagesReceipt)(
-  'qualifies the schema 135 migration image, runtime readiness, and generic write compatibility',
+  'qualifies the schema 136 migration image, runtime readiness, and generic write compatibility',
   async () => {
     assertAllocatedTestTarget({
       databaseUrl: process.env.DATABASE_URL,
@@ -82,7 +82,7 @@ it.skipIf(!imagesReceipt)(
       | undefined;
     try {
       await admin`SET statement_timeout = '15s'`;
-      prefixDir = await mkdtemp(join(tmpdir(), 'assistant-memory-witness-role-135-'));
+      prefixDir = await mkdtemp(join(tmpdir(), 'assistant-memory-witness-role-136-'));
       await admin.unsafe(`CREATE DATABASE "${target.databaseName}"`);
       created = true;
       await admin.unsafe(
@@ -95,6 +95,21 @@ it.skipIf(!imagesReceipt)(
       });
       await client`SET statement_timeout = '30s'`;
 
+      // The populated historical 0134 prefix remains unchanged. The current
+      // candidate must apply exactly the witness and personal Calendar tail.
+      const forwardEntries = journal.entries.slice(135);
+      expect(forwardEntries.map((entry: { tag: string }) => entry.tag)).toEqual([
+        '0135_memory_write_witness',
+        '0136_google_calendar_connections',
+      ]);
+      const expectedForwardLedger = await Promise.all(
+        forwardEntries.map(async (entry: { tag: string; when: number }) => ({
+          hash: createHash('sha256')
+            .update(await readFile(join(folder, `${entry.tag}.sql`)))
+            .digest('hex'),
+          createdAt: String(entry.when),
+        })),
+      );
       const prefixEntries = journal.entries.slice(0, 135);
       expect(prefixEntries).toHaveLength(135);
       expect(prefixEntries.at(-1)?.tag).toBe('0134_owner_memory_creation');
@@ -148,6 +163,28 @@ it.skipIf(!imagesReceipt)(
         onnotice: () => {},
       });
       await client`SET statement_timeout = '15s'`;
+      const firstForward = expectedForwardLedger[0];
+      if (!firstForward) throw new Error('Schema 136 forward migration tail is missing.');
+      const forwardLedger = await client`
+        SELECT hash,created_at::text AS "createdAt" FROM drizzle.__drizzle_migrations
+        WHERE created_at >= ${firstForward.createdAt}
+        ORDER BY created_at,id`;
+      expect([...forwardLedger]).toEqual(expectedForwardLedger);
+      const [calendarTable] = await client`
+        SELECT to_regclass('public.google_calendar_connections')::text AS "tableName"`;
+      expect(calendarTable?.tableName).toBe('google_calendar_connections');
+      const calendarState = {
+        version: 1,
+        adopted: true,
+        ownerId: owner,
+        revision: 0,
+        connection: null,
+        flow: null,
+      };
+      await client`INSERT INTO google_calendar_connections (agent_id,state) VALUES (${owner},${JSON.stringify(calendarState)}::jsonb)`;
+      const [calendarAfter] =
+        await client`SELECT state FROM google_calendar_connections WHERE agent_id=${owner}`;
+      expect(calendarAfter?.state).toEqual(calendarState);
       const [legacyAfter] = await client`
       SELECT content,content_hash AS "contentHash",owner_correction AS "ownerCorrection",
         memory_write_witness IS NULL AS "witnessIsSqlNull"
@@ -168,6 +205,25 @@ it.skipIf(!imagesReceipt)(
         legacyMemoryId,
         legacyContent,
       });
+      const proofDirectory = process.env.ASSISTANT_MEMORY_WITNESS_PROOF_DIR;
+      if (proofDirectory) {
+        await writeFile(
+          join(proofDirectory, 'schema-136-forward-upgrade.json'),
+          `${JSON.stringify(
+            {
+              prefixLastMigration: prefixEntries.at(-1)?.tag,
+              forwardMigrations: forwardEntries.map((entry: { tag: string }) => entry.tag),
+              appliedForwardLedger: [...forwardLedger],
+              calendarTable: calendarTable?.tableName,
+              disconnectedCalendarStateReadback: calendarAfter?.state,
+              legacyMemoryWitnessRemainsSqlNull: legacyAfter?.witnessIsSqlNull,
+            },
+            null,
+            2,
+          )}\n`,
+          { mode: 0o600 },
+        );
+      }
     } catch (error) {
       primaryError = error;
     }
@@ -237,8 +293,8 @@ it.skipIf(!imagesReceipt)(
   // + 15s post-migration readback + 2 x 95s migration-image passes (10s
   // create, 5s inspect, 45s attach, 5s exit inspect, 30s cleanup) + 40s
   // runtime image starts + 45s readiness + 80s runtime-container cleanup
-  // (10s logs and 30s exact close per role) + 240s for at most 16 host SQL
+  // (10s logs and 30s exact close per role) + 300s for at most 20 host SQL
   // statements at the helper's 15s statement timeout + 50s fixture
-  // drop/client close/temp cleanup = 885s; reserve 15s diagnostics margin.
-  900_000,
+  // drop/client close/temp cleanup = 945s; reserve 15s diagnostics margin.
+  960_000,
 );

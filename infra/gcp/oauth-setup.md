@@ -92,8 +92,13 @@ settings continues using its existing assistant-account setup and phone calendar
    `MCP_ENC_KEY`. This optional Calendar helper prefers a complete `GOOGLE_OAUTH_CLIENT_ID` /
    `GOOGLE_OAUTH_CLIENT_SECRET` pair, then accepts a complete `AUTH_GOOGLE_ID` / `AUTH_GOOGLE_SECRET`
    pair. It never mixes half-pairs. Web can reuse its existing dashboard secret bindings when
-   they identify the same client as agent; no alias or assistant-account change is needed. The PostgreSQL `infra/gcp/deploy.sh` forwards these settings; Firestore deployments
-   need the equivalent environment and secret bindings in their existing release configuration.
+   they identify the same client as agent; no alias or assistant-account change is needed.
+   For an existing protected deployment, set the optional `google_calendar_oauth_callback_url`
+   input on a full agent/web release. It validates and applies the same callback to both candidate
+   revisions, including the paused and resumed Firestore web revisions, before promotion. An empty
+   input preserves existing configuration. Existing release readiness and maintenance requirements
+   still apply; this input does not activate editor metadata or bypass those checks.
+   The PostgreSQL `infra/gcp/deploy.sh` also forwards the optional environment setting for setup.
    Do not rotate the encryption key without migrating stored credentials.
 4. Configure the OAuth audience for the personal account, including test-user access when
    applicable. The requested scopes are `openid`, `email`, and

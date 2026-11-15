@@ -454,11 +454,6 @@ jobs:
           IMAGE_TAG: ${{ needs.plan.outputs.sha }}
           RELEASE_COMPONENTS: ${{ needs.plan.outputs.components }}
         run: |
-          node infra/gcp/google-calendar-release-config.mjs
-          if [[ -n "$GOOGLE_CALENDAR_OAUTH_CALLBACK_URL" && "$RELEASE_COMPONENTS" != agent,web ]]; then
-            echo 'Personal Calendar configuration requires a paired agent,web release.' >&2
-            exit 2
-          fi
           source infra/gcp/release-staged-services.sh
           if ! declare -F release_validate_basic_editor_preflight_context >/dev/null; then
             echo 'Release source lacks the protected BASIC5 preflight validator; refusing an older checkout with this workflow before cloud authentication.' >&2
@@ -469,6 +464,11 @@ jobs:
           REPO="$ARTIFACT_REPOSITORY"
           TAG="$IMAGE_TAG"
           release_validate_basic_editor_preflight_context "$RELEASE_COMPONENTS" "$TAG"
+          node infra/gcp/google-calendar-release-config.mjs
+          if [[ -n "${GOOGLE_CALENDAR_OAUTH_CALLBACK_URL:-}" && "$RELEASE_COMPONENTS" != agent,web ]]; then
+            echo 'Personal Calendar configuration requires a paired agent,web release.' >&2
+            exit 2
+          fi
       - run: pnpm install --frozen-lockfile
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
