@@ -622,7 +622,7 @@ describe('PostgreSQL independently parked spending permission', () => {
     expect((await upsert).id).toBe('openrouter');
   });
 
-  it.each(['expired', 'exhausted'] as const)(
+  it.each(['expired', 'exhausted', 'transition_exhausted'] as const)(
     're-parks an %s grant and requires a fresh decision',
     async (condition) => {
       const names = MODEL_ROLE_NAMES.filter((role) => role !== 'embed');
@@ -636,6 +636,18 @@ describe('PostgreSQL independently parked spending permission', () => {
               target: modelRoles.role,
               set: { primaryModel: modelId, fallbackModel: modelId, params: {} },
             });
+        if (condition === 'transition_exhausted') {
+          const sourceBinding = await capturePostgresEstimatedCostSourceBinding(db, {
+            actor: prepared.actor,
+            taskId,
+            role: 'draft',
+            selectedModelId: modelId,
+            routingDigest: 'a'.repeat(64),
+            critical: false,
+            additionalRoles: ['plan'],
+          });
+          prepared = { ...prepared, sourceBinding, bindingDigest: hash(sourceBinding) };
+        }
         expect((await storePreparedPostgresQuote(db, prepared)).ok).toBe(true);
         expect(await approvePostgresEstimatedCost(db, prepared.actor, decision())).toMatchObject({
           ok: true,
@@ -680,7 +692,7 @@ describe('PostgreSQL independently parked spending permission', () => {
             .set({ expiresAt: new Date(Date.now() - 1000) })
             .where(eq(estimatedCostGrants.id, grant.id));
         }
-        if (condition === 'exhausted') {
+        if (condition !== 'expired') {
           const attemptId = randomUUID();
           expect(
             await drawEstimatedCostGrant(db, {
@@ -702,10 +714,10 @@ describe('PostgreSQL independently parked spending permission', () => {
           await createPostgresCostRepository(db).reconcile(attemptId, { usd: 0.00001 });
         }
         const candidate = {
-          role: 'draft',
+          role: condition === 'transition_exhausted' ? 'plan' : 'draft',
           critical: false,
           modelId,
-          nextAttemptMicros: 300_000,
+          nextAttemptMicros: condition === 'transition_exhausted' ? 250_000 : 300_000,
           routingDigest: 'c'.repeat(64),
           requestDigest: 'd'.repeat(64),
         };
@@ -748,6 +760,7 @@ describe('PostgreSQL independently parked spending permission', () => {
           mutationsEnabled: () => true,
         }).prepare(prepared.actor, { operationId, quoteRequestId: randomUUID() });
         if (!fresh.ok) throw new Error('Renewal unavailable');
+        expect(fresh.prepared.quote.nextAttemptMicros).toBe(candidate.nextAttemptMicros);
         expect((await storePreparedPostgresQuote(db, fresh.prepared)).ok).toBe(true);
         expect(
           await approvePostgresEstimatedCost(db, prepared.actor, {
