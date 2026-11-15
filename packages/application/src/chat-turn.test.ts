@@ -1,7 +1,11 @@
 import { createHash } from 'node:crypto';
 import { loadConfig, resetConfigForTest } from '@assistant/config';
 import { TRIAGED_ACTIONABLE } from '@assistant/core/events';
-import type { ModelRouter } from '@assistant/core/model-router';
+import {
+  type BudgetSnapshot,
+  evaluateBudget,
+  type ModelRouter,
+} from '@assistant/core/model-router';
 import type { ActionEvidence } from '@assistant/core/workflow/response-contract';
 import type { ApplicationChatPersistence } from '@assistant/persistence';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -217,6 +221,7 @@ type RouterScript = {
   routeError?: Error;
   budgetBlocked?: boolean;
   triageUnavailable?: boolean;
+  triageBudget?: BudgetSnapshot;
   streamError?: Error;
   reviewedReply?: string;
   reviewUnavailable?: boolean;
@@ -236,7 +241,7 @@ function scriptedRouter(script: RouterScript) {
     if (script.routeError) throw script.routeError;
     return { ok: true as const, modelId: 'test/model' };
   });
-  const object = vi.fn(async (role: string) => {
+  const object = vi.fn(async (role: string, options?: { critical?: boolean }) => {
     if ((role === 'rewrite' || role === 'reason') && script.reviewUnavailable)
       return { ok: false, decision: { mode: 'park', reason: 'budget' } };
     if (role === 'rewrite' || role === 'reason')
@@ -264,6 +269,10 @@ function scriptedRouter(script: RouterScript) {
                 reasons: ['clarity_or_format'],
               },
       };
+    if (script.triageBudget) {
+      const decision = evaluateBudget(script.triageBudget, { critical: options?.critical });
+      if (decision.mode === 'block' || decision.mode === 'park') return { ok: false, decision };
+    }
     if (script.triage instanceof Error) throw script.triage;
     if (script.triageUnavailable) return { ok: false, decision: { mode: 'park', reason: 'cap' } };
     return { ok: true, object: script.triage ?? { needsAction: false } };
@@ -1829,6 +1838,46 @@ describe('chat needs-action triage', () => {
     expect(result.object).toHaveBeenCalledOnce();
     expect(result.stream).toHaveBeenCalledOnce();
     expect(stubs.enqueueTask).not.toHaveBeenCalled();
+  });
+
+  it('binds owner chat classification to its admitted task and critical budget context', async () => {
+    const result = await turn('Help with the thing from earlier.', {
+      triage: { needsAction: false },
+      draft: 'Here is an answer.',
+    });
+    expect(result.object).toHaveBeenCalledWith(
+      'classify',
+      expect.objectContaining({ taskId: 'task-1', critical: true }),
+    );
+    expect(result.object.mock.calls.filter(([role]) => role === 'classify')).toHaveLength(1);
+    expect(result.stream).toHaveBeenCalledOnce();
+    expect(stubs.admission).toHaveBeenCalledOnce();
+  });
+
+  it('classifies an owner message within the existing carve-out and still blocks beyond it', async () => {
+    const triageBudget = {
+      dailyLimitUsd: 6,
+      dailySpentUsd: 0.27,
+      monthlyLimitUsd: 50,
+      monthlySpentUsd: 2,
+      heldUsd: 5.76,
+      softPct: 80,
+    };
+    const allowed = await turn('Help with the thing from earlier.', {
+      triageBudget,
+      triage: { needsAction: false },
+      draft: 'Here is an answer.',
+    });
+    expect(allowed.stream).toHaveBeenCalledOnce();
+    expect(allowed.object).toHaveBeenCalledWith(
+      'classify',
+      expect.objectContaining({ taskId: 'task-1', critical: true }),
+    );
+    const blocked = await turn('Help with the thing from earlier.', {
+      triageBudget: { ...triageBudget, heldUsd: 6.34 },
+    });
+    expect(blocked.response.headers.get('x-async-task')).toBe('task-1');
+    expect(blocked.stream).not.toHaveBeenCalled();
   });
 
   it('defaults to the executor when triage is budget-blocked', async () => {

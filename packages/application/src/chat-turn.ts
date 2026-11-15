@@ -1282,6 +1282,8 @@ export async function handleChatTurn(
         .map((m) => `${m.role}: ${textOf(m).slice(0, 500)}`)
         .join('\n');
       const triage = await router.object<z.infer<typeof NeedsActionSchema>>('classify', {
+        taskId: admittedTask.id,
+        critical: true,
         schema: NeedsActionSchema,
         system:
           'Route one chat turn. Decide whether the LATEST user message asks the assistant to DO or CHECK something (send/schedule/book/buy/browse, read, summarize, or report on the inbox or calendar — "look at my calendar and tell me…", "what do I have this week" — remember something, set a reminder, run a task) versus plain conversation. Judge ONLY the latest message; earlier turns are context. When uncertain, choose action — this streaming path has no tools and cannot act on the message.',
