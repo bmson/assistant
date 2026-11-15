@@ -147,7 +147,7 @@ async function prepare(
         return unavailable;
       const additionalRoles =
         input.kind === 'initial'
-          ? MODEL_ROLE_NAMES.filter((name) => name !== role)
+          ? MODEL_ROLE_NAMES.filter((name) => name !== role && name !== 'embed')
           : (oldBinding?.additionalRoutes.map((entry) => entry.role) ?? []);
       const sourceBinding = await firestoreEstimatedCostSourceBinding(tx, store, {
         actor,

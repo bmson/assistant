@@ -114,7 +114,11 @@ export type Route =
     }
   | { ok: false; decision: Extract<BudgetDecision, { mode: 'park' | 'block' }> };
 
+const estimatedCostAttemptState = Symbol('estimatedCostAttemptState');
+
 export interface CallOptions {
+  /** @internal Shared across router-owned retries. */
+  [estimatedCostAttemptState]?: { dispatched: boolean };
   taskId?: string;
   modelOverride?: string;
   /** Use this role's configured fallback model even when the budget is healthy. */
@@ -143,6 +147,26 @@ export interface CallOptions {
   requestProfile?: Omit<ProviderRequestProfile, 'reasoning' | 'maxPrice' | 'privacy'>;
   /** Opt-in direct owner chat: revalidate its lease before one pre-output retry. */
   recoverBeforeOutput?: () => Promise<boolean>;
+  /** Durable parking for this exact call, only before any provider attempt. */
+  parkEstimatedCost?: (input: {
+    candidate: Awaited<ReturnType<ModelRouter['prepareEstimatedCostCandidate']>>;
+    options: Readonly<CallOptions>;
+    decision: Extract<BudgetDecision, { mode: 'park' | 'block' }>;
+    providerAttempts: 0;
+  }) => Promise<'parked' | 'not_parked'>;
+}
+
+type TrackedCallOptions = CallOptions & { [estimatedCostAttemptState]?: { dispatched: boolean } };
+
+/** A parked or ambiguous durable write must never be retried as provider work. */
+export class EstimatedCostParkedError extends Error {
+  constructor(
+    readonly outcome: 'parked' | 'unknown',
+    options?: ErrorOptions,
+  ) {
+    super('Estimated cost approval stopped this model call', options);
+    this.name = 'EstimatedCostParkedError';
+  }
 }
 
 /** Keep optional per-call cost ceilings inside the reservation path. */
@@ -1435,6 +1459,8 @@ export class ModelRouter {
     reservationId: string,
     outputTokenLimit: number,
   ): Promise<void> {
+    const state = (opts as TrackedCallOptions)[estimatedCostAttemptState];
+    if (state) state.dispatched = true;
     const metadata = {
       provider: connectionIdForModel(route.modelId),
       model: route.modelId,
@@ -1502,13 +1528,35 @@ export class ModelRouter {
     };
 
     const preferred = await attempt(Boolean(opts.forceFallback));
-    if (preferred.ok || !preferred.route || preferred.route.degraded) return preferred;
-
-    const fallback = await attempt(true);
-    // A role may intentionally point primary and fallback at the same model.
-    // Preserve the first failure instead of repeating the identical decision.
-    if (fallback.route?.modelId === preferred.route.modelId) return preferred;
-    return fallback;
+    if (preferred.ok) return preferred;
+    let denied = preferred;
+    if (preferred.route && !preferred.route.degraded) {
+      const fallback = await attempt(true);
+      if (fallback.ok) return fallback;
+      // A role may intentionally point primary and fallback at the same model.
+      // Preserve the first failure instead of repeating the identical decision.
+      if (fallback.route?.modelId !== preferred.route.modelId) denied = fallback;
+    }
+    const state = (opts as TrackedCallOptions)[estimatedCostAttemptState];
+    if (opts.parkEstimatedCost && state && !state.dispatched) {
+      const candidate = await this.prepareEstimatedCostCandidate(role, opts, toolCall);
+      // Never attach a quote for a newly selected route to a different denial.
+      if (denied.route && denied.route.modelId !== candidate.modelId) return denied;
+      let outcome: 'parked' | 'not_parked';
+      try {
+        outcome = await opts.parkEstimatedCost({
+          candidate,
+          options: opts,
+          decision: denied.decision,
+          providerAttempts: 0,
+        });
+      } catch (cause) {
+        throw new EstimatedCostParkedError('unknown', { cause });
+      }
+      if (outcome === 'parked') throw new EstimatedCostParkedError('parked');
+      if (outcome !== 'not_parked') throw new EstimatedCostParkedError('unknown');
+    }
+    return denied;
   }
 
   /**
@@ -1771,7 +1819,11 @@ export class ModelRouter {
   /** Non-streaming call with metering. Callers must handle { ok: false }. */
   async generate(role: ModelRole, opts: CallOptions): Promise<GenerateOutcome> {
     if (role === 'embed') throw new Error('generate() cannot use the embed role');
-    opts = { ...opts, requestProfile: opts.requestProfile ?? textRequestProfile(false) };
+    opts = {
+      ...opts,
+      [estimatedCostAttemptState]: { dispatched: false },
+      requestProfile: opts.requestProfile ?? textRequestProfile(false),
+    } as TrackedCallOptions;
     try {
       return await this.withTimeoutRetry(opts, () => this.generateOnce(role, opts));
     } catch (error) {
@@ -1898,6 +1950,7 @@ export class ModelRouter {
       onError?: (error: unknown) => Promise<void>;
     },
   ): Promise<StreamOutcome> {
+    opts = { ...opts, [estimatedCostAttemptState]: { dispatched: false } } as typeof opts;
     if (!opts.recoverBeforeOutput || opts.singleAttempt) return this.streamOnce(role, opts);
     // Both application attempts share one deadline. SDK transport retries are
     // unchanged and also obey this signal; this is not a network-request count.
@@ -2203,6 +2256,7 @@ export class ModelRouter {
     if (role === 'embed') throw new Error('step() cannot use the embed role');
     opts = {
       ...withAdditionalInputTokens(opts, toolInputTokens(opts.tools)),
+      [estimatedCostAttemptState]: { dispatched: false },
       requestProfile: opts.requestProfile ?? {
         tools: Object.keys(opts.tools).length > 0 ? 'required' : 'none',
         toolChoice: opts.toolChoice ?? 'auto',
@@ -2436,6 +2490,7 @@ export class ModelRouter {
     if (role === 'embed') throw new Error('object() cannot use the embed role');
     opts = {
       ...withAdditionalInputTokens(opts, schemaInputTokens(opts.schema)),
+      [estimatedCostAttemptState]: { dispatched: false },
       requestProfile: opts.requestProfile ?? {
         tools: 'none',
         output: 'json_schema',

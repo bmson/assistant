@@ -40,6 +40,7 @@ vi.mock('../cost.js', async (importOriginal) => ({
 
 import {
   getProviderAttemptEvidence,
+  type CallOptions,
   isProviderCapabilityError,
   ModelCallFallbackAttemptError,
   ModelRouter,
@@ -554,6 +555,77 @@ describe('ModelRouter.object provider-capability fallback', () => {
     expect(outcome.attempts ?? []).toEqual([]);
     expect(stubs.generateObject).not.toHaveBeenCalled();
     expect(stubs.beginCostAttempt).not.toHaveBeenCalled();
+  });
+
+  it('hands the exact denied first call to durable parking before provider work', async () => {
+    const { router } = makeRouter();
+    stubs.reserveCost.mockResolvedValue({
+      ok: false,
+      reason: 'monthly budget exceeded',
+      resumeAt: new Date(),
+    });
+    const candidate = {
+      role: 'extract' as const,
+      critical: false,
+      modelId: 'test/fallback',
+      nextAttemptMicros: 10,
+      routingDigest: 'a'.repeat(64),
+      requestDigest: 'b'.repeat(64),
+    };
+    vi.spyOn(router, 'prepareEstimatedCostCandidate').mockResolvedValue(candidate);
+    const parkEstimatedCost = vi.fn<NonNullable<CallOptions['parkEstimatedCost']>>(
+      async () => 'parked',
+    );
+    await expect(
+      router.object('extract', { system: 'instructions', prompt: 'go', schema, parkEstimatedCost }),
+    ).rejects.toMatchObject({ name: 'EstimatedCostParkedError', outcome: 'parked' });
+    expect(parkEstimatedCost).toHaveBeenCalledOnce();
+    expect(parkEstimatedCost.mock.calls[0]?.[0]).toMatchObject({
+      candidate,
+      providerAttempts: 0,
+      options: { system: 'instructions', prompt: 'go', requestProfile: { output: 'json_schema' } },
+    });
+    expect(stubs.generateObject).not.toHaveBeenCalled();
+    expect(stubs.beginCostAttempt).not.toHaveBeenCalled();
+  });
+
+  it('stops provider work when durable parking has an ambiguous outcome', async () => {
+    const { router } = makeRouter();
+    stubs.reserveCost.mockResolvedValue({
+      ok: false,
+      reason: 'monthly budget exceeded',
+      resumeAt: new Date(),
+    });
+    vi.spyOn(router, 'prepareEstimatedCostCandidate').mockResolvedValue({
+      role: 'extract',
+      critical: false,
+      modelId: 'test/fallback',
+      nextAttemptMicros: 10,
+      routingDigest: 'a'.repeat(64),
+      requestDigest: 'b'.repeat(64),
+    });
+    await expect(
+      router.object('extract', {
+        prompt: 'go',
+        schema,
+        parkEstimatedCost: async () => {
+          throw new Error('write outcome unknown');
+        },
+      }),
+    ).rejects.toMatchObject({ name: 'EstimatedCostParkedError', outcome: 'unknown' });
+    expect(stubs.generateObject).not.toHaveBeenCalled();
+  });
+
+  it('never parks a later denial after a provider attempt', async () => {
+    const { router } = makeRouter();
+    stubs.generateObject.mockRejectedValueOnce(removedModelError());
+    stubs.reserveCost
+      .mockResolvedValueOnce({ ok: true, reservationId: 'first' })
+      .mockResolvedValue({ ok: false, reason: 'monthly budget exceeded', resumeAt: new Date() });
+    const parkEstimatedCost = vi.fn(async () => 'parked' as const);
+    await router.object('extract', { prompt: 'go', schema, parkEstimatedCost });
+    expect(stubs.generateObject).toHaveBeenCalledOnce();
+    expect(parkEstimatedCost).not.toHaveBeenCalled();
   });
 
   it('object() still surfaces transient errors without a model switch', async () => {
