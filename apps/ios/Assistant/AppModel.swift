@@ -244,6 +244,11 @@ struct NotificationTurnSettlements {
 
 /// One model observed per property; unrelated projection refreshes do not
 /// invalidate a screen that only reads its conversation or draft state.
+struct HeldTalkUtterance: Equatable {
+    let scope: ComposerDraftScope
+    let text: String
+}
+
 @MainActor
 @Observable
 final class AppModel {
@@ -402,6 +407,7 @@ final class AppModel {
     private(set) var composerRecoveryRevision = 0
     private(set) var calendarDraftRestoreRevision = 0
     private(set) var isPreparingCalendarContext = false
+    private(set) var heldTalkUtterances: [HeldTalkUtterance] = []
     // Its session and recovery are read through composerDraftScope/helpers.
     // Keep this tracked even though the storage itself is private.
     private var conversationDrafts = ConversationDrafts()
@@ -486,6 +492,7 @@ final class AppModel {
         let streamID: String
         let userMessageID: String
         let ownerText: String
+        let spoken: Bool
         let requestBody: Data
         var taskId: String?
         var cancellationRequested: Bool
@@ -631,6 +638,32 @@ final class AppModel {
     var composerDraftScope: ComposerDraftScope? {
         guard bootstrap != nil, let conversationId else { return nil }
         return conversationDrafts.scope(conversationID: conversationId)
+    }
+
+    func heldTalkUtterance(in scope: ComposerDraftScope) -> String? {
+        heldTalkUtterances.first { $0.scope == scope }?.text
+    }
+
+    @discardableResult
+    func holdTalkUtterance(_ text: String, in scope: ComposerDraftScope) -> Bool {
+        guard composerDraftScope == scope, !text.isEmpty else { return false }
+        if let held = heldTalkUtterances.first(where: { $0.scope == scope }) { return held.text == text }
+        heldTalkUtterances.append(.init(scope: scope, text: text))
+        return true
+    }
+
+    func talkTurnWasAdmitted(_ text: String, in scope: ComposerDraftScope) -> Bool {
+        composerDraftScope == scope && isSending && ordinaryTurn?.spoken == true && ordinaryTurn?.ownerText == text
+            && ordinaryTurn?.conversationId == scope.conversationID
+    }
+
+    private func clearHeldTalkUtterance(_ text: String, in scope: ComposerDraftScope) {
+        heldTalkUtterances.removeAll { $0.scope == scope && $0.text == text }
+    }
+
+    func discardHeldTalkUtterance(_ held: HeldTalkUtterance) {
+        guard composerDraftScope == held.scope, !isPreparingCalendarContext else { return }
+        clearHeldTalkUtterance(held.text, in: held.scope)
     }
 
     func composerDraftSnapshot(in scope: ComposerDraftScope) -> ComposerDraftSnapshot? {
@@ -1933,6 +1966,7 @@ final class AppModel {
         cardFormObservedTaskStatuses.removeAll()
         cardFormStateRevision += 1
         conversationDrafts.reset()
+        heldTalkUtterances = []
         composerRecoveryRevision += 1
         navigationPath = []
         dismissError()
@@ -4337,10 +4371,12 @@ final class AppModel {
             streamID: streamID,
             userMessageID: localUser.id,
             ownerText: text,
+            spoken: spoken,
             requestBody: requestBody,
             taskId: nil,
             cancellationRequested: false
         )
+        if spoken { clearHeldTalkUtterance(text, in: draftScope) }
         pollTask = Task { [weak self] in
             guard let self else { return }
             // `ensure`, not `start`: starting ends every live activity first,

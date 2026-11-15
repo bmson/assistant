@@ -5796,6 +5796,41 @@ extension APIClientRetryTests {
     }
 
     @MainActor
+    func testHeldTalkUtteranceWaitsForAdmissionWithoutReplacingTypedDraft() async throws {
+        let model = try await notificationModel()
+        let scope = try XCTUnwrap(model.composerDraftScope)
+        _ = model.saveComposerDraft("Unrelated typed draft", in: scope)
+        let first = "33333333-3333-4333-8333-333333333333"
+        let second = "44444444-4444-4444-8444-444444444444"
+        let path = "/api/mobile/v1/chat/status"
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/chat": [.taskStream(body: Data("data: [DONE]\n\n".utf8), taskId: first),
+                                    .taskStream(body: Data("data: [DONE]\n\n".utf8), taskId: second)],
+            path: [.held(status: 200, body: try replyFinalFixture(taskID: first)),
+                   .success(status: 200, body: try replyFinalFixture(taskID: second))],
+        ])
+        defer { StubURLProtocol.retireHeldResponse(path: path, testCaseID: testCaseID) }
+        model.send("Synthetic request A")
+        let waiting = try await waitForReplyPollFixture { StubURLProtocol.isHoldingResponse(path: path) }
+        XCTAssertTrue(waiting)
+        XCTAssertTrue(model.holdTalkUtterance("Spoken request B", in: scope))
+        model.send("Spoken request B", spoken: true)
+        XCTAssertEqual(model.heldTalkUtterance(in: scope), "Spoken request B")
+        XCTAssertEqual(StubURLProtocol.urls.filter { $0.path == "/api/mobile/v1/chat" }.count, 1)
+        StubURLProtocol.releaseHeldResponse(path: path)
+        let ready = try await waitForReplyPollFixture { model.canAdmitOrdinarySend }
+        XCTAssertTrue(ready)
+        let snapshot = try XCTUnwrap(model.composerDraftSnapshot(in: scope))
+        model.send("Spoken request B", spoken: true,
+                   composerDraftContext: .init(origin: snapshot, localDraft: snapshot.text))
+        XCTAssertTrue(model.talkTurnWasAdmitted("Spoken request B", in: scope))
+        XCTAssertNil(model.heldTalkUtterance(in: scope))
+        XCTAssertEqual(model.composerDraft(in: scope), "Unrelated typed draft")
+        let settled = try await waitForReplyPollFixture { model.messages.contains { $0.id == "final-\(second)" } }
+        XCTAssertTrue(settled)
+    }
+
+    @MainActor
     func testChangedActivityStartsAHeldFollowBeforeQuietBackoff() async throws {
         let model = try await notificationModel()
         let path = "/api/mobile/v1/chat/status"

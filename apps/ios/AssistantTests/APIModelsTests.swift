@@ -1460,6 +1460,24 @@ final class APIModelsTests: XCTestCase {
         XCTAssertEqual(TalkInteractionPolicy.decisionRoute(messages: [pending, budget]), .activity)
     }
 
+    func testTalkKeepsCostReviewsIndependentAndWaitsForSendReadiness() {
+        let a = ChatMessage(id: "a", role: .assistant, parts: [.init(type: "estimated-cost-approval", operationId: "operation-a", requestText: "Compare train routes")])
+        let b = ChatMessage(id: "b", role: .assistant, parts: [.init(type: "estimated-cost-approval", operationId: "operation-b", requestText: "Research a hotel")])
+        XCTAssertFalse(TalkInteractionPolicy.requiresManualDecision(messages: [a, b], pendingApprovals: 0))
+        XCTAssertEqual(TalkInteractionPolicy.costReviews(messages: [a, b, a]), [
+            .init(id: "operation-a", request: "Compare train routes"),
+            .init(id: "operation-b", request: "Research a hotel"),
+        ])
+        XCTAssertFalse(TalkInteractionPolicy.canAttemptHeldUtterance(waiting: true, ready: false,
+            attemptInProgress: false, manualDecision: false, sameScope: true))
+        XCTAssertFalse(TalkInteractionPolicy.canAttemptHeldUtterance(waiting: true, ready: true,
+            attemptInProgress: true, manualDecision: false, sameScope: true))
+        XCTAssertFalse(TalkInteractionPolicy.canAttemptHeldUtterance(waiting: true, ready: true,
+            attemptInProgress: false, manualDecision: false, sameScope: false))
+        XCTAssertTrue(TalkInteractionPolicy.canAttemptHeldUtterance(waiting: true, ready: true,
+            attemptInProgress: false, manualDecision: false, sameScope: true))
+    }
+
     func testHeldPollAsksAgainImmediatelyBecauseTheHoldWasTheWait() {
         // 20s round trip: the server held the connection, so waiting again
         // locally would only delay a reply that is already overdue.

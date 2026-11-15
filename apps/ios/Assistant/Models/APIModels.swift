@@ -283,6 +283,7 @@ enum ChatRole: String, Codable, Sendable {
 struct MessagePart: Codable, Hashable, Sendable {
     let type: String
     var operationId: String? = nil
+    var requestText: String? = nil
     var text: String?
     var data: JSONValue?
     var notice: String?
