@@ -12,9 +12,8 @@ import {
   type EstimatedCostQuote,
   type EstimatedCostQuoteCheck,
   type EstimatedCostQuoteResponse,
-  type EstimatedCostSourceBinding,
   type EstimatedCostRuntimeProviderSource,
-  validateEstimatedCostRuntimeProviderSource,
+  type EstimatedCostSourceBinding,
   estimatedCostAllowanceExpiry,
   estimatedCostCardMessageId,
   estimatedCostConnectionId,
@@ -26,6 +25,7 @@ import {
   parseEstimatedCostReceipt,
   parseHistoricalUnknownBaseline,
   storedUsdToMicros,
+  validateEstimatedCostRuntimeProviderSource,
 } from '@assistant/persistence';
 import { and, eq, gte, inArray, sql, sum } from 'drizzle-orm';
 import type { Db } from './client.js';

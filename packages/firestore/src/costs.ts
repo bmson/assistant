@@ -754,6 +754,15 @@ export class FirestoreCostRepository implements CostRepository {
     return beginFirestoreEstimatedCostGrantAttempt(this.store, input);
   }
 
+  async parkEstimatedCostGrantRenewal(
+    input: import('@assistant/persistence').EstimatedCostGrantRenewal,
+  ): Promise<boolean> {
+    const { parkFirestoreEstimatedCostGrantRenewal } = await import(
+      './estimated-cost-approval-transactions.js'
+    );
+    return parkFirestoreEstimatedCostGrantRenewal(this.store, input);
+  }
+
   async beginAttempt(
     reservationId: string,
     metadata: import('@assistant/persistence').CostAttemptMetadata,

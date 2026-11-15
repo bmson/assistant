@@ -91,6 +91,9 @@ export interface CostRepository {
   beginEstimatedCostGrantAttempt?(
     input: import('./estimated-cost-approval.js').EstimatedCostGrantAttempt,
   ): Promise<boolean>;
+  parkEstimatedCostGrantRenewal?(
+    input: import('./estimated-cost-approval.js').EstimatedCostGrantRenewal,
+  ): Promise<boolean>;
   /** Keep the estimate as a held liability when a paid result or metering is uncertain. */
   markAttemptUnknown(
     reservationId: string,

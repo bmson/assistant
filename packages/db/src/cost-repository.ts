@@ -4,6 +4,7 @@ import {
   addMicros,
   type CostRepository,
   type CurrentBaselineReservation,
+  canonicalEstimatedCostJson,
   currentHistoricalUnknownMicros,
   DEFAULT_RATES,
   type EstimatedCostActor,
@@ -12,16 +13,17 @@ import {
   type EstimatedCostDecision,
   type EstimatedCostDecisionReceipt,
   type EstimatedCostDecisionResponse,
+  type EstimatedCostGrantAttempt,
   type EstimatedCostGrantDraw,
   type EstimatedCostGrantDrawResult,
-  type EstimatedCostGrantAttempt,
+  type EstimatedCostGrantRenewal,
   type EstimatedCostRequestProjection,
+  type EstimatedCostSourceBinding,
+  estimatedCostConnectionId,
   ledgerUsdToMicros,
   MAX_LEDGER_USD_MICROS,
+  MODEL_ROLE_NAMES,
   matchesEstimatedCostParkedTask,
-  estimatedCostConnectionId,
-  canonicalEstimatedCostJson,
-  type EstimatedCostSourceBinding,
   microsToUsd,
   nextDailyReset,
   nextMonthlyReset,
@@ -869,6 +871,196 @@ export async function reserveCost(
   });
 }
 
+/** Re-park a blocked call and release only the old grant's unspent escrow. */
+export async function parkPostgresEstimatedCostGrantRenewal(
+  db: Db,
+  input: EstimatedCostGrantRenewal,
+  providerSource?: import('@assistant/persistence').EstimatedCostRuntimeProviderSource,
+): Promise<boolean> {
+  if (
+    !Number.isSafeInteger(input.candidate.nextAttemptMicros) ||
+    input.candidate.nextAttemptMicros <= 0 ||
+    !/^[a-f0-9]{64}$/.test(input.candidate.routingDigest) ||
+    !/^[a-f0-9]{64}$/.test(input.candidate.requestDigest)
+  )
+    return false;
+  return db.transaction(async (raw) => {
+    const tx = raw as unknown as Db;
+    const [initial] = await tx
+      .select()
+      .from(estimatedCostRequests)
+      .where(eq(estimatedCostRequests.operationId, input.operationId));
+    if (
+      !initial ||
+      initial.ownerId !== input.actor.ownerId ||
+      initial.installationId !== input.actor.installationId ||
+      initial.taskId !== input.taskId ||
+      initial.state !== 'approved' ||
+      initial.bindingDigest !== input.bindingDigest
+    )
+      return false;
+    const old = initial.sourceBinding as EstimatedCostSourceBinding;
+    if (!old || !Array.isArray(old.additionalRoutes) || (input.candidate.critical && !old.critical))
+      return false;
+    const allowed =
+      old.role === input.candidate.role
+        ? old
+        : old.additionalRoutes.find((item) => item.role === input.candidate.role);
+    if (
+      !allowed ||
+      !Array.isArray(allowed.modelRows) ||
+      !allowed.modelRows.some((item) => item.id === input.candidate.modelId)
+    )
+      return false;
+    const { capturePostgresEstimatedCostSourceBinding } = await import(
+      './estimated-cost-approval-transactions.js'
+    );
+    const oldSource = await capturePostgresEstimatedCostSourceBinding(tx, {
+      actor: input.actor,
+      taskId: input.taskId,
+      role: old.role,
+      selectedModelId: old.selectedModelId,
+      routingDigest: old.routingDigest,
+      critical: old.critical,
+      additionalRoles: old.additionalRoutes.map((item) => item.role),
+      providerSource,
+    });
+    if (
+      canonicalEstimatedCostJson(old) !== canonicalEstimatedCostJson(oldSource) ||
+      createHash('sha256').update(canonicalEstimatedCostJson(old)).digest('hex') !==
+        input.bindingDigest
+    )
+      return false;
+    const [request] = await tx
+      .select()
+      .from(estimatedCostRequests)
+      .where(eq(estimatedCostRequests.operationId, input.operationId))
+      .for('update');
+    const [task] = await tx.select().from(tasks).where(eq(tasks.id, input.taskId)).for('update');
+    const [grant] = await tx
+      .select()
+      .from(estimatedCostGrants)
+      .where(eq(estimatedCostGrants.id, input.grantId))
+      .for('update');
+    const quote = parseEstimatedCostQuote(request?.quote);
+    const state =
+      task?.state && typeof task.state === 'object' && !Array.isArray(task.state)
+        ? (task.state as Record<string, unknown>)
+        : null;
+    const marker = state?.estimatedCostApproval as Record<string, unknown> | undefined;
+    if (
+      !request ||
+      request.state !== 'approved' ||
+      request.bindingDigest !== input.bindingDigest ||
+      !task ||
+      !state ||
+      task.status !== 'running' ||
+      task.leaseToken !== input.leaseToken ||
+      !task.lockedUntil ||
+      !marker ||
+      marker.status !== 'approved' ||
+      marker.grantId !== input.grantId ||
+      marker.bindingDigest !== input.bindingDigest ||
+      !grant ||
+      grant.operationId !== input.operationId ||
+      !quote ||
+      quote.quoteId !== grant.quoteId ||
+      !matchesEstimatedCostParkedTask(
+        { ...task, status: 'waiting_estimated_cost' },
+        {
+          actor: input.actor,
+          taskId: input.taskId,
+          operationId: input.operationId,
+          requestFingerprint: request.requestFingerprint,
+        },
+      )
+    )
+      return false;
+    const [escrow] = await tx
+      .select()
+      .from(costReservations)
+      .where(eq(costReservations.id, grant.escrowReservationId))
+      .for('update');
+    if (
+      !escrow ||
+      escrow.status !== 'held' ||
+      escrow.reservationKind !== 'escrow' ||
+      escrow.costGrantId !== grant.id ||
+      escrow.taskId !== task.id
+    )
+      return false;
+    const balance = storedLedgerUsdToMicros(escrow.estimatedUsd);
+    if (
+      !Number.isSafeInteger(grant.allowanceMicros) ||
+      !Number.isSafeInteger(grant.consumedMicros) ||
+      grant.consumedMicros < 0 ||
+      grant.allowanceMicros - grant.consumedMicros !== balance
+    )
+      return false;
+    const [clock] = await tx.execute<{ leaseValid: boolean; expired: boolean }>(
+      sql`select ${task.lockedUntil.toISOString()}::timestamptz > clock_timestamp() as "leaseValid", ${grant.expiresAt.toISOString()}::timestamptz <= clock_timestamp() as expired`,
+    );
+    if (
+      clock?.leaseValid !== true ||
+      (!clock.expired && balance >= input.candidate.nextAttemptMicros)
+    )
+      return false;
+    const source = await capturePostgresEstimatedCostSourceBinding(tx, {
+      actor: input.actor,
+      taskId: input.taskId,
+      role: input.candidate.role,
+      selectedModelId: input.candidate.modelId,
+      routingDigest: input.candidate.routingDigest,
+      critical: input.candidate.critical,
+      additionalRoles: MODEL_ROLE_NAMES.filter(
+        (role) => role !== input.candidate.role && role !== 'embed',
+      ),
+      providerSource,
+    });
+    const bindingDigest = createHash('sha256')
+      .update(canonicalEstimatedCostJson(source))
+      .digest('hex');
+    const [final] = await tx.execute<{ valid: boolean }>(
+      sql`select ${task.lockedUntil.toISOString()}::timestamptz > clock_timestamp() as valid`,
+    );
+    if (final?.valid !== true) return false;
+    await tx
+      .update(costReservations)
+      .set({ status: 'released', reconciledAt: sql`clock_timestamp()` })
+      .where(eq(costReservations.id, escrow.id));
+    await tx
+      .update(estimatedCostRequests)
+      .set({
+        state: 'expired_or_needs_refresh',
+        sourceBinding: source,
+        bindingDigest,
+        quote: { ...quote, renewalCandidate: input.candidate },
+        updatedAt: sql`clock_timestamp()`,
+      })
+      .where(eq(estimatedCostRequests.operationId, input.operationId));
+    await tx
+      .update(tasks)
+      .set({
+        status: 'waiting_estimated_cost',
+        state: {
+          ...state,
+          estimatedCostApproval: {
+            operationId: input.operationId,
+            quoteId: quote.quoteId,
+            bindingDigest,
+            status: 'pending',
+          },
+        },
+        leaseToken: null,
+        lockedUntil: null,
+        runAfter: null,
+        updatedAt: sql`clock_timestamp()`,
+      })
+      .where(eq(tasks.id, task.id));
+    return true;
+  });
+}
+
 /** One grant-backed dispatch; all authority and source checks precede the transition. */
 export async function beginPostgresEstimatedCostGrantAttempt(
   db: Db,
@@ -1420,6 +1612,8 @@ export function createPostgresCostRepository(
     drawEstimatedCostGrant: (input) => drawEstimatedCostGrant(db, input),
     beginEstimatedCostGrantAttempt: (input) =>
       beginPostgresEstimatedCostGrantAttempt(db, input, options.providerSource),
+    parkEstimatedCostGrantRenewal: (input) =>
+      parkPostgresEstimatedCostGrantRenewal(db, input, options.providerSource),
     markAttemptUnknown: (id, reason, receipt) => markCostAttemptUnknown(db, id, reason, receipt),
     record: (input) => recordCostEvent(db, input),
     reconcile: (id, actual) => reconcileReservation(db, id, actual),

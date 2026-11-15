@@ -135,7 +135,8 @@ async function prepare(
       const nextAttemptMicros =
         input.kind === 'initial'
           ? input.input.candidate.nextAttemptMicros
-          : savedQuote?.nextAttemptMicros;
+          : (decodeRecord<{ nextAttemptMicros?: number } | null>(request.get('renewalCandidate'))
+              ?.nextAttemptMicros ?? savedQuote?.nextAttemptMicros);
       if (
         typeof role !== 'string' ||
         typeof modelId !== 'string' ||

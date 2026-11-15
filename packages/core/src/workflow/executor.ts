@@ -6,8 +6,11 @@ import type { ModelMessage } from 'ai';
 import { BudgetReservationError } from '../cost.js';
 import { isForwardedIngest } from '../email-provenance.js';
 import type { TaskState, Trust } from '../events.js';
+import {
+  EstimatedCostParkedError,
+  estimatedCostGrantContextForTask,
+} from '../model-router/router.js';
 import { withSpan } from '../otel.js';
-import { estimatedCostGrantContextForTask } from '../model-router/router.js';
 import { classifyFailure, failureNotice, ownerTaskLabel } from '../owner-text.js';
 import {
   publicActivityFollowupDisposition,
@@ -271,6 +274,10 @@ export async function executeTask(
         try {
           return await runSteps(deps, task);
         } catch (err) {
+          if (err instanceof EstimatedCostParkedError)
+            return err.outcome === 'parked'
+              ? { outcome: 'parked', detail: 'estimated cost approval required' }
+              : { outcome: 'failed', detail: 'estimated cost status unconfirmed' };
           if (err instanceof BudgetReservationError) {
             if (err.message.startsWith('task budget')) {
               const marked = await markTaskNeedsAttention(

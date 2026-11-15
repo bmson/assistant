@@ -1633,7 +1633,21 @@ export class ModelRouter {
         estimatedMicros: candidate.nextAttemptMicros,
         description: `${role}:${route.modelId} preflight`,
       });
-      if (!drawn.ok) throw new Error(`Estimated cost grant unavailable: ${drawn.reason}`);
+      if (!drawn.ok) {
+        if (
+          (drawn.reason === 'expired' || drawn.reason === 'exhausted') &&
+          this.persistence.costs.parkEstimatedCostGrantRenewal
+        ) {
+          try {
+            if (await this.persistence.costs.parkEstimatedCostGrantRenewal({ ...grant, candidate }))
+              throw new EstimatedCostParkedError('parked');
+          } catch (error) {
+            if (error instanceof EstimatedCostParkedError) throw error;
+            throw new EstimatedCostParkedError('unknown', { cause: error });
+          }
+        }
+        throw new Error(`Estimated cost grant unavailable: ${drawn.reason}`);
+      }
       this.grantReservations.set(drawn.reservationId, { context: grant, candidate });
       return {
         ok: true,

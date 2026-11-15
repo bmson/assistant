@@ -39,8 +39,8 @@ vi.mock('../cost.js', async (importOriginal) => ({
 }));
 
 import {
-  getProviderAttemptEvidence,
   type CallOptions,
+  getProviderAttemptEvidence,
   isProviderCapabilityError,
   ModelCallFallbackAttemptError,
   ModelRouter,

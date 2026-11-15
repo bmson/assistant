@@ -224,18 +224,16 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('agent task repository rou
         },
       },
     });
-    await store
-      .doc('tasks', created.task.id)
-      .update({
-        state: {
-          estimatedCostApproval: {
-            status: 'approved',
-            operationId,
-            grantId: 'grant',
-            bindingDigest: 'binding',
-          },
+    await store.doc('tasks', created.task.id).update({
+      state: {
+        estimatedCostApproval: {
+          status: 'approved',
+          operationId,
+          grantId: 'grant',
+          bindingDigest: 'binding',
         },
-      });
+      },
+    });
     const dependencies = deps({
       taskHandlerFor: () => undefined,
       taskKindUnavailable: () => null,

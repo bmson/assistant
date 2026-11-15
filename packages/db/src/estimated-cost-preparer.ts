@@ -1,21 +1,21 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
   addMicros,
+  type CurrentBaselineReservation,
   canonicalEstimatedCostJson,
   currentHistoricalUnknownMicros,
-  estimatedCostAllowance,
-  estimatedCostQuoteExpiry,
-  type CurrentBaselineReservation,
   type EstimatedCostActor,
-  type EstimatedCostPreparedQuote,
   type EstimatedCostPreparationResult,
+  type EstimatedCostPreparedQuote,
   type EstimatedCostQuotePreparer,
   type EstimatedCostQuoteRequest,
   type EstimatedCostSourceBinding,
   type EstimatedCostTurnParkInput,
   type EstimatedCostTurnParking,
-  matchesEstimatedCostParkedTask,
+  estimatedCostAllowance,
+  estimatedCostQuoteExpiry,
   MODEL_ROLE_NAMES,
+  matchesEstimatedCostParkedTask,
   parseEstimatedCostQuote,
   parseHistoricalUnknownBaseline,
   storedLedgerUsdToMicros,
@@ -97,7 +97,8 @@ async function prepare(
   const nextAttemptMicros =
     input.kind === 'initial'
       ? input.input.candidate.nextAttemptMicros
-      : savedQuote?.nextAttemptMicros;
+      : ((existing?.quote as { renewalCandidate?: { nextAttemptMicros?: number } } | undefined)
+          ?.renewalCandidate?.nextAttemptMicros ?? savedQuote?.nextAttemptMicros);
   if (
     typeof role !== 'string' ||
     typeof modelId !== 'string' ||

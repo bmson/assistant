@@ -344,6 +344,17 @@ export interface EstimatedCostGrantAttempt {
   metadata: import('./contracts.js').CostAttemptMetadata;
 }
 
+/** Internal request to re-park an existing task at an unreservable next call. */
+export interface EstimatedCostGrantRenewal {
+  actor: EstimatedCostActor;
+  operationId: string;
+  taskId: string;
+  grantId: string;
+  bindingDigest: string;
+  leaseToken: string;
+  candidate: EstimatedCostTurnParkInput['candidate'];
+}
+
 /** Application boundary used by the web and mobile HTTP handlers.
  * Implementations own authorization, durable idempotency and all ledger decisions. */
 export interface EstimatedCostApprovalService {

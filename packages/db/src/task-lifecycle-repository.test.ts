@@ -15,15 +15,13 @@ it('does not claim, wake, or sweep a task awaiting estimated-cost consent', asyn
   try {
     const [agent] = await db.select().from(agents).limit(1);
     if (!agent) throw new Error('Seed the test database');
-    await db
-      .insert(tasks)
-      .values({
-        id,
-        agentId: agent.id,
-        type: 'chat_turn',
-        status: 'waiting_estimated_cost',
-        runAfter: new Date(0),
-      });
+    await db.insert(tasks).values({
+      id,
+      agentId: agent.id,
+      type: 'chat_turn',
+      status: 'waiting_estimated_cost',
+      runAfter: new Date(0),
+    });
     const repo = createPostgresTaskRepository(db);
     expect(await repo.claim(id)).toBeNull();
     expect(await repo.wakeTask(id)).toBeNull();

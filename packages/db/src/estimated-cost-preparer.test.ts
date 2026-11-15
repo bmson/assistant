@@ -1,23 +1,19 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
   canonicalEstimatedCostJson,
-  MODEL_ROLE_NAMES,
   type EstimatedCostPreparedQuote,
   type EstimatedCostSourceBinding,
+  MODEL_ROLE_NAMES,
 } from '@assistant/persistence';
 import { eq, inArray, sql } from 'drizzle-orm';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createDb, type Db } from './client.js';
-import { createPostgresModelConnectionRepository } from './model-connection-repository.js';
 import {
-  createPostgresEstimatedCostQuotePreparer,
-  createPostgresEstimatedCostTurnParking,
-} from './estimated-cost-preparer.js';
-import {
-  createPostgresCostRepository,
   beginPostgresEstimatedCostGrantAttempt,
+  createPostgresCostRepository,
   drawEstimatedCostGrant,
   lockCostLedger,
+  parkPostgresEstimatedCostGrantRenewal,
   readEstimatedCostView,
 } from './cost-repository.js';
 import {
@@ -25,6 +21,11 @@ import {
   capturePostgresEstimatedCostSourceBinding,
   storePreparedPostgresQuote,
 } from './estimated-cost-approval-transactions.js';
+import {
+  createPostgresEstimatedCostQuotePreparer,
+  createPostgresEstimatedCostTurnParking,
+} from './estimated-cost-preparer.js';
+import { createPostgresModelConnectionRepository } from './model-connection-repository.js';
 import {
   agents,
   budgets,
@@ -620,4 +621,150 @@ describe('PostgreSQL independently parked spending permission', () => {
     }
     expect((await upsert).id).toBe('openrouter');
   });
+
+  it.each(['expired', 'exhausted'] as const)(
+    're-parks an %s grant and requires a fresh decision',
+    async (condition) => {
+      const names = MODEL_ROLE_NAMES.filter((role) => role !== 'embed');
+      const previous = await db.select().from(modelRoles).where(inArray(modelRoles.role, names));
+      try {
+        for (const role of names)
+          await db
+            .insert(modelRoles)
+            .values({ role, primaryModel: modelId, fallbackModel: modelId, params: {} })
+            .onConflictDoUpdate({
+              target: modelRoles.role,
+              set: { primaryModel: modelId, fallbackModel: modelId, params: {} },
+            });
+        expect((await storePreparedPostgresQuote(db, prepared)).ok).toBe(true);
+        expect(await approvePostgresEstimatedCost(db, prepared.actor, decision())).toMatchObject({
+          ok: true,
+          receipt: { status: 'approved' },
+        });
+        const [grant] = await db
+          .select()
+          .from(estimatedCostGrants)
+          .where(eq(estimatedCostGrants.operationId, operationId));
+        if (!grant) throw new Error('Missing grant');
+        const leaseToken = randomUUID();
+        await db
+          .update(tasks)
+          .set({ status: 'running', leaseToken, lockedUntil: new Date(Date.now() + 60_000) })
+          .where(eq(tasks.id, taskId));
+        let uncertainAttemptId: string | undefined;
+        if (condition === 'expired') {
+          uncertainAttemptId = randomUUID();
+          expect(
+            await drawEstimatedCostGrant(db, {
+              actor: prepared.actor,
+              operationId,
+              taskId,
+              grantId: grant.id,
+              bindingDigest: prepared.bindingDigest,
+              attemptId: uncertainAttemptId,
+              source: 'model',
+              estimatedMicros: 1,
+              description: 'synthetic uncertain dispatch',
+            }),
+          ).toMatchObject({ ok: true });
+          await db
+            .update(costReservations)
+            .set({ status: 'dispatching' })
+            .where(eq(costReservations.id, uncertainAttemptId));
+          await createPostgresCostRepository(db).markAttemptUnknown(
+            uncertainAttemptId,
+            'synthetic uncertain outcome',
+          );
+          await db
+            .update(estimatedCostGrants)
+            .set({ expiresAt: new Date(Date.now() - 1000) })
+            .where(eq(estimatedCostGrants.id, grant.id));
+        }
+        if (condition === 'exhausted') {
+          const attemptId = randomUUID();
+          expect(
+            await drawEstimatedCostGrant(db, {
+              actor: prepared.actor,
+              operationId,
+              taskId,
+              grantId: grant.id,
+              bindingDigest: prepared.bindingDigest,
+              attemptId,
+              source: 'model',
+              estimatedMicros: 500_000,
+              description: 'synthetic spent grant',
+            }),
+          ).toMatchObject({ ok: true });
+          await db
+            .update(costReservations)
+            .set({ status: 'dispatching' })
+            .where(eq(costReservations.id, attemptId));
+          await createPostgresCostRepository(db).reconcile(attemptId, { usd: 0.00001 });
+        }
+        const candidate = {
+          role: 'draft',
+          critical: false,
+          modelId,
+          nextAttemptMicros: 300_000,
+          routingDigest: 'c'.repeat(64),
+          requestDigest: 'd'.repeat(64),
+        };
+        expect(
+          await parkPostgresEstimatedCostGrantRenewal(db, {
+            actor: prepared.actor,
+            operationId,
+            taskId,
+            grantId: grant.id,
+            bindingDigest: prepared.bindingDigest,
+            leaseToken,
+            candidate,
+          }),
+        ).toBe(true);
+        expect((await db.select().from(tasks).where(eq(tasks.id, taskId)))[0]?.status).toBe(
+          'waiting_estimated_cost',
+        );
+        expect(
+          (await db.select().from(costReservations).where(eq(costReservations.id, historicalId)))[0]
+            ?.status,
+        ).toBe('unknown');
+        if (uncertainAttemptId)
+          expect(
+            (
+              await db
+                .select()
+                .from(costReservations)
+                .where(eq(costReservations.id, uncertainAttemptId))
+            )[0]?.status,
+          ).toBe('unknown');
+        expect(
+          (
+            await db
+              .select()
+              .from(costReservations)
+              .where(eq(costReservations.id, grant.escrowReservationId))
+          )[0]?.status,
+        ).toBe('released');
+        const fresh = await createPostgresEstimatedCostQuotePreparer(db, {
+          mutationsEnabled: () => true,
+        }).prepare(prepared.actor, { operationId, quoteRequestId: randomUUID() });
+        if (!fresh.ok) throw new Error('Renewal unavailable');
+        expect((await storePreparedPostgresQuote(db, fresh.prepared)).ok).toBe(true);
+        expect(
+          await approvePostgresEstimatedCost(db, prepared.actor, {
+            operationId,
+            quoteId: fresh.prepared.quote.quoteId,
+            quoteVersion: fresh.prepared.quote.quoteVersion,
+            decisionId: randomUUID(),
+            decision: 'approve',
+          }),
+        ).toMatchObject({ ok: true, receipt: { status: 'approved' } });
+      } finally {
+        for (const role of names) {
+          const original = previous.find((row) => row.role === role);
+          if (original) await db.update(modelRoles).set(original).where(eq(modelRoles.role, role));
+          else await db.delete(modelRoles).where(eq(modelRoles.role, role));
+        }
+      }
+    },
+  );
 });

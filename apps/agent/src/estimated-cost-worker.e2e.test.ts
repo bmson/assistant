@@ -1,31 +1,31 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { handleChatTurn } from '@assistant/application';
 import { loadConfig, resetConfigForTest } from '@assistant/config';
-import { ModelRouter, type ModelProvider } from '@assistant/core/model-router';
+import { type ModelProvider, ModelRouter } from '@assistant/core/model-router';
 import {
-  createFirestoreExecutionPersistence,
   createFirestoreEstimatedCostQuotePreparer,
   createFirestoreEstimatedCostTurnParking,
+  createFirestoreExecutionPersistence,
   FirestoreApplicationChatPersistence,
   FirestoreModelRoutingRepository,
 } from '@assistant/firestore';
-import { MODEL_ROLE_NAMES, type EmbeddingSpace } from '@assistant/persistence';
+import { type EmbeddingSpace, MODEL_ROLE_NAMES } from '@assistant/persistence';
 import type { LanguageModel } from 'ai';
 import { MockLanguageModelV3, simulateReadableStream } from 'ai/test';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { FirestoreCostRepository } from '../../../packages/firestore/src/costs.js';
 import {
   approveFirestoreEstimatedCost,
   storePreparedFirestoreQuote,
 } from '../../../packages/firestore/src/estimated-cost-approval-transactions.js';
-import { FirestoreCostRepository } from '../../../packages/firestore/src/costs.js';
 import type { InstallationStore } from '../../../packages/firestore/src/store.js';
 import {
   disposeStore,
   emulatorStore,
   seedBudget,
 } from '../../../packages/firestore/src/test-store.js';
-import { executeAgentTask } from './task-runner.js';
 import type { AgentDeps } from './deps.js';
+import { executeAgentTask } from './task-runner.js';
 
 const SPACE: EmbeddingSpace = {
   provider: 'synthetic',
@@ -43,9 +43,19 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
   () => {
     let store: InstallationStore;
     afterEach(async () => {
+      vi.restoreAllMocks();
       if (store) await disposeStore(store);
     });
-    it.each(['classify', 'draft', 'lost_park', 'lost_decision', 'exhausted', 'expired'] as const)(
+    it.each([
+      'classify',
+      'draft',
+      'lost_park',
+      'lost_decision',
+      'exhausted',
+      'expired',
+      'transition_exhausted',
+      'lost_renewal',
+    ] as const)(
       'parks A at %s, completes B, then resumes A under its grant',
       async (boundary) => {
         resetConfigForTest();
@@ -260,7 +270,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         };
         const approve = () =>
           approveFirestoreEstimatedCost(store, prepared.prepared.actor, decision);
-        let approved;
+        let approved: Awaited<ReturnType<typeof approve>>;
         if (boundary === 'lost_decision') {
           await expect(
             (async () => {
@@ -277,7 +287,8 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         const marker = (
           task!.state as { estimatedCostApproval: { grantId: string; bindingDigest: string } }
         ).estimatedCostApproval;
-        if (boundary === 'exhausted')
+        if (boundary === 'exhausted') {
+          const exhaustedAttemptId = randomUUID();
           expect(
             await costs.drawEstimatedCostGrant({
               actor: prepared.prepared.actor,
@@ -285,17 +296,77 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
               taskId,
               grantId: marker.grantId,
               bindingDigest: marker.bindingDigest,
-              attemptId: randomUUID(),
+              attemptId: exhaustedAttemptId,
               source: 'model',
               estimatedMicros: quote.allowanceMicros,
               description: 'synthetic exhausted allowance',
             }),
           ).toMatchObject({ ok: true });
-        if (boundary === 'expired')
+          await store.doc('costReservations', exhaustedAttemptId).update({ status: 'dispatching' });
+          await costs.reconcile(exhaustedAttemptId, { usd: 0.00001 });
+        }
+        let uncertainAttemptId: string | undefined;
+        if (boundary === 'expired' || boundary === 'lost_renewal') {
+          uncertainAttemptId = randomUUID();
+          expect(
+            await costs.drawEstimatedCostGrant({
+              actor: prepared.prepared.actor,
+              operationId: operationA,
+              taskId,
+              grantId: marker.grantId,
+              bindingDigest: marker.bindingDigest,
+              attemptId: uncertainAttemptId,
+              source: 'model',
+              estimatedMicros: 1,
+              description: 'synthetic uncertain dispatch',
+            }),
+          ).toMatchObject({ ok: true });
+          await store.doc('costReservations', uncertainAttemptId).update({ status: 'dispatching' });
+          await costs.markAttemptUnknown(uncertainAttemptId, 'synthetic uncertain outcome');
           await store
             .doc('estimatedCostGrants', marker.grantId)
             .update({ expiresAt: new Date(Date.now() - 1000) });
+        }
         const attemptsBeforeResume = model.doGenerateCalls.length + model.doStreamCalls.length;
+        if (boundary === 'lost_renewal') {
+          const repark = FirestoreCostRepository.prototype.parkEstimatedCostGrantRenewal;
+          vi.spyOn(
+            FirestoreCostRepository.prototype,
+            'parkEstimatedCostGrantRenewal',
+          ).mockImplementation(async function (this: FirestoreCostRepository, input) {
+            const result = await repark.call(this, input);
+            if (result) throw new Error('synthetic renewal response lost');
+            return result;
+          });
+        }
+        if (boundary === 'transition_exhausted') {
+          const draw = FirestoreCostRepository.prototype.drawEstimatedCostGrant;
+          let consumed = false;
+          vi.spyOn(FirestoreCostRepository.prototype, 'drawEstimatedCostGrant').mockImplementation(
+            async function (this: FirestoreCostRepository, input) {
+              if (
+                !consumed &&
+                input.operationId === operationA &&
+                input.description.startsWith('draft:')
+              ) {
+                consumed = true;
+                const current = await store.doc('estimatedCostGrants', marker.grantId).get();
+                const remaining = current.get('allowanceMicros') - current.get('consumedMicros');
+                const attemptId = randomUUID();
+                const reserved = await draw.call(this, {
+                  ...input,
+                  attemptId,
+                  estimatedMicros: remaining,
+                  description: 'synthetic remaining grant',
+                });
+                if (!reserved.ok) throw new Error('Cannot exhaust synthetic grant');
+                await store.doc('costReservations', attemptId).update({ status: 'dispatching' });
+                await this.reconcile(attemptId, { usd: 0.00001 });
+              }
+              return draw.call(this, input);
+            },
+          );
+        }
         const deps = {
           config,
           router,
@@ -306,25 +377,82 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         } as unknown as AgentDeps;
         expect(await executeAgentTask(deps, taskId, task!.queueGeneration)).toMatchObject({
           outcome: 'admission_recovered',
-          status: 200,
+          status: boundary === 'lost_renewal' ? 503 : 200,
         });
         const after = await chat.listMessages(agentId, conversationB.id, { limit: 30 });
         expect(after!.messages.filter((row) => row.taskId === bTaskId)).toEqual(bRows);
-        if (boundary === 'exhausted' || boundary === 'expired') {
+        if (
+          boundary === 'exhausted' ||
+          boundary === 'expired' ||
+          boundary === 'transition_exhausted' ||
+          boundary === 'lost_renewal'
+        ) {
           expect(model.doGenerateCalls.length + model.doStreamCalls.length).toBe(
-            attemptsBeforeResume,
+            attemptsBeforeResume + (boundary === 'transition_exhausted' ? 1 : 0),
           );
-          expect((await persistence.tasks.getTask(taskId))?.status).not.toBe('done');
-          if (boundary === 'expired')
-            expect(await costs.expireEstimatedCostGrant(marker.grantId)).toBe(true);
+          expect((await persistence.tasks.getTask(taskId))?.status).toBe('waiting_estimated_cost');
+          if (uncertainAttemptId)
+            expect(
+              (await store.doc('costReservations', uncertainAttemptId).get()).get('status'),
+            ).toBe('unknown');
+          if (boundary === 'expired' || boundary === 'lost_renewal')
+            expect(await costs.expireEstimatedCostGrant(marker.grantId)).toBe(false);
+          if (boundary === 'lost_renewal')
+            expect(
+              await costs.readEstimatedCostView(prepared.prepared.actor, operationA),
+            ).toMatchObject({
+              request: { status: 'expired_or_needs_refresh', operationId: operationA },
+            });
+          const renewal = await createFirestoreEstimatedCostQuotePreparer(store, {
+            mutationsEnabled: () => true,
+          }).prepare(prepared.prepared.actor, {
+            operationId: operationA,
+            quoteRequestId: randomUUID(),
+          });
+          if (!renewal.ok) throw new Error(`renewal unavailable: ${JSON.stringify(renewal)}`);
+          expect(renewal.prepared.quote.totalHeldMicros).toBe(
+            950_000 + (uncertainAttemptId ? 1 : 0),
+          );
           expect(
-            await createFirestoreEstimatedCostQuotePreparer(store, {
-              mutationsEnabled: () => true,
-            }).prepare(prepared.prepared.actor, {
+            (
+              await store
+                .collection('estimatedCostGrants')
+                .where('operationId', '==', operationA)
+                .get()
+            ).size,
+          ).toBe(1);
+          expect((await storePreparedFirestoreQuote(store, renewal.prepared)).ok).toBe(true);
+          expect(model.doGenerateCalls.length + model.doStreamCalls.length).toBe(
+            attemptsBeforeResume + (boundary === 'transition_exhausted' ? 1 : 0),
+          );
+          const fresh = renewal.prepared.quote;
+          expect(
+            await approveFirestoreEstimatedCost(store, renewal.prepared.actor, {
               operationId: operationA,
-              quoteRequestId: randomUUID(),
+              quoteId: fresh.quoteId,
+              quoteVersion: fresh.quoteVersion,
+              decisionId: randomUUID(),
+              decision: 'approve',
             }),
-          ).toMatchObject({ ok: false, outcome: 'unavailable' });
+          ).toMatchObject({ ok: true, receipt: { status: 'approved' } });
+          expect(
+            (
+              await store
+                .collection('estimatedCostGrants')
+                .where('operationId', '==', operationA)
+                .get()
+            ).size,
+          ).toBe(2);
+          const renewedTask = await persistence.tasks.getTask(taskId);
+          expect(await executeAgentTask(deps, taskId, renewedTask!.queueGeneration)).toMatchObject({
+            outcome: 'admission_recovered',
+            status: 200,
+          });
+          expect((await persistence.tasks.getTask(taskId))?.status).toBe('done');
+          if (uncertainAttemptId)
+            expect(
+              (await store.doc('costReservations', uncertainAttemptId).get()).get('status'),
+            ).toBe('unknown');
           return;
         }
         expect((await persistence.tasks.getTask(taskId))?.status).toBe('done');

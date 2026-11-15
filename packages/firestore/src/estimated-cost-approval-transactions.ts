@@ -6,6 +6,7 @@ import {
   type EstimatedCostDecision,
   type EstimatedCostDecisionResponse,
   type EstimatedCostGrantAttempt,
+  type EstimatedCostGrantRenewal,
   type EstimatedCostPreparedQuote,
   type EstimatedCostQuoteResponse,
   type EstimatedCostSourceBinding,
@@ -14,6 +15,7 @@ import {
   estimatedCostConnectionId,
   estimatedCostQuoteExpiry,
   estimatedCostQuoteMatches,
+  MODEL_ROLE_NAMES,
   matchesEstimatedCostParkedTask,
   parseEstimatedCostQuote,
   parseEstimatedCostReceipt,
@@ -42,6 +44,193 @@ function counter(doc: DocumentSnapshot | undefined, field: string): number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0)
     throw new Error('Invalid budget counter');
   return value;
+}
+
+/** Re-park exactly the blocked next call; only a later owner decision can fund it. */
+export async function parkFirestoreEstimatedCostGrantRenewal(
+  store: InstallationStore,
+  input: EstimatedCostGrantRenewal,
+): Promise<boolean> {
+  if (
+    input.actor.installationId !== store.installationId ||
+    !Number.isSafeInteger(input.candidate.nextAttemptMicros) ||
+    input.candidate.nextAttemptMicros <= 0 ||
+    !/^[a-f0-9]{64}$/.test(input.candidate.routingDigest) ||
+    !/^[a-f0-9]{64}$/.test(input.candidate.requestDigest)
+  )
+    return false;
+  return store.db.runTransaction(async (tx) => {
+    const requestRef = store.doc('estimatedCostRequests', input.operationId),
+      taskRef = store.doc('tasks', input.taskId),
+      grantRef = store.doc('estimatedCostGrants', input.grantId);
+    const [request, task, grant, holds, taskHolds] = await tx.getAll(
+      requestRef,
+      taskRef,
+      grantRef,
+      store.doc('coordination', 'budget-holds'),
+      store.doc('taskBudgetHolds', input.taskId),
+    );
+    if (
+      !request?.exists ||
+      !task?.exists ||
+      !grant?.exists ||
+      !holds?.exists ||
+      !taskHolds?.exists ||
+      request.get('installationId') !== input.actor.installationId ||
+      request.get('ownerId') !== input.actor.ownerId ||
+      request.get('taskId') !== input.taskId ||
+      request.get('state') !== 'approved' ||
+      request.get('bindingDigest') !== input.bindingDigest ||
+      grant.get('operationId') !== input.operationId
+    )
+      return false;
+    const taskData = decodeRecord<Record<string, unknown>>(task.data());
+    const state =
+      taskData.state && typeof taskData.state === 'object' && !Array.isArray(taskData.state)
+        ? (taskData.state as Record<string, unknown>)
+        : null;
+    const marker = state?.estimatedCostApproval as Record<string, unknown> | undefined;
+    const expiry = decodeRecord<Date>(grant.get('expiresAt')),
+      lockedUntil = taskData.lockedUntil;
+    const quote = parseEstimatedCostQuote(decodeRecord(request.get('quote')));
+    const fingerprint = request.get('requestFingerprint');
+    if (
+      !state ||
+      !marker ||
+      marker.status !== 'approved' ||
+      marker.grantId !== input.grantId ||
+      marker.bindingDigest !== input.bindingDigest ||
+      !quote ||
+      quote.quoteId !== grant.get('quoteId') ||
+      typeof fingerprint !== 'string' ||
+      taskData.status !== 'running' ||
+      taskData.leaseToken !== input.leaseToken ||
+      !(lockedUntil instanceof Date) ||
+      lockedUntil.getTime() <= store.now().getTime() ||
+      !(expiry instanceof Date) ||
+      !Number.isFinite(expiry.getTime()) ||
+      !matchesEstimatedCostParkedTask(
+        {
+          id: input.taskId,
+          agentId: String(taskData.agentId ?? ''),
+          type: String(taskData.type ?? ''),
+          trust: String(taskData.trust ?? ''),
+          status: 'waiting_estimated_cost',
+          trigger: taskData.trigger,
+        },
+        {
+          actor: input.actor,
+          taskId: input.taskId,
+          operationId: input.operationId,
+          requestFingerprint: fingerprint,
+        },
+      )
+    )
+      return false;
+    const escrowId = grant.get('escrowReservationId');
+    if (typeof escrowId !== 'string') return false;
+    const escrowRef = store.doc('costReservations', escrowId),
+      escrow = await tx.get(escrowRef);
+    if (
+      !escrow.exists ||
+      escrow.get('status') !== 'held' ||
+      escrow.get('reservationKind') !== 'escrow' ||
+      escrow.get('costGrantId') !== input.grantId ||
+      escrow.get('taskId') !== input.taskId
+    )
+      return false;
+    const balance = storedLedgerUsdToMicros(escrow.get('estimatedUsd')),
+      allowance = grant.get('allowanceMicros'),
+      consumed = grant.get('consumedMicros');
+    if (
+      !Number.isSafeInteger(allowance) ||
+      !Number.isSafeInteger(consumed) ||
+      consumed < 0 ||
+      allowance - consumed !== balance ||
+      (expiry.getTime() > store.now().getTime() && balance >= input.candidate.nextAttemptMicros)
+    )
+      return false;
+    const held = counter(holds, 'heldMicros'),
+      taskHeld = counter(taskHolds, 'heldMicros');
+    if (held < balance || taskHeld < balance) return false;
+    const oldBinding = decodeRecord<EstimatedCostSourceBinding>(request.get('sourceBinding'));
+    if (
+      !oldBinding ||
+      !Array.isArray(oldBinding.additionalRoutes) ||
+      !Array.isArray(oldBinding.modelRows)
+    )
+      return false;
+    if (input.candidate.critical && !oldBinding.critical) return false;
+    const allowed =
+      oldBinding.role === input.candidate.role
+        ? oldBinding
+        : oldBinding.additionalRoutes.find((item) => item.role === input.candidate.role);
+    if (
+      !allowed ||
+      !Array.isArray(allowed.modelRows) ||
+      !allowed.modelRows.some((item) => item.id === input.candidate.modelId)
+    )
+      return false;
+    const oldSource = await firestoreEstimatedCostSourceBinding(tx, store, {
+      actor: input.actor,
+      taskId: input.taskId,
+      role: oldBinding.role,
+      selectedModelId: oldBinding.selectedModelId,
+      routingDigest: oldBinding.routingDigest,
+      critical: oldBinding.critical,
+      additionalRoles: oldBinding.additionalRoutes.map((item) => item.role),
+    });
+    if (
+      canonicalEstimatedCostJson(oldSource) !== canonicalEstimatedCostJson(oldBinding) ||
+      createHash('sha256').update(canonicalEstimatedCostJson(oldBinding)).digest('hex') !==
+        input.bindingDigest
+    )
+      return false;
+    const sourceBinding = await firestoreEstimatedCostSourceBinding(tx, store, {
+      actor: input.actor,
+      taskId: input.taskId,
+      role: input.candidate.role,
+      selectedModelId: input.candidate.modelId,
+      routingDigest: input.candidate.routingDigest,
+      critical: input.candidate.critical,
+      additionalRoles: MODEL_ROLE_NAMES.filter(
+        (role) => role !== input.candidate.role && role !== 'embed',
+      ),
+    });
+    const bindingDigest = createHash('sha256')
+      .update(canonicalEstimatedCostJson(sourceBinding))
+      .digest('hex');
+    const now = store.now();
+    if ((lockedUntil as Date).getTime() <= now.getTime()) return false;
+    tx.update(escrowRef, { status: 'released', reconciledAt: now });
+    tx.set(store.doc('coordination', 'budget-holds'), { heldMicros: held - balance });
+    tx.set(store.doc('taskBudgetHolds', input.taskId), { heldMicros: taskHeld - balance });
+    tx.update(requestRef, {
+      state: 'expired_or_needs_refresh',
+      sourceBinding,
+      bindingDigest,
+      critical: input.candidate.critical,
+      renewalCandidate: input.candidate,
+      updatedAt: now,
+    });
+    tx.update(taskRef, {
+      status: 'waiting_estimated_cost',
+      state: {
+        ...state,
+        estimatedCostApproval: {
+          operationId: input.operationId,
+          quoteId: quote.quoteId,
+          bindingDigest,
+          status: 'pending',
+        },
+      },
+      lockedUntil: null,
+      leaseToken: null,
+      runAfter: null,
+      updatedAt: now,
+    });
+    return true;
+  });
 }
 
 /** Persist the single dispatch boundary after revalidating the grant and this

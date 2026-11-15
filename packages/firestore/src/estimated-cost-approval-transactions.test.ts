@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
 import { canonicalEstimatedCostJson, estimatedCostCardMessageId } from '@assistant/persistence';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { FirestoreCostRepository } from './costs.js';
 import { FirestoreApplicationChatPersistence } from './application-chat.js';
+import { FirestoreCostRepository } from './costs.js';
 import {
   approveFirestoreEstimatedCost,
   beginFirestoreEstimatedCostGrantAttempt,

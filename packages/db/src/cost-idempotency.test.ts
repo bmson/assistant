@@ -399,14 +399,12 @@ describe('PostgreSQL idempotent cost events', () => {
         .set({ status: 'unknown' })
         .where(eq(costReservations.id, old.reservationId));
       const frozen = [{ reservationId: old.reservationId, estimatedMicros: 100_000 }];
-      await db
-        .insert(estimatedCostBaselines)
-        .values({
-          installationId: 'install',
-          ownerId: 'owner',
-          rows: frozen,
-          digest: createHash('sha256').update(JSON.stringify(frozen)).digest('hex'),
-        });
+      await db.insert(estimatedCostBaselines).values({
+        installationId: 'install',
+        ownerId: 'owner',
+        rows: frozen,
+        digest: createHash('sha256').update(JSON.stringify(frozen)).digest('hex'),
+      });
       expect((await readEstimatedCostView(db, input.actor, operationId))?.tracking).toMatchObject({
         historicalUnknownMicros: 100_000,
         totalHeldMicros: 110_000,

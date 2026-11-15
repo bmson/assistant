@@ -70,7 +70,6 @@ import {
   smsModule,
 } from '@assistant/modules';
 import {
-  parseEstimatedCostRuntimeProviderSource,
   curiosityNudgeChannel,
   type DocumentExtractionRepository,
   drainNotificationOutbox,
@@ -92,6 +91,7 @@ import {
   notificationLeg,
   notificationLegEntry,
   POSTGRES_EMBEDDING_DIMENSIONS,
+  parseEstimatedCostRuntimeProviderSource,
   type Records,
   sendNotificationOutboxLeg,
 } from '@assistant/persistence';
