@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { eq, inArray } from 'drizzle-orm';
+import { eq, inArray, sql } from 'drizzle-orm';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createDb, type Db } from './client.js';
 import { createPostgresCostRepository, recordCostEvent } from './cost-repository.js';
@@ -51,6 +51,66 @@ describe('PostgreSQL idempotent cost events', () => {
     } finally {
       await db.$client.end();
     }
+  });
+
+  it('does not release a hold whose provider dispatch commits while stale cleanup waits', async () => {
+    const costs = createPostgresCostRepository(db);
+    const reservation = await costs.reserve({ source: 'model', estimatedUsd: 0.2, taskId });
+    if (!reservation.ok) throw new Error('Fixture failed to reserve');
+    reservationIds.push(reservation.reservationId);
+    await db
+      .update(costReservations)
+      .set({ createdAt: new Date(Date.now() - 121 * 60_000) })
+      .where(eq(costReservations.id, reservation.reservationId));
+
+    let unlock!: () => void;
+    let locked!: () => void;
+    const lockReady = new Promise<void>((resolve) => {
+      locked = resolve;
+    });
+    const releaseLock = new Promise<void>((resolve) => {
+      unlock = resolve;
+    });
+    const dispatch = db.transaction(async (tx) => {
+      await tx
+        .update(costReservations)
+        .set({ status: 'dispatching', attemptStartedAt: new Date() })
+        .where(eq(costReservations.id, reservation.reservationId));
+      locked();
+      await releaseLock;
+    });
+    await lockReady;
+    const cleanup = costs.releaseStale(120, 500);
+    try {
+      let waiting = false;
+      for (let i = 0; i < 200; i++) {
+        const rows = await db.execute(
+          sql`select 1 from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock' and query ilike '%update%cost_reservations%'`,
+        );
+        if (rows.length) {
+          waiting = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      expect(waiting).toBe(true);
+    } finally {
+      unlock();
+      await dispatch;
+    }
+    await cleanup;
+    const [after] = await db
+      .select()
+      .from(costReservations)
+      .where(eq(costReservations.id, reservation.reservationId));
+    expect(after?.status).toBe('dispatching');
+    await costs.reconcile(reservation.reservationId, { usd: 0.1 });
+    const events = await db
+      .select()
+      .from(costEvents)
+      .where(eq(costEvents.reservationId, reservation.reservationId));
+    expect(events).toHaveLength(1);
+    expect(events[0]?.usd).toBe('0.100000');
   });
 
   it('records one ledger event and one task-spend increment after replay', async () => {

@@ -441,7 +441,9 @@ export async function releaseStaleReservations(
     const released = await tx
       .update(costReservations)
       .set({ status: 'released', reconciledAt: sql`now()` })
-      .where(inArray(costReservations.id, stale))
+      // A provider dispatch may have changed a selected row while this UPDATE
+      // waited for its row lock; recheck its state on the locked row.
+      .where(and(inArray(costReservations.id, stale), eq(costReservations.status, 'held')))
       .returning({ id: costReservations.id });
     const staleDispatches = await tx
       .select({ id: costReservations.id })
