@@ -1,4 +1,7 @@
-import { assessCalendarDuplicates, calendarDuplicateRequest } from '@/lib/calendar-duplicates';
+import {
+  assessCalendarDuplicates,
+  calendarDuplicateRequest,
+} from '@assistant/application/calendar-duplicates';
 import { getCalendarDuplicateRouter } from '@/lib/server';
 import { authenticateMobileOwner, mobileJson, mobileUnauthorized } from '@/mobile-auth';
 

@@ -7,8 +7,8 @@ vi.mock('@/mobile-auth', () => ({
   mobileUnauthorized: () => Response.json({ error: 'unauthorized' }, { status: 401 }),
 }));
 vi.mock('@/lib/server', () => ({ getCalendarDuplicateRouter: state.router }));
-vi.mock('@/lib/calendar-duplicates', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@/lib/calendar-duplicates')>()),
+vi.mock('@assistant/application/calendar-duplicates', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@assistant/application/calendar-duplicates')>()),
   assessCalendarDuplicates: state.assess,
 }));
 const events = [

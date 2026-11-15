@@ -1,6 +1,6 @@
 import type { ModelRouter } from '@assistant/core/model-router';
 import { describe, expect, it, vi } from 'vitest';
-import { assessCalendarDuplicates, calendarDuplicateRequest } from './calendar-duplicates';
+import { assessCalendarDuplicates, calendarDuplicateRequest } from './calendar-duplicates.js';
 
 const base = [
   {
