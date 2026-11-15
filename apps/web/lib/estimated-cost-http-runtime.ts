@@ -16,6 +16,7 @@ import { isAuthed } from '@/auth';
 import {
   assertPostgresInstallationOwner,
   getDb,
+  getEstimatedCostRuntimeProviderSource,
   getFirestoreInstallationStore,
 } from '@/lib/server';
 import { isMobileAuthed } from '@/mobile-auth';
@@ -26,7 +27,10 @@ import { handleEstimatedCostHttp } from './estimated-cost-http';
 function service() {
   const config = loadConfig();
   const enabled = () => estimatedCostApprovalEnabled(config);
-  const options = { mutationsEnabled: enabled };
+  const options = {
+    mutationsEnabled: enabled,
+    providerSource: getEstimatedCostRuntimeProviderSource(),
+  };
   const firestore = config.PERSISTENCE_DRIVER === 'firestore';
   return createEstimatedCostApprovalService({
     repository: firestore

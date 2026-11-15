@@ -363,6 +363,8 @@ const ConfigSchema = z.object({
   CANARY_ENABLED: booleanString,
   /** Enable only after all budget writers support request-scoped allowance escrow. */
   ESTIMATED_COST_APPROVAL_ENABLED: booleanString,
+  /** Deployment-qualified nonsecret provider provenance; never put credentials here. */
+  ESTIMATED_COST_PROVIDER_SOURCE_JSON: z.string().max(4096).default(''),
   /** Explicit rehearsal-only opt-in: permits the authenticated, task-free Vertex probe. */
   VERTEX_MODEL_PROBE_ENABLED: booleanString,
   CANARY_MAX_COST_USD: z.coerce.number().min(0.01).max(0.1).default(0.03),

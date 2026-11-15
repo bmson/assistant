@@ -146,6 +146,7 @@ import {
   createPostgresGoogleCalendarConnectionRepository,
   createPostgresModelCatalogRepository,
   createPostgresModelConnectionRepository,
+  createPostgresModelRoutingRepository,
   createPostgresRecallSurfacingRepository,
   createPostgresSelfRepairRepository,
   createPostgresTaskDiscoveryRepository,
@@ -216,6 +217,7 @@ import { and, asc, desc, eq, gt, lt, or } from 'drizzle-orm';
 import { unstable_cache } from 'next/cache';
 import { cache } from 'react';
 import { isValidFormSessionScope } from '../app/auth-form-session-scope';
+import { estimatedCostProviderSource } from './estimated-cost-provider-source';
 import {
   decodeMobileDocumentCursor,
   encodeMobileDocumentCursor,
@@ -338,6 +340,7 @@ export function getFirestoreInstallationStore() {
     projectId: config.GCP_PROJECT,
     installationId: config.ASSISTANT_WORKSPACE_ID,
     databaseId: config.FIRESTORE_DATABASE_ID,
+    estimatedCostProviderSource: getEstimatedCostRuntimeProviderSource(),
   });
   return globalCache.__assistantFirestoreStore;
 }
@@ -537,7 +540,9 @@ export function getRouter(): ModelRouter {
   if (!globalCache.__assistantRouter) {
     const connections = createPostgresModelConnectionRepository(getDb());
     globalCache.__assistantRouter = new ModelRouter(
-      getDb(),
+      createPostgresModelRoutingRepository(getDb(), {
+        providerSource: getEstimatedCostRuntimeProviderSource(),
+      }),
       config.OPENROUTER_API_KEY,
       config.LLM_AUDIT_CAPTURE,
       createConnectedModelProviders(config, () => connections.list()),
@@ -560,10 +565,17 @@ export function getCalendarDuplicateRouter(): ModelRouter {
 function getEstimatedCostTurnParking() {
   const config = loadConfig();
   if (!estimatedCostApprovalEnabled(config)) return undefined;
-  const options = { mutationsEnabled: () => estimatedCostApprovalEnabled(config) };
+  const options = {
+    mutationsEnabled: () => estimatedCostApprovalEnabled(config),
+    providerSource: getEstimatedCostRuntimeProviderSource(),
+  };
   return config.PERSISTENCE_DRIVER === 'firestore'
     ? createFirestoreEstimatedCostTurnParking(getFirestoreInstallationStore(), options)
     : createPostgresEstimatedCostTurnParking(getDb(), options);
+}
+
+export function getEstimatedCostRuntimeProviderSource() {
+  return estimatedCostProviderSource(loadConfig(), process.env.BUILD_SHA);
 }
 
 /**
