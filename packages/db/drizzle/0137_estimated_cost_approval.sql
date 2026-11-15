@@ -37,3 +37,7 @@ ALTER TABLE "estimated_cost_grants" ADD CONSTRAINT "estimated_cost_grants_operat
 ALTER TABLE "estimated_cost_grants" ADD CONSTRAINT "estimated_cost_grants_escrow_reservation_id_cost_reservations_id_fk" FOREIGN KEY ("escrow_reservation_id") REFERENCES "public"."cost_reservations"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "estimated_cost_requests" ADD CONSTRAINT "estimated_cost_requests_task_id_tasks_id_fk" FOREIGN KEY ("task_id") REFERENCES "public"."tasks"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "cost_reservations" ADD CONSTRAINT "cost_reservations_kind_check" CHECK ("cost_reservations"."reservation_kind" IN ('attempt','escrow'));
+--> statement-breakpoint
+ALTER TABLE "tasks" DROP CONSTRAINT "tasks_status_check";
+--> statement-breakpoint
+ALTER TABLE "tasks" ADD CONSTRAINT "tasks_status_check" CHECK ("status" IN ('pending','running','waiting_approval','waiting_event','sleeping','waiting_budget','waiting_estimated_cost','done','failed','needs_attention','cancelled'));

@@ -14501,7 +14501,7 @@
         },
         "tasks_status_check": {
           "name": "tasks_status_check",
-          "value": "\"tasks\".\"status\" IN ('pending','running','waiting_approval','waiting_event','sleeping','waiting_budget','done','failed','needs_attention','cancelled')"
+          "value": "\"tasks\".\"status\" IN ('pending','running','waiting_approval','waiting_event','sleeping','waiting_budget','waiting_estimated_cost','done','failed','needs_attention','cancelled')"
         },
         "tasks_trust_check": {
           "name": "tasks_trust_check",

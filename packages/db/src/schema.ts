@@ -600,7 +600,7 @@ export const tasks = pgTable(
     ),
     check(
       'tasks_status_check',
-      sql`${t.status} IN ('pending','running','waiting_approval','waiting_event','sleeping','waiting_budget','done','failed','needs_attention','cancelled')`,
+      sql`${t.status} IN ('pending','running','waiting_approval','waiting_event','sleeping','waiting_budget','waiting_estimated_cost','done','failed','needs_attention','cancelled')`,
     ),
     check('tasks_trust_check', sql`${t.trust} IN ('owner','known','unknown','assistant')`),
     check(
