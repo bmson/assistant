@@ -15,7 +15,7 @@ enum CostPermissionDisplayState: Equatable {
         case .pending: "Review the allowance before deciding."
         case .submitting: "Sending your decision…"
         case .unconfirmed: "The decision could not be confirmed. Check this decision before taking further action."
-        case .approved: "Allowance approved. The request’s result and actual cost are separate."
+        case .approved: "An allowance was approved. The request’s result and actual cost are separate."
         case .declined: "Allowance declined."
         case .expired: "This quote expired. Review an updated quote before deciding."
         case .changed: "This quote changed. Review the updated details before deciding."
@@ -47,8 +47,7 @@ struct CostPermissionDisplay: Equatable {
     var canDecide: Bool { (state == .pending || state == .expired) && quoteComplete }
     var canApprove: Bool { state == .pending && quoteComplete && serverAllowsApproval }
 
-    init(quote: EstimatedCostQuote, state: CostPermissionDisplayState,
-         receipt: EstimatedCostDecisionReceipt? = nil, canonicalGrantExpiry: String? = nil, now: Date = Date()) {
+    init(quote: EstimatedCostQuote, state: CostPermissionDisplayState, now: Date = Date()) {
         func usd(_ micros: Int64) -> String {
             guard quote.complete && quote.isValid else { return "Unavailable" }
             return (Decimal(micros) / Decimal(1_000_000)).formatted(.currency(code: "USD").precision(.fractionLength(2...6)))
@@ -63,11 +62,7 @@ struct CostPermissionDisplay: Equatable {
         pendingApprovalEstimate = usd(quote.pendingApprovalMicros)
         dailyLimit = usd(quote.dailyCeilingMicros); monthlyLimit = usd(quote.monthlyCeilingMicros)
         dailyProjectedGross = usd(quote.dailyProjectedGrossMicros); monthlyProjectedGross = usd(quote.monthlyProjectedGrossMicros)
-        if state == .approved, let expiry = receipt?.expiresAt ?? canonicalGrantExpiry {
-            expiryDescription = "Approved allowance expiry: \(expiry)"
-        } else {
-            expiryDescription = quote.expiry.map { "Quote expires \($0.formatted(date: .abbreviated, time: .shortened))" } ?? "Quote expiry unavailable"
-        }
+        expiryDescription = quote.expiry.map { "Quote expires \($0.formatted(date: .abbreviated, time: .shortened))" } ?? "Quote expiry unavailable"
         quoteComplete = quote.complete && quote.isValid
         unavailableReason = quote.unavailableReason
         serverAllowsApproval = quote.canApprove
@@ -95,6 +90,9 @@ struct CostPermissionDisplay: Equatable {
 struct CostPermissionReviewCard: View {
     let display: CostPermissionDisplay
     var canonicalNotice: String? = nil
+    var canonicalStatus: String? = nil
+    var canonicalGrantExpiry: String? = nil
+    var receipt: EstimatedCostDecisionReceipt? = nil
     let approve: () async -> Void
     let decline: () async -> Void
     let check: () async -> Void
@@ -131,6 +129,8 @@ struct CostPermissionReviewCard: View {
                     .font(.subheadline).fixedSize(horizontal: false, vertical: true)
                 Text("This is an allowance for this request, not a charge or a provider spending cap. It does not raise your configured limits or approve tools or external actions. If it needs more, you may be asked again.")
                     .font(.subheadline).fixedSize(horizontal: false, vertical: true)
+                Text("Declining ends this waiting request without spending more. Other eligible requests can continue.")
+                    .font(.subheadline).fixedSize(horizontal: false, vertical: true)
                 Text(display.expiryDescription).font(.subheadline)
                     .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
                     .fixedSize(horizontal: false, vertical: true)
@@ -147,6 +147,20 @@ struct CostPermissionReviewCard: View {
                 Text(display.state.message).font(.subheadline)
                     .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
                     .fixedSize(horizontal: false, vertical: true)
+                if let receipt {
+                    Text("Your decision for quote \(receipt.quoteId): \(receipt.status == "stale" ? "not applied because the quote changed" : "confirmed \(receipt.status)").")
+                        .font(.subheadline).fixedSize(horizontal: false, vertical: true)
+                    if let expiry = receipt.expiresAt {
+                        Text("Your confirmed allowance expires: \(expiry)").font(.subheadline)
+                    }
+                }
+                if let canonicalStatus {
+                    Text("Last checked request status: \(canonicalStatus.replacingOccurrences(of: "_", with: " ")).")
+                        .font(.subheadline).fixedSize(horizontal: false, vertical: true)
+                    if canonicalStatus == "approved", let canonicalGrantExpiry {
+                        Text("Request allowance expires: \(canonicalGrantExpiry)").font(.subheadline)
+                    }
+                }
                 if let canonicalNotice, !canonicalNotice.isEmpty {
                     Text(canonicalNotice).font(.subheadline).fixedSize(horizontal: false, vertical: true)
                 }
@@ -251,9 +265,10 @@ struct PendingCostPermissionDecision: Codable, Equatable, Sendable {
          connectionIsCurrent: @escaping @MainActor () -> Bool,
          send: @escaping @MainActor (EstimatedCostDecision) async -> EstimatedCostDecisionReceipt?,
          readReceipt: @escaping @MainActor (EstimatedCostDecision) async -> EstimatedCostDecisionReceipt?,
+         previousReceipt: EstimatedCostDecisionReceipt? = nil,
          decisionID: @escaping @MainActor () -> String = { UUID().uuidString.lowercased() },
          now: @escaping @MainActor () -> Date = { Date() }) {
-        self.ownerID = ownerID; self.quote = quote; self.store = store
+        self.ownerID = ownerID; self.quote = quote; self.store = store; self.receipt = previousReceipt
         self.connectionIsCurrent = connectionIsCurrent; self.send = send; self.readReceipt = readReceipt
         self.decisionID = decisionID; self.now = now
     }
@@ -358,16 +373,21 @@ struct EstimatedCostReviewScreen: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 if let controller, displayedConnectionVersion == model.activityConnectionVersion {
-                    CostPermissionReviewCard(display: .init(quote: controller.quote, state: controller.state, receipt: controller.receipt,
-                                                            canonicalGrantExpiry: controller.canonicalGrantExpiry),
-                        canonicalNotice: controller.canonicalNotice,
-                        approve: { await controller.decide("approve") },
-                        decline: { await controller.decide("decline") },
-                        check: { await controller.checkDecision() })
-                    if controller.state == .expired || controller.state == .changed {
-                        Button("Request an updated quote") { Task { await requestUpdatedQuote() } }
-                            .buttonStyle(AssistantActionButtonStyle(kind: .secondary, fillsWidth: true))
-                            .disabled(quoteRefreshUnconfirmed || loading)
+                    TimelineView(.periodic(from: .now, by: 1)) { timeline in
+                        let display = CostPermissionDisplay(quote: controller.quote, state: controller.state, now: timeline.date)
+                        VStack(spacing: 16) {
+                            CostPermissionReviewCard(display: display, canonicalNotice: controller.canonicalNotice,
+                                canonicalStatus: controller.canonicalStatus, canonicalGrantExpiry: controller.canonicalGrantExpiry,
+                                receipt: controller.receipt,
+                                approve: { await controller.decide("approve") },
+                                decline: { await controller.decide("decline") },
+                                check: { await controller.checkDecision() })
+                            if display.state == .expired || display.state == .changed {
+                                Button("Request an updated quote") { Task { await requestUpdatedQuote() } }
+                                    .buttonStyle(AssistantActionButtonStyle(kind: .secondary, fillsWidth: true))
+                                    .disabled(quoteRefreshUnconfirmed || loading)
+                            }
+                        }
                     }
                     if quoteRefreshUnconfirmed {
                         Text("The updated quote could not be confirmed. Check this request before requesting another.")
@@ -425,9 +445,10 @@ struct EstimatedCostReviewScreen: View {
         let owner = context.ownerID
         let version = context.connectionVersion
         let current = { model.checklistCorrectionConnectionIsCurrent(ownerID: owner, version: version) }
+        let previousReceipt = displayedConnectionVersion == version ? controller?.receipt : nil
         let next = CostPermissionController(ownerID: owner, quote: quote, store: store, connectionIsCurrent: current,
             send: { try? await context.client.decideEstimatedCost($0) },
-            readReceipt: { try? await context.client.estimatedCostDecisionReceipt($0) })
+            readReceipt: { try? await context.client.estimatedCostDecisionReceipt($0) }, previousReceipt: previousReceipt)
         next.restore()
         if let projection { next.apply(projection) }
         else if saved == nil { controller = nil; unavailable = true; loading = false; return }

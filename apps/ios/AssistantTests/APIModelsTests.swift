@@ -45,6 +45,19 @@ extension APIModelsTests {
         XCTAssertEqual(reopened.state, .approved)
         XCTAssertNil(store.saved)
         XCTAssertEqual(writes, 1)
+        var nextQuoteJSON = String(data: try JSONEncoder().encode(quote), encoding: .utf8)!
+        nextQuoteJSON = nextQuoteJSON.replacingOccurrences(of: "quote-1", with: "quote-2")
+        let nextQuote = try JSONDecoder().decode(EstimatedCostQuote.self, from: Data(nextQuoteJSON.utf8))
+        reopened.apply(.init(status: "pending", operationId: quote.operationId, quote: nextQuote,
+                             grantExpiresAt: nil, reason: nil))
+        XCTAssertEqual(reopened.state, .pending)
+        XCTAssertEqual(reopened.quote.quoteId, "quote-2")
+        XCTAssertEqual(reopened.receipt?.quoteId, "quote-1", "An earlier receipt remains distinct from a new quote")
+        XCTAssertEqual(reopened.canonicalStatus, "pending")
+        let expiredDisplay = CostPermissionDisplay(quote: nextQuote, state: .pending,
+                                                    now: nextQuote.expiry!.addingTimeInterval(1))
+        XCTAssertEqual(expiredDisplay.state, .expired)
+        XCTAssertFalse(expiredDisplay.canApprove)
         let decision = EstimatedCostDecision(operationId: quote.operationId, quoteId: quote.quoteId,
             quoteVersion: quote.quoteVersion, decisionId: "decision-1", decision: "approve")
         let wrongAmount = EstimatedCostDecisionReceipt(decisionId: "decision-1", operationId: quote.operationId,
