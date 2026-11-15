@@ -483,7 +483,8 @@ it.each(historicalPrefixes)(
   120000,
 );
 
-it('upgrades a populated 0134 memory through the standard 0135 migration and portable export', async () => {
+// Keep the historical selector used by the portable-handoff script; assert the full current tail.
+it('upgrades a populated 0134 memory through the standard 0135 migration and portable export (forward tail through 0136)', async () => {
   const portableMode = selectPortableExportMode(process.env);
   const outerDatabaseName = assertAllocatedTestTarget({
     databaseUrl: process.env.DATABASE_URL,
@@ -512,6 +513,7 @@ it('upgrades a populated 0134 memory through the standard 0135 migration and por
     expect(prefixEntries).toHaveLength(135);
     expect(prefixEntries.at(-1)?.tag).toBe('0134_owner_memory_creation');
     expect(journal.entries[135]?.tag).toBe('0135_memory_write_witness');
+    expect(journal.entries[136]?.tag).toBe('0136_google_calendar_connections');
     await mkdir(join(prefixDir, 'meta'));
     await writeFile(
       join(prefixDir, 'meta/_journal.json'),
@@ -572,7 +574,12 @@ it('upgrades a populated 0134 memory through the standard 0135 migration and por
       WHERE created_at >= ${expectedOwnerTailStart}
       ORDER BY created_at ASC,id ASC
     `;
-    expect(beforeTail).toEqual(expectedOwnerTail.slice(0, -1));
+    // This historical prefix ends at 0134 even as the shipped forward tail advances.
+    expect(beforeTail).toEqual(expectedOwnerTail.slice(0, prefixEntries.length - 130));
+    expect(
+      (await client`SELECT to_regclass('public.google_calendar_connections') AS relation`)[0]
+        ?.relation,
+    ).toBeNull();
     await client.end();
     client = undefined;
 
@@ -596,6 +603,11 @@ it('upgrades a populated 0134 memory through the standard 0135 migration and por
       ORDER BY created_at ASC,id ASC
     `;
     expect(installedTail).toEqual(expectedOwnerTail);
+    // 0136 adds optional credentials without creating grants or changing existing owner data.
+    expect(await client`SELECT agent_id,state FROM google_calendar_connections`).toEqual([]);
+    expect(
+      await client`SELECT convalidated FROM pg_constraint WHERE conrelid='public.google_calendar_connections'::regclass AND conname='google_calendar_connections_agent_id_agents_id_fk'`,
+    ).toEqual([{ convalidated: true }]);
     const witnessColumn = await client`
       SELECT column_name,is_nullable,column_default FROM information_schema.columns
       WHERE table_schema='public' AND table_name='memories' AND column_name='memory_write_witness'

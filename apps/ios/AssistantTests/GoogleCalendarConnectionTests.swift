@@ -139,18 +139,24 @@ final class GoogleCalendarConnectionTests: XCTestCase {
     }
 
     func testTransportFailureDoesNotReplayConnectOrDisconnect() async {
+        let testCaseID = UUID().uuidString
+        StubURLProtocol.beginTestCase(testCaseID)
+        defer { StubURLProtocol.endTestCase(testCaseID) }
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StubURLProtocol.self]
+        configuration.httpAdditionalHeaders = ["X-Assistant-Test-Case": testCaseID]
         let session = URLSession(configuration: configuration)
         defer { session.invalidateAndCancel() }
         let client = APIClient(configuration: .init(baseURL: URL(string: "https://assistant.example.com")!, token: "mobile-key"), session: session)
         StubURLProtocol.prime([.failure(URLError(.timedOut))])
-        do { _ = try await client.connectGoogleCalendar(); XCTFail("Expected uncertain result") } catch {}
+        do { _ = try await client.connectGoogleCalendar(); XCTFail("Expected uncertain result") }
+        catch { XCTAssertEqual((error as? URLError)?.code, .timedOut) }
         XCTAssertEqual(StubURLProtocol.attempts, ["POST"])
         XCTAssertEqual(StubURLProtocol.urls.first?.path, "/api/mobile/v1/connections/google-calendar/connect")
         XCTAssertEqual(StubURLProtocol.headers.first?.first(where: { $0.key.caseInsensitiveCompare("authorization") == .orderedSame })?.value, "Bearer mobile-key")
         StubURLProtocol.prime([.failure(URLError(.timedOut))])
-        do { try await client.disconnectGoogleCalendar(); XCTFail("Expected uncertain result") } catch {}
+        do { try await client.disconnectGoogleCalendar(); XCTFail("Expected uncertain result") }
+        catch { XCTAssertEqual((error as? URLError)?.code, .timedOut) }
         XCTAssertEqual(StubURLProtocol.attempts, ["DELETE"])
     }
 }

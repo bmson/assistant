@@ -288,20 +288,25 @@ beforeAll(async () => {
     const expectedOwnerMemoryHash = createHash('sha256')
       .update(await readFile(join(folder, '0134_owner_memory_creation.sql')))
       .digest('hex');
-    const expectedFinalHash = createHash('sha256')
+    const expectedWitnessHash = createHash('sha256')
       .update(await readFile(join(folder, '0135_memory_write_witness.sql')))
       .digest('hex');
+    const expectedFinalHash = createHash('sha256')
+      .update(await readFile(join(folder, '0136_google_calendar_connections.sql')))
+      .digest('hex');
+    expect(journal.entries.at(-1)?.tag).toBe('0136_google_calendar_connections');
     const [endpoint] = await client`
       SELECT hash FROM drizzle.__drizzle_migrations ORDER BY id DESC LIMIT 1`;
     expect(endpoint?.hash).toBe(expectedFinalHash);
     const [ledgerCount] =
       await client`SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations`;
-    expect(ledgerCount?.count).toBe(136);
+    expect(ledgerCount?.count).toBe(137);
     const ledgerBeforeRerun = await client`
       SELECT hash,created_at::text AS "createdAt"
       FROM drizzle.__drizzle_migrations ORDER BY id`;
-    expect(ledgerBeforeRerun).toHaveLength(136);
-    expect(ledgerBeforeRerun.at(-2)?.hash).toBe(expectedOwnerMemoryHash);
+    expect(ledgerBeforeRerun).toHaveLength(137);
+    expect(ledgerBeforeRerun.at(-3)?.hash).toBe(expectedOwnerMemoryHash);
+    expect(ledgerBeforeRerun.at(-2)?.hash).toBe(expectedWitnessHash);
     expect(ledgerBeforeRerun.at(-1)?.hash).toBe(expectedFinalHash);
     await client.end();
     client = undefined;
