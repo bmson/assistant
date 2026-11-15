@@ -1490,7 +1490,6 @@ export class ModelRouter {
           role,
           taskId: opts.taskId ?? null,
           modelId: route.modelId,
-          degraded: route.degraded,
           promptCostPerMTok: route.promptCostPerMTok,
           completionCostPerMTok: route.completionCostPerMTok,
           params: route.params,
