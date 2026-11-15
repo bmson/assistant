@@ -14,7 +14,10 @@ export { createPostgresCardRefreshRepository } from './card-refresh-repository.j
 export { notChatAdmissionCancellationSql } from './chat-admission-projection.js';
 export * from './client.js';
 export { createPostgresConversationSearchRepository } from './conversation-search-repository.js';
-export { createPostgresCostRepository } from './cost-repository.js';
+export {
+  createPostgresCostRepository,
+  createPostgresEstimatedCostApprovalRepository,
+} from './cost-repository.js';
 export { admitPostgresCuriosityQuestion } from './curiosity-admission-repository.js';
 export { createPostgresDeviceTokenRepository } from './device-token-repository.js';
 export { createPostgresDocumentProcessorRepository } from './document-processor-repository.js';

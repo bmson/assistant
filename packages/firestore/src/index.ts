@@ -22,7 +22,10 @@ export { FirestoreContactLookupRepository } from './contact-lookup.js';
 export { conversationDocument, repairConversationProjectionPage } from './conversation-document.js';
 export { FirestoreConversationSearchRepository } from './conversation-search.js';
 export { FirestoreConversationSegmentationRepository } from './conversation-segmentation.js';
-export { FirestoreCostRepository } from './costs.js';
+export {
+  createFirestoreEstimatedCostApprovalRepository,
+  FirestoreCostRepository,
+} from './costs.js';
 export { FirestoreDeviceTokenRepository } from './device-tokens.js';
 export { FirestoreDocumentCatalogRepository } from './document-catalog.js';
 export { FirestoreDocumentDeletionRepository } from './document-deletion.js';
