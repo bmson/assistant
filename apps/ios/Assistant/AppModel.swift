@@ -140,6 +140,7 @@ enum AssistantDestination: Hashable {
     case route(AssistantRoute)
     case peopleConnections
     case person(id: String)
+    case estimatedCostApproval(operationID: String)
 }
 
 /// An action the error banner can offer when a failure is worth another go.

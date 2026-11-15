@@ -4255,6 +4255,20 @@ final class APIClientRetryTests: XCTestCase {
 }
 
 extension APIClientRetryTests {
+    func testEstimatedCostDecisionDoesNotRetryAndAcceptsBoundStaleReceipt() async throws {
+        let decision = EstimatedCostDecision(operationId: "op-1", quoteId: "q-1", quoteVersion: "v1", decisionId: "d-1", decision: "approve")
+        StubURLProtocol.prime([.failure(URLError(.timedOut)),
+                               .success(status: 200, body: Data(#"{"ok":true}"#.utf8))])
+        do {
+            _ = try await makeClient().decideEstimatedCost(decision)
+            XCTFail("A lost decision response must not replay the POST")
+        } catch { XCTAssertEqual(StubURLProtocol.attempts, ["POST"]) }
+        StubURLProtocol.prime([.success(status: 409, body: Data(#"{"ok":true,"receipt":{"operationId":"op-1","quoteId":"q-1","decisionId":"d-1","status":"stale"}}"#.utf8))])
+        let receipt = try await makeClient().decideEstimatedCost(decision)
+        XCTAssertEqual(receipt.status, "stale")
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST"])
+        XCTAssertEqual(StubURLProtocol.urls.first?.path, "/api/mobile/v1/chat/estimated-cost/decision")
+    }
     func testPhoneCalendarSharingUsesVerifiedOwnerAndGenerationWireContract() async throws {
         let activeState = #"{"version":1,"ownerId":"owner-1","publisherId":"publisher-1","generation":1,"enabled":true,"consentVersion":1,"calendars":[{"id":"work","name":"Work","purpose":"commitments"}],"updatedAt":"2026-10-22T12:00:00Z","mutationId":"mutation-1"}"#
         let disabledState = #"{"version":1,"ownerId":"owner-1","publisherId":"publisher-1","generation":2,"enabled":false,"consentVersion":1,"calendars":[],"updatedAt":"2026-10-22T12:01:00Z"}"#

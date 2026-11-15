@@ -4,6 +4,78 @@ import CoreLocation
 @testable import Assistant
 
 extension APIModelsTests {
+    @MainActor func testCostPermissionRecoversOnlySameDecisionAfterUnknownResponse() async throws {
+        @MainActor final class Store: CostPermissionRecoveryStore {
+            var saved: PendingCostPermissionDecision?
+            func load(ownerID: String, operationID: String) throws -> PendingCostPermissionDecision? { saved }
+            func save(_ pending: PendingCostPermissionDecision) throws { saved = pending }
+            func remove(ownerID: String, operationID: String) throws { saved = nil }
+        }
+        let quote = try JSONDecoder().decode(EstimatedCostQuote.self, from: Data(#"{"type":"estimated-cost-approval","operationId":"op-1","taskId":"task-1","requestText":"Compare options","quoteId":"quote-1","quoteVersion":"v1","expiresAt":"2030-01-01T00:00:00Z","nextAttemptMicros":50000,"allowanceMicros":500000,"recordedDailyMicros":100000,"recordedMonthlyMicros":200000,"totalHeldMicros":30000,"eligibleHistoricalUnknownMicros":20000,"pendingApprovalMicros":50000,"dailyCeilingMicros":1000000,"monthlyCeilingMicros":10000000,"dailyProjectedGrossMicros":180000,"monthlyProjectedGrossMicros":280000,"complete":true,"canApprove":true}"#.utf8))
+        let store = Store()
+        var writes = 0
+        let controller = CostPermissionController(ownerID: "owner", quote: quote, store: store,
+            connectionIsCurrent: { true }, send: { _ in writes += 1; return nil }, readReceipt: { decision in
+                .init(decisionId: decision.decisionId, operationId: decision.operationId, quoteId: decision.quoteId,
+                      status: "approved", allowanceMicros: 500000, expiresAt: "2030-01-01T00:20:00Z")
+            }, decisionID: { "decision-1" })
+        controller.restore()
+        await controller.decide("approve")
+        XCTAssertEqual(controller.state, .unconfirmed)
+        XCTAssertEqual(store.saved?.decision.decisionId, "decision-1")
+        await controller.decide("approve")
+        XCTAssertEqual(writes, 1, "Unknown decisions cannot replay their spending POST")
+        var reads = 0
+        let reopened = CostPermissionController(ownerID: "owner", quote: quote, store: store,
+            connectionIsCurrent: { true }, send: { _ in writes += 1; return nil }, readReceipt: { decision in
+                reads += 1
+                return .init(decisionId: reads == 1 ? "wrong-id" : decision.decisionId,
+                             operationId: decision.operationId, quoteId: decision.quoteId,
+                             status: "approved", allowanceMicros: 500000, expiresAt: "2030-01-01T00:20:00Z")
+            })
+        reopened.restore()
+        XCTAssertEqual(reopened.state, .unconfirmed)
+        reopened.apply(.init(status: "approved", operationId: quote.operationId, quote: quote,
+                             grantExpiresAt: "2030-01-01T00:20:00Z", reason: nil))
+        XCTAssertEqual(reopened.state, .unconfirmed, "Another device's request projection is not this decision's receipt")
+        await reopened.checkDecision()
+        XCTAssertEqual(reopened.state, .unconfirmed)
+        XCTAssertNotNil(store.saved)
+        await reopened.checkDecision()
+        XCTAssertEqual(reopened.state, .approved)
+        XCTAssertNil(store.saved)
+        XCTAssertEqual(writes, 1)
+        let decision = EstimatedCostDecision(operationId: quote.operationId, quoteId: quote.quoteId,
+            quoteVersion: quote.quoteVersion, decisionId: "decision-1", decision: "approve")
+        let wrongAmount = EstimatedCostDecisionReceipt(decisionId: "decision-1", operationId: quote.operationId,
+            quoteId: quote.quoteId, status: "approved", allowanceMicros: quote.allowanceMicros + 1,
+            expiresAt: "2030-01-01T00:20:00Z")
+        XCTAssertFalse(wrongAmount.confirms(decision, quote: quote))
+        let wrongAction = EstimatedCostDecisionReceipt(decisionId: "decision-1", operationId: quote.operationId,
+            quoteId: quote.quoteId, status: "declined", allowanceMicros: nil, expiresAt: nil)
+        XCTAssertFalse(wrongAction.confirms(decision, quote: quote))
+    }
+    func testCostPermissionPresentationOnlyAllowsFreshPendingDecision() {
+        XCTAssertTrue(CostPermissionDisplayState.pending.canDecide)
+        for state: CostPermissionDisplayState in [.submitting, .unconfirmed, .approved, .declined, .expired, .changed, .cancelled, .unavailable] {
+            XCTAssertFalse(state.canDecide)
+        }
+        XCTAssertTrue(CostPermissionDisplayState.unconfirmed.canCheck)
+        XCTAssertFalse(CostPermissionDisplayState.pending.canCheck)
+        XCTAssertTrue(CostPermissionDisplayState.approved.message.contains("result and actual cost are separate"))
+        func display(complete: Bool, allowed: Bool) -> CostPermissionDisplay {
+            .init(requestName: "Compare options", estimatedNextAttempt: "$0.05", maximumAllowance: "$0.50",
+                  recordedDailySpend: "$0.10", recordedMonthlySpend: "$0.20", activeHeldEstimate: "$0.03",
+                  historicalUnknownEstimate: "$0.02", pendingApprovalEstimate: "$0.05", dailyLimit: "$1.00",
+                  monthlyLimit: "$10.00", dailyProjectedGross: "$0.20", monthlyProjectedGross: "$0.30",
+                  expiryDescription: "Expires soon", quoteComplete: complete,
+                  serverAllowsApproval: allowed, state: .pending)
+        }
+        XCTAssertTrue(display(complete: true, allowed: true).canApprove)
+        XCTAssertFalse(display(complete: false, allowed: true).canDecide)
+        XCTAssertFalse(display(complete: true, allowed: false).canApprove)
+        XCTAssertTrue(display(complete: true, allowed: false).canDecide)
+    }
     func testOwnerMemoryCorrectionDTOsPreserveStoredSnapshotClaimsAndTypedReplyAuthority() throws {
         let decoder = JSONDecoder()
         let ineligible = try decoder.decode(OwnerMemoryCorrectionSnapshot.self, from: Data(
