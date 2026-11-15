@@ -13,12 +13,18 @@ export interface EstimatedCostQuote {
   allowanceMicros: number;
   recordedDailyMicros: number;
   recordedMonthlyMicros: number;
-  activeHeldMicros: number;
-  historicalUnknownMicros: number;
+  /** All active held, dispatching and unknown estimates (H), including the subset below. */
+  totalHeldMicros: number;
+  /** Proven eligible historical unknown estimates, already included in totalHeldMicros. */
+  eligibleHistoricalUnknownMicros: number;
+  /** Sum of proposed allowances for all current pending approvals, including this quote once when pending.
+   * Excludes approved, declined, cancelled and expired quotes. It is not a hold. */
   pendingApprovalMicros: number;
   dailyCeilingMicros: number;
   monthlyCeilingMicros: number;
+  /** Server-calculated recordedDailyMicros + totalHeldMicros + pendingApprovalMicros. */
   dailyProjectedGrossMicros: number;
+  /** Server-calculated recordedMonthlyMicros + totalHeldMicros + pendingApprovalMicros. */
   monthlyProjectedGrossMicros: number;
   /** False means at least one amount is incomplete; no approval is offered. */
   complete: boolean;
