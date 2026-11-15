@@ -1343,6 +1343,8 @@ export class ModelRouter {
     opts: CallOptions,
     toolCall = false,
   ): Promise<{
+    role: Exclude<ModelRole, 'embed'>;
+    critical: boolean;
     modelId: string;
     nextAttemptMicros: number;
     routingDigest: string;
@@ -1391,7 +1393,14 @@ export class ModelRouter {
         }),
       )
       .digest('hex');
-    return { modelId: route.modelId, nextAttemptMicros, routingDigest, requestDigest };
+    return {
+      role,
+      critical: opts.critical === true,
+      modelId: route.modelId,
+      nextAttemptMicros,
+      routingDigest,
+      requestDigest,
+    };
   }
 
   private async reserveModelCall(

@@ -8,6 +8,10 @@ import {
   storePreparedFirestoreQuote,
 } from './estimated-cost-approval-transactions.js';
 import { firestoreEstimatedCostSourceBinding } from './estimated-cost-binding.js';
+import {
+  createFirestoreEstimatedCostQuotePreparer,
+  createFirestoreEstimatedCostTurnParking,
+} from './estimated-cost-preparer.js';
 import type { InstallationStore } from './store.js';
 import { disposeStore, emulatorStore, seedBudget } from './test-store.js';
 
@@ -80,6 +84,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore estimated cost 
       installationId: store.installationId,
       ownerId: 'owner',
       rows: baseline,
+      createdAt: now,
       digest: createHash('sha256').update(JSON.stringify(baseline)).digest('hex'),
     });
     const sourceInput = {
@@ -132,6 +137,19 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore estimated cost 
       quote,
       baseline,
     };
+    const cardRef = store.doc(
+      'messages',
+      estimatedCostCardMessageId('operation-a', 'quote-a', 'v1'),
+    );
+    await cardRef.set({ occupied: true });
+    expect(await storePreparedFirestoreQuote(store, prepared)).toMatchObject({
+      ok: false,
+      outcome: 'unavailable',
+    });
+    expect((await store.doc('tasks', 'a').get()).get('status')).toBe('running');
+    expect((await store.doc('estimatedCostRequests', 'operation-a').get()).exists).toBe(false);
+    expect((await costs.totals()).heldUsd).toBe(0.8);
+    await cardRef.delete();
     const parked = await storePreparedFirestoreQuote(store, prepared);
     expect(parked).toMatchObject({
       ok: true,
@@ -313,5 +331,70 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore estimated cost 
         makeAttempt('draft', 'draft-attempt', 100_000, 'd'),
       ),
     ).toBe(false);
+  }, 30_000);
+
+  it('prepares and parks a server candidate, then refreshes after independent spend', async () => {
+    for (const role of ['extract', 'reason', 'rewrite', 'embed', 'batch'])
+      await store
+        .doc('modelRoles', role)
+        .set({ role, primaryModel: 'primary', fallbackModel: 'fallback', params: {} });
+    await store.doc('taskBudgetHolds', 'a').delete();
+    const costs = new FirestoreCostRepository(store);
+    const old = await costs.reserve({ source: 'model', estimatedUsd: 0.8 });
+    if (!old.ok) throw new Error('Expected historical hold');
+    await store.doc('costReservations', old.reservationId).update({ status: 'unknown' });
+    const baseline = [{ reservationId: old.reservationId, estimatedMicros: 800_000 }];
+    const actor = { installationId: store.installationId, ownerId: 'owner' };
+    await store.doc('estimatedCostBaselines', store.installationId).set({
+      installationId: store.installationId,
+      ownerId: 'owner',
+      rows: baseline,
+      createdAt: now,
+      digest: createHash('sha256').update(JSON.stringify(baseline)).digest('hex'),
+    });
+    const parking = createFirestoreEstimatedCostTurnParking(store);
+    const outcome = await parking.park({
+      actor,
+      operationId: 'operation-a',
+      conversationId: 'conversation',
+      taskId: 'a',
+      leaseToken: 'lease',
+      requestFingerprint: 'fingerprint',
+      quoteRequestId: 'prepare-a',
+      candidate: {
+        role: 'classify',
+        critical: false,
+        modelId: 'fallback',
+        nextAttemptMicros: 300_000,
+        routingDigest: 'a'.repeat(64),
+        requestDigest: 'b'.repeat(64),
+      },
+    });
+    expect(outcome).toMatchObject({
+      ok: true,
+      status: 'pending',
+      operationId: 'operation-a',
+      taskId: 'a',
+    });
+    expect((await store.doc('taskBudgetHolds', 'a').get()).get('heldMicros')).toBe(0);
+    expect((await costs.totals()).heldUsd).toBe(0.8);
+    const b = await costs.reserve({ source: 'model', estimatedUsd: 0.1 });
+    if (!b.ok) throw new Error('B must remain eligible');
+    await costs.reconcile(b.reservationId, { usd: 0.01 });
+    const preparation = await createFirestoreEstimatedCostQuotePreparer(store).prepare(actor, {
+      operationId: 'operation-a',
+      quoteRequestId: 'refresh-a',
+    });
+    if (!preparation.ok) throw new Error('Expected refreshed quote');
+    expect(preparation.prepared.quote).toMatchObject({
+      recordedDailyMicros: 10_000,
+      totalHeldMicros: 800_000,
+      pendingApprovalMicros: 500_000,
+      dailyProjectedGrossMicros: 1_310_000,
+    });
+    expect(await storePreparedFirestoreQuote(store, preparation.prepared)).toMatchObject({
+      ok: true,
+      request: { status: 'pending' },
+    });
   }, 30_000);
 });

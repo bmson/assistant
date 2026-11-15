@@ -654,7 +654,31 @@ export async function storePreparedFirestoreQuote(
       store.doc('budgetPeriods', `month:${month}`),
       store.doc('coordination', 'budget-policy'),
     );
-    if (!holds?.exists || !taskHolds?.exists || !policy?.exists) return unavailable;
+    if (!holds?.exists || !taskHolds || !policy?.exists) return unavailable;
+    if (
+      !daily?.exists &&
+      !(
+        await tx.get(
+          store
+            .collection('costEvents')
+            .where('createdAt', '>=', new Date(`${day}T00:00:00.000Z`))
+            .limit(1),
+        )
+      ).empty
+    )
+      return unavailable;
+    if (
+      !monthly?.exists &&
+      !(
+        await tx.get(
+          store
+            .collection('costEvents')
+            .where('createdAt', '>=', new Date(`${month}-01T00:00:00.000Z`))
+            .limit(1),
+        )
+      ).empty
+    )
+      return unavailable;
     const heldMicros = counter(holds, 'heldMicros');
     const baseline = await firestoreEstimatedCostBaseline(tx, store, actor, heldMicros);
     if (
@@ -663,6 +687,18 @@ export async function storePreparedFirestoreQuote(
         canonicalEstimatedCostJson(prepared.baseline)
     )
       return unavailable;
+    if (!taskHolds.exists) {
+      const existingTaskReservations = await tx.get(
+        store.collection('costReservations').where('taskId', '==', prepared.taskId).limit(501),
+      );
+      if (
+        existingTaskReservations.size >= 501 ||
+        existingTaskReservations.docs.some((doc) =>
+          ['held', 'dispatching', 'unknown'].includes(String(doc.get('status'))),
+        )
+      )
+        return unavailable;
+    }
     const pending = await tx.get(
       store.collection('estimatedCostRequests').where('state', '==', 'pending').limit(501),
     );
@@ -750,6 +786,11 @@ export async function storePreparedFirestoreQuote(
       quoteVersion: quote.quoteVersion,
       createdAt: now,
     });
+    if (!taskHolds.exists)
+      tx.create(store.doc('taskBudgetHolds', prepared.taskId), { heldMicros: 0 });
+    if (!daily?.exists) tx.create(store.doc('budgetPeriods', `day:${day}`), { spentMicros: 0 });
+    if (!monthly?.exists)
+      tx.create(store.doc('budgetPeriods', `month:${month}`), { spentMicros: 0 });
     tx.create(
       messageRef,
       encodeRecord({

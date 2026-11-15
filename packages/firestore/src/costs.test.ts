@@ -263,6 +263,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore atomic cost led
       installationId: store.installationId,
       ownerId: 'owner',
       rows: frozen,
+      createdAt: now,
       digest: createHash('sha256').update(JSON.stringify(frozen)).digest('hex'),
     });
     expect((await costs.readEstimatedCostView(input.actor, operationId))?.tracking).toMatchObject({

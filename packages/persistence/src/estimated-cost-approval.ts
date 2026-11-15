@@ -607,7 +607,14 @@ export interface EstimatedCostTurnParkInput {
   leaseToken: string;
   requestFingerprint: string;
   quoteRequestId: string;
-  candidate: { modelId: string; nextAttemptMicros: number; routingDigest: string };
+  candidate: {
+    role: string;
+    critical: boolean;
+    modelId: string;
+    nextAttemptMicros: number;
+    routingDigest: string;
+    requestDigest: string;
+  };
 }
 
 export type EstimatedCostTurnParkResult =

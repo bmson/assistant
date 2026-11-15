@@ -7,7 +7,7 @@ import {
   parseHistoricalUnknownBaseline,
   storedLedgerUsdToMicros,
 } from '@assistant/persistence';
-import type { Transaction } from '@google-cloud/firestore';
+import { Timestamp, type Transaction } from '@google-cloud/firestore';
 import { decodeRecord, type InstallationStore } from './store.js';
 
 /** Read the frozen baseline and every canonical row in the caller's transaction. */
@@ -34,6 +34,8 @@ export async function firestoreEstimatedCostBaseline(
     baseline.get('ownerId') !== actor.ownerId
   )
     return null;
+  const capturedAt = baseline.createTime;
+  if (!(capturedAt instanceof Timestamp)) return null;
   const frozen = parseHistoricalUnknownBaseline(decodeRecord(baseline.get('rows')));
   if (
     !frozen ||
@@ -46,16 +48,24 @@ export async function firestoreEstimatedCostBaseline(
   try {
     const current: CurrentBaselineReservation[] = docs
       .filter((doc) => doc.exists)
-      .map((doc) => ({
-        reservationId: String(doc.get('id') ?? ''),
-        estimatedMicros: storedLedgerUsdToMicros(doc.get('estimatedUsd')),
-        status: String(doc.get('status') ?? ''),
-        provenance:
-          (doc.get('reservationKind') === undefined || doc.get('reservationKind') === 'attempt') &&
-          doc.get('costGrantId') == null
-            ? 'proven-historical-unapproved'
-            : 'unrecognized',
-      }));
+      .map((doc) => {
+        const createdAt = doc.createTime;
+        return {
+          reservationId: String(doc.get('id') ?? ''),
+          estimatedMicros: storedLedgerUsdToMicros(doc.get('estimatedUsd')),
+          status: String(doc.get('status') ?? ''),
+          provenance:
+            (doc.get('reservationKind') === undefined ||
+              doc.get('reservationKind') === 'attempt') &&
+            doc.get('costGrantId') == null &&
+            createdAt instanceof Timestamp &&
+            (createdAt.seconds < capturedAt.seconds ||
+              (createdAt.seconds === capturedAt.seconds &&
+                createdAt.nanoseconds <= capturedAt.nanoseconds))
+              ? ('proven-historical-unapproved' as const)
+              : ('unrecognized' as const),
+        };
+      });
     const eligibleMicros = currentHistoricalUnknownMicros(frozen, current);
     if (eligibleMicros === null || eligibleMicros > heldMicros) return null;
     const unknownIds = new Set(
