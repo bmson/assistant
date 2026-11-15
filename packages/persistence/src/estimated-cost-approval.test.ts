@@ -55,6 +55,37 @@ describe('estimated cost allowance', () => {
     );
     expect(() => estimatedCostAllowanceExpiry(new Date('invalid'))).toThrow();
   });
+  it('does not reuse baseline credit after settlement or removal', () => {
+    const baseline = [{ reservationId: 'historical', estimatedMicros: 600 }];
+    const original = {
+      ...baseline[0],
+      reservationId: 'historical',
+      estimatedMicros: 600,
+      status: 'unknown',
+      provenance: 'proven-historical-unapproved' as const,
+    };
+    expect(
+      estimatedCostAllowance({
+        ...snapshot,
+        historicalUnknownMicros: verifiedHistoricalUnknownMicros(baseline, [original], true),
+      }).canApprove,
+    ).toBe(true);
+    expect(() =>
+      verifiedHistoricalUnknownMicros(baseline, [{ ...original, status: 'reconciled' }], true),
+    ).toThrow();
+    expect(() => verifiedHistoricalUnknownMicros(baseline, [], true)).toThrow();
+    expect(() =>
+      estimatedCostAllowance({ ...snapshot, heldMicros: 100, historicalUnknownMicros: 600 }),
+    ).toThrow();
+    expect(
+      estimatedCostAllowance({
+        ...snapshot,
+        heldMicros: 100,
+        historicalUnknownMicros: 0,
+        dailySpentMicros: 800,
+      }).canApprove,
+    ).toBe(false);
+  });
   it('excludes only proven historical pressure from global headroom and protects the task cap', () => {
     expect(estimatedCostAllowance(snapshot)).toEqual({ allowanceMicros: 450, canApprove: true });
     expect(estimatedCostAllowance({ ...snapshot, historicalUnknownMicros: 0 })).toEqual({

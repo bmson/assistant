@@ -35,6 +35,47 @@ export interface EstimatedCostDecision {
   decision: 'approve' | 'decline';
 }
 
+/** Web and mobile routes share the same JSON contract; authentication differs. */
+export const ESTIMATED_COST_ROUTES = {
+  web: {
+    quote: '/api/chat/estimated-cost/quote',
+    decision: '/api/chat/estimated-cost/decision',
+  },
+  mobile: {
+    quote: '/api/mobile/v1/chat/estimated-cost/quote',
+    decision: '/api/mobile/v1/chat/estimated-cost/decision',
+  },
+} as const;
+
+/** GET quote?operationId=... returns the current durable quote. POST explicitly
+ * requests a fresh quote without spending; quoteRequestId is stable on retry. */
+export interface EstimatedCostQuoteRequest {
+  operationId: string;
+  quoteRequestId: string;
+}
+
+export type EstimatedCostQuoteResponse =
+  | { ok: true; quote: EstimatedCostQuote }
+  | EstimatedCostHttpError;
+
+/** POST decision accepts EstimatedCostDecision; GET decision?operationId=...&decisionId=... reads its exact receipt. */
+export type EstimatedCostDecisionResponse =
+  | { ok: true; receipt: EstimatedCostDecisionReceipt }
+  | EstimatedCostHttpError;
+
+/** Status mapping: invalid=400, unauthorized=401, not_found=404, conflict=409,
+ * unavailable=503, unconfirmed=503. An unconfirmed decision must be read back
+ * with the same operationId and decisionId, never retried as a new decision.
+ * A stale decision is a durable receipt returned with HTTP 409 and ok: true.
+ */
+export type EstimatedCostHttpError = {
+  ok: false;
+  outcome: 'invalid' | 'unauthorized' | 'not_found' | 'conflict' | 'unavailable' | 'unconfirmed';
+  operationId?: string;
+  decisionId?: string;
+  message: string;
+};
+
 export const ESTIMATED_COST_QUOTE_LIFETIME_MS = 10 * 60_000;
 export const ESTIMATED_COST_ALLOWANCE_LIFETIME_MS = 30 * 60_000;
 
