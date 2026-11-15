@@ -1,3 +1,7 @@
+import {
+  matchesNativeServiceDigest,
+  nativeServiceDefaults,
+} from './owner-release-native-service-defaults.js';
 /** Pure reviewed current binding; no transport, credential lookup or settlement observation. */
 import type { NativeProof } from './owner-web-release-lifecycle-model.js';
 import { reconciliationDigest } from './owner-web-traffic-reconciliation-model.js';
@@ -28,7 +32,17 @@ const SERVICE_OUTPUT = new Set([
   'reconciling',
 ]);
 export const scalingConfigurationDigest = (s: Obj) =>
-  bootstrapDigest(Object.fromEntries(Object.entries(s).filter(([k]) => !SERVICE_OUTPUT.has(k))));
+  bootstrapDigest(
+    nativeServiceDefaults(
+      Object.fromEntries(Object.entries(s).filter(([k]) => !SERVICE_OUTPUT.has(k))),
+    ),
+  );
+export const matchesScalingConfigurationDigest = (s: Obj, expected: string) =>
+  matchesNativeServiceDigest(
+    Object.fromEntries(Object.entries(s).filter(([k]) => !SERVICE_OUTPUT.has(k))),
+    expected,
+    bootstrapDigest,
+  );
 export function verifiedRestoreReceipts(
   attempt: unknown,
   completion: unknown,
@@ -177,7 +191,7 @@ export function verifyCurrentService(
     s.name === binding.service &&
       s.uid === binding.uid &&
       (!mustBeDisabled || disabled(s)) &&
-      bootstrapDigest(s) === binding.serviceSha256,
+      matchesNativeServiceDigest(s, binding.serviceSha256, bootstrapDigest),
   );
   for (const value of [s.traffic, s.trafficStatuses]) {
     requireProof(Array.isArray(value) && value.length === 1);

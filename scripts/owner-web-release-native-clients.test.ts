@@ -1326,6 +1326,31 @@ describe('reviewed zero-tag disabled capture adapter', () => {
       'changed',
     );
   });
+  it('captures old raw service receipt bindings across sshEnabled default flaps without writes', () => {
+    for (const capturedFalse of [true, false]) {
+      const f = reviewed();
+      const raw = { ...f.service } as Record<string, unknown>;
+      if (capturedFalse) raw.sshEnabled = false;
+      else delete raw.sshEnabled;
+      f.context.currentBinding!.serviceSha256 = bootstrapDigest(raw);
+      const fresh = { ...raw };
+      if (capturedFalse) delete fresh.sshEnabled;
+      else fresh.sshEnabled = false;
+      const receipts = {
+        initialize: () => 'private-state',
+        readCurrent: () => f.state(),
+        recordIntent: () => {},
+        recordCheckpoint: () => {},
+      };
+      expect(() =>
+        initializePairedWebLifecycle(f.context, fresh, f.native, receipts),
+      ).not.toThrow();
+      expect(() =>
+        initializePairedWebLifecycle(f.context, { ...fresh, sshEnabled: true }, f.native, receipts),
+      ).toThrow('changed');
+      expect(f.writes()).toBe(0);
+    }
+  });
   it('recognizes v2 retired admission only for the reviewed old canonical; unsupported reason remains held', () => {
     const f = reviewed();
     expect(() => f.state()).not.toThrow();
