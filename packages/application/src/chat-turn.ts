@@ -25,7 +25,12 @@ import {
   explicitlyAsksAboutPriorSituationDecision,
   renderSituationDecisionContext,
 } from '@assistant/core/memory/situation-context';
-import type { ModelRouter, StreamOutcome } from '@assistant/core/model-router';
+import {
+  type CallOptions,
+  EstimatedCostParkedError,
+  type ModelRouter,
+  type StreamOutcome,
+} from '@assistant/core/model-router';
 import { getQueueNotifier } from '@assistant/core/queue';
 import { isSituationRequest } from '@assistant/core/situations-schema';
 import { buildAutonomyGrant } from '@assistant/core/workflow/autonomy';
@@ -994,9 +999,57 @@ export async function handleChatTurn(
     });
   }
   if (!admittedTask) throw new Error('New chat admission did not return its lease');
-  // The preflight does not yet have the full blocked call or its attempt history.
-  // Do not request a spending quote from a prompt-only estimate. A future router
-  // handoff must bind the exact blocked attempt before using the optional hook.
+  // The router invokes this only for an exact call denied before provider work.
+  // A resumed grant is not a fresh initial park; renewal requires its own
+  // durable checkpoint and must not overwrite the earlier request.
+  const parkEstimatedCost: CallOptions['parkEstimatedCost'] =
+    dependencies.estimatedCostTurnParking && !dependencies.resumeTask && admittedTask.leaseToken
+      ? async ({ candidate, providerAttempts }) => {
+          if (providerAttempts !== 0) throw new Error('Unsafe parking attempt');
+          const result = await dependencies.estimatedCostTurnParking!.park({
+            actor: { installationId: config.ASSISTANT_WORKSPACE_ID, ownerId: agent.id },
+            operationId: clientOperationId,
+            conversationId: conversation.id,
+            taskId: admittedTask.id,
+            leaseToken: admittedTask.leaseToken!,
+            requestFingerprint: requestHash,
+            quoteRequestId: clientOperationId,
+            candidate,
+          });
+          if (!result.ok && result.outcome === 'unavailable') return 'not_parked';
+          if (
+            result.ok &&
+            result.status === 'pending' &&
+            result.operationId === clientOperationId &&
+            result.taskId === admittedTask.id &&
+            result.quoteId &&
+            result.quoteVersion
+          )
+            return 'parked';
+          throw new Error('Parking result could not be confirmed');
+        }
+      : undefined;
+  const parkingResponse = (error: unknown): Response | null => {
+    if (!(error instanceof EstimatedCostParkedError)) return null;
+    if (error.outcome === 'parked')
+      return acceptedStreamResponse(admittedTask.id, {
+        'x-conversation-id': conversation.id,
+        'x-async-task': admittedTask.id,
+        'x-message-cursor': messageCursor,
+        'x-owner-message-id': persistedUser.id,
+        'x-estimated-cost-operation-id': clientOperationId,
+      });
+    return Response.json(
+      {
+        error: 'The request status could not be confirmed.',
+        code: 'estimated_cost_unconfirmed',
+        conversationId: conversation.id,
+        taskId: admittedTask.id,
+        clientOperationId,
+      },
+      { status: 503 },
+    );
+  };
   const refreshCardId = savedCardRefreshId(userText);
   const cardRefresh = dependencies.db ?? dependencies.persistence?.cardRefresh;
   if (refreshCardId && cardRefresh) {
@@ -1294,6 +1347,7 @@ export async function handleChatTurn(
         .join('\n');
       const triage = await router.object<z.infer<typeof NeedsActionSchema>>('classify', {
         taskId: admittedTask.id,
+        parkEstimatedCost,
         critical: true,
         schema: NeedsActionSchema,
         system:
@@ -1307,6 +1361,8 @@ export async function handleChatTurn(
         ruledOnAction = true;
       }
     } catch (err) {
+      const parked = parkingResponse(err);
+      if (parked) return parked;
       console.error('chat triage failed — routing to executor', err);
     }
   }
@@ -1547,6 +1603,7 @@ export async function handleChatTurn(
         : 'draft',
       {
         taskId: task.id,
+        parkEstimatedCost,
         abortSignal: req.signal,
         recoverBeforeOutput: async () => {
           const repository =
@@ -1641,6 +1698,8 @@ export async function handleChatTurn(
       },
     );
   } catch (error) {
+    const parked = parkingResponse(error);
+    if (parked) return parked;
     await finishApplicationChatTask(chat, agent.id, task, {
       status: 'failed',
       progress: String(error).slice(0, 500),

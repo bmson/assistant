@@ -3,6 +3,8 @@ import { loadConfig, resetConfigForTest } from '@assistant/config';
 import { TRIAGED_ACTIONABLE } from '@assistant/core/events';
 import {
   type BudgetSnapshot,
+  type CallOptions,
+  EstimatedCostParkedError,
   evaluateBudget,
   type ModelRouter,
 } from '@assistant/core/model-router';
@@ -451,6 +453,230 @@ function queuedPayload() {
 }
 
 describe('chat needs-action triage', () => {
+  it.each([
+    ['classify', false],
+    ['classify', true],
+    ['stream', false],
+    ['stream', true],
+  ] as const)(
+    'parks only the exact denied %s call and resumes the original request after B (spoken=%s)',
+    async (phase, spoken) => {
+      const operationId = '00000000-0000-4000-8000-0000000000a1';
+      const otherId = '00000000-0000-4000-8000-0000000000b1';
+      const original = 'Explain the original topic A.';
+      const later = 'Explain the separate topic B.';
+      const store = chatStore();
+      const router = scriptedRouter({ draft: 'Synthetic answer.' });
+      let actualOptions: CallOptions | undefined;
+      const invokeDenied = async (role: string, options: CallOptions) => {
+        actualOptions = options;
+        const requestDigest = createHash('sha256')
+          .update(
+            JSON.stringify({
+              system: options.system,
+              prompt: options.prompt,
+              messages: options.messages,
+            }),
+          )
+          .digest('hex');
+        const outcome = await options.parkEstimatedCost!({
+          candidate: {
+            role: role as 'classify' | 'draft',
+            critical: options.critical === true,
+            modelId: 'synthetic/model',
+            nextAttemptMicros: 1234,
+            routingDigest: 'd'.repeat(64),
+            requestDigest,
+          },
+          options,
+          decision: { mode: 'block', reason: 'synthetic' },
+          providerAttempts: 0,
+        });
+        if (outcome === 'parked') throw new EstimatedCostParkedError('parked');
+        return { ok: false as const, decision: { mode: 'block' as const, reason: 'synthetic' } };
+      };
+      if (phase === 'classify') router.object.mockImplementationOnce(invokeDenied as never);
+      else router.stream.mockImplementationOnce(invokeDenied as never);
+      let parked:
+        | Parameters<import('@assistant/persistence').EstimatedCostTurnParking['park']>[0]
+        | undefined;
+      const park = vi.fn(async (input: NonNullable<typeof parked>) => {
+        parked = input;
+        return {
+          ok: true as const,
+          status: 'pending' as const,
+          operationId: input.operationId,
+          taskId: input.taskId,
+          quoteId: 'quote-a',
+          quoteVersion: 'v1',
+        };
+      });
+      const deps = {
+        config: config(),
+        router: router.router,
+        chat: store.chat,
+        persistence: { tasks: {}, ownerContext: {} } as never,
+        estimatedCostTurnParking: { park },
+      };
+      const result = await handleChatTurn(
+        send(original, { clientOperationId: operationId, spoken }),
+        deps,
+      );
+      expect(result.status).toBe(200);
+      expect(result.headers.get('x-estimated-cost-operation-id')).toBe(operationId);
+      expect(park).toHaveBeenCalledOnce();
+      expect(parked).toMatchObject({
+        operationId,
+        taskId: 'task-1',
+        conversationId: CONVERSATION,
+        leaseToken: 'lease-task-1',
+        quoteRequestId: operationId,
+        candidate: { role: phase === 'classify' ? 'classify' : 'draft', critical: true },
+      });
+      expect(parked?.requestFingerprint).toBe(
+        createHash('sha256')
+          .update(JSON.stringify([original, false, false, spoken]))
+          .digest('hex'),
+      );
+      expect(actualOptions?.system).toBeTruthy();
+      expect(JSON.stringify(actualOptions?.messages ?? actualOptions?.prompt)).toContain(original);
+      expect(parked?.candidate.requestDigest).toBe(
+        createHash('sha256')
+          .update(
+            JSON.stringify({
+              system: actualOptions?.system,
+              prompt: actualOptions?.prompt,
+              messages: actualOptions?.messages,
+            }),
+          )
+          .digest('hex'),
+      );
+      expect(store.completions).toHaveLength(0);
+      expect(stubs.queueAdmission).not.toHaveBeenCalled();
+
+      expect((await handleChatTurn(send(later, { clientOperationId: otherId }), deps)).status).toBe(
+        200,
+      );
+      const messageA = store.messages.find((m) => m.taskId === 'task-1')!;
+      const task = {
+        id: 'task-1',
+        agentId: AGENT,
+        conversationId: CONVERSATION,
+        type: 'chat_turn',
+        trust: 'owner',
+        status: 'running',
+        lockedUntil: new Date(Date.now() + 60_000),
+        leaseToken: 'resumed-a',
+        maxSteps: 12,
+        createdAt: messageA.createdAt,
+        trigger: {
+          source: 'chat',
+          payload: {
+            text: original,
+            spoken,
+            chatAdmission: {
+              protocol: 'owner-chat-v1',
+              clientOperationId: operationId,
+              requestHash: parked!.requestFingerprint,
+              triggerMessageId: messageA.id,
+              phase: phase === 'stream' ? 'streaming' : 'classifying',
+              ...(phase === 'stream' ? { triageOutcome: 'conversational' } : {}),
+            },
+          },
+        },
+      } as never;
+      await expect(resumeAdmittedChatTask(task, deps)).resolves.toBe(200);
+      expect(park).toHaveBeenCalledOnce();
+      const resumedOptions = router.stream.mock.calls.at(-1)![1] as unknown as {
+        taskId: string;
+        messages: unknown;
+      };
+      expect(resumedOptions.taskId).toBe('task-1');
+      expect(JSON.stringify(resumedOptions.messages)).toContain(original);
+      expect(JSON.stringify(resumedOptions.messages)).not.toContain(later);
+    },
+  );
+  it.each(['classify', 'stream'] as const)(
+    'preserves an unconfirmed %s parking write without completing or queueing the task',
+    async (phase) => {
+      const store = chatStore();
+      const router = scriptedRouter({ draft: 'Must not be used.' });
+      const blocked = async (role: string, options: CallOptions) => {
+        try {
+          await options.parkEstimatedCost!({
+            candidate: {
+              role: role as 'classify' | 'draft',
+              critical: true,
+              modelId: 'synthetic/model',
+              nextAttemptMicros: 1,
+              routingDigest: 'd'.repeat(64),
+              requestDigest: 'e'.repeat(64),
+            },
+            options,
+            decision: { mode: 'block', reason: 'synthetic' },
+            providerAttempts: 0,
+          });
+        } catch (cause) {
+          throw new EstimatedCostParkedError('unknown', { cause });
+        }
+        throw new Error('Unexpected fallback');
+      };
+      if (phase === 'classify') router.object.mockImplementationOnce(blocked as never);
+      else router.stream.mockImplementationOnce(blocked as never);
+      const response = await handleChatTurn(send('Explain the original topic.'), {
+        config: config(),
+        router: router.router,
+        chat: store.chat,
+        persistence: { tasks: {}, ownerContext: {} } as never,
+        estimatedCostTurnParking: {
+          park: async () => {
+            throw new Error('uncertain transaction');
+          },
+        },
+      });
+      expect(response.status).toBe(503);
+      expect(await response.json()).toMatchObject({
+        code: 'estimated_cost_unconfirmed',
+        taskId: 'task-1',
+      });
+      expect(store.completions).toHaveLength(0);
+      expect(stubs.queueAdmission).not.toHaveBeenCalled();
+    },
+  );
+  it('retains the existing route when the optional parking service is unavailable', async () => {
+    const store = chatStore();
+    const router = scriptedRouter({ draft: 'Synthetic reply.' });
+    router.object.mockImplementationOnce((async (_role: string, options: CallOptions) => {
+      expect(
+        await options.parkEstimatedCost!({
+          candidate: {
+            role: 'classify',
+            critical: true,
+            modelId: 'synthetic/model',
+            nextAttemptMicros: 1,
+            routingDigest: 'd'.repeat(64),
+            requestDigest: 'e'.repeat(64),
+          },
+          options,
+          decision: { mode: 'block', reason: 'synthetic' },
+          providerAttempts: 0,
+        }),
+      ).toBe('not_parked');
+      return { ok: true, object: { needsAction: false } };
+    }) as never);
+    const response = await handleChatTurn(send('Explain the topic.'), {
+      config: config(),
+      router: router.router,
+      chat: store.chat,
+      persistence: { tasks: {}, ownerContext: {} } as never,
+      estimatedCostTurnParking: {
+        park: async () => ({ ok: false, outcome: 'unavailable', message: 'off' }),
+      },
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get('x-estimated-cost-operation-id')).toBeNull();
+    expect(router.stream).toHaveBeenCalledOnce();
+  });
   it.each([false, true])(
     'never parks from a prompt-only preflight, including spoken requests (spoken=%s)',
     async (spoken) => {
