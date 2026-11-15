@@ -4,8 +4,10 @@ import { writeFileSync } from 'node:fs';
 import { verifyPreAuthEnvironment } from './owner-editor-release-inventory.js';
 import { protectedWebTagCloud } from './owner-web-tag-cloud.js';
 import {
+  canonicalCurrentWebRevision,
   executeOwnedWebTagRetirement,
   HISTORICAL_WEB_TAGS,
+  observeCanonicalCurrentWeb,
   planOwnedWebTagRetirement,
   type RetirementPlan,
 } from './owner-web-tag-retirement.js';
@@ -15,8 +17,15 @@ import {
 } from './owner-web-tag-retirement-failure.js';
 
 const WORKFLOW = 'bmson/assistant/.github/workflows/owner-web-tag-retirement.yml@refs/heads/main';
+export function retirementProfile(env: NodeJS.ProcessEnv) {
+  const profile = env.OWNER_TAG_RETIREMENT_PROFILE ?? 'legacy-01080';
+  if (profile !== 'legacy-01080' && profile !== 'known-resume-40403696377-1')
+    throw new Error('Unknown retirement profile');
+  return profile;
+}
 export function verifyRetirementContext(env: NodeJS.ProcessEnv) {
   verifyPreAuthEnvironment(env);
+  retirementProfile(env);
   if (
     env.GITHUB_EVENT_NAME !== 'workflow_dispatch' ||
     env.GITHUB_WORKFLOW_REF !== WORKFLOW ||
@@ -61,26 +70,34 @@ export async function runRetirementCommand(tracker: ReturnType<typeof retirement
     !/^[a-f0-9]{64}$/.test(process.env.OWNER_TAG_REVIEWED_PLAN_SHA256 ?? '')
   )
     throw new Error('Missing reviewed retirement hash');
-  const io = await protectedWebTagCloud(tracker.mark);
-  const [old, current] = HISTORICAL_WEB_TAGS;
-  if (!old || !current) throw new Error('Missing historical pins');
+  const canonical = retirementProfile(process.env) === 'known-resume-40403696377-1';
+  const io = await protectedWebTagCloud(tracker.mark, canonical ? 'canonical-untagged' : 'tagged');
+  const [legacy, pinnedCurrent] = HISTORICAL_WEB_TAGS;
+  const old = canonical ? pinnedCurrent : legacy;
+  if (!old || !pinnedCurrent) throw new Error('Missing historical pins');
   tracker.mark('plan_read_service');
   const before = await io.readService();
+  const currentRevision = canonical ? canonicalCurrentWebRevision(before) : pinnedCurrent.revision;
   const native: Record<string, unknown> = {};
-  for (const proof of [old, current]) {
-    tracker.mark(proof === old ? 'plan_read_historical_revision' : 'plan_read_current_revision');
-    native[proof.revision] = await io.readRevision(proof.revision);
+  for (const name of new Set([old.revision, currentRevision])) {
+    tracker.mark(
+      name === old.revision ? 'plan_read_historical_revision' : 'plan_read_current_revision',
+    );
+    native[name] = await io.readRevision(name);
   }
   tracker.mark('plan_validation');
   let plan: RetirementPlan;
   try {
-    plan = planOwnedWebTagRetirement(before, native, [old], {
-      revision: current.revision,
-      image: current.image,
-      tag: current.tag,
-      uriSha256: current.uriSha256,
-      paused: false,
-    });
+    const current = canonical
+      ? observeCanonicalCurrentWeb(before, native[currentRevision])
+      : {
+          revision: pinnedCurrent.revision,
+          image: pinnedCurrent.image,
+          tag: pinnedCurrent.tag,
+          uriSha256: pinnedCurrent.uriSha256,
+          paused: false,
+        };
+    plan = planOwnedWebTagRetirement(before, native, [old], current);
   } catch (error) {
     if (mode === '--plan' && retirementFailureReason(error) === 'traffic_disagreement')
       tracker.noteTrafficSnapshot(before);
