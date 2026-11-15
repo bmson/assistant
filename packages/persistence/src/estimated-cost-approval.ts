@@ -4,6 +4,8 @@
 export interface EstimatedCostQuote {
   type: 'estimated-cost-approval';
   operationId: string;
+  taskId: string;
+  requestText: string;
   quoteId: string;
   quoteVersion: string;
   expiresAt: string;
@@ -16,6 +18,8 @@ export interface EstimatedCostQuote {
   pendingApprovalMicros: number;
   dailyCeilingMicros: number;
   monthlyCeilingMicros: number;
+  dailyProjectedGrossMicros: number;
+  monthlyProjectedGrossMicros: number;
   /** False means at least one amount is incomplete; no approval is offered. */
   complete: boolean;
   canApprove: boolean;
@@ -71,6 +75,53 @@ export interface EstimatedCostHeadroom {
   taskHeldMicros: number;
   taskCeilingMicros: number;
   nextAttemptMicros: number;
+}
+
+export interface HistoricalUnknownBaselineRow {
+  reservationId: string;
+  estimatedMicros: number;
+}
+
+/** Must be produced from canonical reservation records, not attempt metadata. */
+export interface CurrentBaselineReservation extends HistoricalUnknownBaselineRow {
+  status: string;
+  provenance: 'proven-historical-unapproved' | 'grant-linked' | 'unrecognized';
+}
+
+/** Verify the exact frozen baseline before using it in a new quote or decision. */
+export function verifiedHistoricalUnknownMicros(
+  baseline: readonly HistoricalUnknownBaselineRow[],
+  current: readonly CurrentBaselineReservation[],
+  complete: boolean,
+): number {
+  if (!complete || baseline.length !== current.length)
+    throw new Error('Incomplete unknown baseline');
+  const rows = new Map<string, CurrentBaselineReservation>();
+  for (const row of current) {
+    if (!row.reservationId || rows.has(row.reservationId))
+      throw new Error('Invalid unknown baseline');
+    rows.set(row.reservationId, row);
+  }
+  const seen = new Set<string>();
+  let total = 0;
+  for (const expected of baseline) {
+    const row = rows.get(expected.reservationId);
+    if (
+      !expected.reservationId ||
+      seen.has(expected.reservationId) ||
+      !Number.isSafeInteger(expected.estimatedMicros) ||
+      expected.estimatedMicros <= 0 ||
+      !row ||
+      row.status !== 'unknown' ||
+      row.provenance !== 'proven-historical-unapproved' ||
+      row.estimatedMicros !== expected.estimatedMicros
+    )
+      throw new Error('Changed or unproven unknown baseline');
+    seen.add(expected.reservationId);
+    total += expected.estimatedMicros;
+    if (!Number.isSafeInteger(total)) throw new Error('Unknown baseline overflow');
+  }
+  return total;
 }
 
 /** Computes the maximum additional allocation, never removing any existing hold. */

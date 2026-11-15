@@ -3,6 +3,7 @@ import {
   type EstimatedCostHeadroom,
   estimatedCostAllowance,
   estimatedCostAllowanceExpiry,
+  verifiedHistoricalUnknownMicros,
 } from './estimated-cost-approval.js';
 
 const snapshot: EstimatedCostHeadroom = {
@@ -19,6 +20,32 @@ const snapshot: EstimatedCostHeadroom = {
 };
 
 describe('estimated cost allowance', () => {
+  it('accepts only the exact complete, proven historical unknown baseline', () => {
+    const row = { reservationId: 'old', estimatedMicros: 10 };
+    const baseline = [row];
+    const canonical = {
+      ...row,
+      status: 'unknown',
+      provenance: 'proven-historical-unapproved' as const,
+    };
+    const current = [canonical];
+    expect(verifiedHistoricalUnknownMicros(baseline, current, true)).toBe(10);
+    expect(() => verifiedHistoricalUnknownMicros(baseline, current, false)).toThrow();
+    expect(() => verifiedHistoricalUnknownMicros(baseline, [], true)).toThrow();
+    expect(() =>
+      verifiedHistoricalUnknownMicros(
+        baseline,
+        [{ ...canonical, provenance: 'grant-linked' }],
+        true,
+      ),
+    ).toThrow();
+    expect(() =>
+      verifiedHistoricalUnknownMicros(baseline, [{ ...canonical, estimatedMicros: 11 }], true),
+    ).toThrow();
+    expect(() =>
+      verifiedHistoricalUnknownMicros(baseline, [{ ...canonical, status: 'reconciled' }], true),
+    ).toThrow();
+  });
   it('limits an approved allowance to 30 minutes and the next UTC day', () => {
     expect(estimatedCostAllowanceExpiry(new Date('2026-11-15T12:00:00Z')).toISOString()).toBe(
       '2026-11-15T12:30:00.000Z',
