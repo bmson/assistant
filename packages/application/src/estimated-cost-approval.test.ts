@@ -26,6 +26,21 @@ function prepared(): EstimatedCostPreparedQuote {
     leaseToken: null,
     requestFingerprint: 'fingerprint',
     bindingDigest: 'binding',
+    sourceBinding: {
+      role: 'draft',
+      critical: true,
+      selectedModelId: 'synthetic-model',
+      routingDigest: 'a'.repeat(64),
+      roleRowDigest: 'b'.repeat(64),
+      modelRows: [{ id: 'synthetic-model', digest: 'c'.repeat(64) }],
+      connectionRows: [{ id: 'openrouter', digest: 'd'.repeat(64) }],
+      additionalRoutes: [],
+      budgetRows: [
+        { scope: 'daily', digest: 'e'.repeat(64) },
+        { scope: 'monthly', digest: 'f'.repeat(64) },
+      ],
+      privacyGeneration: null,
+    },
     critical: true,
     baseline: [{ reservationId: 'historical-a', estimatedMicros: 5_760_000 }],
     quote: {
