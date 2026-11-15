@@ -1,5 +1,6 @@
 /** Fixed-service tag retirement planner. No provider calls or mutation authority. */
 import { createHash } from 'node:crypto';
+import { nativeServiceDefaults } from './owner-release-native-service-defaults.js';
 export const WEB_SERVICE = 'projects/bmson-assistant/locations/us-west1/services/assistant-web';
 /** Verified project-number endpoint for this fixed project, region and service. */
 export const WEB_CANONICAL_URL = 'https://assistant-web-83709630368.us-west1.run.app';
@@ -203,7 +204,7 @@ function serviceState(raw: unknown) {
     observed,
     template,
     templateSha256: digest(template),
-    configurationSha256: digest(configuration),
+    configurationSha256: digest(nativeServiceDefaults(configuration)),
   };
 }
 
