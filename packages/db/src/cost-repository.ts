@@ -3,6 +3,8 @@ import {
   addLedgerMicros,
   type CostRepository,
   DEFAULT_RATES,
+  type EstimatedCostActor,
+  type EstimatedCostDecisionReceipt,
   type EstimatedCostGrantDraw,
   type EstimatedCostGrantDrawResult,
   ledgerUsdToMicros,
@@ -10,6 +12,7 @@ import {
   microsToUsd,
   nextDailyReset,
   nextMonthlyReset,
+  parseEstimatedCostReceipt,
   storedLedgerUsdToMicros,
   storedTaskBudgetToMicros,
 } from '@assistant/persistence';
@@ -19,6 +22,7 @@ import {
   budgets,
   costEvents,
   costReservations,
+  estimatedCostDecisions,
   estimatedCostGrants,
   estimatedCostRequests,
   rateTable,
@@ -35,6 +39,33 @@ export async function getRate(
   const fallback = DEFAULT_RATES[key];
   if (!fallback) throw new Error(`no rate for key: ${key}`);
   return fallback;
+}
+
+/** Canonical receipt read for the exact operation and decision, scoped to the owner. */
+export async function readEstimatedCostDecision(
+  db: Db,
+  actor: EstimatedCostActor,
+  identity: { operationId: string; decisionId: string },
+): Promise<EstimatedCostDecisionReceipt | null> {
+  const [row] = await db
+    .select({ receipt: estimatedCostDecisions.receipt })
+    .from(estimatedCostDecisions)
+    .innerJoin(
+      estimatedCostRequests,
+      eq(estimatedCostRequests.operationId, estimatedCostDecisions.operationId),
+    )
+    .where(
+      and(
+        eq(estimatedCostDecisions.decisionId, identity.decisionId),
+        eq(estimatedCostDecisions.operationId, identity.operationId),
+        eq(estimatedCostRequests.installationId, actor.installationId),
+        eq(estimatedCostRequests.ownerId, actor.ownerId),
+      ),
+    );
+  if (!row) return null;
+  const receipt = parseEstimatedCostReceipt(row.receipt, identity);
+  if (!receipt) throw new Error('Invalid stored estimated cost receipt');
+  return receipt;
 }
 
 /** Move a grant allocation into one attempt without changing total held capacity. */

@@ -80,6 +80,15 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore atomic cost led
       consumedMicros: 0,
       expiresAt: new Date(now.getTime() + 60_000),
     });
+    const receipt = {
+      operationId,
+      decisionId: 'decision',
+      quoteId: 'quote',
+      status: 'approved',
+      allowanceMicros: 200_000,
+      expiresAt: new Date(now.getTime() + 60_000).toISOString(),
+    };
+    await store.doc('estimatedCostDecisions', 'decision').set({ operationId, receipt });
     const input = {
       actor: { installationId: 'install', ownerId: 'owner' },
       operationId,
@@ -91,6 +100,25 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore atomic cost led
       description: 'attempt',
     };
     const before = await costs.totals();
+    expect(
+      await costs.readEstimatedCostDecision(input.actor, { operationId, decisionId: 'decision' }),
+    ).toEqual(receipt);
+    expect(
+      await costs.readEstimatedCostDecision(
+        { ...input.actor, ownerId: 'other' },
+        { operationId, decisionId: 'decision' },
+      ),
+    ).toBeNull();
+    expect(
+      await costs.readEstimatedCostDecision(input.actor, { operationId, decisionId: 'other' }),
+    ).toBeNull();
+    await store
+      .doc('estimatedCostDecisions', 'decision')
+      .update({ receipt: { ...receipt, operationId: 'other' } });
+    await expect(
+      costs.readEstimatedCostDecision(input.actor, { operationId, decisionId: 'decision' }),
+    ).rejects.toThrow('Invalid stored');
+    await store.doc('estimatedCostDecisions', 'decision').update({ receipt });
     const outcomes = await Promise.all([
       costs.drawEstimatedCostGrant({ ...input, attemptId: 'attempt-one' }),
       costs.drawEstimatedCostGrant({ ...input, attemptId: 'attempt-two' }),

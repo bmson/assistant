@@ -172,6 +172,46 @@ export type EstimatedCostDecisionReceipt =
   | { decisionId: string; operationId: string; quoteId: string; status: 'declined' }
   | { decisionId: string; operationId: string; quoteId: string; status: 'stale' };
 
+/** Fail closed on malformed stored receipts; identity must match the requested operation. */
+export function parseEstimatedCostReceipt(
+  value: unknown,
+  identity: { operationId: string; decisionId: string },
+): EstimatedCostDecisionReceipt | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  if (
+    row.operationId !== identity.operationId ||
+    row.decisionId !== identity.decisionId ||
+    typeof row.quoteId !== 'string' ||
+    !row.quoteId
+  )
+    return null;
+  if (row.status === 'declined' || row.status === 'stale')
+    return {
+      operationId: identity.operationId,
+      decisionId: identity.decisionId,
+      quoteId: row.quoteId,
+      status: row.status,
+    };
+  if (
+    row.status !== 'approved' ||
+    typeof row.allowanceMicros !== 'number' ||
+    !Number.isSafeInteger(row.allowanceMicros) ||
+    row.allowanceMicros <= 0 ||
+    typeof row.expiresAt !== 'string' ||
+    !Number.isFinite(Date.parse(row.expiresAt))
+  )
+    return null;
+  return {
+    operationId: identity.operationId,
+    decisionId: identity.decisionId,
+    quoteId: row.quoteId,
+    status: 'approved',
+    allowanceMicros: row.allowanceMicros,
+    expiresAt: row.expiresAt,
+  };
+}
+
 /** Inputs must come from one transactionally consistent, verified ledger snapshot. */
 export interface EstimatedCostHeadroom {
   dailySpentMicros: number;

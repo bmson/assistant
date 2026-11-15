@@ -6,12 +6,14 @@ import {
   createPostgresCostRepository,
   drawEstimatedCostGrant,
   expireEstimatedCostGrant,
+  readEstimatedCostDecision,
   recordCostEvent,
 } from './cost-repository.js';
 import {
   agents,
   costEvents,
   costReservations,
+  estimatedCostDecisions,
   estimatedCostGrants,
   estimatedCostRequests,
   tasks,
@@ -139,6 +141,17 @@ describe('PostgreSQL idempotent cost events', () => {
       allowanceMicros: 200_000,
       expiresAt: new Date(Date.now() + 60_000),
     });
+    const receipt = {
+      operationId,
+      decisionId: 'decision',
+      quoteId: 'quote',
+      status: 'approved',
+      allowanceMicros: 200_000,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    };
+    await db
+      .insert(estimatedCostDecisions)
+      .values({ decisionId: 'decision', operationId, bodyDigest: 'body', receipt });
     const input = {
       actor: { installationId: 'install', ownerId: 'owner' },
       operationId,
@@ -153,6 +166,30 @@ describe('PostgreSQL idempotent cost events', () => {
     const secondId = randomUUID();
     reservationIds.push(firstId, secondId);
     try {
+      expect(
+        await readEstimatedCostDecision(db, input.actor, { operationId, decisionId: 'decision' }),
+      ).toEqual(receipt);
+      expect(
+        await readEstimatedCostDecision(
+          db,
+          { ...input.actor, ownerId: 'other' },
+          { operationId, decisionId: 'decision' },
+        ),
+      ).toBeNull();
+      expect(
+        await readEstimatedCostDecision(db, input.actor, { operationId, decisionId: 'other' }),
+      ).toBeNull();
+      await db
+        .update(estimatedCostDecisions)
+        .set({ receipt: { ...receipt, operationId: 'other' } })
+        .where(eq(estimatedCostDecisions.decisionId, 'decision'));
+      await expect(
+        readEstimatedCostDecision(db, input.actor, { operationId, decisionId: 'decision' }),
+      ).rejects.toThrow('Invalid stored');
+      await db
+        .update(estimatedCostDecisions)
+        .set({ receipt })
+        .where(eq(estimatedCostDecisions.decisionId, 'decision'));
       const before = await costs.totals();
       const outcomes = await Promise.all([
         drawEstimatedCostGrant(db, { ...input, attemptId: firstId }),
@@ -256,6 +293,9 @@ describe('PostgreSQL idempotent cost events', () => {
       expect(child?.status).toBe('unknown');
       expect((await costs.totals()).heldUsd).toBeCloseTo(before.heldUsd - 0.17);
     } finally {
+      await db
+        .delete(estimatedCostDecisions)
+        .where(eq(estimatedCostDecisions.decisionId, 'decision'));
       await db.delete(estimatedCostGrants).where(eq(estimatedCostGrants.id, grantId));
       await db
         .delete(estimatedCostRequests)

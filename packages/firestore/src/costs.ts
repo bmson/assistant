@@ -5,6 +5,8 @@ import {
   type CostEventInput,
   type CostRepository,
   type CostTotals,
+  type EstimatedCostActor,
+  type EstimatedCostDecisionReceipt,
   type EstimatedCostGrantDraw,
   type EstimatedCostGrantDrawResult,
   ledgerUsdToMicros,
@@ -12,6 +14,7 @@ import {
   microsToUsd,
   nextUtcDailyReset,
   nextUtcMonthlyReset,
+  parseEstimatedCostReceipt,
   type ReservationActual,
   type ReserveCostInput,
   type ReserveOutcome,
@@ -65,6 +68,33 @@ export class FirestoreCostRepository implements CostRepository {
   readonly kind = 'cost-repository' as const;
 
   constructor(private readonly store: InstallationStore) {}
+
+  /** Canonical receipt read for the exact operation and decision, scoped to the owner. */
+  async readEstimatedCostDecision(
+    actor: EstimatedCostActor,
+    identity: { operationId: string; decisionId: string },
+  ): Promise<EstimatedCostDecisionReceipt | null> {
+    return this.store.db.runTransaction(
+      async (tx) => {
+        const [request, decision] = await tx.getAll(
+          this.store.doc('estimatedCostRequests', identity.operationId),
+          this.store.doc('estimatedCostDecisions', identity.decisionId),
+        );
+        if (
+          !request?.exists ||
+          request.get('installationId') !== actor.installationId ||
+          request.get('ownerId') !== actor.ownerId ||
+          !decision?.exists ||
+          decision.get('operationId') !== identity.operationId
+        )
+          return null;
+        const receipt = parseEstimatedCostReceipt(decodeRecord(decision.get('receipt')), identity);
+        if (!receipt) throw new Error('Invalid stored estimated cost receipt');
+        return receipt;
+      },
+      { readOnly: true },
+    );
+  }
 
   /** Atomically move pre-reserved capacity from escrow to one attempt. */
   async drawEstimatedCostGrant(
