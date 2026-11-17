@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@google-cloud/firestore": "9.4.0",
+    "@google-cloud/firestore": "9.4.1",
     "unpdf": "2.1.0"
   }
 }
