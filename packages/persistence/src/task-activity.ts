@@ -18,7 +18,7 @@ export type ActivityTaskRecord = Pick<
   | 'archivedAt'
   | 'autonomyGrant'
   | 'trigger'
->;
+> & { state?: unknown };
 
 export interface TaskActivityRepository {
   readonly kind: 'task-activity-repository';

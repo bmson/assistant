@@ -207,6 +207,72 @@ describe('PostgreSQL idempotent cost events', () => {
     });
     reservationIds.push(firstId, secondId);
     try {
+      const overview = () =>
+        createPostgresEstimatedCostApprovalRepository(db).getOverview!(input.actor);
+      expect(await overview()).toMatchObject({
+        ok: true,
+        requests: [
+          {
+            status: 'pending',
+            operationId: pendingOperationId,
+            quote: { taskId, quoteId: 'other-quote' },
+          },
+        ],
+        tracking: { pendingApprovalMicros: 200_000, totalHeldMicros: 200_000 },
+      });
+      expect(
+        await createPostgresEstimatedCostApprovalRepository(db).getOverview!({
+          ...input.actor,
+          ownerId: 'other',
+        }),
+      ).toMatchObject({ ok: true, requests: [] });
+      expect(
+        await createPostgresEstimatedCostApprovalRepository(db).getOverview!({
+          ...input.actor,
+          installationId: 'other',
+        }),
+      ).toMatchObject({ ok: true, requests: [] });
+      await db
+        .update(estimatedCostRequests)
+        .set({ quote: { invalid: true } })
+        .where(eq(estimatedCostRequests.operationId, pendingOperationId));
+      expect(await overview()).toMatchObject({
+        ok: true,
+        requests: null,
+        tracking: { pendingApprovalMicros: null, complete: false },
+      });
+      await db
+        .update(estimatedCostRequests)
+        .set({
+          quote: {
+            ...quote,
+            operationId: pendingOperationId,
+            quoteId: 'other-quote',
+            expiresAt: new Date(Date.now() - 1000).toISOString(),
+          },
+        })
+        .where(eq(estimatedCostRequests.operationId, pendingOperationId));
+      expect(await overview()).toMatchObject({
+        ok: true,
+        requests: [{ status: 'expired_or_needs_refresh', operationId: pendingOperationId }],
+        tracking: { pendingApprovalMicros: 0 },
+      });
+      await db
+        .update(estimatedCostRequests)
+        .set({ state: 'expired_or_needs_refresh' })
+        .where(eq(estimatedCostRequests.operationId, pendingOperationId));
+      expect(await overview()).toMatchObject({
+        ok: true,
+        requests: [{ status: 'expired_or_needs_refresh', operationId: pendingOperationId }],
+        tracking: { pendingApprovalMicros: 0 },
+      });
+      await db
+        .update(estimatedCostRequests)
+        .set({
+          state: 'pending',
+          quote: { ...quote, operationId: pendingOperationId, quoteId: 'other-quote' },
+        })
+        .where(eq(estimatedCostRequests.operationId, pendingOperationId));
       await db
         .update(estimatedCostRequests)
         .set({ quote: { quoteId: 'other' } })
@@ -240,6 +306,11 @@ describe('PostgreSQL idempotent cost events', () => {
         .update(estimatedCostRequests)
         .set({ state: 'declined' })
         .where(eq(estimatedCostRequests.operationId, pendingOperationId));
+      expect(await overview()).toMatchObject({
+        ok: true,
+        requests: [],
+        tracking: { pendingApprovalMicros: 0, totalHeldMicros: 200_000 },
+      });
       expect((await readEstimatedCostView(db, input.actor, operationId))?.tracking).toMatchObject({
         pendingApprovalMicros: 0,
         dailyPlannedExposureMicros: 210_000,

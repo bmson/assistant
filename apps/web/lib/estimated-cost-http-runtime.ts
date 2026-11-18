@@ -10,7 +10,7 @@ import { handleEstimatedCostHttp } from './estimated-cost-http';
 
 export function estimatedCostHandler(
   request: Request,
-  kind: 'quote' | 'decision',
+  kind: 'quote' | 'decision' | 'overview',
   mobile: boolean,
 ): Promise<Response> {
   return handleEstimatedCostHttp(request, kind, {

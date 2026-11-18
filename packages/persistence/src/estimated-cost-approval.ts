@@ -137,10 +137,12 @@ export interface EstimatedCostDecision {
 /** Web and mobile routes share the same JSON contract; authentication differs. */
 export const ESTIMATED_COST_ROUTES = {
   web: {
+    overview: '/api/chat/estimated-cost/overview',
     quote: '/api/chat/estimated-cost/quote',
     decision: '/api/chat/estimated-cost/decision',
   },
   mobile: {
+    overview: '/api/mobile/v1/chat/estimated-cost/overview',
     quote: '/api/mobile/v1/chat/estimated-cost/quote',
     decision: '/api/mobile/v1/chat/estimated-cost/decision',
   },
@@ -181,6 +183,15 @@ export interface EstimatedCostBudgetTracking {
   dailyPlannedExposureMicros: number | null;
   monthlyPlannedExposureMicros: number | null;
 }
+
+/** Owner-scoped discovery. Null requests means the bounded inventory is incomplete. */
+export type EstimatedCostOverviewResponse =
+  | {
+      ok: true;
+      requests: EstimatedCostRequestProjection[] | null;
+      tracking: EstimatedCostBudgetTracking;
+    }
+  | { ok: false; outcome: 'unavailable'; message: string };
 
 /** Project a canonical request and its explicitly quote-linked grant. */
 export function projectEstimatedCostRequest(input: {
@@ -358,6 +369,7 @@ export interface EstimatedCostGrantRenewal {
 /** Application boundary used by the web and mobile HTTP handlers.
  * Implementations own authorization, durable idempotency and all ledger decisions. */
 export interface EstimatedCostApprovalService {
+  getOverview?(actor: EstimatedCostActor): Promise<EstimatedCostOverviewResponse>;
   getQuote(actor: EstimatedCostActor, operationId: string): Promise<EstimatedCostQuoteResponse>;
   requestQuote(
     actor: EstimatedCostActor,
@@ -745,6 +757,7 @@ export interface EstimatedCostQuotePreparer {
  * A successful approve atomically creates its receipt and escrow, and resumes
  * only the original task. Replays must never allocate twice. */
 export interface EstimatedCostApprovalRepository {
+  getOverview?(actor: EstimatedCostActor): Promise<EstimatedCostOverviewResponse>;
   getQuote(actor: EstimatedCostActor, operationId: string): Promise<EstimatedCostQuoteResponse>;
   storePreparedQuote(prepared: EstimatedCostPreparedQuote): Promise<EstimatedCostQuoteResponse>;
   decide(

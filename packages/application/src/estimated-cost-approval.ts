@@ -53,6 +53,23 @@ export function createEstimatedCostApprovalService(
   const valid = (actor: EstimatedCostActor, operationId: string) =>
     validActor(actor) && id(operationId);
   return {
+    async getOverview(actor) {
+      if (!validActor(actor) || !deps.repository.getOverview)
+        return {
+          ok: false,
+          outcome: 'unavailable',
+          message: 'Estimated cost approval is unavailable.',
+        };
+      try {
+        return await deps.repository.getOverview(actor);
+      } catch {
+        return {
+          ok: false,
+          outcome: 'unavailable',
+          message: 'Estimated cost approval is unavailable.',
+        };
+      }
+    },
     async getQuote(actor, operationId) {
       if (!valid(actor, operationId)) return failure('invalid', operationId);
       try {

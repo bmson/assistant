@@ -95,6 +95,60 @@ for (const driver of ['postgres', 'firestore'] as const)
   describe.skipIf(driver === 'firestore' && !process.env.FIRESTORE_EMULATOR_HOST)(
     `${driver} historical audit discovery`,
     () => {
+      it('exposes the parked spending operation in Needs you without exposing checkpoint state', async () => {
+        const store = driver === 'firestore' ? emulatorStore() : null;
+        const agentId = driver === 'postgres' ? owner : 'audit-owner';
+        const task = {
+          ...record(agentId, 42),
+          status: 'waiting_estimated_cost',
+          state: {
+            privateDraft: 'do-not-expose',
+            estimatedCostApproval: {
+              status: 'pending',
+              operationId: 'operation-42',
+              quoteId: 'quote',
+              bindingDigest: 'private',
+            },
+          },
+        } as Records['tasks'];
+        try {
+          if (store) {
+            await store.doc('agents', agentId).set({ id: agentId });
+            await store.doc('tasks', task.id).set(encodeRecord(task));
+          } else {
+            await db
+              .insert(tasks)
+              .values({
+                id: task.id,
+                agentId,
+                type: task.type,
+                status: task.status,
+                title: task.title,
+                progress: task.progress,
+                trigger: task.trigger,
+                trust: task.trust,
+                state: task.state,
+              });
+          }
+          const repository = store
+            ? new FirestoreTaskDiscoveryRepository(store)
+            : createPostgresTaskDiscoveryRepository(db);
+          const result = await discoverActivityWithRepository(repository, agentId, {
+            ...base,
+            filter: 'needs-you',
+          });
+          const item = result.items.find((row) => row.id === task.id);
+          expect(item).toMatchObject({
+            status: 'waiting_estimated_cost',
+            estimatedCostOperationId: 'operation-42',
+          });
+          expect(JSON.stringify(item)).not.toContain('do-not-expose');
+          expect(JSON.stringify(item)).not.toContain('bindingDigest');
+        } finally {
+          if (store) await disposeStore(store);
+          else await db.delete(tasks).where(eq(tasks.id, task.id));
+        }
+      });
       it('keeps pre-admission cancellation markers out of discovery while advancing the page boundary', async () => {
         const store = driver === 'firestore' ? emulatorStore() : null;
         const agentId = driver === 'postgres' ? owner : 'audit-owner';

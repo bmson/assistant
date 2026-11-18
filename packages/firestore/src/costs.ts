@@ -96,6 +96,16 @@ export class FirestoreCostRepository implements CostRepository {
       }
     };
     return {
+      getOverview: async (actor) => {
+        const view = await this.readEstimatedCostSnapshot(actor);
+        return view
+          ? { ok: true, requests: view.requests, tracking: view.tracking }
+          : {
+              ok: false,
+              outcome: 'unavailable',
+              message: 'Estimated cost approval is unavailable.',
+            };
+      },
       getQuote: async (actor, operationId) => {
         const view = await this.readEstimatedCostView(actor, operationId);
         return view
@@ -286,11 +296,17 @@ export class FirestoreCostRepository implements CostRepository {
   }
 
   /** Request and current totals are read in one transaction. */
-  async readEstimatedCostView(
+  async readEstimatedCostView(actor: EstimatedCostActor, operationId: string) {
+    const view = await this.readEstimatedCostSnapshot(actor, operationId);
+    return view?.request ? { request: view.request, tracking: view.tracking } : null;
+  }
+
+  private async readEstimatedCostSnapshot(
     actor: EstimatedCostActor,
-    operationId: string,
+    operationId?: string,
   ): Promise<{
-    request: EstimatedCostRequestProjection;
+    request?: EstimatedCostRequestProjection;
+    requests: EstimatedCostRequestProjection[] | null;
     tracking: EstimatedCostBudgetTracking;
   } | null> {
     if (actor.installationId !== this.store.installationId) return null;
@@ -298,47 +314,50 @@ export class FirestoreCostRepository implements CostRepository {
       async (tx) => {
         const now = this.store.now().getTime();
         if (!Number.isFinite(now)) throw new Error('Invalid store clock');
-        const request = await tx.get(this.store.doc('estimatedCostRequests', operationId));
-        if (
-          !request.exists ||
-          request.get('installationId') !== actor.installationId ||
-          request.get('ownerId') !== actor.ownerId
-        )
-          return null;
-        const quote = parseEstimatedCostQuote(decodeRecord(request.get('quote')));
-        const taskId: unknown = request.get('taskId');
-        const state: unknown = request.get('state');
-        if (!quote || typeof taskId !== 'string' || typeof state !== 'string')
-          throw new Error('Invalid stored estimated cost request');
-        let selected: { quoteId: string; expiresAt: string; expired: boolean } | undefined;
-        if (state === 'approved') {
-          const grants = await tx.get(
-            this.store
-              .collection('estimatedCostGrants')
-              .where('operationId', '==', operationId)
-              .limit(501),
-          );
-          if (grants.size >= 501) throw new Error('Incomplete estimated cost grants');
-          const matching = grants.docs.filter((doc) => doc.get('quoteId') === quote.quoteId);
-          if (matching.length !== 1 || !matching[0])
-            throw new Error('Invalid stored estimated cost grant');
-          const expiry = decodeRecord<Date>(matching[0].get('expiresAt'));
-          if (!(expiry instanceof Date) || !Number.isFinite(expiry.getTime()))
-            throw new Error('Invalid stored estimated cost grant expiry');
-          selected = {
-            quoteId: quote.quoteId,
-            expiresAt: expiry.toISOString(),
-            expired: expiry.getTime() <= now,
-          };
+        let projection: EstimatedCostRequestProjection | undefined;
+        if (operationId !== undefined) {
+          const request = await tx.get(this.store.doc('estimatedCostRequests', operationId));
+          if (
+            !request.exists ||
+            request.get('installationId') !== actor.installationId ||
+            request.get('ownerId') !== actor.ownerId
+          )
+            return null;
+          const quote = parseEstimatedCostQuote(decodeRecord(request.get('quote')));
+          const taskId: unknown = request.get('taskId');
+          const state: unknown = request.get('state');
+          if (!quote || typeof taskId !== 'string' || typeof state !== 'string')
+            throw new Error('Invalid stored estimated cost request');
+          let selected: { quoteId: string; expiresAt: string; expired: boolean } | undefined;
+          if (state === 'approved') {
+            const grants = await tx.get(
+              this.store
+                .collection('estimatedCostGrants')
+                .where('operationId', '==', operationId)
+                .limit(501),
+            );
+            if (grants.size >= 501) throw new Error('Incomplete estimated cost grants');
+            const matching = grants.docs.filter((doc) => doc.get('quoteId') === quote.quoteId);
+            if (matching.length !== 1 || !matching[0])
+              throw new Error('Invalid stored estimated cost grant');
+            const expiry = decodeRecord<Date>(matching[0].get('expiresAt'));
+            if (!(expiry instanceof Date) || !Number.isFinite(expiry.getTime()))
+              throw new Error('Invalid stored estimated cost grant expiry');
+            selected = {
+              quoteId: quote.quoteId,
+              expiresAt: expiry.toISOString(),
+              expired: expiry.getTime() <= now,
+            };
+          }
+          projection = projectEstimatedCostRequest({
+            operationId,
+            taskId,
+            state,
+            quote,
+            quoteExpired: Date.parse(quote.expiresAt) <= now,
+            ...(selected ? { grant: selected } : {}),
+          });
         }
-        const projection = projectEstimatedCostRequest({
-          operationId,
-          taskId,
-          state,
-          quote,
-          quoteExpired: Date.parse(quote.expiresAt) <= now,
-          ...(selected ? { grant: selected } : {}),
-        });
         const refs = this.refs(new Date(now));
         const [holds, daily, monthly] = await tx.getAll(refs.holds, refs.daily, refs.monthly);
         const pending = await tx.get(
@@ -363,21 +382,69 @@ export class FirestoreCostRepository implements CostRepository {
         const monthlyMicros = counter(monthly, 'spentMicros');
         const heldMicros = counter(holds, 'heldMicros');
         let pendingMicros: number | null = pending.size >= 501 ? null : 0;
+        let requests: EstimatedCostRequestProjection[] | null = pendingMicros === null ? null : [];
         if (pendingMicros !== null)
           for (const row of pending.docs) {
             const pendingQuote = parseEstimatedCostQuote(decodeRecord(row.get('quote')));
             if (
               row.get('installationId') !== actor.installationId ||
+              typeof row.get('ownerId') !== 'string' ||
+              !row.get('ownerId') ||
               !pendingQuote ||
               row.get('operationId') !== pendingQuote.operationId ||
               row.get('taskId') !== pendingQuote.taskId
             ) {
               pendingMicros = null;
+              requests = null;
               break;
             }
-            if (Date.parse(pendingQuote.expiresAt) > now)
-              pendingMicros = addMicros(pendingMicros, pendingQuote.allowanceMicros);
+            const expired = Date.parse(pendingQuote.expiresAt) <= now;
+            if (!expired) pendingMicros = addMicros(pendingMicros, pendingQuote.allowanceMicros);
+            if (row.get('ownerId') === actor.ownerId)
+              requests?.push(
+                projectEstimatedCostRequest({
+                  operationId: pendingQuote.operationId,
+                  taskId: pendingQuote.taskId,
+                  state: 'pending',
+                  quote: pendingQuote,
+                  quoteExpired: expired,
+                }),
+              );
           }
+        if (operationId === undefined && requests !== null) {
+          const expired = await tx.get(
+            this.store
+              .collection('estimatedCostRequests')
+              .where('state', '==', 'expired_or_needs_refresh')
+              .limit(501),
+          );
+          if (expired.size >= 501) requests = null;
+          else
+            for (const row of expired.docs) {
+              const quote = parseEstimatedCostQuote(decodeRecord(row.get('quote')));
+              if (
+                row.get('installationId') !== actor.installationId ||
+                typeof row.get('ownerId') !== 'string' ||
+                !row.get('ownerId') ||
+                !quote ||
+                row.get('operationId') !== quote.operationId ||
+                row.get('taskId') !== quote.taskId
+              ) {
+                requests = null;
+                break;
+              }
+              if (row.get('ownerId') === actor.ownerId)
+                requests.push(
+                  projectEstimatedCostRequest({
+                    operationId: quote.operationId,
+                    taskId: quote.taskId,
+                    state: 'expired_or_needs_refresh',
+                    quote,
+                    quoteExpired: true,
+                  }),
+                );
+            }
+        }
         // A positive aggregate without a complete provenance inventory cannot prove
         // that an omitted/malformed reservation is not an unknown liability.
         let historicalUnknownMicros: number | null = unknown.empty && heldMicros === 0 ? 0 : null;
@@ -410,7 +477,7 @@ export class FirestoreCostRepository implements CostRepository {
               ? null
               : addMicros(monthlyMicros, heldMicros, pendingMicros),
         };
-        return { request: projection, tracking };
+        return { ...(projection ? { request: projection } : {}), requests, tracking };
       },
       { readOnly: true },
     );

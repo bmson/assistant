@@ -75,8 +75,18 @@ export async function readEstimatedCostView(
   db: Db,
   actor: EstimatedCostActor,
   operationId: string,
+) {
+  const view = await readEstimatedCostSnapshot(db, actor, operationId);
+  return view?.request ? { request: view.request, tracking: view.tracking } : null;
+}
+
+async function readEstimatedCostSnapshot(
+  db: Db,
+  actor: EstimatedCostActor,
+  operationId?: string,
 ): Promise<{
-  request: EstimatedCostRequestProjection;
+  request?: EstimatedCostRequestProjection;
+  requests: EstimatedCostRequestProjection[] | null;
   tracking: EstimatedCostBudgetTracking;
 } | null> {
   return db.transaction(
@@ -86,50 +96,53 @@ export async function readEstimatedCostView(
       );
       const now = new Date(clock?.observed ?? '');
       if (!Number.isFinite(now.getTime())) throw new Error('Invalid database clock');
-      const [request] = await tx
-        .select()
-        .from(estimatedCostRequests)
-        .where(
-          and(
-            eq(estimatedCostRequests.operationId, operationId),
-            eq(estimatedCostRequests.installationId, actor.installationId),
-            eq(estimatedCostRequests.ownerId, actor.ownerId),
-          ),
-        );
-      if (!request) return null;
-      const quote = parseEstimatedCostQuote(request.quote);
-      if (!quote) throw new Error('Invalid stored estimated cost quote');
-      let selected: { quoteId: string; expiresAt: string; expired: boolean } | undefined;
-      if (request.state === 'approved') {
-        const grants = await tx
+      let projection: EstimatedCostRequestProjection | undefined;
+      if (operationId !== undefined) {
+        const [request] = await tx
           .select()
-          .from(estimatedCostGrants)
+          .from(estimatedCostRequests)
           .where(
             and(
-              eq(estimatedCostGrants.operationId, operationId),
-              eq(estimatedCostGrants.quoteId, quote.quoteId),
+              eq(estimatedCostRequests.operationId, operationId),
+              eq(estimatedCostRequests.installationId, actor.installationId),
+              eq(estimatedCostRequests.ownerId, actor.ownerId),
             ),
-          )
-          .limit(2);
-        if (grants.length !== 1 || !grants[0])
-          throw new Error('Invalid stored estimated cost grant');
-        const grant = grants[0];
-        if (!(grant.expiresAt instanceof Date) || !Number.isFinite(grant.expiresAt.getTime()))
-          throw new Error('Invalid stored estimated cost grant expiry');
-        selected = {
-          quoteId: grant.quoteId,
-          expiresAt: grant.expiresAt.toISOString(),
-          expired: grant.expiresAt.getTime() <= now.getTime(),
-        };
+          );
+        if (!request) return null;
+        const quote = parseEstimatedCostQuote(request.quote);
+        if (!quote) throw new Error('Invalid stored estimated cost quote');
+        let selected: { quoteId: string; expiresAt: string; expired: boolean } | undefined;
+        if (request.state === 'approved') {
+          const grants = await tx
+            .select()
+            .from(estimatedCostGrants)
+            .where(
+              and(
+                eq(estimatedCostGrants.operationId, operationId),
+                eq(estimatedCostGrants.quoteId, quote.quoteId),
+              ),
+            )
+            .limit(2);
+          if (grants.length !== 1 || !grants[0])
+            throw new Error('Invalid stored estimated cost grant');
+          const grant = grants[0];
+          if (!(grant.expiresAt instanceof Date) || !Number.isFinite(grant.expiresAt.getTime()))
+            throw new Error('Invalid stored estimated cost grant expiry');
+          selected = {
+            quoteId: grant.quoteId,
+            expiresAt: grant.expiresAt.toISOString(),
+            expired: grant.expiresAt.getTime() <= now.getTime(),
+          };
+        }
+        projection = projectEstimatedCostRequest({
+          operationId,
+          taskId: request.taskId,
+          state: request.state,
+          quote,
+          quoteExpired: Date.parse(quote.expiresAt) <= now.getTime(),
+          ...(selected ? { grant: selected } : {}),
+        });
       }
-      const projection = projectEstimatedCostRequest({
-        operationId,
-        taskId: request.taskId,
-        state: request.state,
-        quote,
-        quoteExpired: Date.parse(quote.expiresAt) <= now.getTime(),
-        ...(selected ? { grant: selected } : {}),
-      });
       const day = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
       const month = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
       const [[daily], [monthly], [held], unknown, baselineRows, pending] = await Promise.all([
@@ -158,6 +171,7 @@ export async function readEstimatedCostView(
         tx
           .select({
             operationId: estimatedCostRequests.operationId,
+            ownerId: estimatedCostRequests.ownerId,
             taskId: estimatedCostRequests.taskId,
             quote: estimatedCostRequests.quote,
           })
@@ -174,20 +188,76 @@ export async function readEstimatedCostView(
       const monthlyMicros = storedUsdToMicros(monthly?.total ?? '0');
       const heldMicros = storedUsdToMicros(held?.total ?? '0');
       let pendingMicros: number | null = pending.length >= 501 ? null : 0;
+      let requests: EstimatedCostRequestProjection[] | null = pendingMicros === null ? null : [];
       if (pendingMicros !== null)
         for (const row of pending) {
           const pendingQuote = parseEstimatedCostQuote(row.quote);
           if (
             !pendingQuote ||
+            typeof row.ownerId !== 'string' ||
+            !row.ownerId ||
             pendingQuote.operationId !== row.operationId ||
             pendingQuote.taskId !== row.taskId
           ) {
             pendingMicros = null;
+            requests = null;
             break;
           }
-          if (Date.parse(pendingQuote.expiresAt) > now.getTime())
-            pendingMicros = addMicros(pendingMicros, pendingQuote.allowanceMicros);
+          const expired = Date.parse(pendingQuote.expiresAt) <= now.getTime();
+          if (!expired) pendingMicros = addMicros(pendingMicros, pendingQuote.allowanceMicros);
+          if (row.ownerId === actor.ownerId)
+            requests?.push(
+              projectEstimatedCostRequest({
+                operationId: row.operationId,
+                taskId: row.taskId,
+                state: 'pending',
+                quote: pendingQuote,
+                quoteExpired: expired,
+              }),
+            );
         }
+      if (operationId === undefined && requests !== null) {
+        const expired = await tx
+          .select({
+            operationId: estimatedCostRequests.operationId,
+            ownerId: estimatedCostRequests.ownerId,
+            taskId: estimatedCostRequests.taskId,
+            quote: estimatedCostRequests.quote,
+          })
+          .from(estimatedCostRequests)
+          .where(
+            and(
+              eq(estimatedCostRequests.installationId, actor.installationId),
+              eq(estimatedCostRequests.state, 'expired_or_needs_refresh'),
+            ),
+          )
+          .limit(501);
+        if (expired.length >= 501) requests = null;
+        else
+          for (const row of expired) {
+            const quote = parseEstimatedCostQuote(row.quote);
+            if (
+              !quote ||
+              typeof row.ownerId !== 'string' ||
+              !row.ownerId ||
+              row.operationId !== quote.operationId ||
+              row.taskId !== quote.taskId
+            ) {
+              requests = null;
+              break;
+            }
+            if (row.ownerId === actor.ownerId)
+              requests.push(
+                projectEstimatedCostRequest({
+                  operationId: row.operationId,
+                  taskId: row.taskId,
+                  state: 'expired_or_needs_refresh',
+                  quote,
+                  quoteExpired: true,
+                }),
+              );
+          }
+      }
       let historicalUnknownMicros: number | null = unknown.length === 0 ? 0 : null;
       const baseline = baselineRows[0];
       if (baseline) {
@@ -239,7 +309,7 @@ export async function readEstimatedCostView(
         monthlyPlannedExposureMicros:
           pendingMicros === null ? null : addMicros(monthlyMicros, heldMicros, pendingMicros),
       };
-      return { request: projection, tracking };
+      return { ...(projection ? { request: projection } : {}), requests, tracking };
     },
     { isolationLevel: 'repeatable read', accessMode: 'read only' },
   );
@@ -293,6 +363,10 @@ export function createPostgresEstimatedCostApprovalRepository(
     }
   };
   return {
+    async getOverview(actor) {
+      const view = await readEstimatedCostSnapshot(db, actor);
+      return view ? { ok: true, requests: view.requests, tracking: view.tracking } : unavailable;
+    },
     async getQuote(actor, operationId) {
       const view = await readEstimatedCostView(db, actor, operationId);
       return view
