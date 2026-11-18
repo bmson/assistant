@@ -1,7 +1,11 @@
 import { decryptMcpBearerToken } from '@assistant/core/mcp-secrets';
 import { mcpConnections } from '@assistant/db';
-import { mcpApprovalBindingFingerprint } from '@assistant/persistence';
-import { and, asc, eq } from 'drizzle-orm';
+import {
+  type McpOAuthRepository,
+  mcpApprovalBindingFingerprint,
+  projectMcpOAuthApproval,
+} from '@assistant/persistence';
+import { and, asc, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { type McpHttpSession, pinnedAgent, pinnedRequest, resolveMcpEndpoint } from './mcp-http.js';
 import {
@@ -50,6 +54,8 @@ export interface McpToolConnectionSummary {
 export interface McpToolConnectionRecord extends McpToolConnectionSummary {
   endpoint: string;
   bearerTokenEncrypted: string | null;
+  oauthGeneration?: string;
+  oauthState?: unknown;
 }
 
 /** Persistence port used by owner-scoped MCP tools in portable runtimes. */
@@ -71,6 +77,7 @@ interface McpSession extends McpHttpSession {
   sessionId?: string;
   fetchImpl: FetchImplementation;
   bearerToken?: string;
+  oauth: boolean;
 }
 
 type JsonRpcResponse = McpRpcResponse;
@@ -102,7 +109,7 @@ async function rpc(
     session.fetchImpl === fetch
       ? await pinnedRequest(session, init)
       : await session.fetchImpl(session.endpoint, init);
-  if (response.status === 401) throw new McpAuthorizationError();
+  if (response.status === 401) throw new McpAuthorizationError(session.oauth);
   if (!response.ok && response.status !== 202) {
     throw new Error(`MCP server responded with HTTP ${response.status}.`);
   }
@@ -114,8 +121,12 @@ async function rpc(
 }
 
 class McpAuthorizationError extends Error {
-  constructor() {
-    super('This MCP server requires authorization. OAuth connection is not yet available.');
+  constructor(oauth: boolean) {
+    super(
+      oauth
+        ? 'The MCP server rejected this account authorization. Reconnect before trying again.'
+        : 'This MCP server requires authorization.',
+    );
     this.name = 'McpAuthorizationError';
   }
 }
@@ -136,16 +147,18 @@ async function openMcpSession(
   endpointValue: string,
   fetchImpl: FetchImplementation = fetch,
   bearerToken?: string,
+  publicHttpsOnly = false,
 ): Promise<{
   session: McpSession;
   initialize: Record<string, unknown>;
 }> {
-  const target = await resolveMcpEndpoint(endpointValue);
+  const target = await resolveMcpEndpoint(endpointValue, { publicHttpsOnly });
   const session: McpSession = {
     endpoint: target.endpoint,
     agent: pinnedAgent(target),
     fetchImpl,
     bearerToken,
+    oauth: publicHttpsOnly,
   };
   try {
     const initialized = await rpc(session, {
@@ -192,14 +205,23 @@ function sanitizedTools(value: unknown): McpListedTool[] {
 /** Check a connection and return a bounded, display-safe discovery snapshot. */
 export async function inspectMcpConnection(
   endpointValue: string,
-  options: { fetchImpl?: FetchImplementation; bearerTokenEncrypted?: string | null } = {},
+  options: {
+    fetchImpl?: FetchImplementation;
+    bearerTokenEncrypted?: string | null;
+    publicHttpsOnly?: boolean;
+  } = {},
 ): Promise<McpInspection> {
   let session: McpSession | undefined;
   try {
     const bearerToken = options.bearerTokenEncrypted
       ? decryptMcpBearerToken(options.bearerTokenEncrypted)
       : undefined;
-    const opened = await openMcpSession(endpointValue, options.fetchImpl, bearerToken);
+    const opened = await openMcpSession(
+      endpointValue,
+      options.fetchImpl,
+      bearerToken,
+      options.publicHttpsOnly,
+    );
     session = opened.session;
     const { initialize } = opened;
     const listed = await rpc(session, { id: 2, method: 'tools/list', params: {} });
@@ -235,16 +257,36 @@ export async function invokeMcpTool(
   input: Record<string, unknown>,
   bearerTokenEncrypted: string | null | undefined,
   fetchImpl: FetchImplementation = fetch,
+  oauthAuthority?: {
+    connection: McpToolConnectionRecord;
+    assertCurrent(): Promise<void>;
+  },
 ): Promise<Record<string, unknown>> {
   const bearerToken = bearerTokenEncrypted
     ? decryptMcpBearerToken(bearerTokenEncrypted)
     : undefined;
-  const { session } = await openMcpSession(endpointValue, fetchImpl, bearerToken);
+  const { session } = await openMcpSession(
+    endpointValue,
+    fetchImpl,
+    bearerToken,
+    Boolean(oauthAuthority),
+  );
   try {
+    if (oauthAuthority) {
+      const listed = await rpc(session, { id: 2, method: 'tools/list', params: {} });
+      const tools = sanitizedTools(resultOf(listed.response, 'tools/list').tools);
+      const current = mcpApprovalBindingFingerprint(
+        { ...oauthAuthority.connection, tools },
+        toolName,
+      );
+      if (current !== mcpApprovalBindingFingerprint(oauthAuthority.connection, toolName))
+        throw new Error('MCP tool changed since approval. Reconnect and request fresh approval.');
+      await oauthAuthority.assertCurrent();
+    }
     let response: Awaited<ReturnType<typeof rpc>>;
     try {
       response = await rpc(session, {
-        id: 2,
+        id: oauthAuthority ? 3 : 2,
         method: 'tools/call',
         params: { name: toolName, arguments: input },
       });
@@ -273,10 +315,16 @@ export async function invokeMcpTool(
 export function registerMcpTools(
   registry: ToolRegistry,
   connectionReadPort?: McpToolConnectionReadPort,
-  options: { invoke?: McpToolInvoker } = {},
+  options: {
+    invoke?: McpToolInvoker;
+    oauth?: {
+      repo: McpOAuthRepository;
+      resolve(ownerId: string, connection: McpToolConnectionRecord): Promise<string>;
+    };
+  } = {},
 ): ToolRegistry {
   const invoke = options.invoke ?? invokeMcpTool;
-  const listConnections = async (ctx: import('./types.js').ToolContext) => {
+  const listSavedConnections = async (ctx: import('./types.js').ToolContext) => {
     if (connectionReadPort) return connectionReadPort.list(ctx.agentId);
     return ctx.db
       .select({
@@ -291,7 +339,7 @@ export function registerMcpTools(
       .where(eq(mcpConnections.agentId, ctx.agentId))
       .orderBy(asc(mcpConnections.name));
   };
-  const getConnection = async (
+  const getSavedConnection = async (
     ctx: import('./types.js').ToolContext,
     connectionId: string,
   ): Promise<McpToolConnectionRecord | null> => {
@@ -306,10 +354,42 @@ export function registerMcpTools(
         tools: mcpConnections.tools,
         endpoint: mcpConnections.endpoint,
         bearerTokenEncrypted: mcpConnections.bearerTokenEncrypted,
+        // Keyed read works before the nullable OAuth column migration as well.
+        oauthState: sql<unknown>`to_jsonb(${mcpConnections}) -> 'oauth_state'`,
       })
       .from(mcpConnections)
       .where(and(eq(mcpConnections.id, connectionId), eq(mcpConnections.agentId, ctx.agentId)));
     return row ?? null;
+  };
+  const getConnection = async (ctx: import('./types.js').ToolContext, connectionId: string) => {
+    const connection = await getSavedConnection(ctx, connectionId);
+    if (!connection?.enabled) return connection;
+    if ('oauthState' in connection) {
+      return projectMcpOAuthApproval(
+        connection,
+        ctx.agentId,
+        connection.oauthState,
+        Boolean(options.oauth),
+      );
+    }
+    if (!options.oauth) return connection;
+    const state = await options.oauth.repo.get(
+      { ownerId: ctx.agentId, connectionId },
+      connection.endpoint,
+    );
+    if (!state) return null;
+    return projectMcpOAuthApproval(connection, ctx.agentId, state, true);
+  };
+  const listConnections = async (ctx: import('./types.js').ToolContext) => {
+    const rows = await listSavedConnections(ctx);
+    if (!options.oauth) return rows;
+    // Reuse one credential-safe projection in listings and approval checks.
+    const result: McpToolConnectionSummary[] = [];
+    for (const row of rows) {
+      const current = await getConnection(ctx, row.id);
+      if (current) result.push(current);
+    }
+    return result;
   };
   register(
     registry,
@@ -426,6 +506,50 @@ export function registerMcpTools(
           scope.fingerprint !== mcpApprovalBindingFingerprint(connection, args.toolName)
         ) {
           throw new Error('MCP connection or tool changed since approval. Request fresh approval.');
+        }
+        if (connection.oauthGeneration) {
+          const oauth = options.oauth;
+          if (!oauth) throw new Error('MCP OAuth is unavailable.');
+          const credential = await oauth.resolve(ctx.agentId, connection);
+          return {
+            connection: connection.name,
+            tool: args.toolName,
+            result: await invokeMcpTool(
+              connection.endpoint,
+              args.toolName,
+              args.arguments,
+              credential,
+              fetch,
+              {
+                connection,
+                assertCurrent: async () => {
+                  const current = await getSavedConnection(ctx, args.connectionId);
+                  const state = current?.enabled
+                    ? await oauth.repo.get(
+                        {
+                          ownerId: ctx.agentId,
+                          connectionId: args.connectionId,
+                        },
+                        current.endpoint,
+                      )
+                    : null;
+                  const grant = state?.grant;
+                  if (
+                    !current ||
+                    !grant ||
+                    grant.tokens.accessTokenEncrypted !== credential ||
+                    Date.parse(grant.tokens.accessTokenExpiresAt) <= Date.now() ||
+                    scope.fingerprint !==
+                      mcpApprovalBindingFingerprint(
+                        projectMcpOAuthApproval(current, ctx.agentId, state, true),
+                        args.toolName,
+                      )
+                  )
+                    throw new Error('MCP account changed since approval. Request fresh approval.');
+                },
+              },
+            ),
+          };
         }
         return {
           connection: connection.name,

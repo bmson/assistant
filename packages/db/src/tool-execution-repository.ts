@@ -1,5 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { configuredOwnerPhoneRecipientFingerprint } from '@assistant/config';
+import {
+  configuredOwnerPhoneRecipientFingerprint,
+  loadConfig,
+  mcpOAuthReleaseReady,
+} from '@assistant/config';
 import type {
   ApprovedToolCall,
   CachedToolCallInput,
@@ -23,6 +27,7 @@ import {
   phoneCallOwnerActionGrantBindingMatches,
   phoneCallOwnerActionGrantScopeFingerprint,
   phoneCallOwnerNumberGrantBindingMatches,
+  projectMcpOAuthApproval,
   reserveOwnerCallGrantUsage,
   sameDirectOwnerCallRequestBinding,
   toolCallReceiptKeyId,
@@ -484,8 +489,17 @@ export function createPostgresToolExecutionRepository(db: Db): ToolExecutionRepo
             !/^[a-f0-9]{64}$/.test(binding.fingerprint)
           )
             return markStaleAuthorization();
+          const oauthEnabled = mcpOAuthReleaseReady(loadConfig(), 'agent');
           const [connection] = await tx
-            .select()
+            .select({
+              id: mcpConnections.id,
+              endpoint: mcpConnections.endpoint,
+              enabled: mcpConnections.enabled,
+              status: mcpConnections.status,
+              tools: mcpConnections.tools,
+              bearerTokenEncrypted: mcpConnections.bearerTokenEncrypted,
+              oauthState: sql<unknown>`to_jsonb(${mcpConnections}) -> 'oauth_state'`,
+            })
             .from(mcpConnections)
             .where(
               and(
@@ -499,7 +513,12 @@ export function createPostgresToolExecutionRepository(db: Db): ToolExecutionRepo
             bindingMatches = Boolean(
               connection &&
                 mcpApprovalBindingFingerprint(
-                  connection,
+                  projectMcpOAuthApproval(
+                    connection,
+                    input.agentId,
+                    connection.oauthState,
+                    oauthEnabled,
+                  ),
                   String((input.args as { toolName?: unknown }).toolName),
                 ) === binding.fingerprint,
             );
