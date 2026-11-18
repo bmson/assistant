@@ -72,84 +72,79 @@ struct McpOAuthControl: View {
     private let unknown = "Couldn’t confirm the change. Check its status before trying again."
 
     var body: some View {
-        Group {
-            if pending != nil || status?.signInAvailable == true
-                || status.map({ $0.grant != .none }) == true
+        VStack(alignment: .leading, spacing: 8) {
+            Divider()
+            if status?.grant == .authorized {
+                Text("Tool sign-in authorized").font(.subheadline.weight(.semibold))
+            } else if status?.grant == .reauthorizationRequired {
+                Text("Tool sign-in needs attention").font(.subheadline.weight(.semibold))
+            }
+            if status?.signInAvailable != false, pending == nil, !unconfirmed,
+                !providerAvailable
             {
-                Divider()
-                VStack(alignment: .leading, spacing: 8) {
-                    if status?.grant == .authorized {
-                        Text("Tool sign-in authorized").font(.subheadline.weight(.semibold))
-                    } else if status?.grant == .reauthorizationRequired {
-                        Text("Tool sign-in needs attention").font(.subheadline.weight(.semibold))
-                    }
-                    if status?.signInAvailable == true, pending == nil, !unconfirmed,
-                        !providerAvailable
-                    {
-                        action("Check browser sign-in") {
-                            run { context, current in
-                                let verified = try await context.client.mcpOAuthStatus(
-                                    id: connection.id, verifyProvider: true)
-                                guard verified.connectionId == connection.id else {
-                                    throw Unverified.response
-                                }
-                                guard accepts(context, current) else { return }
-                                status = verified
-                                providerAvailable = verified.providerAvailable == true
-                                if !providerAvailable {
-                                    notice =
-                                        "Browser sign-in isn’t available for this service. Manual setup is still available."
-                                }
-                            }
+                action("Check browser sign-in") {
+                    run { context, current in
+                        let verified = try await context.client.mcpOAuthStatus(
+                            id: connection.id, verifyProvider: true)
+                        guard verified.connectionId == connection.id else {
+                            throw Unverified.response
                         }
-                    }
-                    if let status, status.signInAvailable, pending == nil, !unconfirmed,
-                        providerAvailable
-                    {
-                        action(
-                            status.grant == .none ? "Sign in to this service" : "Reconnect sign-in",
-                            extraDisabled: window == nil
-                        ) {
-                            guard let window else { return }
-                            run { context, current in
-                                try await connect(context, window: window, current: current)
-                            }
+                        guard accepts(context, current) else { return }
+                        status = verified
+                        providerAvailable = verified.providerAvailable == true
+                        if !providerAvailable {
+                            notice =
+                                "Browser sign-in isn’t available for this service. Manual setup is still available."
                         }
-                    }
-                    if pending != nil || unconfirmed {
-                        action("Check sign-in status") {
-                            run { context, current in
-                                try await reconcile(context, flowId: pending, current: current)
-                            }
-                        }
-                    }
-                    if let pending {
-                        action("Cancel sign-in attempt", extraDisabled: unconfirmed) {
-                            run { context, current in
-                                try await reconcile(
-                                    context, flowId: pending, cancel: true, current: current)
-                            }
-                        }
-                    }
-                    if let status, status.grant != .none {
-                        Button("Disconnect sign-in", role: .destructive) {
-                            confirmingDisconnect = true
-                        }
-                        .buttonStyle(
-                            AssistantActionButtonStyle(
-                                kind: .destructive, fillsWidth: true, minimumHeight: 44)
-                        )
-                        .disabled(disabled || busy || unconfirmed || pending != nil)
-                    }
-                    if busy {
-                        ProgressView("Checking tool sign-in…").font(.caption)
-                    } else if let notice {
-                        Text(notice).font(.caption).foregroundStyle(.secondary)
                     }
                 }
             }
+            if let status, status.signInAvailable, pending == nil, !unconfirmed,
+                providerAvailable
+            {
+                action(
+                    status.grant == .none ? "Sign in to this service" : "Reconnect sign-in",
+                    extraDisabled: window == nil
+                ) {
+                    guard let window else { return }
+                    run { context, current in
+                        try await connect(context, window: window, current: current)
+                    }
+                }
+            }
+            if pending != nil || unconfirmed {
+                action("Check sign-in status") {
+                    run { context, current in
+                        try await reconcile(context, flowId: pending, current: current)
+                    }
+                }
+            }
+            if let pending {
+                action("Cancel sign-in attempt", extraDisabled: unconfirmed) {
+                    run { context, current in
+                        try await reconcile(
+                            context, flowId: pending, cancel: true, current: current)
+                    }
+                }
+            }
+            if let status, status.grant != .none {
+                Button("Disconnect sign-in", role: .destructive) {
+                    confirmingDisconnect = true
+                }
+                .buttonStyle(
+                    AssistantActionButtonStyle(
+                        kind: .destructive, fillsWidth: true, minimumHeight: 44)
+                )
+                .disabled(disabled || busy || unconfirmed || pending != nil)
+            }
+            if busy {
+                ProgressView("Checking tool sign-in…").font(.caption)
+            } else if let notice {
+                Text(notice).font(.caption).foregroundStyle(.secondary)
+            }
         }
         .background(AssistantWindowReader(window: $window).frame(width: 0, height: 0))
+        .onAppear { isVisible = true }
         .task {
             isVisible = true
             guard let context = model.mcpSignInOptionsRequestContext(for: connection),
@@ -160,7 +155,9 @@ struct McpOAuthControl: View {
             do {
                 try await reconcile(context, flowId: nil, current: current)
             } catch {
-                // Older servers and unavailable lifecycle configurations keep the diagnostics visible.
+                if accepts(context, current), !Task.isCancelled {
+                    notice = "Couldn’t check tool sign-in. Try Check browser sign-in."
+                }
             }
             if accepts(context, current) { busy = false }
         }
