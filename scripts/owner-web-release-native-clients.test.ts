@@ -1415,6 +1415,28 @@ describe('reviewed zero-tag disabled capture adapter', () => {
     f.native[f.context.canonical]!.conditions[1].revisionReason = 'HEALTH_CHECK_SKIPPED';
     expect(() => f.state()).toThrow();
   });
+  it('allows the retained resource condition only on the stable closed current revision, never the service terminal', () => {
+    const f = reviewed();
+    const revision = f.native[f.context.canonical]!;
+    revision.conditions[2].state = 'CONDITION_RECONCILING';
+    f.context.currentBinding!.revisionSha256 = bootstrapDigest(revision);
+    expect(() => projectNativeWebSnapshot(f.service, f.native, f.context)).not.toThrow();
+    revision.reconciling = true;
+    f.context.currentBinding!.revisionSha256 = bootstrapDigest(revision);
+    expect(() => projectNativeWebSnapshot(f.service, f.native, f.context)).toThrow();
+    revision.reconciling = false;
+    f.context.currentBinding!.revisionSha256 = bootstrapDigest(revision);
+    f.context.currentBinding!.preclosed = false;
+    expect(() => projectNativeWebSnapshot(f.service, f.native, f.context)).toThrow();
+    f.context.currentBinding!.preclosed = true;
+    f.service.terminalCondition = {
+      type: 'ResourcesAvailable',
+      state: 'CONDITION_RECONCILING',
+      revisionReason: 'RETIRED',
+    };
+    f.context.currentBinding!.serviceSha256 = bootstrapDigest(f.service);
+    expect(() => projectNativeWebSnapshot(f.service, f.native, f.context)).toThrow();
+  });
   it('requires promoted candidate-only current state before accepting externally reviewed preclosed aliases', async () => {
     const f = reviewed();
     let state = f.state();

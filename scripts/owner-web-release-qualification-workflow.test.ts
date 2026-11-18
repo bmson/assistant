@@ -205,6 +205,9 @@ describe('same-workflow recovery build isolation', () => {
     expect(image).toContain('registryManifestDigest:$digest');
     expect(image).toContain('sbomSha256:$sbomSha256');
     expect(image).toContain('ref="${IMAGE_ROOT}/${IMAGE_NAME}@${digest}"');
+    expect(image).toMatch(
+      /name: Install Cosign\n\s+uses: sigstore\/cosign-installer@[^\n]+\n\s+with:\n\s+cosign-release: v3\.1\.3/,
+    );
     expect(image).toContain(
       'cosign sign --yes --bundle "sbom/${IMAGE_NAME}-signature.sigstore.json" "$ref"',
     );
