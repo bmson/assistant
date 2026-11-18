@@ -6,6 +6,7 @@ import dotenv from 'dotenv';
 import { z } from 'zod';
 import { type AssistantModule, assistantModuleNames, parseAssistantModules } from './modules.js';
 
+export { mcpOAuthReleaseReady } from './mcp-oauth-release.js';
 export {
   type AssistantModule,
   assistantModuleNames,
