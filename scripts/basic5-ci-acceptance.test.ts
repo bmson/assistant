@@ -987,6 +987,53 @@ describe('one-shot BASIC5 CI controller', () => {
     expect(run.signals).toEqual([]);
   });
 
+  it('confirms independent first-pass exits together and defers a child of a missing parent', async () => {
+    const sibling = { ...censusChild, pid: 91, startTimeTicks: '3' };
+    const grandchild = { ...censusChild, pid: 92, ppid: 90, startTimeTicks: '4' };
+    const readIdentity = vi.fn(async (pid: number) => (pid === 88 ? censusRoot : undefined));
+    const run = await censusSequence(
+      [
+        censusSnapshot(censusRoot, censusChild, sibling, grandchild),
+        censusSnapshot(censusRoot),
+        censusSnapshot(),
+        censusSnapshot(),
+      ],
+      readIdentity,
+    );
+    expect(run.error).toBeUndefined();
+    expect(run.result?.exitCode).toBe(0);
+    expect(readIdentity).toHaveBeenCalledWith(90);
+    expect(readIdentity).toHaveBeenCalledWith(91);
+    expect(readIdentity).not.toHaveBeenCalledWith(92);
+    expect(run.snapshotReads).toBe(4);
+    expect(run.enrolled).toEqual([88]);
+    expect(run.signals).toEqual([]);
+  });
+
+  it.each([
+    ['still present', '3', 'absence_not_confirmed'],
+    ['reused', '99', 'generation_changed'],
+  ] as const)(
+    'holds if one batched missing PID is %s in the fresh snapshot',
+    async (_label, ticks, reason) => {
+      const sibling = { ...censusChild, pid: 91, startTimeTicks: '3' };
+      const run = await censusSequence(
+        [
+          censusSnapshot(censusRoot, censusChild, sibling),
+          censusSnapshot(censusRoot, { ...sibling, startTimeTicks: ticks }),
+        ],
+        async (pid) => (pid === 88 ? censusRoot : undefined),
+      );
+      expect(run.error).toMatchObject({
+        operationSettled: false,
+        censusDiagnostic: { stage: 'absence_confirmation', reason },
+      });
+      expect(run.snapshotReads).toBe(2);
+      expect(run.enrolled).toEqual([88]);
+      expect(run.signals).toEqual([]);
+    },
+  );
+
   it.each([
     ['same live row', censusChild, 'absence_not_confirmed'],
     ['reused PID', { ...censusChild, startTimeTicks: '99' }, 'generation_changed'],
