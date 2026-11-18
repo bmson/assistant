@@ -4,6 +4,8 @@ import type {
   EstimatedCostBaselineWitness,
 } from '@assistant/persistence';
 import { eq, sql } from 'drizzle-orm';
+import { drizzle } from 'drizzle-orm/postgres-js';
+import postgres from 'postgres';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createDb, type Db } from './client.js';
 import {
@@ -12,6 +14,7 @@ import {
   preparePostgresEstimatedCostBaseline,
   readbackPostgresEstimatedCostBaseline,
 } from './estimated-cost-baseline-provision.js';
+import * as schema from './schema.js';
 import {
   agents,
   costReservations,
@@ -31,15 +34,65 @@ assertAllocatedTestTarget({
 });
 if (!url) throw new Error('Missing isolated test database');
 describe('PostgreSQL baseline provisioning', () => {
-  let db: Db, context: EstimatedCostBaselineContext, ownerId: string, reservationId: string;
+  let db: Db,
+    control: Db,
+    context: EstimatedCostBaselineContext,
+    ownerId: string,
+    reservationId: string;
+  const schemaName = `baseline_test_${randomUUID().replaceAll('-', '')}`;
+  const unrelatedId = randomUUID();
   beforeAll(async () => {
-    db = createDb(url);
-    const owners = await db.select({ id: agents.id }).from(agents);
+    control = createDb(url);
+    const owners = await control.select({ id: agents.id }).from(agents);
     if (owners.length !== 1 || !owners[0]) throw new Error('Expected one owner');
     ownerId = owners[0].id;
+    // Each test uses a complete independent ledger, in the already allocated
+    // local disposable database. No public tables or shared rows are reset.
+    await control.execute(sql`create schema ${sql.identifier(schemaName)}`);
+    for (const name of [
+      'agents',
+      'tasks',
+      'cost_reservations',
+      'estimated_cost_grants',
+      'estimated_cost_requests',
+      'estimated_cost_baselines',
+      'maintenance_cursors',
+    ])
+      await control.execute(
+        sql`create table ${sql.identifier(schemaName)}.${sql.identifier(name)} (like public.${sql.identifier(name)} including all)`,
+      );
+    const client = postgres(url, { connection: { search_path: schemaName } });
+    db = drizzle(client, { schema });
+    const [identity] = (await db.execute(sql`select current_schema() as name`)) as unknown as {
+      name: string;
+    }[];
+    if (identity?.name !== schemaName) throw new Error('Isolated schema binding failed');
+    await db.insert(agents).values({
+      id: ownerId,
+      name: 'Baseline owner',
+      email: `${ownerId}@baseline.invalid`,
+      workspacePrefix: 'baseline-test',
+    });
+    // Simulate an earlier suite's unrelated active liability in the shared
+    // ledger; every baseline test must succeed or fail on its own contents.
+    await control.insert(costReservations).values({
+      id: unrelatedId,
+      source: 'model',
+      estimatedUsd: '0.030000',
+      status: 'held',
+      description: 'baseline-isolation-control',
+    });
   });
   afterAll(async () => {
-    await db.$client.end();
+    try {
+      if (db) await db.$client.end();
+      if (control) {
+        await control.delete(costReservations).where(eq(costReservations.id, unrelatedId));
+        await control.execute(sql`drop schema if exists ${sql.identifier(schemaName)} cascade`);
+      }
+    } finally {
+      if (control) await control.$client.end();
+    }
   });
   beforeEach(async () => {
     reservationId = randomUUID();
@@ -100,6 +153,22 @@ describe('PostgreSQL baseline provisioning', () => {
       };
     return { witness, proposal: await preparePostgresEstimatedCostBaseline(db, context, witness) };
   }
+  it('keeps unrelated active liabilities in the shared ledger untouched', async () => {
+    const before = await control
+      .select()
+      .from(costReservations)
+      .where(eq(costReservations.id, unrelatedId));
+    expect(before).toHaveLength(1);
+    expect(before[0]?.status).toBe('held');
+    await expect(inspectPostgresEstimatedCostBaseline(control, context)).rejects.toThrow(
+      'Active reservation during baseline freeze',
+    );
+    const { proposal } = await prepared();
+    expect(proposal.rows).toEqual([{ reservationId, estimatedMicros: 100000 }]);
+    expect(
+      await control.select().from(costReservations).where(eq(costReservations.id, unrelatedId)),
+    ).toEqual(before);
+  });
   it('creates once, reads back the same receipt, and preserves liabilities', async () => {
     const before = await db
       .select()
@@ -221,7 +290,10 @@ describe('PostgreSQL baseline provisioning', () => {
   it('rejects more than 500 eligible rows instead of truncating', async () => {
     await db.execute(sql`insert into cost_reservations (id, source, estimated_usd, status, description, created_at)
       select gen_random_uuid(), 'model', 0.000001, 'unknown', 'baseline-oversize-test', now() - interval '1 day' from generate_series(1, 500)`);
-    await expect(prepared()).rejects.toThrow('rows');
+    const inspection = await inspectPostgresEstimatedCostBaseline(db, context);
+    expect(inspection.census.reservations).toHaveLength(501);
+    expect(inspection.census.heldMicros).toBe(100500);
+    await expect(prepared()).rejects.toThrow('Invalid baseline proposal rows');
   });
   it('recovers the exact receipt after expiry and release change without authorizing another apply', async () => {
     const { witness, proposal } = await prepared();
