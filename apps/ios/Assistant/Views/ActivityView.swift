@@ -127,18 +127,18 @@ struct EstimatedCostOverviewCard: View {
                     ProgressView("Checking planned spending…")
                 } else if let overview, let tracking = overview.tracking {
                     Text("Awaiting approval is planned, not held or spent. Planned totals include recorded spending, holds, and awaiting approval once.")
-                        .font(.footnote).foregroundStyle(.secondary)
+                        .font(.footnote).foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
                     if !tracking.complete {
-                        Text("Some current amounts are unavailable.").font(.footnote).foregroundStyle(.secondary)
+                        Text("Some current amounts are unavailable.").font(.footnote).foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
                     }
-                    LabeledContent("Recorded today", value: amount(tracking.recordedDailyMicros))
-                    LabeledContent("Recorded this month", value: amount(tracking.recordedMonthlyMicros))
-                    LabeledContent("Reserved or unresolved", value: amount(tracking.totalHeldMicros))
-                    LabeledContent("Awaiting approval · planned", value: amount(tracking.pendingApprovalMicros))
-                    LabeledContent("Planned today", value: amount(tracking.dailyPlannedExposureMicros))
-                    LabeledContent("Planned this month", value: amount(tracking.monthlyPlannedExposureMicros))
+                    amountRow("Recorded today", micros: tracking.recordedDailyMicros)
+                    amountRow("Recorded this month", micros: tracking.recordedMonthlyMicros)
+                    amountRow("Reserved or unresolved", micros: tracking.totalHeldMicros)
+                    amountRow("Awaiting approval · planned", micros: tracking.pendingApprovalMicros)
+                    amountRow("Planned today", micros: tracking.dailyPlannedExposureMicros)
+                    amountRow("Planned this month", micros: tracking.monthlyPlannedExposureMicros)
                 } else {
-                    Text("Current planned spending is unavailable.").font(.footnote).foregroundStyle(.secondary)
+                    Text("Current planned spending is unavailable.").font(.footnote).foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
                 }
             }.padding(24).frame(maxWidth: .infinity, alignment: .leading)
             if !loading, loadedKey == refreshKey, let overview {
@@ -147,7 +147,7 @@ struct EstimatedCostOverviewCard: View {
                     Text("Spending requests").font(.subheadline.weight(.semibold))
                     if let requests = overview.requests {
                         if requests.isEmpty {
-                            Text("No spending requests are waiting.").font(.footnote).foregroundStyle(.secondary)
+                            Text("No spending requests are waiting.").font(.footnote).foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
                         } else {
                             ForEach(requests, id: \.operationId) { request in
                                 Button {
@@ -156,7 +156,7 @@ struct EstimatedCostOverviewCard: View {
                                     VStack(alignment: .leading, spacing: 4) {
                                         Text(request.quote?.requestText ?? "Estimate unavailable")
                                         Text("\(status(request.status)) · Request \(request.operationId.suffix(8))")
-                                            .font(.footnote).foregroundStyle(.secondary)
+                                            .font(.footnote).foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
                                     }.frame(maxWidth: .infinity, alignment: .leading)
                                 }
                                 .buttonStyle(AssistantActionButtonStyle(kind: .secondary, fillsWidth: true))
@@ -164,7 +164,7 @@ struct EstimatedCostOverviewCard: View {
                             }
                         }
                     } else {
-                        Text("The request list is unavailable.").font(.footnote).foregroundStyle(.secondary)
+                        Text("The request list is unavailable.").font(.footnote).foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
                     }
                 }.padding(24).frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -173,6 +173,14 @@ struct EstimatedCostOverviewCard: View {
         .task(id: refreshKey) {
             guard scenePhase == .active else { return }
             await load(key: refreshKey)
+        }
+    }
+
+    private func amountRow(_ label: String, micros: Int64?) -> some View {
+        LabeledContent {
+            Text(amount(micros)).foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+        } label: {
+            Text(label)
         }
     }
 
