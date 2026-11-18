@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { EstimatedCostReleaseProfile } from '../infra/gcp/estimated-cost-release-config.mjs';
+import type { VerifiedBaselineEnablePrerequisites } from './estimated-cost-baseline-operator.js';
 import {
   recordVerifiedEstimatedCostReleaseProfile,
   reviewedEstimatedCostReleaseProfile,
@@ -212,6 +213,17 @@ describe('reviewed cost runtime profile', () => {
     try {
       const p: EstimatedCostReleaseProfile = { ...profile, mode: 'enable', ...evidence };
       const env = environment(directory, p);
+      const prerequisites: VerifiedBaselineEnablePrerequisites = {
+        target: {
+          driver: 'firestore',
+          projectId: p.projectId,
+          databaseId: 'assistant-production',
+          installationId: p.installationId,
+        },
+        ownerId: p.ownerId,
+        source: p.source,
+        ...evidence,
+      };
       expect(() =>
         recordVerifiedEstimatedCostReleaseProfile(p, 'e'.repeat(64), undefined, env, now),
       ).toThrow();
@@ -224,10 +236,18 @@ describe('reviewed cost runtime profile', () => {
           now,
         ),
       ).toThrow();
-      recordVerifiedEstimatedCostReleaseProfile(p, 'e'.repeat(64), evidence, env, now);
-      expect(reviewedEstimatedCostReleaseProfile(env, now)).toEqual(p);
+      recordVerifiedEstimatedCostReleaseProfile(p, 'e'.repeat(64), prerequisites, env, now);
       const file = join(directory, 'estimated-cost-release-verified.json');
       const receipt = JSON.parse(readFileSync(file, 'utf8'));
+      expect(receipt.evidence).toStrictEqual(evidence);
+      expect(reviewedEstimatedCostReleaseProfile(env, now)).toEqual(p);
+      for (const tamperedEvidence of [
+        { ...evidence, writersReceiptSha256: 'f'.repeat(64) },
+        prerequisites,
+      ]) {
+        writeFileSync(file, JSON.stringify({ ...receipt, evidence: tamperedEvidence }));
+        expect(() => reviewedEstimatedCostReleaseProfile(env, now)).toThrow();
+      }
       delete receipt.evidence;
       writeFileSync(file, JSON.stringify(receipt), { mode: 0o600 });
       expect(() => reviewedEstimatedCostReleaseProfile(env, now)).toThrow();
