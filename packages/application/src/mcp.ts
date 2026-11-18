@@ -108,10 +108,12 @@ export async function createMcpConnection(
   }
   const agent = await getAgent(db);
   try {
-    const [connection] = await db
-      .insert(mcpConnections)
-      .values({ agentId: agent.id, name, endpoint, bearerTokenEncrypted, status: 'checking' })
-      .returning({ id: mcpConnections.id });
+    // Keep the legacy create path usable before the optional OAuth column is migrated.
+    const [connection] = await db.execute<{ id: string }>(sql`
+      INSERT INTO mcp_connections (agent_id, name, endpoint, bearer_token_encrypted)
+      VALUES (${agent.id}, ${name}, ${endpoint}, ${bearerTokenEncrypted})
+      RETURNING id
+    `);
     return connection ? { connectionId: connection.id } : { error: 'Unable to save connection.' };
   } catch (error) {
     const detail = error instanceof Error ? error.message : '';

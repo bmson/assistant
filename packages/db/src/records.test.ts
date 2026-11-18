@@ -38,8 +38,9 @@ it('keeps portable record types compatible with all PostgreSQL tables', () => {
     typeof schema.situationPreviews.$inferSelect
   >();
   expectTypeOf<Records['agents']>().toEqualTypeOf<typeof schema.agents.$inferSelect>();
-  expectTypeOf<Records['mcpConnections']>().toEqualTypeOf<
-    typeof schema.mcpConnections.$inferSelect
+  // Existing Firestore documents omit this field; PostgreSQL materializes NULL.
+  expectTypeOf<Omit<Records['mcpConnections'], 'oauthState'>>().toEqualTypeOf<
+    Omit<typeof schema.mcpConnections.$inferSelect, 'oauthState'>
   >();
   expectTypeOf<Records['goals']>().toEqualTypeOf<typeof schema.goals.$inferSelect>();
   expectTypeOf<Records['conversations']>().toEqualTypeOf<

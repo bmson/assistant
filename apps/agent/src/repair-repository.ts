@@ -36,7 +36,16 @@ export function repairRepositoryReader(
       ).filter((row): row is NonNullable<typeof row> => row !== null);
     } else {
       rows = await deps.db
-        .select()
+        .select({
+          id: mcpConnections.id,
+          name: mcpConnections.name,
+          serverName: mcpConnections.serverName,
+          endpoint: mcpConnections.endpoint,
+          enabled: mcpConnections.enabled,
+          status: mcpConnections.status,
+          tools: mcpConnections.tools,
+          bearerTokenEncrypted: mcpConnections.bearerTokenEncrypted,
+        })
         .from(mcpConnections)
         .where(
           and(

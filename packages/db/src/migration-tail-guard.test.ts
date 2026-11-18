@@ -40,6 +40,10 @@ const expected: MigrationTailMetadata[] = [
     folderMillis: 1_794_765_054_109,
     hash: '6b319e02cd34458a4fdd6137f11d8a4d0bded4a955e904657d66f0cbe72797f4',
   },
+  {
+    folderMillis: 1_795_023_841_106,
+    hash: 'e43420d5b6b4ab8ca0b90404718db314a90fdb13196b05bde0918c855d0f65d3',
+  },
 ];
 const applied = (count: number): AppliedMigrationTailRow[] =>
   expected.slice(0, count).map((migration) => ({
@@ -57,7 +61,7 @@ describe('owner-editor migration tail guard', () => {
     expect(shipped).toEqual(expected);
   });
 
-  it.each([0, 1, 2, 3, 4, 5, 6, 7, 8])('accepts canonical strict prefix length %i', (count) => {
+  it.each([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])('accepts canonical strict prefix length %i', (count) => {
     expect(() => assertCompatibleOwnerEditorMigrationTail(expected, applied(count))).not.toThrow();
   });
 
@@ -75,7 +79,7 @@ describe('owner-editor migration tail guard', () => {
       [{ hash: 'a'.repeat(64), createdAt: String(expected[0]!.folderMillis) }],
       [{ hash: expected[0]!.hash, createdAt: String(expected[0]!.folderMillis + 1) }],
       [applied(1)[0]!, applied(1)[0]!],
-      [...applied(8), { hash: 'b'.repeat(64), createdAt: String(expected[7]!.folderMillis + 1) }],
+      [...applied(9), { hash: 'b'.repeat(64), createdAt: String(expected[8]!.folderMillis + 1) }],
       [{ hash: expected[0]!.hash, createdAt: null }],
       [{ hash: 'not-a-hash', createdAt: 'not-a-time' }],
     ];
@@ -101,8 +105,11 @@ describe('owner-editor migration tail guard', () => {
     expect(() => assertCompatibleOwnerEditorMigrationTail(expected, applied(7), true)).toThrow(
       'Incompatible owner-editor migration ledger.',
     );
+    expect(() => assertCompatibleOwnerEditorMigrationTail(expected, applied(8), true)).toThrow(
+      'Incompatible owner-editor migration ledger.',
+    );
     expect(() =>
-      assertCompatibleOwnerEditorMigrationTail(expected, applied(8), true),
+      assertCompatibleOwnerEditorMigrationTail(expected, applied(9), true),
     ).not.toThrow();
   });
 
@@ -146,13 +153,13 @@ describe('owner-editor migration tail guard', () => {
     ).toThrow('Incompatible owner-editor migration ledger.');
   });
 
-  it('rejects an extra ledger row after the reviewed 0137 tail', () => {
+  it('rejects an extra ledger row after the reviewed 0138 tail', () => {
     expect(() =>
       assertCompatibleOwnerEditorMigrationTail(expected, [
-        ...applied(8),
+        ...applied(9),
         {
           hash: 'b'.repeat(64),
-          createdAt: String(expected[7]!.folderMillis + 1),
+          createdAt: String(expected[8]!.folderMillis + 1),
         },
       ]),
     ).toThrow('Incompatible owner-editor migration ledger.');

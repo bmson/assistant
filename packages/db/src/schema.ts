@@ -171,6 +171,8 @@ export const mcpConnections = pgTable(
     endpoint: text('endpoint').notNull(),
     /** AES-GCM payload for the optional bearer token; never expose this field. */
     bearerTokenEncrypted: text('bearer_token_encrypted'),
+    /** Versioned OAuth state, separate from the manual bearer credential. */
+    oauthState: jsonb('oauth_state'),
     /** ready | checking | authorization_required | error | disabled */
     status: text('status').notNull().default('checking'),
     enabled: boolean('enabled').notNull().default(true),

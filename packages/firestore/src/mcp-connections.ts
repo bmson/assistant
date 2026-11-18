@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { Records } from '@assistant/persistence';
+import { parseMcpOAuthState, pauseMcpOAuthState, type Records } from '@assistant/persistence';
 import type { Transaction } from '@google-cloud/firestore';
 import {
   assertPrivacyErasureFenceUnchanged,
@@ -289,6 +289,19 @@ export class FirestoreMcpConnectionMutationRepository {
       const status = enabled ? 'error' : 'disabled';
       tx.update(ref, {
         enabled,
+        ...(!enabled && row.oauthState != null
+          ? {
+              oauthState: encodeRecord(
+                pauseMcpOAuthState(
+                  parseMcpOAuthState(
+                    row.oauthState,
+                    { ownerId: this.configuredAgentId, connectionId: id },
+                    row.endpoint,
+                  ),
+                ),
+              ),
+            }
+          : {}),
         status,
         ...(enabled ? { lastError: pendingDiscoveryError } : {}),
         updatedAt: this.now(),
