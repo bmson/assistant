@@ -1441,7 +1441,15 @@ struct ActivityView: View {
             .frame(maxWidth: isLandscape ? 760 : .infinity, alignment: .leading)
         }
         .navigationTitle(showingArchived ? "Archived activity" : "Activity")
-        .onAppear { updateChecklistCorrectionEligibility() }
+        .onAppear {
+#if DEBUG
+            if URLComponents(string: model.serverURL)?.host == "127.0.0.1",
+               ProcessInfo.processInfo.environment["ASSISTANT_PENDING_SPENDING_REVIEW"] == "activity" {
+                filter = .needsYou
+            }
+#endif
+            updateChecklistCorrectionEligibility()
+        }
         .onChange(of: showingArchived) { _, _ in
             discoveryTask?.cancel()
             discoveryGeneration = UUID()
