@@ -98,6 +98,107 @@ struct CostPermissionDisplay: Equatable {
     }
 }
 
+/// Owner-scoped totals and reviewable requests; missing values stay unavailable.
+struct EstimatedCostOverviewCard: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var overview: EstimatedCostOverviewResponse?
+    @State private var loading = true
+    @State private var loadedKey: String?
+
+    private var refreshKey: String {
+        "\(model.activityConnectionVersion)-\(model.costTrackingRevision)-\(scenePhase)"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .top, spacing: 8) {
+                Text("Planned spending").font(.body.weight(.semibold))
+                    .frame(maxWidth: .infinity, minHeight: 24, alignment: .leading)
+                    .accessibilityAddTraits(.isHeader)
+                Image(systemName: "dollarsign.circle").font(.system(size: 20))
+                    .frame(width: 24, height: 24).accessibilityHidden(true)
+            }.padding(24)
+            Divider()
+            VStack(alignment: .leading, spacing: 12) {
+                if loading || loadedKey != refreshKey {
+                    ProgressView("Checking planned spending…")
+                } else if let overview, let tracking = overview.tracking {
+                    Text("Awaiting approval is planned, not held or spent. Planned totals include recorded spending, holds, and awaiting approval once.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    if !tracking.complete {
+                        Text("Some current amounts are unavailable.").font(.footnote).foregroundStyle(.secondary)
+                    }
+                    LabeledContent("Recorded today", value: amount(tracking.recordedDailyMicros))
+                    LabeledContent("Recorded this month", value: amount(tracking.recordedMonthlyMicros))
+                    LabeledContent("Reserved or unresolved", value: amount(tracking.totalHeldMicros))
+                    LabeledContent("Awaiting approval · planned", value: amount(tracking.pendingApprovalMicros))
+                    LabeledContent("Planned today", value: amount(tracking.dailyPlannedExposureMicros))
+                    LabeledContent("Planned this month", value: amount(tracking.monthlyPlannedExposureMicros))
+                } else {
+                    Text("Current planned spending is unavailable.").font(.footnote).foregroundStyle(.secondary)
+                }
+            }.padding(24).frame(maxWidth: .infinity, alignment: .leading)
+            if !loading, loadedKey == refreshKey, let overview {
+                Divider()
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Spending requests").font(.subheadline.weight(.semibold))
+                    if let requests = overview.requests {
+                        if requests.isEmpty {
+                            Text("No spending requests are waiting.").font(.footnote).foregroundStyle(.secondary)
+                        } else {
+                            ForEach(requests, id: \.operationId) { request in
+                                Button {
+                                    model.navigationPath.append(.estimatedCostApproval(operationID: request.operationId))
+                                } label: {
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text(request.quote?.requestText ?? "Estimate unavailable")
+                                        Text("\(status(request.status)) · Request \(request.operationId.suffix(8))")
+                                            .font(.footnote).foregroundStyle(.secondary)
+                                    }.frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                                .buttonStyle(AssistantActionButtonStyle(kind: .secondary, fillsWidth: true))
+                                .accessibilityIdentifier("cost-review-request-\(request.operationId)")
+                            }
+                        }
+                    } else {
+                        Text("The request list is unavailable.").font(.footnote).foregroundStyle(.secondary)
+                    }
+                }.padding(24).frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .assistantCard(in: colorScheme, padded: false)
+        .task(id: refreshKey) {
+            guard scenePhase == .active else { return }
+            await load(key: refreshKey)
+        }
+    }
+
+    private func amount(_ micros: Int64?) -> String {
+        guard let micros else { return "Unavailable" }
+        return (Decimal(micros) / Decimal(1_000_000)).formatted(.currency(code: "USD").precision(.fractionLength(2...6)))
+    }
+
+    private func status(_ value: String) -> String {
+        switch value {
+        case "pending": "Awaiting approval"
+        case "expired_or_needs_refresh": "Estimate needs refreshing"
+        case "unavailable": "Status unavailable"
+        default: value.sentenceCaseIdentifier
+        }
+    }
+
+    @MainActor private func load(key: String) async {
+        overview = nil; loading = true
+        guard let context = model.checklistCorrectionRequestContext() else { loadedKey = key; loading = false; return }
+        let result = try? await context.client.estimatedCostOverview()
+        guard !Task.isCancelled, key == refreshKey,
+              model.checklistCorrectionConnectionIsCurrent(ownerID: context.ownerID, version: context.connectionVersion) else { return }
+        overview = result; loadedKey = key; loading = false
+    }
+}
+
 /// A self-contained 24-point Dialog built from components available in the
 /// published client. Actions are supplied only by the request-scoped owner.
 struct CostPermissionReviewCard: View {
@@ -1604,7 +1705,7 @@ struct ActivityView: View {
         return items.filter { item in
             switch filter {
             case .all: true
-            case .needsYou: ["waiting_approval", "waiting_budget", "needs_attention", "stuck"].contains(item.displayStatus)
+            case .needsYou: ["waiting_approval", "waiting_budget", "waiting_estimated_cost", "needs_attention", "stuck"].contains(item.displayStatus)
             case .working: ["pending", "running"].contains(item.status)
             case .scheduled: ["sleeping", "waiting_event"].contains(item.status)
             case .completed: ["done", "failed", "cancelled"].contains(item.status)
@@ -1687,11 +1788,23 @@ struct ActivityView: View {
 
     @ViewBuilder
     private func activityPrimaryActions(_ item: ActivityItem) -> some View {
-        if showingArchived || item.hasPendingApproval || item.status == "needs_attention" || item.stuckWaiting == true {
+        if showingArchived || item.hasPendingApproval || item.status == "needs_attention" || item.status == "waiting_estimated_cost" || item.stuckWaiting == true {
             AssistantFlowLayout(spacing: AssistantTheme.actionSpacing) {
                 if showingArchived {
                     actionButton(item, title: "Restore", icon: "tray.and.arrow.up", action: "restore")
                 } else {
+                    if item.status == "waiting_estimated_cost", let operationID = item.estimatedCostOperationId, !operationID.isEmpty {
+                        Button {
+                            model.navigationPath.append(.estimatedCostApproval(operationID: operationID))
+                        } label: {
+                            Label("Review spending request", systemImage: "dollarsign.circle")
+                        }
+                        .buttonStyle(AssistantActionButtonStyle(kind: .primary, compact: true))
+                        .accessibilityIdentifier("activity-review-estimated-cost-\(operationID)")
+                    } else if item.status == "waiting_estimated_cost" {
+                        Text("This spending request cannot be opened from this activity.")
+                            .font(.footnote).foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                    }
                     if item.hasPendingApproval {
                         Button { model.present(.approvals) } label: {
                             Label("Review approval", systemImage: "checkmark.shield")
@@ -1986,7 +2099,7 @@ struct ActivityView: View {
         case "running": "arrow.triangle.2.circlepath"
         case "done": "checkmark.circle.fill"
         case "failed", "cancelled": "xmark.circle.fill"
-        case "waiting_approval", "waiting_budget", "needs_attention", "stuck": "hand.raised.fill"
+        case "waiting_approval", "waiting_budget", "waiting_estimated_cost", "needs_attention", "stuck": "hand.raised.fill"
         case "sleeping", "waiting_event": "clock.fill"
         default: "circle.dotted"
         }
@@ -1999,7 +2112,7 @@ struct ActivityView: View {
         // same card — system green is a visibly different hue.
         case "done": AssistantTheme.success(for: colorScheme)
         case "failed", "cancelled": .red
-        case "waiting_approval", "waiting_budget", "needs_attention", "stuck": AssistantTheme.warning(for: colorScheme)
+        case "waiting_approval", "waiting_budget", "waiting_estimated_cost", "needs_attention", "stuck": AssistantTheme.warning(for: colorScheme)
         default: .secondary
         }
     }

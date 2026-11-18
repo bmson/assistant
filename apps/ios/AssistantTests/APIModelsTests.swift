@@ -4,6 +4,24 @@ import CoreLocation
 @testable import Assistant
 
 extension APIModelsTests {
+    func testEstimatedCostOverviewPreservesUnavailableInventoryAndAmounts() throws {
+        let data = Data(#"{"ok":true,"requests":null,"tracking":{"observedAt":"2029-01-01T00:00:00Z","complete":false,"recordedDailyMicros":null,"recordedMonthlyMicros":200000,"totalHeldMicros":300000,"historicalUnknownMicros":null,"pendingApprovalMicros":null,"dailyPlannedExposureMicros":null,"monthlyPlannedExposureMicros":null}}"#.utf8)
+        let decoded = try JSONDecoder().decode(EstimatedCostOverviewResponse.self, from: data)
+        XCTAssertTrue(decoded.isValid)
+        XCTAssertNil(decoded.requests)
+        XCTAssertNil(decoded.tracking?.pendingApprovalMicros)
+        XCTAssertNil(decoded.tracking?.dailyPlannedExposureMicros)
+        XCTAssertEqual(decoded.tracking?.recordedMonthlyMicros, 200_000)
+    }
+
+    func testActivityEstimatedCostLocatorIsOptionalAndExact() throws {
+        let raw = #"{"id":"task-a","type":"chat_turn","status":"waiting_estimated_cost","title":"Research","progress":"Waiting","trust":"owner","spentUsd":"0","budgetUsdLimit":"1","updatedAt":"2029-01-01T00:00:00Z","archivedAt":null,"hasPendingApproval":false,"estimatedCostOperationId":"operation-a"}"#
+        let item = try JSONDecoder().decode(ActivityItem.self, from: Data(raw.utf8))
+        XCTAssertEqual(item.estimatedCostOperationId, "operation-a")
+        let legacy = raw.replacingOccurrences(of: #","estimatedCostOperationId":"operation-a""#, with: "")
+        XCTAssertNil(try JSONDecoder().decode(ActivityItem.self, from: Data(legacy.utf8)).estimatedCostOperationId)
+    }
+
     func testCostWireDatesAcceptWholeAndFractionalSecondsButRejectMissingOffset() throws {
         let quote = try JSONDecoder().decode(EstimatedCostQuote.self, from: Data(#"{"type":"estimated-cost-approval","operationId":"a","taskId":"task","requestText":"Request A","quoteId":"q","quoteVersion":"v","expiresAt":"2030-01-01T00:00:00Z","nextAttemptMicros":1,"allowanceMicros":1,"recordedDailyMicros":0,"recordedMonthlyMicros":0,"totalHeldMicros":0,"eligibleHistoricalUnknownMicros":0,"pendingApprovalMicros":1,"dailyCeilingMicros":10,"monthlyCeilingMicros":10,"dailyProjectedGrossMicros":1,"monthlyProjectedGrossMicros":1,"complete":true,"canApprove":true}"#.utf8))
         for value in ["2029-01-01T00:00:00Z", "2029-01-01T00:00:00.000Z", "2029-01-01T01:00:00+01:00"] {

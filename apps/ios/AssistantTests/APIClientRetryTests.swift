@@ -2208,9 +2208,9 @@ final class APIClientRetryTests: XCTestCase {
     }
 
     func testVisualSummaryKeepsEveryStatusAndRejectsInvalidChartValues() {
-        let summary = ActivityVisualSummary(statuses: ["waiting_approval", "waiting_budget", "needs_attention",
+        let summary = ActivityVisualSummary(statuses: ["waiting_approval", "waiting_budget", "waiting_estimated_cost", "needs_attention",
             "pending", "running", "sleeping", "waiting_event", "done", "failed", "cancelled", "new_status"])
-        XCTAssertEqual(summary.counts, [3, 2, 2, 1, 2, 1])
+        XCTAssertEqual(summary.counts, [4, 2, 2, 1, 2, 1])
         XCTAssertEqual(AssistantChartScale.shares([0, -1, .nan, .infinity]), [0, 0, 0, 0])
         XCTAssertEqual(AssistantChartScale.shares([]), [])
         XCTAssertEqual(AssistantChartScale.shares([1, 3]), [0.25, 0.75])
@@ -4257,6 +4257,16 @@ final class APIClientRetryTests: XCTestCase {
 }
 
 extension APIClientRetryTests {
+    func testEstimatedCostOverviewUsesScopedGetAndPreservesUnavailableInventory() async throws {
+        let body = #"{"ok":true,"requests":null,"tracking":{"observedAt":"2029-01-01T00:00:00Z","complete":false,"recordedDailyMicros":null,"recordedMonthlyMicros":null,"totalHeldMicros":null,"historicalUnknownMicros":null,"pendingApprovalMicros":null,"dailyPlannedExposureMicros":null,"monthlyPlannedExposureMicros":null}}"#
+        StubURLProtocol.prime([.success(status: 200, body: Data(body.utf8))])
+        let overview = try await makeClient().estimatedCostOverview()
+        XCTAssertNil(overview.requests)
+        XCTAssertNil(overview.tracking?.pendingApprovalMicros)
+        XCTAssertEqual(StubURLProtocol.attempts, ["GET"])
+        XCTAssertEqual(StubURLProtocol.urls.first?.path, "/api/mobile/v1/chat/estimated-cost/overview")
+    }
+
     func testEstimatedCostDecisionDoesNotRetryAndAcceptsBoundStaleReceipt() async throws {
         let decision = EstimatedCostDecision(operationId: "op-1", quoteId: "q-1", quoteVersion: "v1", decisionId: "d-1", decision: "approve")
         StubURLProtocol.prime([.failure(URLError(.timedOut)),

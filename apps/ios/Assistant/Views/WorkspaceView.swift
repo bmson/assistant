@@ -651,6 +651,7 @@ struct WorkspaceView: View {
     @ViewBuilder
     private func workspaceContent(_ workspace: WorkspaceResponse) -> some View {
         if let failedSection = area.availabilityKeys.first(where: { !workspace.isSectionAvailable($0) }) {
+            if area == .costs { EstimatedCostOverviewCard() }
             WorkspaceAvailabilityNotice(title: failedSection.capitalized)
                 .accessibilityIdentifier("workspace-section-unavailable-\(failedSection)")
         } else {
@@ -1007,6 +1008,7 @@ struct WorkspaceView: View {
                     providerBillingCard(report)
                 }
             }
+            EstimatedCostOverviewCard()
             sectionHeading("Assistant usage ledger")
             Text("Includes estimates used for spending limits. These limits do not cap your cloud bill. Ledger costs overlap provider billing and are not added to it.")
                 .font(.footnote)
