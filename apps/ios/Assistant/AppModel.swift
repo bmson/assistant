@@ -834,6 +834,20 @@ final class AppModel {
         activityConnectionRevision == version && client != nil && bootstrap?.identity.id == ownerID
     }
 
+    func mcpSignInOptionsRequestContext(for connection: McpConnection) -> McpSignInOptionsRequestContext? {
+        guard let client, let ownerID = bootstrap?.identity.id,
+              mcpConnections.contains(where: { McpSignInOptionsIdentity($0) == McpSignInOptionsIdentity(connection) }) else { return nil }
+        return .init(ownerID: ownerID, version: activityConnectionRevision,
+                     identity: McpSignInOptionsIdentity(connection), client: client)
+    }
+
+    func mcpSignInOptionsConnectionIsCurrent(_ context: McpSignInOptionsRequestContext) -> Bool {
+        activityConnectionRevision == context.version && bootstrap?.identity.id == context.ownerID
+            && client?.configuration == context.client.configuration
+            && context.identity.enabled
+            && mcpConnections.contains(where: { McpSignInOptionsIdentity($0) == context.identity })
+    }
+
     func googleCalendarRequestContext() -> GoogleCalendarRequestContext? {
         guard let client, let ownerID = bootstrap?.identity.id else { return nil }
         return GoogleCalendarRequestContext(ownerID: ownerID, version: activityConnectionRevision, client: client)

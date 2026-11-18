@@ -5,8 +5,8 @@
     "packages/config/src/index.ts": "e64b8e5cbe019883a5de916d38c389c7dfbf2020a45ebbcb4f43891e112188e1",
     "apps/agent/src/deps.ts": "89217c440abad988fa569107b3c82c7fdf9ff432ce821c547617143726ecd2c0",
     "apps/agent/src/index.ts": "bc65b1a16ba83c6351a74e2c071189fb4288d5d3ec2c4425accc185da77fe6ab",
-    "apps/web/lib/server.ts": "e2d0c45a9c554581c90602d85c8b8af18ee7fabc0677808a498d7b0b4be9dd19",
-    "apps/web/proxy.ts": "bc466ee22d267c197241c506cbfb31f12c722d9a3072aaef45d095affe2c57fd",
+    "apps/web/lib/server.ts": "8c6a27708842cd10b3b6be7b3923cae80b363fe950daabbbff0ed12c3d6e9e2f",
+    "apps/web/proxy.ts": "1490c51dd34aceb963f04169b9db596b5ea56dede1c05c92427e2c587c0a9e1a",
     "packages/db/drizzle/meta/_journal.json": "20bd0a5fd629334e0169caa6f95b0afd6423a8ee69dabf0bba96decb01466ba8",
     "infra/gcp/release-contracts.json": "111be11f1f7c739e6d03076f1523aadf6cdba71c88e8a72410efe9dc4ede2e02"
   },
@@ -75,7 +75,7 @@
     }
   },
   "agentWebSchemaCompatible": true,
-  "webApiRouteCount": 114,
+  "webApiRouteCount": 115,
   "routes": {
     "apps/web/app/api/audit/[id]/route.ts": {
       "methods": ["GET"],
@@ -312,6 +312,10 @@
     "apps/web/app/api/mobile/v1/location/route.ts": {
       "methods": ["POST"],
       "sha256": "e815144b7358cc1fed8ab41ed31cdb05fd8ea00eafcaf55cdf0af422156b4d1a"
+    },
+    "apps/web/app/api/mobile/v1/mcp/[id]/authorization/route.ts": {
+      "methods": ["GET"],
+      "sha256": "97b6f970ab82d8a92daef0253774dd5bf76a8c6b49ccfee4e3033acb779213e2"
     },
     "apps/web/app/api/mobile/v1/mcp/[id]/route.ts": {
       "methods": ["DELETE", "POST"],

@@ -138,7 +138,7 @@ private final class NativeCardFormProjectionReadiness: @unchecked Sendable {
     func setEnabled(_ value: Bool) { lock.withLock { enabled = value } }
 }
 
-struct APIClient: Sendable, GoogleCalendarConnectionService {
+struct APIClient: Sendable, GoogleCalendarConnectionService, McpSignInOptionsService {
     let configuration: APIConfiguration
     let clientID: String?
     /// A test seam. Production passes nothing and reads `Transport.shared` on
@@ -1368,6 +1368,12 @@ struct APIClient: Sendable, GoogleCalendarConnectionService {
 
     func mcpConnections() async throws -> McpConnectionsResponse {
         try await get("api/mobile/v1/mcp")
+    }
+
+    func mcpSignInOptions(id: String) async throws -> McpSignInOptionsResponse {
+        var request = makeRequest(url: configuration.baseURL.appending(path: "api/mobile/v1/mcp/\(id)/authorization"))
+        request.timeoutInterval = 25
+        return try await perform(request, as: McpSignInOptionsResponse.self)
     }
 
     func createMcpConnection(name: String, endpoint: String, bearerToken: String?) async throws {

@@ -158,6 +158,7 @@ import {
   documents,
   files,
   improvementProposals,
+  mcpConnections,
   type PostgresAgentResolutionStageObserver,
   skills,
   withPostgresPrivacyObservationFence,
@@ -186,6 +187,7 @@ import {
   FirestoreImportOverviewRepository,
   FirestoreLocationPingRepository,
   FirestoreMcpConnectionMutationRepository,
+  FirestoreMcpConnectionReadRepository,
   FirestoreModelCatalogRepository,
   FirestoreModelConnectionRepository,
   FirestoreOwnerKnowledgeGraphFactRepository,
@@ -214,6 +216,10 @@ import {
 import type { CardFormSubmission } from '@assistant/persistence/card-form';
 import { inspectMcpConnection } from '@assistant/tools/mcp';
 import {
+  inspectMcpAuthorization,
+  unavailableMcpAuthorization,
+} from '@assistant/tools/mcp-authorization';
+import {
   GcsWorkspaceStore,
   LocalWorkspaceStore,
   type WorkspaceStore,
@@ -223,6 +229,7 @@ import { unstable_cache } from 'next/cache';
 import { cache } from 'react';
 import { isValidFormSessionScope } from '../app/auth-form-session-scope';
 import { estimatedCostProviderSource } from './estimated-cost-provider-source';
+import type { McpAuthorizationDiagnostic } from './mcp-authorization-types';
 import {
   decodeMobileDocumentCursor,
   encodeMobileDocumentCursor,
@@ -2120,4 +2127,64 @@ export function getGoogleCalendarConnectionService() {
     repository,
     config: googleCalendarOAuthConfig(config),
   });
+}
+
+/** Read one configured-owner MCP reference. Credentials are never returned to diagnostics. */
+export async function readOwnerMcpAuthorizationConnection(
+  ownerId: string,
+  id: string,
+): Promise<{ id: string; ownerId: string; endpoint: string; enabled: boolean } | null> {
+  const config = loadConfig();
+  if (config.PERSISTENCE_DRIVER === 'firestore') {
+    if (validateAgentPersistenceConfig(config).length)
+      throw new Error('MCP diagnostics unavailable');
+    if (ownerId !== config.FIRESTORE_AGENT_ID) return null;
+    const repo = new FirestoreMcpConnectionReadRepository(
+      getFirestoreInstallationStore(),
+      config.FIRESTORE_AGENT_ID,
+    );
+    const row = await repo.getForTools(ownerId, id);
+    return row ? { id: row.id, ownerId, endpoint: row.endpoint, enabled: row.enabled } : null;
+  }
+  const db = getDb();
+  if ((await assertPostgresInstallationOwner(db)) !== ownerId) return null;
+  const [row] = await db
+    .select({
+      id: mcpConnections.id,
+      ownerId: mcpConnections.agentId,
+      endpoint: mcpConnections.endpoint,
+      enabled: mcpConnections.enabled,
+    })
+    .from(mcpConnections)
+    .where(and(eq(mcpConnections.id, id), eq(mcpConnections.agentId, ownerId)))
+    .limit(1);
+  return row ?? null;
+}
+
+/** The facade's declared wire type checks compatibility with the browser-safe DTO. */
+export async function inspectMcpAuthorizationEndpoint(
+  endpoint: string,
+  options: { signal?: AbortSignal },
+): Promise<McpAuthorizationDiagnostic> {
+  return inspectMcpAuthorization(endpoint, options);
+}
+export function unavailableMcpAuthorizationDiagnostic(
+  reason: 'connection_disabled',
+): McpAuthorizationDiagnostic {
+  return unavailableMcpAuthorization(reason);
+}
+
+/** Owner-facing MCP inventory for either store; no credential ciphertext is exposed. */
+export async function listOwnerMcpConnections() {
+  const config = loadConfig();
+  if (config.PERSISTENCE_DRIVER === 'firestore') {
+    if (validateAgentPersistenceConfig(config).length) throw new Error('MCP inventory unavailable');
+    return new FirestoreMcpConnectionReadRepository(
+      getFirestoreInstallationStore(),
+      config.FIRESTORE_AGENT_ID,
+    ).list(config.FIRESTORE_AGENT_ID);
+  }
+  const db = getDb();
+  await assertPostgresInstallationOwner(db);
+  return listMcpConnections(db);
 }
