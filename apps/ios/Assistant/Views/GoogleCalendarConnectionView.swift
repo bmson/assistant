@@ -12,7 +12,7 @@ struct GoogleCalendarConnectionView: View {
     var body: some View {
         AssistantSettingsList {
             Section("Google Calendar") {
-                Text("Optionally connect your Google Calendar so your assistant can read events when answering calendar questions. This connection cannot create, change or delete events. Gmail and Drive aren’t included.")
+                Text("Optionally connect your Google Calendar to read events when answering calendar questions. Event creation, when available, needs separate permission and your approval. Gmail and Drive aren’t included.")
                     .font(.subheadline).foregroundStyle(.secondary)
                 Text("Once connected, your personal Google account becomes the default for ordinary calendar questions. If personal access fails, Assistant won’t automatically fall back to the assistant account.")
                     .font(.subheadline).foregroundStyle(.secondary)
@@ -20,7 +20,9 @@ struct GoogleCalendarConnectionView: View {
                     if let account = status.account {
                         Text("Personal Google account").font(.caption).foregroundStyle(.secondary)
                         Text(account.email).textSelection(.enabled)
-                        Text(status.isReady && !coordinator.couldNotCheck ? "Connected · Read-only" : statusLabel(status))
+                        Text(status.isReady && !coordinator.couldNotCheck
+                             ? (status.canCreateEvents ? "Connected · Read access and event creation" : "Connected · Read-only")
+                             : statusLabel(status))
                             .font(.subheadline).foregroundStyle(.secondary)
                     } else {
                         Text(statusLabel(status)).font(.subheadline).foregroundStyle(.secondary)
@@ -30,8 +32,23 @@ struct GoogleCalendarConnectionView: View {
                             guard let window else { return }
                             Task { await coordinator.connect(anchor: window) }
                         }
-                        .buttonStyle(AssistantActionButtonStyle(kind: .primary, fillsWidth: true, minimumHeight: 44))
+                        .buttonStyle(AssistantActionButtonStyle(kind: status.isReady ? .secondary : .primary, fillsWidth: true, minimumHeight: 44))
                         .disabled(coordinator.isBusy || window == nil || coordinator.couldNotCheck)
+                        if status.canRequestEventCreation && !coordinator.couldNotCheck {
+                            Text("Allow event creation for \(status.account?.email ?? "this personal account"). Read access works without this permission. You’ll still review each event’s calendar, title, time and guests before it’s created.")
+                                .font(.subheadline).foregroundStyle(.secondary)
+                            Button("Allow event creation") {
+                                guard let window else { return }
+                                Task { await coordinator.upgradeWriteAccess(anchor: window) }
+                            }
+                            .buttonStyle(AssistantActionButtonStyle(kind: .primary, fillsWidth: true, minimumHeight: 44))
+                            .disabled(coordinator.isBusy || window == nil)
+                            .accessibilityIdentifier("google-calendar-allow-event-creation")
+                        }
+                        if status.canCreateEvents && !coordinator.couldNotCheck {
+                            Text("Event creation is allowed for this personal account. Each event still needs your approval in Assistant.")
+                                .font(.subheadline).foregroundStyle(.secondary)
+                        }
                         if status.isReady && !coordinator.couldNotCheck {
                             Text("Ask your assistant about upcoming events or your agenda. Calendar answers use this Google account.")
                                 .font(.subheadline).foregroundStyle(.secondary)
@@ -108,7 +125,7 @@ struct GoogleCalendarConnectionView: View {
         ) {
             Button("Disconnect", role: .destructive) { Task { await coordinator.disconnect() } }
         } message: {
-            Text("This stops new calendar reads from this account. Your assistant account and iPhone calendar sharing stay as they are. You can still explicitly ask to read the assistant account’s calendar; there is no automatic fallback.")
+            Text("This stops new calendar reads and event creation from this account. Your assistant account and iPhone calendar sharing stay as they are. You can still explicitly ask to read the assistant account’s calendar; there is no automatic fallback.")
         }
     }
 
