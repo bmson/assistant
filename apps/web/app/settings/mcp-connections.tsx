@@ -10,6 +10,7 @@ import {
 } from '@/app/settings/actions';
 import { Badge, btn, btnSm, inputClass, labelClass } from '@/lib/ui';
 import { ConfirmButton } from '@/lib/ui-client';
+import { McpOAuthControl } from './mcp-oauth-control';
 import { McpSignInOptions } from './mcp-sign-in-options';
 
 type McpConnection = {
@@ -50,26 +51,37 @@ export function McpConnectionsPanel({
   connections,
   discoveryAvailable = true,
   executionAvailable = true,
+  oauthConfigured = false,
 }: {
   connections: McpConnection[];
   discoveryAvailable?: boolean;
   executionAvailable?: boolean;
+  oauthConfigured?: boolean;
 }) {
   const [name, setName] = useState('');
   const [endpoint, setEndpoint] = useState('');
   const [bearerToken, setBearerToken] = useState('');
+  const [notice, setNotice] = useState<string>();
   const [error, setError] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
 
-  const run = (key: string, action: () => Promise<{ error?: string }>, after?: () => void) => {
+  const run = (
+    key: string,
+    action: () => Promise<{ error?: string; notice?: string }>,
+    after?: () => void,
+  ) => {
     setError(null);
+    setNotice(undefined);
     setPendingAction(key);
     startTransition(async () => {
       try {
         const result = await action();
         if (result.error) setError(result.error);
-        else after?.();
+        else {
+          setNotice(result.notice);
+          after?.();
+        }
       } catch {
         setError('Unable to update the MCP connection. Try again.');
       } finally {
@@ -161,6 +173,12 @@ export function McpConnectionsPanel({
           {error}
         </p>
       ) : null}
+
+      {notice && (
+        <p role="status" className="text-sm text-muted">
+          {notice}
+        </p>
+      )}
 
       {connections.length === 0 ? (
         <p className="rounded-xl border border-dashed border-edge px-4 py-5 text-sm text-muted">
@@ -254,6 +272,18 @@ export function McpConnectionsPanel({
                   }}
                   disabled={pending}
                 />
+                {oauthConfigured && connection.enabled && (
+                  <McpOAuthControl
+                    key={JSON.stringify([
+                      connection.endpoint,
+                      connection.hasBearerToken,
+                      connection.status,
+                      connection.lastCheckedAt,
+                    ])}
+                    connectionId={connection.id}
+                    disabled={pending}
+                  />
+                )}
                 {connection.tools.length > 0 ? (
                   <details className="mt-3 border-t border-edge pt-3">
                     <summary className="flex cursor-pointer list-none items-center gap-1 text-xs font-medium text-muted">

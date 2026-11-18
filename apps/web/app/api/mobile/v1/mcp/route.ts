@@ -9,6 +9,7 @@ import {
   encryptMcpConnectionBearerToken,
   getApplication,
   getFirestoreInstallationStore,
+  isMcpOAuthConfigured,
 } from '@/lib/server';
 import { isMobileAuthed, mobileJson, mobileUnauthorized } from '@/mobile-auth';
 
@@ -18,6 +19,7 @@ export const dynamic = 'force-dynamic';
 export async function GET(request: Request): Promise<Response> {
   if (!(await isMobileAuthed(request))) return mobileUnauthorized();
   const config = loadConfig();
+  const capability = isMcpOAuthConfigured() ? { oauthConfigured: true } : {};
   if (config.PERSISTENCE_DRIVER === 'firestore') {
     const problems = validateAgentPersistenceConfig(config);
     if (problems.length) return mobileJson({ error: problems.join('; ') }, { status: 503 });
@@ -25,9 +27,12 @@ export async function GET(request: Request): Promise<Response> {
       getFirestoreInstallationStore(),
       config.FIRESTORE_AGENT_ID,
     );
-    return mobileJson({ connections: await repository.list(config.FIRESTORE_AGENT_ID) });
+    return mobileJson({
+      connections: await repository.list(config.FIRESTORE_AGENT_ID),
+      ...capability,
+    });
   }
-  return mobileJson({ connections: await getApplication().listMcpConnections() });
+  return mobileJson({ connections: await getApplication().listMcpConnections(), ...capability });
 }
 
 export async function POST(request: Request): Promise<Response> {

@@ -302,6 +302,7 @@ final class AppModel {
     private(set) var memoryReviewCount = 0
     private(set) var mcpConnections: [McpConnection] = []
     private(set) var mcpConnectionsLoaded = false
+    private(set) var mcpOAuthConfigured = false
     private(set) var modelProviders: ModelProviderSettings? {
         get { edits.visible.modelProviders }
         set { edits.updateRemote(resources: [.providers]) { $0.modelProviders = newValue } }
@@ -1929,6 +1930,7 @@ final class AppModel {
         workspace = nil
         modelProviders = nil
         mcpConnections = []
+        mcpOAuthConfigured = false
         mcpConnectionsLoaded = false
         savedCards = []
         cachedCalls = nil
@@ -3536,6 +3538,7 @@ final class AppModel {
             let response = try await client.mcpConnections()
             guard connectionIsCurrent(client, version: version) else { return false }
             mcpConnections = response.connections
+            mcpOAuthConfigured = response.oauthConfigured == true
             mcpConnectionsLoaded = true
             return true
         } catch {
@@ -3551,8 +3554,13 @@ final class AppModel {
         }
     }
 
-    func updateMcpConnection(id: String, action: String) async -> Bool {
-        await mcpConnectionMutation { try await $0.updateMcpConnection(id: id, action: action) }
+    func updateMcpConnection(id: String, action: String) async -> (updated: Bool, requiresReconnect: Bool) {
+        var requiresReconnect = false
+        let updated = await mcpConnectionMutation {
+            let result = try await $0.updateMcpConnection(id: id, action: action)
+            requiresReconnect = result.requiresOAuthReconnectForRefresh
+        }
+        return (updated, updated && requiresReconnect)
     }
 
     func deleteMcpConnection(id: String) async -> Bool {

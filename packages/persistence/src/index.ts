@@ -97,6 +97,7 @@ export * from './knowledge-graph-sync.js';
 export * from './knowledge-workspace.js';
 export * from './location-pings.js';
 export * from './maintenance.js';
+export * from './mcp-oauth.js';
 export * from './memory-consolidation.js';
 export * from './memory-embedding-refresh.js';
 export * from './memory-extraction.js';

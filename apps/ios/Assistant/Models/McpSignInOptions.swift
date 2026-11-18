@@ -19,7 +19,7 @@ enum McpSignInOptionsPresentation: Equatable {
   var detail: String {
     switch self {
     case .supported:
-      "This service reports browser sign-in options. Automatic sign-in is not available in Assistant."
+      "This service reports browser sign-in options. Checking setup doesn’t sign you in."
     case .unsupported:
       "Assistant couldn’t validate a supported sign-in setup for this connection. Manual setup is still available."
     case .unavailable:

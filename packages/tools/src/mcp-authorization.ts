@@ -59,6 +59,16 @@ export interface McpAuthorizationDiagnostic {
   authorizationServers: McpAuthorizationServerDiagnostic[];
   reason: McpAuthorizationReason | null;
 }
+export interface McpOAuthServer {
+  issuer: string;
+  resource: string;
+  authorizationEndpoint: string;
+  tokenEndpoint: string;
+  authorizationResponseIssuerRequired: boolean;
+  clientIdMetadataDocument: boolean;
+  tokenEndpointAuthMethods: string[];
+  scope?: string;
+}
 export interface McpAuthorizationIo {
   lookup: typeof lookup;
   /** Receives an already validated and DNS-pinned target; no ambient credentials. */
@@ -97,7 +107,12 @@ export function unavailableMcpAuthorization(
 
 /** Tokenize challenge commas without splitting quoted strings or their escapes. */
 export function mcpResourceMetadataChallenge(header: string | null): string | null {
-  if (!header) return null;
+  return bearerResourceChallenge(header).resourceMetadata;
+}
+
+function bearerResourceChallenge(header: string | null) {
+  if (!header) return { resourceMetadata: null, scope: undefined };
+
   if (
     header.length > MCP_AUTHORIZATION_LIMITS.maxChallengeLength ||
     [...header].some((c) => c.charCodeAt(0) <= 31 || c.charCodeAt(0) === 127)
@@ -126,7 +141,8 @@ export function mcpResourceMetadataChallenge(header: string | null): string | nu
   if (quoted || escaped) unsupported('invalid_challenge');
   parts.push(header.slice(start).trim());
   let bearer = false;
-  const resources: string[] = [];
+  const bearers: Array<{ resourceMetadata?: string; scope?: string }> = [];
+  let params: { resourceMetadata?: string; scope?: string } | undefined;
   let seen = new Set<string>();
   for (let part of parts) {
     // Auth-params allow optional whitespace before '='. Detect them before
@@ -138,6 +154,8 @@ export function mcpResourceMetadataChallenge(header: string | null): string | nu
     if (challenge) {
       bearer = challenge[1]?.toLowerCase() === 'bearer';
       seen = new Set();
+      params = bearer ? {} : undefined;
+      if (params) bearers.push(params);
       part = challenge[2] ?? '';
     }
     if (!bearer || !part) continue;
@@ -147,11 +165,18 @@ export function mcpResourceMetadataChallenge(header: string | null): string | nu
     const key = param[1]?.toLowerCase() ?? '';
     if (seen.has(key)) unsupported('invalid_challenge');
     seen.add(key);
-    if (key === 'resource_metadata')
-      resources.push((param[2] ?? param[3] ?? '').replace(/\\(.)/g, '$1'));
+    const value = (param[2] ?? param[3] ?? '').replace(/\\(.)/g, '$1');
+    if (params && key === 'resource_metadata') params.resourceMetadata = value;
+    if (params && key === 'scope') params.scope = value;
   }
+  const resources = bearers.flatMap((entry) =>
+    entry.resourceMetadata === undefined ? [] : [entry.resourceMetadata],
+  );
   if (resources.length > 1 || resources.some((x) => !x)) unsupported('invalid_challenge');
-  return resources[0] ?? null;
+  return {
+    resourceMetadata: resources[0] ?? null,
+    scope: bearers.length === 1 ? bearers[0]?.scope : undefined,
+  };
 }
 function safeUrl(value: unknown): URL {
   if (
@@ -196,7 +221,7 @@ function object(value: unknown, reason: McpAuthorizationReason): Record<string, 
   if (!value || typeof value !== 'object' || Array.isArray(value)) unsupported(reason);
   return value as Record<string, unknown>;
 }
-async function defaultRequest(target: ResolvedMcpEndpoint, init: RequestInit) {
+export async function openMcpAuthorizationRequest(target: ResolvedMcpEndpoint, init: RequestInit) {
   const agent = pinnedAgent(target);
   try {
     const response = await pinnedRequest({ endpoint: target.endpoint, agent }, init);
@@ -214,9 +239,32 @@ async function defaultRequest(target: ResolvedMcpEndpoint, init: RequestInit) {
 }
 
 /** Transient, unauthenticated GETs only. Does not initialize MCP or mutate saved state. */
-export async function inspectMcpAuthorization(
+export function inspectMcpAuthorization(
   endpointValue: string,
   options: { signal?: AbortSignal; io?: McpAuthorizationIo } = {},
+): Promise<McpAuthorizationDiagnostic> {
+  return discoverAuthorization(endpointValue, options);
+}
+
+/** Server-only lookup. Endpoints never enter the client-visible diagnostic. */
+export async function readMcpOAuthServers(
+  endpointValue: string,
+  options: { signal?: AbortSignal; io?: McpAuthorizationIo; issuer?: string } = {},
+): Promise<McpOAuthServer[]> {
+  const selected: McpOAuthServer[] = [];
+  const diagnostic = await discoverAuthorization(endpointValue, options, {
+    issuer: options.issuer,
+    collect(server) {
+      selected.push(server);
+    },
+  });
+  return diagnostic.status === 'supported' ? selected : [];
+}
+
+async function discoverAuthorization(
+  endpointValue: string,
+  options: { signal?: AbortSignal; io?: McpAuthorizationIo },
+  selection?: { issuer?: string; collect(server: McpOAuthServer): void },
 ): Promise<McpAuthorizationDiagnostic> {
   let resource: string | null = null;
   const empty = unavailableMcpAuthorization('request_failed');
@@ -253,7 +301,7 @@ export async function inspectMcpAuthorization(
         ): Promise<{ status: number; challenge: string | null; data?: unknown }> => {
           if (++requests > MCP_AUTHORIZATION_LIMITS.maxRequests) failed('request_limit');
           const target = await resolve(value);
-          const operation = (options.io?.request ?? defaultRequest)(target, {
+          const operation = (options.io?.request ?? openMcpAuthorizationRequest)(target, {
             method: 'GET',
             headers: { Accept: 'application/json', 'Accept-Encoding': 'identity' },
             redirect: 'error',
@@ -331,9 +379,11 @@ export async function inspectMcpAuthorization(
         };
         // Probe headers only, without bearer/session/cookie headers or MCP RPCs.
         const probe = await request(endpoint.href, true);
-        const challenge = mcpResourceMetadataChallenge(probe.challenge);
+        const challenge = bearerResourceChallenge(probe.challenge);
         let metadata: Record<string, unknown> | null = null;
-        for (const url of challenge ? [challenge] : resourceMetadataUrls(endpoint)) {
+        for (const url of challenge.resourceMetadata
+          ? [challenge.resourceMetadata]
+          : resourceMetadataUrls(endpoint)) {
           const response = await request(url);
           if (response.status === 404 || response.status === 410) continue;
           metadata = object(response.data, 'invalid_resource_metadata');
@@ -355,7 +405,10 @@ export async function inspectMcpAuthorization(
         )
           unsupported('invalid_resource_metadata');
         const authorizationServers: McpAuthorizationServerDiagnostic[] = [];
-        for (const issuer of servers as string[]) {
+        const issuers = servers as string[];
+        if (selection?.issuer !== undefined && !issuers.includes(selection.issuer))
+          unsupported('issuer_mismatch');
+        for (const issuer of selection?.issuer === undefined ? issuers : [selection.issuer]) {
           safeUrl(issuer);
           let server: Record<string, unknown> | null = null;
           for (const url of serverMetadataUrls(issuer)) {
@@ -398,6 +451,33 @@ export async function inspectMcpAuthorization(
             typeof server.authorization_response_iss_parameter_supported !== 'boolean'
           )
             unsupported('invalid_server_metadata');
+          if (selection) {
+            const methods =
+              server.token_endpoint_auth_methods_supported === undefined
+                ? ['client_secret_basic']
+                : server.token_endpoint_auth_methods_supported;
+            if (!Array.isArray(methods) || !methods.every((method) => typeof method === 'string'))
+              unsupported('invalid_server_metadata');
+            const scopes = metadata.scopes_supported;
+            const scope =
+              challenge.scope ??
+              (Array.isArray(scopes) &&
+              scopes.length > 0 &&
+              scopes.every((entry) => typeof entry === 'string')
+                ? scopes.join(' ')
+                : undefined);
+            selection.collect({
+              issuer,
+              resource: resource as string,
+              authorizationEndpoint: server.authorization_endpoint as string,
+              tokenEndpoint: server.token_endpoint as string,
+              authorizationResponseIssuerRequired:
+                server.authorization_response_iss_parameter_supported === true,
+              clientIdMetadataDocument: server.client_id_metadata_document_supported === true,
+              tokenEndpointAuthMethods: methods,
+              scope,
+            });
+          }
           authorizationServers.push({
             issuer,
             pkceS256: true,

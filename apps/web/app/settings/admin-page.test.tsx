@@ -27,6 +27,7 @@ vi.mock('@/lib/mobile-access-token', () => ({
 vi.mock('@/lib/server', () => ({
   getWorkspaceSettings: async () => ({ policies: [] }),
   listOwnerMcpConnections: state.connections,
+  isMcpOAuthConfigured: () => false,
 }));
 vi.mock('./actions', () => ({}));
 vi.mock('./mobile-token', () => ({

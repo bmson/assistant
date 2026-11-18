@@ -2,38 +2,38 @@
   "format": 1,
   "purpose": "Source composition and route drift evidence only; not a deployment or configured-runtime receipt.",
   "runtimeSources": {
-    "packages/config/src/index.ts": "e64b8e5cbe019883a5de916d38c389c7dfbf2020a45ebbcb4f43891e112188e1",
-    "apps/agent/src/deps.ts": "89217c440abad988fa569107b3c82c7fdf9ff432ce821c547617143726ecd2c0",
+    "packages/config/src/index.ts": "563c98374b32afdf42eab148f4ac891cd0ecc0925387f7cc18b84ef208bd4381",
+    "apps/agent/src/deps.ts": "6d04e93fb589b84b4e279c6f47e72b426c46c2376d600e5a51790c325092813d",
     "apps/agent/src/index.ts": "bc65b1a16ba83c6351a74e2c071189fb4288d5d3ec2c4425accc185da77fe6ab",
-    "apps/web/lib/server.ts": "8c6a27708842cd10b3b6be7b3923cae80b363fe950daabbbff0ed12c3d6e9e2f",
-    "apps/web/proxy.ts": "1490c51dd34aceb963f04169b9db596b5ea56dede1c05c92427e2c587c0a9e1a",
-    "packages/db/drizzle/meta/_journal.json": "20bd0a5fd629334e0169caa6f95b0afd6423a8ee69dabf0bba96decb01466ba8",
-    "infra/gcp/release-contracts.json": "111be11f1f7c739e6d03076f1523aadf6cdba71c88e8a72410efe9dc4ede2e02"
+    "apps/web/lib/server.ts": "2d6ebc1cb3244e1c0c0847f5f9d221e10d5fd6b77270e3fa148c7b5bef8ab821",
+    "apps/web/proxy.ts": "2bd4b31f35537ca7c61e030470792422b957687a0a345838bcbec111a21bbaae",
+    "packages/db/drizzle/meta/_journal.json": "0641de27b704f13a1cbeddca9b19f5be1270b1abd380695150b84ec34415cfe7",
+    "infra/gcp/release-contracts.json": "fc09b6cb5cc2c74ca9e7bf33b9be9ed11c0b7e20062fd2052e4dc5ad5864f75d"
   },
-  "latestPostgresMigration": "0137_estimated_cost_approval",
-  "postgresSchemaVersion": 137,
+  "latestPostgresMigration": "0138_mcp_oauth_state",
+  "postgresSchemaVersion": 138,
   "releaseContracts": {
     "agent": {
-      "apiContract": 1,
+      "apiContract": 3,
       "peerApi": {
-        "min": 1,
-        "max": 1
+        "min": 3,
+        "max": 3
       },
       "postgresSchema": {
-        "min": 137,
-        "max": 137
+        "min": 138,
+        "max": 138
       },
       "currentPostgresSchemaCompatible": true
     },
     "web": {
-      "apiContract": 1,
+      "apiContract": 3,
       "peerApi": {
-        "min": 1,
-        "max": 1
+        "min": 3,
+        "max": 3
       },
       "postgresSchema": {
-        "min": 137,
-        "max": 137
+        "min": 138,
+        "max": 138
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -44,8 +44,8 @@
         "max": 1
       },
       "postgresSchema": {
-        "min": 137,
-        "max": 137
+        "min": 138,
+        "max": 138
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -56,8 +56,8 @@
         "max": 1
       },
       "postgresSchema": {
-        "min": 137,
-        "max": 137
+        "min": 138,
+        "max": 138
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -68,14 +68,14 @@
         "max": 1
       },
       "postgresSchema": {
-        "min": 137,
-        "max": 137
+        "min": 138,
+        "max": 138
       },
       "currentPostgresSchemaCompatible": true
     }
   },
   "agentWebSchemaCompatible": true,
-  "webApiRouteCount": 115,
+  "webApiRouteCount": 119,
   "routes": {
     "apps/web/app/api/audit/[id]/route.ts": {
       "methods": ["GET"],
@@ -317,13 +317,21 @@
       "methods": ["GET"],
       "sha256": "97b6f970ab82d8a92daef0253774dd5bf76a8c6b49ccfee4e3033acb779213e2"
     },
+    "apps/web/app/api/mobile/v1/mcp/[id]/oauth/flow/route.ts": {
+      "methods": ["DELETE", "GET"],
+      "sha256": "bf1b001c8892012a426c99140f5016b439299a5e97755aafa072264cf2d27355"
+    },
+    "apps/web/app/api/mobile/v1/mcp/[id]/oauth/route.ts": {
+      "methods": ["DELETE", "GET", "POST"],
+      "sha256": "344715a609ac1e1881248628a7e020ca2904f9bbf4c7d42108519cfb77352b5c"
+    },
     "apps/web/app/api/mobile/v1/mcp/[id]/route.ts": {
       "methods": ["DELETE", "POST"],
       "sha256": "b4f198fdbc18e35be8b8aaa35832bc856c7208becb393c4cb1fae4286f011c09"
     },
     "apps/web/app/api/mobile/v1/mcp/route.ts": {
       "methods": ["GET", "POST"],
-      "sha256": "6784a41cd0ffc352447c226cc9b958a183a64d8effd20baad5dde05b9e0e9e0f"
+      "sha256": "1130a6d2ac0a7c09c7ae23ddf999bb5c97c2c17f5649815670423b931c2ab84c"
     },
     "apps/web/app/api/mobile/v1/memory/[id]/correction/[operationId]/apply/route.ts": {
       "methods": ["POST"],
@@ -468,6 +476,14 @@
     "apps/web/app/api/oauth/google-calendar/callback/route.ts": {
       "methods": ["GET"],
       "sha256": "be0bf6d4b8eb1dac4b1ae0a22440dc006f64c6ea733fb77489f1c8df43e28c3d"
+    },
+    "apps/web/app/api/oauth/mcp/callback/route.ts": {
+      "methods": ["GET"],
+      "sha256": "75b230cbcce509939a6195ae7d8cfb5d2734185efac9948882743de87f79a0c0"
+    },
+    "apps/web/app/api/oauth/mcp/client-metadata/route.ts": {
+      "methods": ["GET"],
+      "sha256": "e493f4206b6a64c15dd906790260c46dd300745488013237715f6f5a126faf4d"
     },
     "apps/web/app/api/owner/browser-signout/route.ts": {
       "methods": ["POST"],

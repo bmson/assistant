@@ -57,7 +57,7 @@ final class McpSignInOptionsTests: XCTestCase {
       result.presentation, .supported(authorizationServers: ["https://auth.example.test/oauth"]))
     XCTAssertEqual(result.presentation.authorizationHosts, ["auth.example.test"])
     XCTAssertTrue(
-      result.presentation.detail.contains("Automatic sign-in is not available in Assistant"))
+      result.presentation.detail.contains("Checking setup doesn’t sign you in"))
     XCTAssertEqual(try response(authenticated: true).presentation, .unavailable)
     XCTAssertEqual(try response(connectionSupported: true).presentation, .unavailable)
     XCTAssertEqual(try response(status: "future-state").presentation, .unavailable)
@@ -125,6 +125,24 @@ final class McpSignInOptionsTests: XCTestCase {
     coordinator.bind(service: service, connectionID: "connection-1", isCurrent: { true })
     await coordinator.check()
     XCTAssertEqual(coordinator.result, .unavailable)
+  }
+
+  func testOAuthConfirmationIsBoundToTheRequestedGrantGeneration() throws {
+    let data = Data(
+      """
+      {"connectionId":"connection","signInAvailable":true,"grant":"authorized","grantGeneration":"newer"}
+      """.utf8)
+    let status = try JSONDecoder().decode(McpOAuthStatus.self, from: data)
+    XCTAssertFalse(status.confirms(flowId: "attempt"))
+    XCTAssertTrue(status.confirms(flowId: "newer"))
+  }
+
+  func testOAuthCapabilityIsOffOnOlderConnectionResponses() throws {
+    let old = Data(#"{"connections":[]}"#.utf8)
+    let current = Data(#"{"connections":[],"oauthConfigured":true}"#.utf8)
+    XCTAssertNil(try JSONDecoder().decode(McpConnectionsResponse.self, from: old).oauthConfigured)
+    XCTAssertEqual(
+      try JSONDecoder().decode(McpConnectionsResponse.self, from: current).oauthConfigured, true)
   }
 
   func testTransportUsesOwnerCredentialAndFixedReadonlyRoute() async throws {

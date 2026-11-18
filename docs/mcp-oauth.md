@@ -24,7 +24,13 @@ Acceptance for this increment:
 - Existing anonymous and manual-token MCP discovery and execution retain their approval behavior.
 - Web and native results never use metadata discovery as evidence of connected-account identity, enabled tools, or completed sign-in.
 
-## Next increment: complete account authorization
+## Optional account authorization
+
+The installation publishes its public client description at `/api/oauth/mcp/client-metadata`. The client identifier and the sole redirect URI are derived from the configured HTTPS `AUTH_URL`. The return route is `/api/oauth/mcp/callback`. Providers using this shared callback must identify their issuer in the authorization response. The owner can use a compatible hosted client or supply a pre-registered client for a specific resource and issuer through `MCP_OAUTH_REGISTRATIONS`. Keep confidential registrations in the installation secret store.
+
+`MCP_OAUTH_ENABLED` defaults to false. Sign-in also needs a valid encryption key and compatible web, agent, and storage versions. Run the database upgrade and qualify the release before turning on account sign-in. Use the same installation URL and registration settings on the web and agent services.
+
+### Lifecycle acceptance
 
 Use separate, versioned OAuth records rather than placing OAuth grants in the manual bearer-token field. Define a shared persistence contract and exercise every supported database adapter before enabling it. Bind each pending flow to its owner, connection, endpoint, issuer, resource, redirect URI, single-use state, expiry, and PKCE verifier. Validate callback issuer information before sending a code to a token endpoint.
 

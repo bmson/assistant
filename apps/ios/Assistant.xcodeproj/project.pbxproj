@@ -11,6 +11,7 @@
 		E63C00000000000000000001 /* McpSignInOptionsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E63C00000000000000000002 /* McpSignInOptionsTests.swift */; };
 		E61C00000000000000000009 /* Views/GoogleCalendarConnectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E61C0000000000000000000A /* Views/GoogleCalendarConnectionView.swift */; };
 		E63C00000000000000000003 /* Views/McpSignInOptionsSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = E63C00000000000000000004 /* Views/McpSignInOptionsSection.swift */; };
+		E64C00000000000000000001 /* Views/McpOAuthControl.swift in Sources */ = {isa = PBXBuildFile; fileRef = E64C00000000000000000002 /* Views/McpOAuthControl.swift */; };
 		E61C00000000000000000007 /* System/GoogleCalendarConnectionCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = E61C00000000000000000008 /* System/GoogleCalendarConnectionCoordinator.swift */; };
 		E63C00000000000000000005 /* System/McpSignInOptionsCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = E63C00000000000000000006 /* System/McpSignInOptionsCoordinator.swift */; };
 		E61C00000000000000000005 /* Models/GoogleCalendarConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = E61C00000000000000000006 /* Models/GoogleCalendarConnection.swift */; };
@@ -142,6 +143,7 @@
 		E63C00000000000000000002 /* McpSignInOptionsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = McpSignInOptionsTests.swift; sourceTree = "<group>"; };
 		E61C0000000000000000000A /* Views/GoogleCalendarConnectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/GoogleCalendarConnectionView.swift; sourceTree = "<group>"; };
 		E63C00000000000000000004 /* Views/McpSignInOptionsSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/McpSignInOptionsSection.swift; sourceTree = "<group>"; };
+		E64C00000000000000000002 /* Views/McpOAuthControl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/McpOAuthControl.swift; sourceTree = "<group>"; };
 		E61C00000000000000000008 /* System/GoogleCalendarConnectionCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = System/GoogleCalendarConnectionCoordinator.swift; sourceTree = "<group>"; };
 		E63C00000000000000000006 /* System/McpSignInOptionsCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = System/McpSignInOptionsCoordinator.swift; sourceTree = "<group>"; };
 		E61C00000000000000000006 /* Models/GoogleCalendarConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models/GoogleCalendarConnection.swift; sourceTree = "<group>"; };
@@ -291,6 +293,7 @@
 			children = (
 				E61C0000000000000000000A /* Views/GoogleCalendarConnectionView.swift */,
 				E63C00000000000000000004 /* Views/McpSignInOptionsSection.swift */,
+				E64C00000000000000000002 /* Views/McpOAuthControl.swift */,
 				E61C00000000000000000008 /* System/GoogleCalendarConnectionCoordinator.swift */,
 				E63C00000000000000000006 /* System/McpSignInOptionsCoordinator.swift */,
 				E61C00000000000000000006 /* Models/GoogleCalendarConnection.swift */,
@@ -538,6 +541,7 @@
 			files = (
 				E61C00000000000000000009 /* Views/GoogleCalendarConnectionView.swift in Sources */,
 				E63C00000000000000000003 /* Views/McpSignInOptionsSection.swift in Sources */,
+				E64C00000000000000000001 /* Views/McpOAuthControl.swift in Sources */,
 				E61C00000000000000000007 /* System/GoogleCalendarConnectionCoordinator.swift in Sources */,
 				E63C00000000000000000005 /* System/McpSignInOptionsCoordinator.swift in Sources */,
 				E61C00000000000000000005 /* Models/GoogleCalendarConnection.swift in Sources */,
