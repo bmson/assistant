@@ -102,6 +102,15 @@ const OWNER_READ_PROHIBITION_SOURCES: Readonly<Record<string, readonly string[]>
     'old conversations',
     'anything up',
   ],
+  github: [
+    'github',
+    'repository',
+    'repositories',
+    'repo',
+    'repos',
+    'pull request',
+    'pull requests',
+  ],
   gmail: [
     'gmail',
     'email',
@@ -897,10 +906,13 @@ export class ToolDispatcher {
 
     // The model-facing schema strips internal binding metadata. Restore only
     // the original dispatcher snapshot, never one supplied in edited arguments.
-    if (call.toolName === 'mcp.call') {
+    const bindingArgument =
+      registered.tool.approvalBindingArgument ??
+      (call.toolName === 'mcp.call' ? '_approvalMcpScope' : undefined);
+    if (bindingArgument) {
       const original = call.args as Record<string, unknown> | null;
-      if (original?._approvalMcpScope) {
-        (parsed.data as Record<string, unknown>)._approvalMcpScope = original._approvalMcpScope;
+      if (original && Object.hasOwn(original, bindingArgument)) {
+        (parsed.data as Record<string, unknown>)[bindingArgument] = original[bindingArgument];
       }
     }
 

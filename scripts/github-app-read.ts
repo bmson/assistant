@@ -1,5 +1,5 @@
-import { readFile } from 'node:fs/promises';
-import { createGitHubAppReader, GitHubAppReadError } from '@assistant/tools/github-app-reader';
+import { GitHubAppReadError } from '@assistant/tools/github-app-reader';
+import { configuredGitHubAppReader } from '@assistant/tools/github-app-reader-config';
 
 const usage = `Usage:
   pnpm github:read repository <repository-id>
@@ -7,7 +7,8 @@ const usage = `Usage:
 
 Set ASSISTANT_GITHUB_APP_CLIENT_ID, ASSISTANT_GITHUB_APP_INSTALLATION_ID,
 ASSISTANT_GITHUB_APP_PRIVATE_KEY_FILE and ASSISTANT_GITHUB_SELECTED_REPOSITORY_IDS
-(comma-separated IDs) in your local environment.`;
+(comma-separated IDs) in your local environment. Use an absolute key file path
+and restrict the file to its owner.`;
 
 function number(value: string | undefined) {
   return value && /^[1-9]\d*$/.test(value) ? Number(value) : NaN;
@@ -31,32 +32,8 @@ async function main(args: string[]) {
     return;
   }
 
-  const env = process.env;
-  const allowed = (env.ASSISTANT_GITHUB_SELECTED_REPOSITORY_IDS ?? '')
-    .split(',')
-    .map((value) => number(value.trim()));
-  const keyFile = env.ASSISTANT_GITHUB_APP_PRIVATE_KEY_FILE;
-  const appClientId = env.ASSISTANT_GITHUB_APP_CLIENT_ID;
-  const installationId = number(env.ASSISTANT_GITHUB_APP_INSTALLATION_ID);
-  if (
-    !keyFile ||
-    !appClientId ||
-    !Number.isSafeInteger(installationId) ||
-    allowed.some((id) => !Number.isSafeInteger(id))
-  ) {
-    throw new GitHubAppReadError('invalid_configuration');
-  }
-  if (!allowed.includes(number(repo))) throw new GitHubAppReadError('repository_not_selected');
-
-  const privateKey = await readFile(keyFile, 'utf8').catch(() => {
-    throw new GitHubAppReadError('invalid_configuration');
-  });
-  const reader = createGitHubAppReader({
-    appClientId,
-    installationId,
-    privateKey,
-    selectedRepositoryIds: allowed,
-  });
+  const reader = await configuredGitHubAppReader();
+  if (!reader) throw new GitHubAppReadError('invalid_configuration');
   const result = repository
     ? await reader.getRepository(number(repo))
     : await reader.getPullRequest(number(repo), number(pr));

@@ -47,6 +47,7 @@ export class ToolRegistry {
           // reads with egress (web.fetch, web.search). Without the egress
           // strip, any DKIM-valid stranger's email could drive blind HTTP
           // requests and paid searches from the owner's IP.
+          (!flags.ownerOnly || trust === 'owner') &&
           (!untrusted || (!flags.outwardFacing && !flags.networkEgress)) &&
           (!external || tool.acceptsUntrustedInput) &&
           (!external ||

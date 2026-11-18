@@ -3,7 +3,7 @@
   "purpose": "Source composition and route drift evidence only; not a deployment or configured-runtime receipt.",
   "runtimeSources": {
     "packages/config/src/index.ts": "563c98374b32afdf42eab148f4ac891cd0ecc0925387f7cc18b84ef208bd4381",
-    "apps/agent/src/deps.ts": "6d04e93fb589b84b4e279c6f47e72b426c46c2376d600e5a51790c325092813d",
+    "apps/agent/src/deps.ts": "dfdfb01f46fa583ff0041a4cf240b6a33f7ce4f64ce37dd9e4d8551446dac6f8",
     "apps/agent/src/index.ts": "bc65b1a16ba83c6351a74e2c071189fb4288d5d3ec2c4425accc185da77fe6ab",
     "apps/web/lib/server.ts": "2d6ebc1cb3244e1c0c0847f5f9d221e10d5fd6b77270e3fa148c7b5bef8ab821",
     "apps/web/proxy.ts": "2bd4b31f35537ca7c61e030470792422b957687a0a345838bcbec111a21bbaae",
