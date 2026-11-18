@@ -207,9 +207,7 @@ export function verifyCurrentService(
   const terminal = object(s.terminalCondition);
   requireProof(
     terminal.state === 'CONDITION_SUCCEEDED' ||
-      (mustBeDisabled &&
-        terminal.state !== 'CONDITION_RECONCILING' &&
-        retiredCurrentCondition(terminal)),
+      (mustBeDisabled && retiredCurrentCondition(terminal)),
   );
   requireProof(
     s.reconciling !== true &&
@@ -222,8 +220,15 @@ export function retiredCurrentCondition(c: Obj) {
   return (
     ['Ready', 'Active', 'ResourcesAvailable'].includes(String(c.type)) &&
     c.revisionReason === 'RETIRED' &&
-    ([undefined, 'STATE_UNSPECIFIED', 'CONDITION_FAILED'].includes(c.state as string | undefined) ||
-      (c.type === 'ResourcesAvailable' && c.state === 'CONDITION_RECONCILING'))
+    [undefined, 'STATE_UNSPECIFIED', 'CONDITION_FAILED'].includes(c.state as string | undefined)
+  );
+}
+export function retiredCurrentRevisionCondition(c: Obj) {
+  return (
+    retiredCurrentCondition(c) ||
+    (c.type === 'ResourcesAvailable' &&
+      c.state === 'CONDITION_RECONCILING' &&
+      c.revisionReason === 'RETIRED')
   );
 }
 export function verifyCurrentSnapshot(
@@ -248,7 +253,7 @@ export function verifyCurrentSnapshot(
     })
   )
     requireProof(r.reconciling !== true);
-  const retired = (c: Obj) => mustBeDisabled && retiredCurrentCondition(c);
+  const retired = (c: Obj) => mustBeDisabled && retiredCurrentRevisionCondition(c);
   requireProof(
     conditions.map(object).every((c) => c.state === 'CONDITION_SUCCEEDED' || retired(c)),
   );

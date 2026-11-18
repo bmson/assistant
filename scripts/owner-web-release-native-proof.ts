@@ -4,7 +4,11 @@ import {
   verifyEstimatedCostProvider,
 } from '../infra/gcp/estimated-cost-release-config.mjs';
 import { googleCalendarReleaseCallback } from '../infra/gcp/google-calendar-release-config.mjs';
-import { disabled, retiredCurrentCondition } from './owner-release-current-snapshot.js';
+import {
+  disabled,
+  retiredCurrentCondition,
+  retiredCurrentRevisionCondition,
+} from './owner-release-current-snapshot.js';
 import { revisionWithRequestedImage } from './owner-release-image-resolution.js';
 import {
   matchesNativeServiceDigest,
@@ -125,7 +129,7 @@ function revisionProof(raw: unknown, name: string, c: Context): NativeProof {
       const v = nativeObject(condition);
       return (
         v.state === 'CONDITION_SUCCEEDED' ||
-        (reviewedCurrent?.preclosed && retiredCurrentCondition(v))
+        (reviewedCurrent?.preclosed && retiredCurrentRevisionCondition(v))
       );
     }),
   );
@@ -140,7 +144,7 @@ function revisionProof(raw: unknown, name: string, c: Context): NativeProof {
       (r.service === WEB_SERVICE || r.service === 'assistant-web') &&
       ready.length === 1 &&
       (ready[0]?.state === 'CONDITION_SUCCEEDED' ||
-        (reviewedCurrent?.preclosed && retiredCurrentCondition(ready[0] as Obj))) &&
+        (reviewedCurrent?.preclosed && retiredCurrentRevisionCondition(ready[0] as Obj))) &&
       (r.reconciling === undefined || r.reconciling === false),
   );
   const uid = text(r.uid, /^[A-Za-z0-9-]{1,128}$/),
