@@ -116,19 +116,17 @@ for (const driver of ['postgres', 'firestore'] as const)
             await store.doc('agents', agentId).set({ id: agentId });
             await store.doc('tasks', task.id).set(encodeRecord(task));
           } else {
-            await db
-              .insert(tasks)
-              .values({
-                id: task.id,
-                agentId,
-                type: task.type,
-                status: task.status,
-                title: task.title,
-                progress: task.progress,
-                trigger: task.trigger,
-                trust: task.trust,
-                state: task.state,
-              });
+            await db.insert(tasks).values({
+              id: task.id,
+              agentId,
+              type: task.type,
+              status: task.status,
+              title: task.title,
+              progress: task.progress,
+              trigger: task.trigger,
+              trust: task.trust,
+              state: task.state,
+            });
           }
           const repository = store
             ? new FirestoreTaskDiscoveryRepository(store)

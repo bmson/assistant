@@ -51,12 +51,10 @@ export function createPostgresTaskDiscoveryRepository(db: Db): TaskDiscoveryRepo
         )
         .orderBy(desc(tasks.updatedAt), tasks.id)
         .limit(input.limit + 1);
-      const selected = rows
-        .slice(0, input.limit)
-        .map(({ state, ...row }) => ({
-          ...row,
-          estimatedCostOperationId: estimatedCostOperationLocator(row.status, state),
-        }));
+      const selected = rows.slice(0, input.limit).map(({ state, ...row }) => ({
+        ...row,
+        estimatedCostOperationId: estimatedCostOperationLocator(row.status, state),
+      }));
       const waiting = selected
         .filter((row) => row.status === 'waiting_approval')
         .map((row) => row.id);
