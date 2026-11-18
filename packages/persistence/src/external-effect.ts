@@ -1,8 +1,8 @@
 export interface ExternalEffectProgress {
   provider: 'google';
-  kind: 'document' | 'sheet' | 'slides' | 'email' | 'draft';
+  kind: 'document' | 'sheet' | 'slides' | 'email' | 'draft' | 'calendar_event';
   objectId: string;
-  stage: 'created' | 'filled' | 'shared' | 'sent';
+  stage: 'created' | 'filled' | 'shared' | 'sent' | 'prepared' | 'verified';
   payloadDigest: string;
 }
 
@@ -12,17 +12,19 @@ export function advanceExternalEffect(
 ): ExternalEffectProgress {
   if (
     next.provider !== 'google' ||
-    !['document', 'sheet', 'slides', 'email', 'draft'].includes(next.kind) ||
+    !['document', 'sheet', 'slides', 'email', 'draft', 'calendar_event'].includes(next.kind) ||
     !/^[A-Za-z0-9_-]{1,254}$/.test(next.objectId) ||
     !/^[a-f0-9]{64}$/.test(next.payloadDigest)
   )
     throw new Error('Invalid external effect receipt');
   const sequence =
-    next.kind === 'email'
-      ? ['sent']
-      : next.kind === 'draft'
-        ? ['created']
-        : ['created', 'filled', 'shared'];
+    next.kind === 'calendar_event'
+      ? ['prepared', 'created', 'verified']
+      : next.kind === 'email'
+        ? ['sent']
+        : next.kind === 'draft'
+          ? ['created']
+          : ['created', 'filled', 'shared'];
   const index = sequence.indexOf(next.stage);
   if (index < 0) throw new Error('Invalid external effect stage');
   if (previous == null) {

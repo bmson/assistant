@@ -8,9 +8,47 @@ export {
 
 import {
   GOOGLE_CALENDAR_READ_SCOPE,
+  GOOGLE_CALENDAR_WRITE_SCOPE,
   type GoogleCalendarConnectionRepository,
 } from '@assistant/persistence';
 import { decryptStoredCredential, encryptStoredCredential } from './mcp-secrets.js';
+
+/**
+ * Write grants create version-2 durable connection/effect state. Never activate
+ * on the deployed API-1/schema-1-or-136 contract, including a partial rollout.
+ * The release owner must qualify and promote the API-2 peer/storage contract
+ * separately. This source change does not activate or migrate an installation.
+ */
+export function googleCalendarWriteContractReady(
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  const peers = ['AGENT', 'WEB'].filter(
+    (peer) =>
+      env[`ASSISTANT_RELEASE_${peer}_API_MIN`] !== undefined ||
+      env[`ASSISTANT_RELEASE_${peer}_API_MAX`] !== undefined,
+  );
+  const peerReady =
+    peers.length > 0 &&
+    peers.every(
+      (peer) =>
+        env[`ASSISTANT_RELEASE_${peer}_API_MIN`] === '2' &&
+        env[`ASSISTANT_RELEASE_${peer}_API_MAX`] === '2',
+    );
+  const version =
+    env.ASSISTANT_RELEASE_SCHEMA_DRIVER === 'firestore'
+      ? '2'
+      : env.ASSISTANT_RELEASE_SCHEMA_DRIVER === 'postgres'
+        ? '137'
+        : null;
+  return (
+    env.ASSISTANT_RELEASE_API_CONTRACT === '2' &&
+    peerReady &&
+    version !== null &&
+    env.ASSISTANT_RELEASE_SCHEMA_VERSION === version &&
+    env.ASSISTANT_RELEASE_SCHEMA_MIN === version &&
+    env.ASSISTANT_RELEASE_SCHEMA_MAX === version
+  );
+}
 
 export class GoogleCalendarOAuthError extends Error {
   constructor(
@@ -29,6 +67,7 @@ const allowedScopes = new Set([
   'email',
   'https://www.googleapis.com/auth/userinfo.email',
   GOOGLE_CALENDAR_READ_SCOPE,
+  GOOGLE_CALENDAR_WRITE_SCOPE,
 ]);
 export function validGoogleCalendarScopes(scopes: string[]): boolean {
   return (
@@ -130,6 +169,7 @@ export async function reportGoogleCalendarReadFailure(input: {
   status: number;
   body: unknown;
   url?: string;
+  method?: string;
   decrypt?: (value: string) => string;
 }): Promise<void> {
   const reason = googleCalendarReadFailureReason(input.status, input.body, input.url);
@@ -157,9 +197,16 @@ export async function reportGoogleCalendarReadFailure(input: {
   if (!failedCurrentToken || credential.refreshLease) return;
   await input.repository.updateCredential(input.ownerId, current.revision, {
     ...credential,
-    accessTokenEncrypted: null,
-    accessTokenExpiresAt: null,
-    status: reason === 'provider_unavailable' ? 'provider_unavailable' : 'reconnect_required',
+    ...(reason === 'missing_scope' && input.method && !['GET', 'HEAD'].includes(input.method)
+      ? { scopes: credential.scopes.filter((scope) => scope !== GOOGLE_CALENDAR_WRITE_SCOPE) }
+      : {
+          accessTokenEncrypted: null,
+          accessTokenExpiresAt: null,
+          status:
+            reason === 'provider_unavailable'
+              ? ('provider_unavailable' as const)
+              : ('reconnect_required' as const),
+        }),
     // The store also rejects a refresh claim or newer credential saved since this read.
   });
 }
@@ -204,6 +251,7 @@ export async function getGoogleCalendarAccessToken(input: {
   forceRefresh?: boolean;
   rejectedAccessToken?: string;
   expectedConnectionId?: string;
+  requireWrite?: boolean;
   fetcher?: typeof fetch;
   encrypt?: (value: string) => string;
   decrypt?: (value: string) => string;
@@ -222,6 +270,8 @@ export async function getGoogleCalendarAccessToken(input: {
   const now = input.now ?? (() => new Date());
   const initial = await repository.get(ownerId);
   if (!initial?.connection) throw new GoogleCalendarOAuthError('disconnected');
+  if (input.requireWrite && !initial.connection.scopes.includes(GOOGLE_CALENDAR_WRITE_SCOPE))
+    throw new GoogleCalendarOAuthError('missing_scope');
   const generation = initial.connection.id;
   if (input.expectedConnectionId && input.expectedConnectionId !== generation)
     throw new GoogleCalendarOAuthError('disconnected');
@@ -272,6 +322,16 @@ export async function getGoogleCalendarAccessToken(input: {
         // Persist rotation even when availability/scopes fail after a successful token exchange.
         refreshedCredential = {
           ...credential,
+          scopes:
+            typeof token.scope === 'string'
+              ? token.scope
+                  .split(/\s+/)
+                  .filter(
+                    (scope) =>
+                      scope !== GOOGLE_CALENDAR_WRITE_SCOPE ||
+                      credential.scopes.includes(GOOGLE_CALENDAR_WRITE_SCOPE),
+                  )
+              : credential.scopes,
           refreshTokenEncrypted:
             typeof token.refresh_token === 'string' && token.refresh_token
               ? encrypt(token.refresh_token)
@@ -331,6 +391,8 @@ export async function getGoogleCalendarAccessToken(input: {
       !current.connection.accessTokenEncrypted
     )
       throw new GoogleCalendarOAuthError('disconnected');
+    if (input.requireWrite && !current.connection.scopes.includes(GOOGLE_CALENDAR_WRITE_SCOPE))
+      throw new GoogleCalendarOAuthError('missing_scope');
     return {
       accessToken: decrypt(current.connection.accessTokenEncrypted),
       credentialVersion: current.connection.credentialVersion,

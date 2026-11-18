@@ -15,6 +15,26 @@ describe('external effect checkpoint contract', () => {
     expect(advanceExternalEffect(filled, filled)).toEqual(filled);
     expect(advanceExternalEffect(filled, { ...created, stage: 'shared' }).stage).toBe('shared');
   });
+  it('retains a Calendar operation before its POST and verifies only that same object', () => {
+    const prepared: ExternalEffectProgress = {
+      ...created,
+      kind: 'calendar_event',
+      objectId: 'ac0123456789abcdef',
+      stage: 'prepared',
+    };
+    expect(advanceExternalEffect(null, prepared)).toEqual(prepared);
+    expect(() => advanceExternalEffect(prepared, { ...prepared, stage: 'verified' })).toThrow(
+      'skipped',
+    );
+    const accepted = advanceExternalEffect(prepared, { ...prepared, stage: 'created' });
+    expect(advanceExternalEffect(accepted, { ...prepared, stage: 'verified' }).stage).toBe(
+      'verified',
+    );
+    expect(() => advanceExternalEffect(accepted, prepared)).toThrow('stale');
+    expect(() =>
+      advanceExternalEffect(prepared, { ...prepared, objectId: 'another', stage: 'created' }),
+    ).toThrow('identity');
+  });
   it('rejects skipped/regressed stages, different object identities and changed approved bytes', () => {
     for (const patch of [
       { stage: 'shared' },

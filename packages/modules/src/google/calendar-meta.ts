@@ -2,13 +2,13 @@ import { googleCalendarOAuthConfig } from '@assistant/config/google-calendar';
 import type { ModuleMeta } from '../contract.js';
 
 /**
- * PostgreSQL-independent Google Calendar reads. Mutations, Gmail, and the
+ * PostgreSQL-independent Google Calendar reads and approved personal event creation. Gmail and the
  * remaining Workspace tools stay in the separate `google` module.
  */
 export const calendarMeta = {
   name: 'calendar',
   title: 'Google Calendar',
-  summary: 'Read calendars, events, and free/busy availability.',
+  summary: 'Read calendars and availability; optionally approve personal event creation.',
   configKeys: [
     'GOOGLE_OAUTH_CLIENT_ID',
     'GOOGLE_OAUTH_CLIENT_SECRET',

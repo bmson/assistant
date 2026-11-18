@@ -88,6 +88,24 @@ describe('personal Calendar mobile endpoints', () => {
     expect((await POST(request('/connect', 'POST', '{}'))).status).toBe(200);
     expect(state.service.connect).toHaveBeenCalledWith('owner');
   });
+  it('starts only an explicit supported write upgrade for the authenticated owner', async () => {
+    state.service.connect.mockResolvedValue({
+      authorizationUrl: 'https://accounts.google.com/auth',
+      flowId,
+      expiresAt: '2026-11-14T13:00:00Z',
+    });
+    expect(
+      (await POST(request('/connect', 'POST', JSON.stringify({ capability: 'calendarWrite' }))))
+        .status,
+    ).toBe(200);
+    expect(state.service.connect).toHaveBeenCalledWith('owner', 'calendarWrite');
+    state.service.connect.mockClear();
+    for (const capability of ['calendar', 'read', true, null])
+      expect((await POST(request('/connect', 'POST', JSON.stringify({ capability })))).status).toBe(
+        400,
+      );
+    expect(state.service.connect).not.toHaveBeenCalled();
+  });
   it('checks flow identity and cancellation, returning 404 for other flows', async () => {
     expect((await flowGET(request('/flow?flowId=bad'))).status).toBe(400);
     await flowDELETE(request(`/flow?flowId=${flowId}`, 'DELETE'));
