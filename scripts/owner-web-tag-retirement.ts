@@ -1,5 +1,6 @@
 /** Fixed-service tag retirement planner. No provider calls or mutation authority. */
 import { createHash } from 'node:crypto';
+import { verifyRevisionImage } from './owner-release-image-resolution.js';
 import { nativeServiceDefaults } from './owner-release-native-service-defaults.js';
 export const WEB_SERVICE = 'projects/bmson-assistant/locations/us-west1/services/assistant-web';
 /** Verified project-number endpoint for this fixed project, region and service. */
@@ -147,8 +148,8 @@ export function immutableWebRevision(
   )
     throw new Error('Immutable revision identity mismatch');
   const c = object(r.containers[0]);
-  if (c.image !== expectedImage || !Array.isArray(c.env))
-    throw new Error('Immutable image mismatch');
+  verifyRevisionImage(r, expectedImage);
+  if (!Array.isArray(c.env)) throw new Error('Immutable image mismatch');
   const pause = c.env.map(object).filter((e) => e.name === 'ASSISTANT_RELEASE_WRITES_PAUSED');
   if (
     pause.length !== 1 ||
@@ -317,7 +318,7 @@ export function observeCanonicalCurrentWeb(raw: unknown, native: unknown): Expec
   )
     throw new Error('Current native proof refused');
   const image = text(
-    object((r.containers as unknown[])[0]).image,
+    object((state.template.containers as unknown[])[0]).image,
     /^us-west1-docker\.pkg\.dev\/bmson-assistant\/assistant\/web@sha256:[a-f0-9]{64}$/,
   );
   immutableWebRevision(r, revision, image, pause === 'true');

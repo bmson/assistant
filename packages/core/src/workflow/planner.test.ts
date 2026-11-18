@@ -502,6 +502,42 @@ describe('planTask unavailable outcomes', () => {
     });
   });
 
+  it.each([
+    { type: 'chat_turn', trust: 'owner', critical: true },
+    { type: 'sms_turn', trust: 'owner', critical: true },
+    { type: 'chat_turn', trust: 'external', critical: false },
+    { type: 'email_triage', trust: 'owner', critical: false },
+  ])(
+    'limits classification and planning carve-out to owner chat/SMS: $type $trust',
+    async ({ type, trust, critical }) => {
+      const object = vi.fn(async (role: string) =>
+        role === 'classify'
+          ? { ok: true as const, object: { trivial: false } }
+          : {
+              ok: true as const,
+              object: { action: 'reply', reasoning: 'fixture', steps: [], missingInfo: [] },
+            },
+      );
+      const update = vi.fn(() => ({ set: vi.fn(() => ({ where: vi.fn() })) }));
+      const task = { id: 'fixture-budget-context', type, trust } as TaskRow;
+      await planTask(
+        { db: { update } as never, router: { object } as unknown as ModelRouter },
+        task,
+        { name: 'AI Bot' } as AgentRow,
+        [{ role: 'user', content: 'Help with the thing from earlier.' }] as ModelMessage[],
+      );
+      expect(object).toHaveBeenCalledWith(
+        'plan',
+        expect.objectContaining({ taskId: task.id, critical }),
+      );
+      if (type === 'chat_turn' || type === 'sms_turn')
+        expect(object).toHaveBeenCalledWith(
+          'classify',
+          expect.objectContaining({ taskId: task.id, critical }),
+        );
+    },
+  );
+
   it('keeps the successful trivial-chat null result', async () => {
     const object = vi.fn(async (role: string) => {
       if (role === 'classify')

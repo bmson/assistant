@@ -9,6 +9,7 @@ import {
   SERVICE_ROOT,
   scalingConfigurationDigest,
 } from './owner-release-current-snapshot.js';
+import { revisionWithRequestedImage } from './owner-release-image-resolution.js';
 import {
   matchesNativeServiceDigest,
   nativeServiceDefaults,
@@ -60,8 +61,13 @@ export function verifyBootstrapRevisionTemplate(
     r.name === `${service}/revisions/${expectedRevision}` &&
       (r.service === service || r.service === `assistant-${role}`),
   );
+  const requestedContainers = t.containers;
+  requireProof(Array.isArray(requestedContainers) && requestedContainers.length === 1);
+  const expectedImage = object(requestedContainers[0]).image;
+  requireProof(typeof expectedImage === 'string');
+  const semantic = revisionWithRequestedImage(r, expectedImage);
   const projected: Obj = {};
-  for (const key of Object.keys(t)) if (r[key] !== undefined) projected[key] = r[key];
+  for (const key of Object.keys(t)) if (semantic[key] !== undefined) projected[key] = semantic[key];
   projected.revision = expectedRevision;
   const requested = t.containers,
     actual = projected.containers;

@@ -10,6 +10,7 @@ FROM mirror.gcr.io/library/node:26-slim AS build
 WORKDIR /workspace
 RUN npm install --global corepack@0.36.0 && corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
+COPY patches ./patches
 COPY workers/document-processor ./workers/document-processor
 # Legacy deploy resolves root workspace links even for a filtered worker.
 # These build-only packages are excluded from the production runtime copy.

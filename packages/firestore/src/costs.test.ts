@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { FirestoreCostRepository } from './costs.js';
 import type { InstallationStore } from './store.js';
@@ -16,6 +16,374 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore atomic cost led
   });
   afterEach(async () => {
     await disposeStore(store);
+  });
+
+  it('returns structured ceiling information for a denied reservation', async () => {
+    const outcome = await costs.reserve({ source: 'model', estimatedUsd: 1.000001 });
+    expect(outcome).toMatchObject({
+      ok: false,
+      budget: { scope: 'daily', nextAttemptMicros: 1_000_001 },
+    });
+  });
+
+  it('never dispatches, reconciles, or cleans up an escrow as an ordinary reservation', async () => {
+    const reservation = await costs.reserve({ source: 'model', estimatedUsd: 0.2 });
+    if (!reservation.ok) throw new Error('Fixture failed to reserve');
+    const ref = store.doc('costReservations', reservation.reservationId);
+    await ref.update({
+      reservationKind: 'escrow',
+      createdAt: new Date(now.getTime() - 180 * 60_000),
+    });
+    expect(
+      await costs.beginAttempt(reservation.reservationId, {
+        provider: 'test',
+        model: 'test',
+        role: 'chat',
+        requestDigest: 'a'.repeat(64),
+        inputTokenEstimate: 1,
+        outputTokenLimit: 1,
+        reasoning: 'disabled',
+      }),
+    ).toBe(false);
+    await costs.release(reservation.reservationId);
+    await costs.reconcile(reservation.reservationId, { usd: 0.1 });
+    await costs.releaseStale(120, 500);
+    expect((await ref.get()).data()).toMatchObject({
+      status: 'held',
+      reservationKind: 'escrow',
+      estimatedUsd: '0.200000',
+    });
+    expect((await costs.totals()).heldUsd).toBe(0.2);
+  });
+
+  it('atomically transfers escrow to one attempt under concurrent draws', async () => {
+    const taskId = 'grant-task';
+    await store.doc('tasks', taskId).set({ id: taskId, spentUsd: '0', budgetUsdLimit: '0.5' });
+    const reservation = await costs.reserve({ source: 'model', estimatedUsd: 0.2, taskId });
+    if (!reservation.ok) throw new Error('Fixture failed to reserve');
+    const grantId = 'grant-one';
+    const operationId = 'operation-one';
+    const quote = {
+      type: 'estimated-cost-approval',
+      operationId,
+      taskId,
+      requestText: 'request',
+      quoteId: 'quote',
+      quoteVersion: 'v1',
+      expiresAt: new Date(now.getTime() + 60_000).toISOString(),
+      nextAttemptMicros: 100_000,
+      allowanceMicros: 200_000,
+      recordedDailyMicros: 0,
+      recordedMonthlyMicros: 0,
+      totalHeldMicros: 500_000,
+      eligibleHistoricalUnknownMicros: 400_000,
+      pendingApprovalMicros: 200_000,
+      dailyCeilingMicros: 1_000_000,
+      monthlyCeilingMicros: 2_000_000,
+      dailyProjectedGrossMicros: 700_000,
+      monthlyProjectedGrossMicros: 700_000,
+      complete: true,
+      canApprove: true,
+    };
+    await store
+      .doc('costReservations', reservation.reservationId)
+      .update({ reservationKind: 'escrow', costGrantId: grantId });
+    await store.doc('estimatedCostRequests', operationId).set({
+      installationId: store.installationId,
+      ownerId: 'owner',
+      taskId,
+      bindingDigest: 'binding',
+      state: 'approved',
+      quote,
+    });
+    await store.doc('estimatedCostGrants', grantId).set({
+      operationId,
+      quoteId: 'quote',
+      escrowReservationId: reservation.reservationId,
+      allowanceMicros: 200_000,
+      consumedMicros: 0,
+      expiresAt: new Date(now.getTime() + 60_000),
+    });
+    const receipt = {
+      operationId,
+      decisionId: 'decision',
+      quoteId: 'quote',
+      status: 'approved',
+      allowanceMicros: 200_000,
+      expiresAt: new Date(now.getTime() + 60_000).toISOString(),
+    };
+    await store.doc('estimatedCostDecisions', 'decision').set({ operationId, receipt });
+    const input = {
+      actor: { installationId: store.installationId, ownerId: 'owner' },
+      operationId,
+      grantId,
+      bindingDigest: 'binding',
+      taskId,
+      source: 'model' as const,
+      estimatedMicros: 120_000,
+      description: 'attempt',
+    };
+    const before = await costs.totals();
+    const pendingOperationId = 'pending-other';
+    await store.doc('estimatedCostRequests', pendingOperationId).set({
+      operationId: pendingOperationId,
+      installationId: store.installationId,
+      ownerId: 'owner',
+      taskId,
+      state: 'pending',
+      quote: { ...quote, operationId: pendingOperationId, quoteId: 'other-quote' },
+    });
+    await store
+      .doc('budgetPeriods', `day:${now.toISOString().slice(0, 10)}`)
+      .set({ spentMicros: 0 });
+    await store
+      .doc('budgetPeriods', `month:${now.toISOString().slice(0, 7)}`)
+      .set({ spentMicros: 0 });
+    await store.doc('estimatedCostRequests', operationId).update({ quote: { quoteId: 'other' } });
+    expect(await costs.drawEstimatedCostGrant({ ...input, attemptId: 'attempt-one' })).toEqual({
+      ok: false,
+      reason: 'unavailable',
+    });
+    await store.doc('estimatedCostRequests', operationId).update({ quote });
+    expect(await costs.readEstimatedCostRequest(input.actor, operationId)).toMatchObject({
+      status: 'approved',
+      operationId,
+      quote,
+    });
+    expect((await costs.readEstimatedCostView(input.actor, operationId))?.tracking).toMatchObject({
+      totalHeldMicros: 200_000,
+      pendingApprovalMicros: 200_000,
+      dailyPlannedExposureMicros: 400_000,
+    });
+    await costs.record({ source: 'model', usd: 0.01, taskId });
+    expect((await costs.readEstimatedCostView(input.actor, operationId))?.tracking).toMatchObject({
+      recordedDailyMicros: 10_000,
+      totalHeldMicros: 200_000,
+      pendingApprovalMicros: 200_000,
+      dailyPlannedExposureMicros: 410_000,
+    });
+    await store.doc('estimatedCostRequests', pendingOperationId).update({ state: 'declined' });
+    expect((await costs.readEstimatedCostView(input.actor, operationId))?.tracking).toMatchObject({
+      pendingApprovalMicros: 0,
+      dailyPlannedExposureMicros: 210_000,
+    });
+    expect(
+      await costs.readEstimatedCostRequest({ ...input.actor, ownerId: 'other' }, operationId),
+    ).toBeNull();
+    expect(
+      await costs.readEstimatedCostDecision(input.actor, { operationId, decisionId: 'decision' }),
+    ).toEqual(receipt);
+    expect(
+      await costs.readEstimatedCostDecision(
+        { ...input.actor, ownerId: 'other' },
+        { operationId, decisionId: 'decision' },
+      ),
+    ).toBeNull();
+    expect(
+      await costs.readEstimatedCostDecision(input.actor, { operationId, decisionId: 'other' }),
+    ).toBeNull();
+    await store
+      .doc('estimatedCostDecisions', 'decision')
+      .update({ receipt: { ...receipt, operationId: 'other' } });
+    await expect(
+      costs.readEstimatedCostDecision(input.actor, { operationId, decisionId: 'decision' }),
+    ).rejects.toThrow('Invalid stored');
+    await store.doc('estimatedCostDecisions', 'decision').update({ receipt });
+    const outcomes = await Promise.all([
+      costs.drawEstimatedCostGrant({ ...input, attemptId: 'attempt-one' }),
+      costs.drawEstimatedCostGrant({ ...input, attemptId: 'attempt-two' }),
+    ]);
+    expect(outcomes.filter((outcome) => outcome.ok)).toHaveLength(1);
+    expect(outcomes.filter((outcome) => !outcome.ok)).toEqual([{ ok: false, reason: 'exhausted' }]);
+    const success = outcomes.find((outcome) => outcome.ok);
+    if (!success?.ok) throw new Error('Expected successful draw');
+    expect(
+      await costs.drawEstimatedCostGrant({ ...input, attemptId: success.reservationId }),
+    ).toEqual(success);
+    expect((await costs.totals()).heldUsd).toBe(before.heldUsd);
+    expect((await store.doc('estimatedCostGrants', grantId).get()).get('consumedMicros')).toBe(
+      120_000,
+    );
+    await expect(
+      costs.drawEstimatedCostGrant({
+        ...input,
+        attemptId: success.reservationId,
+        estimatedMicros: 1,
+      }),
+    ).rejects.toThrow('reused');
+    expect(
+      await costs.drawEstimatedCostGrant({
+        ...input,
+        actor: { ...input.actor, ownerId: 'other' },
+        attemptId: 'other-attempt',
+      }),
+    ).toEqual({ ok: false, reason: 'unavailable' });
+    await costs.reconcile(success.reservationId, { usd: 0.15 });
+    expect((await store.doc('estimatedCostGrants', grantId).get()).get('consumedMicros')).toBe(
+      150_000,
+    );
+    expect((await costs.totals()).heldUsd).toBeCloseTo(before.heldUsd - 0.15);
+    const lowId = 'low-attempt';
+    expect(
+      await costs.drawEstimatedCostGrant({
+        ...input,
+        estimatedMicros: 30_000,
+        attemptId: lowId,
+      }),
+    ).toEqual({ ok: true, reservationId: lowId });
+    await costs.reconcile(lowId, { usd: 0.01 });
+    expect((await store.doc('estimatedCostGrants', grantId).get()).get('consumedMicros')).toBe(
+      180_000,
+    );
+    const unknownId = 'unknown-attempt';
+    expect(
+      await costs.drawEstimatedCostGrant({
+        ...input,
+        estimatedMicros: 10_000,
+        attemptId: unknownId,
+      }),
+    ).toEqual({ ok: true, reservationId: unknownId });
+    now = new Date(now.getTime() + 60_000);
+    expect(await costs.readEstimatedCostRequest(input.actor, operationId)).toMatchObject({
+      status: 'expired_or_needs_refresh',
+    });
+    expect(
+      await costs.drawEstimatedCostGrant({ ...input, attemptId: success.reservationId }),
+    ).toEqual({ ok: false, reason: 'expired' });
+    await store.doc('costReservations', unknownId).update({ status: 'unknown' });
+    expect(await costs.expireEstimatedCostGrant(grantId)).toBe(true);
+    expect(await costs.expireEstimatedCostGrant(grantId)).toBe(false);
+    expect((await store.doc('costReservations', unknownId).get()).get('status')).toBe('unknown');
+    expect((await costs.totals()).heldUsd).toBeCloseTo(before.heldUsd - 0.19);
+    const old = await costs.reserve({ source: 'model', estimatedUsd: 0.1 });
+    if (!old.ok) throw new Error('Expected historical hold');
+    await store.doc('costReservations', old.reservationId).update({ status: 'unknown' });
+    const frozen = [{ reservationId: old.reservationId, estimatedMicros: 100_000 }];
+    await store.doc('estimatedCostBaselines', store.installationId).set({
+      installationId: store.installationId,
+      ownerId: 'owner',
+      rows: frozen,
+      createdAt: now,
+      digest: createHash('sha256').update(JSON.stringify(frozen)).digest('hex'),
+    });
+    expect((await costs.readEstimatedCostView(input.actor, operationId))?.tracking).toMatchObject({
+      historicalUnknownMicros: 100_000,
+      totalHeldMicros: 110_000,
+    });
+    await costs.reconcile(old.reservationId, { usd: 0.05 });
+    expect((await costs.readEstimatedCostView(input.actor, operationId))?.tracking).toMatchObject({
+      historicalUnknownMicros: 0,
+      totalHeldMicros: 10_000,
+    });
+    const invalid = [{ reservationId: unknownId, estimatedMicros: 10_000 }];
+    await store.doc('estimatedCostBaselines', store.installationId).update({
+      rows: invalid,
+      digest: createHash('sha256').update(JSON.stringify(invalid)).digest('hex'),
+    });
+    expect(
+      (await costs.readEstimatedCostView(input.actor, operationId))?.tracking
+        .historicalUnknownMicros,
+    ).toBeNull();
+  });
+
+  it('closes only the selected expired parked request and replays the exact decline receipt', async () => {
+    const taskId = 'parked-task';
+    const operationId = 'parked-operation';
+    const fingerprint = 'request-fingerprint';
+    const quote = {
+      type: 'estimated-cost-approval',
+      operationId,
+      taskId,
+      requestText: 'request',
+      quoteId: 'quote',
+      quoteVersion: 'v1',
+      expiresAt: new Date(now.getTime() - 1000).toISOString(),
+      nextAttemptMicros: 100_000,
+      allowanceMicros: 200_000,
+      recordedDailyMicros: 0,
+      recordedMonthlyMicros: 0,
+      totalHeldMicros: 500_000,
+      eligibleHistoricalUnknownMicros: 400_000,
+      pendingApprovalMicros: 200_000,
+      dailyCeilingMicros: 1_000_000,
+      monthlyCeilingMicros: 2_000_000,
+      dailyProjectedGrossMicros: 700_000,
+      monthlyProjectedGrossMicros: 700_000,
+      complete: true,
+      canApprove: true,
+    };
+    const trigger = {
+      payload: {
+        chatAdmission: {
+          protocol: 'owner-chat-v1',
+          clientOperationId: operationId,
+          requestHash: fingerprint,
+        },
+      },
+    };
+    await store.doc('tasks', taskId).set({
+      id: taskId,
+      agentId: 'owner',
+      type: 'chat_turn',
+      trust: 'owner',
+      status: 'waiting_estimated_cost',
+      trigger,
+    });
+    await store.doc('coordination', 'budget-holds').set({ heldMicros: 0 });
+    await store.doc('tasks', 'other-task').set({
+      id: 'other-task',
+      agentId: 'owner',
+      type: 'chat_turn',
+      trust: 'owner',
+      status: 'pending',
+    });
+    await store.doc('estimatedCostRequests', operationId).set({
+      operationId,
+      installationId: store.installationId,
+      ownerId: 'owner',
+      taskId,
+      requestFingerprint: fingerprint,
+      bindingDigest: 'binding',
+      state: 'pending',
+      quote,
+      baseline: [],
+    });
+    const repo = costs.estimatedCostApprovalRepository();
+    const actor = { installationId: store.installationId, ownerId: 'owner' };
+    const decision = {
+      operationId,
+      quoteId: 'quote',
+      quoteVersion: 'v1',
+      decisionId: 'decline-one',
+      decision: 'decline' as const,
+    };
+    expect(await repo.decide(actor, { ...decision, decision: 'approve' })).toMatchObject({
+      ok: false,
+      outcome: 'unavailable',
+    });
+    expect(await repo.decide({ ...actor, ownerId: 'other' }, decision)).toMatchObject({
+      ok: false,
+      outcome: 'not_found',
+    });
+    expect(
+      await repo.decide(actor, { ...decision, decisionId: 'stale', quoteVersion: 'old' }),
+    ).toMatchObject({ ok: true, receipt: { status: 'stale' } });
+    const results = await Promise.all([
+      repo.decide(actor, decision),
+      repo.decide(actor, { ...decision, decisionId: 'decline-two' }),
+    ]);
+    const winner = results.find((result) => result.ok && result.receipt.status === 'declined');
+    expect(winner?.ok).toBe(true);
+    expect(results.filter((result) => !result.ok)).toHaveLength(1);
+    if (!winner?.ok) throw new Error('Expected decline receipt');
+    const replay = { ...decision, decisionId: winner.receipt.decisionId };
+    expect(await repo.decide(actor, replay)).toEqual(winner);
+    expect(
+      await repo.getDecisionReceipt(actor, { operationId, decisionId: replay.decisionId }),
+    ).toEqual(winner);
+    expect((await store.doc('tasks', taskId).get()).get('status')).toBe('cancelled');
+    expect((await store.doc('tasks', 'other-task').get()).get('status')).toBe('pending');
+    expect((await store.collection('costReservations').get()).empty).toBe(true);
   });
 
   it('serializes competing reservations and never over-reserves the daily cap', async () => {

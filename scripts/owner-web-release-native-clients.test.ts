@@ -11,6 +11,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { estimatedCostReleaseEnvironment } from '../infra/gcp/estimated-cost-release-config.mjs';
 import { bootstrapDigest, scalingCheckpoint } from './owner-release-bootstrap.js';
 import { nativeWebCreationFixtureClient } from './owner-web-release-creation-client.js';
 import {
@@ -274,6 +275,63 @@ function fixture() {
 }
 afterEach(() => vi.useRealTimers());
 describe('unwired fixed native fixture clients', () => {
+  it('refuses an expired spending profile before forward I/O while allowing canonical recovery', async () => {
+    const f = fixture();
+    f.context.estimatedCost = {
+      format: 1,
+      mode: 'compatible-off',
+      source: f.context.source,
+      projectId: 'bmson-assistant',
+      installationId: 'test-installation',
+      ownerId: 'test-owner',
+      providerSecret: 'existing',
+      providerVersion: '31',
+      reviewedAt: '2026-11-01T22:35:00.000Z',
+      expiresAt: '2026-11-01T23:00:00.000Z',
+    };
+    Object.assign(f.context.releaseEnv, estimatedCostReleaseEnvironment(f.context.estimatedCost));
+    for (const container of [
+      f.service.template.containers[0],
+      f.native[f.context.canonical]!.containers[0],
+    ])
+      container.env.push(
+        { name: 'GCP_PROJECT', value: 'bmson-assistant' },
+        { name: 'ASSISTANT_WORKSPACE_ID', value: 'test-installation' },
+        { name: 'FIRESTORE_AGENT_ID', value: 'test-owner' },
+        {
+          name: 'OPENROUTER_API_KEY',
+          valueSource: { secretKeyRef: { secret: 'existing', version: 'latest' } },
+        },
+      );
+    const ready = await readyForResume(f);
+    const receipts = {
+      initialize: () => '',
+      readCurrent: () => ready,
+      recordIntent: () => {},
+      recordCheckpoint: () => {},
+    };
+    const hold = vi.fn(async () => {});
+    f.setClock(Date.parse(f.context.estimatedCost.expiresAt));
+    const requestCount = f.requests.length;
+    await expect(
+      runPairedWebLifecyclePhase(
+        'createR',
+        f.context.estimatedCost.expiresAt,
+        f.deps,
+        receipts,
+        hold,
+      ),
+    ).rejects.toThrow('Invalid estimated cost release configuration');
+    expect(f.requests).toHaveLength(requestCount);
+    const closed = await runPairedWebLifecyclePhase(
+      'restoreC',
+      f.context.estimatedCost.expiresAt,
+      f.deps,
+      receipts,
+      hold,
+    );
+    expect(closed.phase).toBe('restoredC');
+  });
   it('initializes only from a fresh canonical-only native projection and checks hold before a phase', async () => {
     const f = fixture(),
       root = mkdtempSync(join(tmpdir(), 'owner-web-controller-private-')),

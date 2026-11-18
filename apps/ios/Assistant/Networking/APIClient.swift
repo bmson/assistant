@@ -749,6 +749,55 @@ struct APIClient: Sendable, GoogleCalendarConnectionService {
         value.utf8.count == 36 && UUID(uuidString: value) != nil
     }
 
+    func estimatedCostQuote(operationID: String) async throws -> EstimatedCostQuoteResponse {
+        var components = URLComponents(url: configuration.baseURL.appending(path: "api/mobile/v1/chat/estimated-cost/quote"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [.init(name: "operationId", value: operationID)]
+        guard let url = components?.url else { throw APIError.invalidServerURL }
+        let envelope = try await perform(makeRequest(url: url), as: EstimatedCostQuoteResponse.self)
+        guard envelope.ok, let projection = envelope.request, projection.isValid(for: operationID) else { throw APIError.invalidResponse }
+        return envelope
+    }
+
+    func requestEstimatedCostQuote(operationID: String, quoteRequestID: String) async throws -> EstimatedCostQuoteResponse {
+        struct Body: Encodable { let operationId: String; let quoteRequestId: String }
+        var request = makeRequest(url: configuration.baseURL.appending(path: "api/mobile/v1/chat/estimated-cost/quote"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = try JSONEncoder().encode(Body(operationId: operationID, quoteRequestId: quoteRequestID))
+        let envelope = try await perform(request, as: EstimatedCostQuoteResponse.self)
+        guard envelope.ok, let projection = envelope.request, projection.isValid(for: operationID) else { throw APIError.invalidResponse }
+        return envelope
+    }
+
+    func decideEstimatedCost(_ decision: EstimatedCostDecision) async throws -> EstimatedCostDecisionReceipt {
+        var request = makeRequest(url: configuration.baseURL.appending(path: "api/mobile/v1/chat/estimated-cost/decision"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = try JSONEncoder().encode(decision)
+        return try await estimatedCostReceipt(request, decision: decision)
+    }
+
+    func estimatedCostDecisionReceipt(_ decision: EstimatedCostDecision) async throws -> EstimatedCostDecisionReceipt {
+        var components = URLComponents(url: configuration.baseURL.appending(path: "api/mobile/v1/chat/estimated-cost/decision"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [.init(name: "operationId", value: decision.operationId), .init(name: "decisionId", value: decision.decisionId)]
+        guard let url = components?.url else { throw APIError.invalidServerURL }
+        return try await estimatedCostReceipt(makeRequest(url: url), decision: decision)
+    }
+
+    private func estimatedCostReceipt(_ request: URLRequest, decision: EstimatedCostDecision) async throws -> EstimatedCostDecisionReceipt {
+        let (data, response) = try await load(request)
+        guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
+        if (200..<300).contains(http.statusCode) || http.statusCode == 409 {
+            if let envelope = try? JSONDecoder().decode(EstimatedCostDecisionResponse.self, from: data),
+               envelope.ok, let receipt = envelope.receipt,
+               receipt.operationId == decision.operationId, receipt.decisionId == decision.decisionId,
+               receipt.quoteId == decision.quoteId,
+               ((200..<300).contains(http.statusCode) || receipt.status == "stale") { return receipt }
+        }
+        try await validate(http, data: data)
+        throw APIError.invalidResponse
+    }
+
     func updateActivity(id: String, action: String, budgetUsdLimit: Double? = nil) async throws {
         var request = makeRequest(
             url: configuration.baseURL.appending(path: "api/mobile/v1/activity/\(id)")
@@ -1959,6 +2008,7 @@ struct APIClient: Sendable, GoogleCalendarConnectionService {
         var request = makeRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.setValue("v1", forHTTPHeaderField: "X-Assistant-Estimated-Cost-Approval")
         if let encodedRequestBody {
             request.httpBody = encodedRequestBody
         } else {

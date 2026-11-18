@@ -14,7 +14,10 @@ export { createPostgresCardRefreshRepository } from './card-refresh-repository.j
 export { notChatAdmissionCancellationSql } from './chat-admission-projection.js';
 export * from './client.js';
 export { createPostgresConversationSearchRepository } from './conversation-search-repository.js';
-export { createPostgresCostRepository } from './cost-repository.js';
+export {
+  createPostgresCostRepository,
+  createPostgresEstimatedCostApprovalRepository,
+} from './cost-repository.js';
 export { admitPostgresCuriosityQuestion } from './curiosity-admission-repository.js';
 export { createPostgresDeviceTokenRepository } from './device-token-repository.js';
 export { createPostgresDocumentProcessorRepository } from './document-processor-repository.js';
@@ -22,6 +25,12 @@ export { createPostgresDocumentSearchRepository } from './document-search-reposi
 export { createPostgresEmailAttachmentCustodyRepository } from './email-attachment-custody-repository.js';
 export { createPostgresEmailSyncRepository } from './email-sync-repository.js';
 export * from './entities.js';
+export { capturePostgresEstimatedCostSourceBinding } from './estimated-cost-approval-transactions.js';
+export * from './estimated-cost-baseline-provision.js';
+export {
+  createPostgresEstimatedCostQuotePreparer,
+  createPostgresEstimatedCostTurnParking,
+} from './estimated-cost-preparer.js';
 export { createPostgresExecutionContextRepository } from './execution-context-repository.js';
 export { createPostgresExecutionEvidenceRepository } from './execution-evidence-repository.js';
 export { createPostgresExecutionJobRepository } from './execution-jobs-repository.js';

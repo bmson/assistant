@@ -85,6 +85,8 @@ struct RootView: View {
                                     PersonCardScreen(personId: id)
                                 case .peopleConnections:
                                     PeopleConnectionsScreen()
+                                case let .estimatedCostApproval(operationID):
+                                    EstimatedCostReviewScreen(operationID: operationID)
                                 }
                             }
                     }

@@ -10,6 +10,7 @@ export * from './costs.js';
 export * from './dashboard.js';
 export * from './documents.js';
 export * from './email-obligations.js';
+export * from './estimated-cost-approval.js';
 export * from './goals.js';
 export * from './health.js';
 export * from './imports.js';

@@ -3,6 +3,8 @@ import {
   checksumV3,
   compositeMigrationId,
   deterministicMigrationCompare,
+  ESTIMATED_COST_AUTHORITY_TABLES,
+  INSTALLATION_RUNTIME_EXCLUSIONS_V2,
   isOwnerEditorRuntimeCursorName,
   MIGRATION_TABLES,
   type MigrationBundle,
@@ -189,6 +191,23 @@ export async function exportWorkspaceSnapshot(
       const sourceTables = await connection<
         { table_name: string }[]
       >`select table_name from information_schema.tables where table_schema = 'public' and table_type = 'BASE TABLE' order by table_name`;
+      const sourceTableNames = new Set(sourceTables.map((row) => row.table_name));
+      for (const table of ESTIMATED_COST_AUTHORITY_TABLES) {
+        if (!sourceTableNames.has(table)) continue;
+        const [row] = await connection.unsafe<{ present: boolean }[]>(
+          `select exists (select 1 from ${quoteIdentifier(table)}) as present`,
+        );
+        if (row?.present) {
+          throw new Error(
+            `Unsupported portability: estimated-cost authority table ${table} is not empty`,
+          );
+        }
+      }
+      const runtimeExclusions = ESTIMATED_COST_AUTHORITY_TABLES.every((table) =>
+        sourceTableNames.has(table),
+      )
+        ? INSTALLATION_RUNTIME_EXCLUSIONS_V2
+        : OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1;
       const timestampRows = await connection<
         { table_name: MigrationTable; column_name: string }[]
       >`select table_name, column_name from information_schema.columns where table_schema = 'public' and data_type in ('timestamp with time zone', 'timestamp without time zone') order by table_name, ordinal_position`;
@@ -389,18 +408,18 @@ export async function exportWorkspaceSnapshot(
           complete: migrationCoverageIsComplete(
             sourceTables.map((row) => row.table_name),
             tables,
-            OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1,
+            runtimeExclusions,
           ),
           supportedTables: tables,
           omittedTables: migrationCoverageOmittedTables(
             sourceTables.map((row) => row.table_name),
             tables,
-            OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1,
+            runtimeExclusions,
           ),
-          runtimeExclusions: OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1,
+          runtimeExclusions,
         },
         recordCount: records.length,
-        bundleChecksum: migrationBundleChecksum(records, 3, OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1),
+        bundleChecksum: migrationBundleChecksum(records, 3, runtimeExclusions),
         unsupportedTables: [],
       };
       return { manifest, records };

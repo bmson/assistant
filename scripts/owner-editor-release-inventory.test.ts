@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { syntheticImage } from './fixtures/owner-image-resolution.synthetic.js';
 import {
   allowedUrl,
   BASIC_EDITOR_COMMANDS,
@@ -26,6 +27,7 @@ import {
   bootstrapDigest,
   reviewedBootstrap,
 } from './owner-release-current-snapshot.js';
+import { registerImageResolution } from './owner-release-image-resolution.js';
 
 const manifest = readFileSync(
   new URL('./fixtures/owner-editor-release-indexes.json', import.meta.url),
@@ -733,6 +735,7 @@ describe('protected read-only release inventory', () => {
     'bound-disabled-wif',
     'bound-disabled-local',
     'unbound',
+    'bound-index',
     'mismatched',
     'revision-mismatch',
   ] as const)('collects and redacts editor target state: %s', async (mode) => {
@@ -741,6 +744,11 @@ describe('protected read-only release inventory', () => {
       ownerId: '11111111-1111-4111-8111-111111111111',
     };
     let observations = 0;
+    const images = {
+      agent: syntheticImage('agent', 'inventory'),
+      web: syntheticImage('web', 'inventory'),
+    };
+    const resolved: string[] = [];
     const spec = JSON.parse(manifest.toString()) as {
       indexes: Array<{
         collectionGroup: string;
@@ -822,6 +830,11 @@ describe('protected read-only release inventory', () => {
       ) as ReturnType<typeof service>;
       const traffic = svc.trafficStatuses[0];
       if (!traffic) throw new Error('missing fake traffic fixture');
+      if (mode === 'bound-index') {
+        const container = svc.template.containers[0];
+        if (!container) throw new Error('Synthetic container missing');
+        container.image = images[component].image;
+      }
       if (mode.startsWith('bound-disabled'))
         Object.assign(svc, {
           uid: `${component}-uid`,
@@ -855,6 +868,18 @@ describe('protected read-only release inventory', () => {
         return {
           name: `${svc.name}/revisions/${traffic.revision}`,
           ...svc.template,
+          ...(mode === 'bound-index'
+            ? {
+                containers: [
+                  {
+                    ...svc.template.containers[0],
+                    name: `${component}-1`,
+                    image: images[component].childImage,
+                  },
+                ],
+                containerStatuses: images[component].revision.containerStatuses,
+              }
+            : {}),
           ...(mode.startsWith('bound-disabled')
             ? {
                 uid: `${component}-revision-uid`,
@@ -955,7 +980,14 @@ describe('protected read-only release inventory', () => {
       mode === 'bound-disabled-local' ? undefined : observe,
       undefined,
       current,
+      async (image) => {
+        resolved.push(image);
+        const f = Object.values(images).find((candidate) => candidate.image === image);
+        if (!f) throw new Error('Unexpected image requested');
+        registerImageResolution(image, f.parentBytes, f.childBytes);
+      },
     );
+    expect(resolved).toEqual(mode === 'bound-index' ? [images.agent.image, images.web.image] : []);
     if (current) {
       expect(
         result.services.every(

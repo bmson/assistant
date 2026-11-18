@@ -1151,6 +1151,8 @@ final class APIClientRetryTests: XCTestCase {
             "/api/mobile/v1/chats/11111111-1111-4111-8111-111111111111/messages/44444444-4444-4444-8444-444444444444",
         ])
         let chatBody = try XCTUnwrap(StubURLProtocol.bodies.first)
+        let chatHeaders = try XCTUnwrap(StubURLProtocol.headers.first)
+        XCTAssertEqual(chatHeaders.first { $0.key.caseInsensitiveCompare("X-Assistant-Estimated-Cost-Approval") == .orderedSame }?.value, "v1")
         let chat = try XCTUnwrap(JSONSerialization.jsonObject(with: chatBody) as? [String: Any])
         XCTAssertEqual(chat["clientId"] as? String, clientID)
         let deliveryBody = try XCTUnwrap(StubURLProtocol.bodies.last)
@@ -4255,6 +4257,20 @@ final class APIClientRetryTests: XCTestCase {
 }
 
 extension APIClientRetryTests {
+    func testEstimatedCostDecisionDoesNotRetryAndAcceptsBoundStaleReceipt() async throws {
+        let decision = EstimatedCostDecision(operationId: "op-1", quoteId: "q-1", quoteVersion: "v1", decisionId: "d-1", decision: "approve")
+        StubURLProtocol.prime([.failure(URLError(.timedOut)),
+                               .success(status: 200, body: Data(#"{"ok":true}"#.utf8))])
+        do {
+            _ = try await makeClient().decideEstimatedCost(decision)
+            XCTFail("A lost decision response must not replay the POST")
+        } catch { XCTAssertEqual(StubURLProtocol.attempts, ["POST"]) }
+        StubURLProtocol.prime([.success(status: 409, body: Data(#"{"ok":true,"receipt":{"operationId":"op-1","quoteId":"q-1","decisionId":"d-1","status":"stale"}}"#.utf8))])
+        let receipt = try await makeClient().decideEstimatedCost(decision)
+        XCTAssertEqual(receipt.status, "stale")
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST"])
+        XCTAssertEqual(StubURLProtocol.urls.first?.path, "/api/mobile/v1/chat/estimated-cost/decision")
+    }
     func testPhoneCalendarSharingUsesVerifiedOwnerAndGenerationWireContract() async throws {
         let activeState = #"{"version":1,"ownerId":"owner-1","publisherId":"publisher-1","generation":1,"enabled":true,"consentVersion":1,"calendars":[{"id":"work","name":"Work","purpose":"commitments"}],"updatedAt":"2026-10-22T12:00:00Z","mutationId":"mutation-1"}"#
         let disabledState = #"{"version":1,"ownerId":"owner-1","publisherId":"publisher-1","generation":2,"enabled":false,"consentVersion":1,"calendars":[],"updatedAt":"2026-10-22T12:01:00Z"}"#
@@ -5751,6 +5767,67 @@ extension APIClientRetryTests {
             messages: [ChatMessage(id: "final-\(taskID)", role: .assistant,
                 parts: [.init(type: "text", text: "Fixture result")], metadata: ["taskId": .string(taskID)])],
             refreshed: [], superseded: nil, nextCursor: nil, hasMore: false, activity: []))
+    }
+
+    @MainActor
+    func testParkedCostRequestReleasesSendBeforeAnotherTurnCompletes() async throws {
+        let model = try await notificationModel()
+        let first = "33333333-3333-4333-8333-333333333333"
+        let second = "44444444-4444-4444-8444-444444444444"
+        let path = "/api/mobile/v1/chat/status"
+        let waiting = try JSONEncoder().encode(ChatUpdates(taskStatus: "waiting_estimated_cost", messages: [],
+            refreshed: [], superseded: nil, nextCursor: nil, hasMore: false, activity: []))
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/chat": [.taskStream(body: Data("data: [DONE]\n\n".utf8), taskId: first),
+                                    .taskStream(body: Data("data: [DONE]\n\n".utf8), taskId: second)],
+            path: [.success(status: 200, body: waiting), .success(status: 200, body: try replyFinalFixture(taskID: second))],
+        ])
+        model.send("Synthetic request A")
+        let firstSettled = try await waitForReplyPollFixture { model.canAdmitOrdinarySend }
+        XCTAssertTrue(firstSettled)
+        XCTAssertEqual(StubURLProtocol.urls.filter { $0.path == path }.count, 1)
+        let revision = model.costTrackingRevision
+        model.send("Synthetic request B")
+        let secondSettled = try await waitForReplyPollFixture { model.messages.contains { $0.id == "final-\(second)" } && model.canAdmitOrdinarySend }
+        XCTAssertTrue(secondSettled)
+        XCTAssertGreaterThan(model.costTrackingRevision, revision)
+        model.scenePhaseDidChange(.active)
+        XCTAssertGreaterThan(model.costTrackingRevision, revision + 1)
+    }
+
+    @MainActor
+    func testHeldTalkUtteranceWaitsForAdmissionWithoutReplacingTypedDraft() async throws {
+        let model = try await notificationModel()
+        let scope = try XCTUnwrap(model.composerDraftScope)
+        _ = model.saveComposerDraft("Unrelated typed draft", in: scope)
+        let first = "33333333-3333-4333-8333-333333333333"
+        let second = "44444444-4444-4444-8444-444444444444"
+        let path = "/api/mobile/v1/chat/status"
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/chat": [.taskStream(body: Data("data: [DONE]\n\n".utf8), taskId: first),
+                                    .taskStream(body: Data("data: [DONE]\n\n".utf8), taskId: second)],
+            path: [.held(status: 200, body: try replyFinalFixture(taskID: first)),
+                   .success(status: 200, body: try replyFinalFixture(taskID: second))],
+        ])
+        defer { StubURLProtocol.retireHeldResponse(path: path, testCaseID: testCaseID) }
+        model.send("Synthetic request A")
+        let waiting = try await waitForReplyPollFixture { StubURLProtocol.isHoldingResponse(path: path) }
+        XCTAssertTrue(waiting)
+        XCTAssertTrue(model.holdTalkUtterance("Spoken request B", in: scope))
+        model.send("Spoken request B", spoken: true)
+        XCTAssertEqual(model.heldTalkUtterance(in: scope), "Spoken request B")
+        XCTAssertEqual(StubURLProtocol.urls.filter { $0.path == "/api/mobile/v1/chat" }.count, 1)
+        StubURLProtocol.releaseHeldResponse(path: path)
+        let ready = try await waitForReplyPollFixture { model.canAdmitOrdinarySend }
+        XCTAssertTrue(ready)
+        let snapshot = try XCTUnwrap(model.composerDraftSnapshot(in: scope))
+        model.send("Spoken request B", spoken: true,
+                   composerDraftContext: .init(origin: snapshot, localDraft: snapshot.text))
+        XCTAssertTrue(model.talkTurnWasAdmitted("Spoken request B", in: scope))
+        XCTAssertNil(model.heldTalkUtterance(in: scope))
+        XCTAssertEqual(model.composerDraft(in: scope), "Unrelated typed draft")
+        let settled = try await waitForReplyPollFixture { model.messages.contains { $0.id == "final-\(second)" } }
+        XCTAssertTrue(settled)
     }
 
     @MainActor

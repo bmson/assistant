@@ -99,6 +99,7 @@ struct RecallReferenceDetails: View {
 }
 
 struct MessageBubble: View {
+    @Environment(AppModel.self) private var model: AppModel?
     let message: ChatMessage
     let userPrompt: String?
     let isStreaming: Bool
@@ -291,6 +292,27 @@ struct MessageBubble: View {
                     }
                 } else {
                     settledDecisionReceipt(part)
+                }
+            }
+
+            ForEach(Array(message.parts.enumerated()), id: \.offset) { _, part in
+                if part.type == "estimated-cost-approval" {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Label("Spending permission", systemImage: "dollarsign.circle")
+                            .font(.headline)
+                        Text("Review the spending status for this request. Other eligible requests can continue.")
+                            .font(.subheadline).fixedSize(horizontal: false, vertical: true)
+                        if let operationID = part.operationId, !operationID.isEmpty, let model {
+                            Button("Review request") {
+                                model.navigationPath.append(.estimatedCostApproval(operationID: operationID))
+                            }
+                            .buttonStyle(AssistantActionButtonStyle(kind: .secondary))
+                        } else {
+                            Text("This request cannot be opened here.").font(.caption)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .assistantCard(in: colorScheme)
                 }
             }
 

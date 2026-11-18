@@ -1,5 +1,593 @@
 import Observation
 import SwiftUI
+import CryptoKit
+import Security
+
+/// Presentation only: the future request adapter owns quote validation,
+/// persistence and same-operation recovery before it supplies this state.
+enum CostPermissionDisplayState: Equatable {
+    case pending, submitting, unconfirmed, approved, declined, expired, changed, cancelled, unavailable
+
+    var canDecide: Bool { self == .pending }
+    var canCheck: Bool { self == .unconfirmed }
+    var message: String {
+        switch self {
+        case .pending: "Review the allowance before deciding."
+        case .submitting: "Sending your decision…"
+        case .unconfirmed: "The decision could not be confirmed. Check this decision before taking further action."
+        case .approved: "An allowance was approved. The request’s result and actual cost are separate."
+        case .declined: "Allowance declined."
+        case .expired: "This quote expired. Review an updated quote before deciding."
+        case .changed: "This quote changed. Request an updated quote before approving."
+        case .cancelled: "This request was cancelled."
+        case .unavailable: "This request’s current state is unavailable."
+        }
+    }
+}
+
+struct CostPermissionDisplay: Equatable {
+    let requestName: String
+    let estimatedNextAttempt: String
+    let maximumAllowance: String
+    let recordedDailySpend: String
+    let recordedMonthlySpend: String
+    let activeHeldEstimate: String
+    let historicalUnknownEstimate: String
+    let pendingApprovalEstimate: String
+    let dailyLimit: String
+    let monthlyLimit: String
+    let dailyProjectedGross: String
+    let monthlyProjectedGross: String
+    let expiryDescription: String
+    let trackingDescription: String
+    let unavailableReason: String?
+    let quoteComplete: Bool
+    let serverAllowsApproval: Bool
+    let trackingMatchesQuote: Bool
+    let state: CostPermissionDisplayState
+
+    var canDecide: Bool { (state == .pending || state == .expired || state == .changed) && quoteComplete }
+    var canApprove: Bool { state == .pending && quoteComplete && serverAllowsApproval && trackingMatchesQuote }
+
+    init(quote: EstimatedCostQuote, state: CostPermissionDisplayState,
+         tracking: EstimatedCostBudgetTracking? = nil, now: Date = Date()) {
+        func usd(_ micros: Int64) -> String {
+            guard quote.complete && quote.isValid else { return "Unavailable" }
+            return (Decimal(micros) / Decimal(1_000_000)).formatted(.currency(code: "USD").precision(.fractionLength(2...6)))
+        }
+        let current = tracking.flatMap { $0.isValid ? $0 : nil }
+        func currentUSD(_ micros: Int64?) -> String {
+            guard let micros else { return "Unavailable" }
+            return (Decimal(micros) / Decimal(1_000_000)).formatted(.currency(code: "USD").precision(.fractionLength(2...6)))
+        }
+        requestName = quote.requestText
+        estimatedNextAttempt = usd(quote.nextAttemptMicros)
+        maximumAllowance = usd(quote.allowanceMicros)
+        recordedDailySpend = currentUSD(current?.recordedDailyMicros)
+        recordedMonthlySpend = currentUSD(current?.recordedMonthlyMicros)
+        activeHeldEstimate = currentUSD(current?.totalHeldMicros)
+        historicalUnknownEstimate = currentUSD(current?.historicalUnknownMicros)
+        pendingApprovalEstimate = currentUSD(current?.pendingApprovalMicros)
+        dailyLimit = usd(quote.dailyCeilingMicros); monthlyLimit = usd(quote.monthlyCeilingMicros)
+        dailyProjectedGross = currentUSD(current?.dailyPlannedExposureMicros); monthlyProjectedGross = currentUSD(current?.monthlyPlannedExposureMicros)
+        trackingDescription = current.map { "Budget tracking observed \($0.observedAt)" + ($0.complete ? "." : "; some amounts are unavailable.") } ?? "Budget tracking is unavailable."
+        expiryDescription = quote.expiry.map { "Quote expires \($0.formatted(date: .abbreviated, time: .shortened))" } ?? "Quote expiry unavailable"
+        quoteComplete = quote.complete && quote.isValid
+        trackingMatchesQuote = current?.matches(quote) == true
+        unavailableReason = quote.unavailableReason
+        serverAllowsApproval = quote.canApprove
+        self.state = state == .pending && (quote.expiry.map { $0 <= now } ?? true) ? .expired : state
+    }
+
+    init(requestName: String, estimatedNextAttempt: String, maximumAllowance: String,
+         recordedDailySpend: String, recordedMonthlySpend: String, activeHeldEstimate: String,
+         historicalUnknownEstimate: String, pendingApprovalEstimate: String, dailyLimit: String,
+         monthlyLimit: String, dailyProjectedGross: String, monthlyProjectedGross: String,
+         expiryDescription: String, unavailableReason: String? = nil, quoteComplete: Bool, serverAllowsApproval: Bool,
+         trackingMatchesQuote: Bool = false, state: CostPermissionDisplayState) {
+        self.requestName = requestName; self.estimatedNextAttempt = estimatedNextAttempt; self.maximumAllowance = maximumAllowance
+        self.recordedDailySpend = recordedDailySpend; self.recordedMonthlySpend = recordedMonthlySpend
+        self.activeHeldEstimate = activeHeldEstimate; self.historicalUnknownEstimate = historicalUnknownEstimate
+        self.pendingApprovalEstimate = pendingApprovalEstimate; self.dailyLimit = dailyLimit; self.monthlyLimit = monthlyLimit
+        self.dailyProjectedGross = dailyProjectedGross; self.monthlyProjectedGross = monthlyProjectedGross
+        self.expiryDescription = expiryDescription; self.quoteComplete = quoteComplete
+        self.trackingDescription = "Budget tracking is unavailable."
+        self.unavailableReason = unavailableReason
+        self.serverAllowsApproval = serverAllowsApproval; self.state = state
+        self.trackingMatchesQuote = trackingMatchesQuote
+    }
+}
+
+/// A self-contained 24-point Dialog built from components available in the
+/// published client. Actions are supplied only by the request-scoped owner.
+struct CostPermissionReviewCard: View {
+    let display: CostPermissionDisplay
+    var canonicalNotice: String? = nil
+    var canonicalStatus: String? = nil
+    var canonicalGrantExpiry: String? = nil
+    var receipt: EstimatedCostDecisionReceipt? = nil
+    let approve: () async -> Void
+    let decline: () async -> Void
+    let check: () async -> Void
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .top, spacing: 8) {
+                Text("Spending permission").font(.body.weight(.semibold))
+                    .frame(maxWidth: .infinity, minHeight: 24, alignment: .leading)
+                    .accessibilityAddTraits(.isHeader)
+                Image(systemName: "dollarsign.circle").font(.system(size: 20))
+                    .frame(width: 24, height: 24).accessibilityHidden(true)
+            }
+            .padding(24)
+            Divider()
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Allow up to \(display.maximumAllowance) for \(display.requestName)")
+                    .font(.body.weight(.semibold)).fixedSize(horizontal: false, vertical: true)
+                Text("When estimated: next attempt \(display.estimatedNextAttempt); daily limit \(display.dailyLimit); monthly limit \(display.monthlyLimit).")
+                    .font(.subheadline).fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(display.trackingDescription).fontWeight(.semibold)
+                    Text("Recorded today: \(display.recordedDailySpend)")
+                    Text("Recorded this month: \(display.recordedMonthlySpend)")
+                    Text("Total held estimates: \(display.activeHeldEstimate)")
+                    Text("Eligible historical unknown estimates, included in held: \(display.historicalUnknownEstimate)")
+                    Text("Awaiting-decision estimates: \(display.pendingApprovalEstimate)")
+                    Text("Planned exposure today: \(display.dailyProjectedGross)")
+                    Text("Planned exposure this month: \(display.monthlyProjectedGross)")
+                }
+                .font(.subheadline).fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .assistantPanel(in: colorScheme)
+                Text("Held and awaiting-decision amounts are estimates, not recorded spend. Planned exposure includes recorded spend, held and awaiting-decision estimates; do not add these lines together.")
+                    .font(.subheadline).fixedSize(horizontal: false, vertical: true)
+                Text("This is an allowance for this request, not a charge or a provider spending cap. It does not raise your configured limits or approve tools or external actions. If it needs more, you may be asked again.")
+                    .font(.subheadline).fixedSize(horizontal: false, vertical: true)
+                Text("Declining ends this waiting request without spending more. Other eligible requests can continue.")
+                    .font(.subheadline).fixedSize(horizontal: false, vertical: true)
+                Text(display.expiryDescription).font(.subheadline)
+                    .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                    .fixedSize(horizontal: false, vertical: true)
+                if !display.quoteComplete {
+                    Text("Some amounts are unavailable. Review a complete quote before deciding.")
+                        .font(.subheadline).fixedSize(horizontal: false, vertical: true)
+                } else if display.state.canDecide && !display.serverAllowsApproval {
+                    Text("This request cannot be approved with the available allowance.")
+                        .font(.subheadline).fixedSize(horizontal: false, vertical: true)
+                }
+                if display.state == .pending && !display.trackingMatchesQuote {
+                    Text("Current spending details are unavailable or changed. Check this request or review an updated quote before approving.")
+                        .font(.subheadline).fixedSize(horizontal: false, vertical: true)
+                }
+                if let reason = display.unavailableReason, !reason.isEmpty {
+                    Text(reason).font(.subheadline).fixedSize(horizontal: false, vertical: true)
+                }
+                Text(display.state.message).font(.subheadline)
+                    .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                    .fixedSize(horizontal: false, vertical: true)
+                if let receipt {
+                    Text("Your decision for quote \(receipt.quoteId): \(receipt.status == "stale" ? "not applied because the quote changed" : "confirmed \(receipt.status)").")
+                        .font(.subheadline).fixedSize(horizontal: false, vertical: true)
+                    if let expiry = receipt.expiresAt {
+                        Text("Your confirmed allowance expires: \(expiry)").font(.subheadline)
+                    }
+                }
+                if let canonicalStatus {
+                    Text("Last checked request status: \(canonicalStatus.replacingOccurrences(of: "_", with: " ")).")
+                        .font(.subheadline).fixedSize(horizontal: false, vertical: true)
+                    if canonicalStatus == "approved", let canonicalGrantExpiry {
+                        Text("Request allowance expires: \(canonicalGrantExpiry)").font(.subheadline)
+                    }
+                }
+                if let canonicalNotice, !canonicalNotice.isEmpty {
+                    Text(canonicalNotice).font(.subheadline).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(24)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if display.canDecide || display.state.canCheck {
+                Divider()
+                VStack(spacing: 8) {
+                    if display.canDecide {
+                        AssistantConfirmationButton("Allow up to \(display.maximumAllowance)", confirmationTitle: "Allow this request?",
+                            systemImage: "checkmark", kind: .primary, fillsWidth: true, action: approve)
+                            .disabled(!display.canApprove)
+                        AssistantConfirmationButton("Decline", confirmationTitle: "Decline this request?",
+                            systemImage: "xmark", kind: .secondary, fillsWidth: true, action: decline)
+                    } else {
+                        Button("Check this decision") { Task { await check() } }
+                            .buttonStyle(AssistantActionButtonStyle(kind: .secondary, fillsWidth: true))
+                    }
+                }.padding(24)
+            }
+        }
+        .foregroundStyle(AssistantTheme.ink(for: colorScheme))
+        .background(AssistantTheme.raised(for: colorScheme), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+    }
+}
+
+struct PendingCostPermissionDecision: Codable, Equatable, Sendable {
+    let ownerID: String
+    let quote: EstimatedCostQuote
+    let decision: EstimatedCostDecision
+}
+struct StaleCostQuote: Codable, Equatable, Sendable {
+    let quoteId: String
+    let quoteVersion: String
+}
+struct CostTrackingReadFence {
+    private(set) var generation = 0
+    mutating func invalidate() { generation += 1 }
+    func accepts(_ captured: Int) -> Bool { generation == captured }
+}
+
+/// Implementations must durably protect this record before returning from save.
+/// No storage adapter is supplied until the operation contract is available.
+@MainActor protocol CostPermissionRecoveryStore {
+    func load(ownerID: String, operationID: String) throws -> PendingCostPermissionDecision?
+    func save(_ pending: PendingCostPermissionDecision) throws
+    func remove(ownerID: String, operationID: String) throws
+    func loadStale(ownerID: String, operationID: String) throws -> StaleCostQuote?
+    func saveStale(_ quote: StaleCostQuote, ownerID: String, operationID: String) throws
+}
+
+@MainActor final class KeychainCostPermissionRecoveryStore: CostPermissionRecoveryStore {
+    private let serverIdentity: String
+    private let service = "assistant.estimated-cost-decision.v1"
+    init(serverIdentity: String) {
+        if var components = URLComponents(string: serverIdentity) {
+            components.scheme = components.scheme?.lowercased()
+            components.host = components.host?.lowercased()
+            if (components.scheme == "https" && components.port == 443) ||
+                (components.scheme == "http" && components.port == 80) { components.port = nil }
+            components.path = components.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            self.serverIdentity = components.string ?? serverIdentity
+        } else { self.serverIdentity = serverIdentity }
+    }
+
+    private func query(ownerID: String, operationID: String, stale: Bool = false) throws -> [String: Any] {
+        let identity = try JSONEncoder().encode([serverIdentity, ownerID, operationID])
+        let account = SHA256.hash(data: identity).map { String(format: "%02x", $0) }.joined()
+        return [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
+                kSecAttrAccount as String: account + (stale ? ".stale" : "")]
+    }
+    func load(ownerID: String, operationID: String) throws -> PendingCostPermissionDecision? {
+        var request = try query(ownerID: ownerID, operationID: operationID)
+        request[kSecReturnData as String] = true
+        request[kSecMatchLimit as String] = kSecMatchLimitOne
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(request as CFDictionary, &result)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess, let data = result as? Data else { throw APIError.invalidResponse }
+        return try JSONDecoder().decode(PendingCostPermissionDecision.self, from: data)
+    }
+    func save(_ pending: PendingCostPermissionDecision) throws {
+        var request = try query(ownerID: pending.ownerID, operationID: pending.quote.operationId)
+        request[kSecValueData as String] = try JSONEncoder().encode(pending)
+        request[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        guard SecItemAdd(request as CFDictionary, nil) == errSecSuccess else { throw APIError.invalidResponse }
+    }
+    func remove(ownerID: String, operationID: String) throws {
+        let status = SecItemDelete(try query(ownerID: ownerID, operationID: operationID) as CFDictionary)
+        guard status == errSecSuccess else { throw APIError.invalidResponse }
+    }
+    func loadStale(ownerID: String, operationID: String) throws -> StaleCostQuote? {
+        var request = try query(ownerID: ownerID, operationID: operationID, stale: true)
+        request[kSecReturnData as String] = true
+        request[kSecMatchLimit as String] = kSecMatchLimitOne
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(request as CFDictionary, &result)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess, let data = result as? Data else { throw APIError.invalidResponse }
+        let marker = try JSONDecoder().decode(StaleCostQuote.self, from: data)
+        guard !marker.quoteId.isEmpty, marker.quoteId.utf8.count <= 200,
+              !marker.quoteVersion.isEmpty, marker.quoteVersion.utf8.count <= 200 else { throw APIError.invalidResponse }
+        return marker
+    }
+    func saveStale(_ quote: StaleCostQuote, ownerID: String, operationID: String) throws {
+        let key = try query(ownerID: ownerID, operationID: operationID, stale: true)
+        let data = try JSONEncoder().encode(quote)
+        let updated = SecItemUpdate(key as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+        if updated == errSecSuccess { return }
+        guard updated == errSecItemNotFound else { throw APIError.invalidResponse }
+        var request = key
+        request[kSecValueData as String] = data
+        request[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        guard SecItemAdd(request as CFDictionary, nil) == errSecSuccess else { throw APIError.invalidResponse }
+    }
+}
+
+@MainActor @Observable final class CostPermissionController {
+    let ownerID: String
+    private(set) var quote: EstimatedCostQuote
+    private(set) var state: CostPermissionDisplayState = .pending
+    private(set) var receipt: EstimatedCostDecisionReceipt?
+    private(set) var canonicalStatus: String?
+    private(set) var canonicalGrantExpiry: String?
+    private(set) var canonicalNotice: String?
+    private(set) var tracking: EstimatedCostBudgetTracking?
+    private(set) var staleQuote: StaleCostQuote?
+    @ObservationIgnored private let store: any CostPermissionRecoveryStore
+    @ObservationIgnored private let connectionIsCurrent: @MainActor () -> Bool
+    @ObservationIgnored private let send: @MainActor (EstimatedCostDecision) async -> EstimatedCostDecisionReceipt?
+    @ObservationIgnored private let readReceipt: @MainActor (EstimatedCostDecision) async -> EstimatedCostDecisionReceipt?
+    @ObservationIgnored private let decisionID: @MainActor () -> String
+    @ObservationIgnored private let now: @MainActor () -> Date
+    @ObservationIgnored private var pending: PendingCostPermissionDecision?
+    @ObservationIgnored private var recoveryStoreReady = false
+
+    init(ownerID: String, quote: EstimatedCostQuote, store: any CostPermissionRecoveryStore,
+         connectionIsCurrent: @escaping @MainActor () -> Bool,
+         send: @escaping @MainActor (EstimatedCostDecision) async -> EstimatedCostDecisionReceipt?,
+         readReceipt: @escaping @MainActor (EstimatedCostDecision) async -> EstimatedCostDecisionReceipt?,
+         previousReceipt: EstimatedCostDecisionReceipt? = nil,
+         decisionID: @escaping @MainActor () -> String = { UUID().uuidString.lowercased() },
+         now: @escaping @MainActor () -> Date = { Date() }) {
+        self.ownerID = ownerID; self.quote = quote; self.store = store; self.receipt = previousReceipt
+        self.connectionIsCurrent = connectionIsCurrent; self.send = send; self.readReceipt = readReceipt
+        self.decisionID = decisionID; self.now = now
+    }
+
+    func restore() {
+        recoveryStoreReady = false
+        guard connectionIsCurrent(), quote.isValid else { state = .unavailable; return }
+        do {
+            staleQuote = try store.loadStale(ownerID: ownerID, operationID: quote.operationId)
+            if let saved = try store.load(ownerID: ownerID, operationID: quote.operationId) {
+                guard saved.ownerID == ownerID, saved.quote.isValid,
+                      ["approve", "decline"].contains(saved.decision.decision),
+                      !saved.decision.decisionId.isEmpty,
+                      saved.decision.operationId == quote.operationId,
+                      saved.decision.operationId == saved.quote.operationId,
+                      saved.decision.quoteId == saved.quote.quoteId,
+                      saved.decision.quoteVersion == saved.quote.quoteVersion else { state = .unavailable; return }
+                pending = saved
+                state = .unconfirmed
+            } else if staleQuote == StaleCostQuote(quoteId: quote.quoteId, quoteVersion: quote.quoteVersion) { state = .changed }
+            else if let expiry = quote.expiry, expiry <= now() { state = .expired }
+            else { state = .pending }
+            recoveryStoreReady = true
+        } catch { state = .unavailable }
+    }
+
+    /// A request projection can disable actions, but cannot settle an earlier
+    /// ambiguous decision made by this device.
+    func apply(_ projection: EstimatedCostRequestProjection) {
+        guard recoveryStoreReady, connectionIsCurrent(), projection.isValid(for: quote.operationId) else {
+            state = pending == nil ? .unavailable : .unconfirmed
+            return
+        }
+        canonicalStatus = projection.status
+        canonicalGrantExpiry = projection.grantExpiresAt
+        canonicalNotice = projection.reason
+        if pending != nil { state = .unconfirmed; return }
+        if let refreshed = projection.quote { quote = refreshed }
+        switch projection.status {
+        case "pending":
+            if staleQuote == StaleCostQuote(quoteId: quote.quoteId, quoteVersion: quote.quoteVersion) { state = .changed }
+            else { state = quote.expiry.map { $0 <= now() } == true ? .expired : .pending }
+        case "approved": state = .approved
+        case "declined": state = .declined
+        case "expired_or_needs_refresh": state = .expired
+        case "cancelled": state = .cancelled
+        default: state = .unavailable
+        }
+    }
+
+    /// Passing nil on any failed or superseded read prevents use of old data.
+    func updateTracking(_ snapshot: EstimatedCostBudgetTracking?) {
+        tracking = snapshot.flatMap { $0.isValid ? $0 : nil }
+    }
+
+    func decide(_ answer: String) async {
+        guard recoveryStoreReady, (state == .pending || ((state == .expired || state == .changed) && answer == "decline")), connectionIsCurrent(), quote.isValid, quote.complete,
+              ["approve", "decline"].contains(answer) else { return }
+        guard let expiry = quote.expiry else { state = .unavailable; return }
+        if expiry <= now() && answer == "approve" { state = .expired; return }
+        guard answer != "approve" || (quote.canApprove && tracking?.matches(quote) == true &&
+              staleQuote != StaleCostQuote(quoteId: quote.quoteId, quoteVersion: quote.quoteVersion)) else { return }
+        let id = decisionID()
+        guard !id.isEmpty, id.utf8.count <= 200 else { state = .unavailable; return }
+        let decision = EstimatedCostDecision(operationId: quote.operationId, quoteId: quote.quoteId,
+            quoteVersion: quote.quoteVersion, decisionId: id, decision: answer)
+        let saved = PendingCostPermissionDecision(ownerID: ownerID, quote: quote, decision: decision)
+        // Set the state before any suspension so two taps cannot race.
+        tracking = nil
+        state = .submitting
+        do { try store.save(saved) } catch { state = .unavailable; return }
+        pending = saved
+        guard connectionIsCurrent() else { state = .unconfirmed; return }
+        let receipt = await send(decision)
+        resolve(receipt, pending: saved)
+    }
+
+    func checkDecision() async {
+        guard state == .unconfirmed, connectionIsCurrent(), let saved = pending else { return }
+        tracking = nil
+        state = .submitting
+        let receipt = await readReceipt(saved.decision)
+        resolve(receipt, pending: saved)
+    }
+
+    private func resolve(_ receipt: EstimatedCostDecisionReceipt?, pending saved: PendingCostPermissionDecision) {
+        guard connectionIsCurrent(), let receipt, receipt.confirms(saved.decision, quote: saved.quote) else {
+            state = .unconfirmed; return
+        }
+        do {
+            if receipt.status == "stale" {
+                let marker = StaleCostQuote(quoteId: saved.quote.quoteId, quoteVersion: saved.quote.quoteVersion)
+                try store.saveStale(marker, ownerID: saved.ownerID, operationID: saved.quote.operationId)
+                staleQuote = marker
+            }
+            try store.remove(ownerID: saved.ownerID, operationID: saved.quote.operationId)
+        }
+        catch { state = .unconfirmed; return }
+        pending = nil
+        self.receipt = receipt
+        switch receipt.status {
+        case "approved": state = .approved
+        case "declined": state = .declined
+        case "stale": state = .changed
+        default: state = .unconfirmed
+        }
+    }
+}
+
+struct EstimatedCostReviewScreen: View {
+    let operationID: String
+    @Environment(AppModel.self) private var model
+    @State private var controller: CostPermissionController?
+    @State private var displayedConnectionVersion: Int?
+    @State private var standaloneProjection: EstimatedCostRequestProjection?
+    @State private var loading = true
+    @State private var unavailable = false
+    @State private var quoteRequestID: String?
+    @State private var quoteRefreshUnconfirmed = false
+    @State private var sessionVersion: Int?
+    @State private var trackingReadFence = CostTrackingReadFence()
+    @State private var needsTrackingReload = false
+    @State private var trackingReloadScheduled = false
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                if let controller, displayedConnectionVersion == model.activityConnectionVersion {
+                    TimelineView(.periodic(from: .now, by: 1)) { timeline in
+                        let display = CostPermissionDisplay(quote: controller.quote, state: controller.state, tracking: controller.tracking, now: timeline.date)
+                        VStack(spacing: 16) {
+                            CostPermissionReviewCard(display: display, canonicalNotice: controller.canonicalNotice,
+                                canonicalStatus: controller.canonicalStatus, canonicalGrantExpiry: controller.canonicalGrantExpiry,
+                                receipt: controller.receipt,
+                                approve: { await controller.decide("approve") },
+                                decline: { await controller.decide("decline") },
+                                check: { await controller.checkDecision() })
+                                .disabled(loading)
+                            if display.state == .expired || display.state == .changed ||
+                                (display.state == .pending && controller.tracking != nil && !display.trackingMatchesQuote) {
+                                Button("Request an updated quote") { Task { await requestUpdatedQuote() } }
+                                    .buttonStyle(AssistantActionButtonStyle(kind: .secondary, fillsWidth: true))
+                                    .disabled(quoteRefreshUnconfirmed || loading)
+                            }
+                        }
+                    }
+                    if quoteRefreshUnconfirmed {
+                        Text("The updated quote could not be confirmed. Check this request before requesting another.")
+                            .font(.subheadline).fixedSize(horizontal: false, vertical: true)
+                    }
+                } else if loading {
+                    ProgressView("Checking request…")
+                } else if displayedConnectionVersion == model.activityConnectionVersion,
+                          let projection = standaloneProjection, projection.status == "cancelled" {
+                    Text("This request was cancelled.").font(.subheadline)
+                } else if displayedConnectionVersion == model.activityConnectionVersion,
+                          let projection = standaloneProjection, projection.status == "unavailable" {
+                    Text(projection.reason ?? "This request’s current status is unavailable.")
+                        .font(.subheadline).fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Text("This request is unavailable. Its decision has not been confirmed here.")
+                        .font(.subheadline).fixedSize(horizontal: false, vertical: true)
+                }
+                Button("Check request") { Task { await load() } }
+                    .buttonStyle(AssistantActionButtonStyle(kind: .secondary, fillsWidth: true))
+                    .disabled(loading || controller?.state == .submitting)
+            }
+            .padding(16)
+        }
+        .navigationTitle("Review spending")
+        .assistantSubmenuChrome()
+        .task(id: model.activityConnectionVersion) {
+            let version = model.activityConnectionVersion
+            if sessionVersion != version {
+                sessionVersion = version
+                controller = nil; displayedConnectionVersion = nil; standaloneProjection = nil
+                quoteRequestID = nil; quoteRefreshUnconfirmed = false
+            }
+            await load()
+        }
+        .onChange(of: model.costTrackingRevision) { _, _ in
+            trackingReadFence.invalidate()
+            controller?.updateTracking(nil)
+            needsTrackingReload = true
+            reloadTrackingWhenReady()
+        }
+        .onChange(of: controller?.state) { _, _ in reloadTrackingWhenReady() }
+    }
+
+    private func reloadTrackingWhenReady() {
+        guard needsTrackingReload, !loading, !trackingReloadScheduled, controller?.state != .submitting else { return }
+        needsTrackingReload = false
+        trackingReloadScheduled = true
+        Task { trackingReloadScheduled = false; await load() }
+    }
+
+    private func load() async {
+        guard controller?.state != .submitting else { return }
+        controller?.updateTracking(nil)
+        guard let context = model.checklistCorrectionRequestContext() else { loading = false; unavailable = true; return }
+        loading = true
+        let readGeneration = trackingReadFence.generation
+        let priorQuoteID = controller?.quote.quoteId
+        let priorVersion = controller?.quote.quoteVersion
+        let store = KeychainCostPermissionRecoveryStore(serverIdentity: context.client.configuration.baseURL.absoluteString)
+        let saved: PendingCostPermissionDecision?
+        do { saved = try store.load(ownerID: context.ownerID, operationID: operationID) }
+        catch { loading = false; unavailable = true; return }
+        let response = try? await context.client.estimatedCostQuote(operationID: operationID)
+        guard !Task.isCancelled, model.checklistCorrectionConnectionIsCurrent(ownerID: context.ownerID, version: context.connectionVersion) else { loading = false; return }
+        guard trackingReadFence.accepts(readGeneration) else { loading = false; reloadTrackingWhenReady(); return }
+        let projection = response?.request
+        guard let quote = saved?.quote ?? projection?.quote else {
+            controller = nil; standaloneProjection = projection; displayedConnectionVersion = context.connectionVersion
+            loading = false; unavailable = projection == nil; return
+        }
+        let model = model
+        let owner = context.ownerID
+        let version = context.connectionVersion
+        let current = { model.checklistCorrectionConnectionIsCurrent(ownerID: owner, version: version) }
+        let previousReceipt = displayedConnectionVersion == version ? controller?.receipt : nil
+        let next = CostPermissionController(ownerID: owner, quote: quote, store: store, connectionIsCurrent: current,
+            send: { try? await context.client.decideEstimatedCost($0) },
+            readReceipt: { try? await context.client.estimatedCostDecisionReceipt($0) }, previousReceipt: previousReceipt)
+        next.restore()
+        if let projection { next.apply(projection) }
+        else if saved == nil { controller = nil; unavailable = true; loading = false; return }
+        next.updateTracking(response?.tracking)
+        if quoteRefreshUnconfirmed, let refreshed = projection?.quote,
+           refreshed.quoteId != priorQuoteID || refreshed.quoteVersion != priorVersion {
+            quoteRefreshUnconfirmed = false
+            quoteRequestID = nil
+        }
+        controller = next
+        standaloneProjection = nil
+        displayedConnectionVersion = context.connectionVersion
+        loading = false
+        unavailable = false
+        reloadTrackingWhenReady()
+    }
+
+    private func requestUpdatedQuote() async {
+        guard !loading, !quoteRefreshUnconfirmed, let context = model.checklistCorrectionRequestContext() else { return }
+        let id = quoteRequestID ?? UUID().uuidString.lowercased()
+        quoteRequestID = id
+        loading = true
+        let readGeneration = trackingReadFence.generation
+        controller?.updateTracking(nil)
+        do {
+            let response = try await context.client.requestEstimatedCostQuote(operationID: operationID, quoteRequestID: id)
+            guard !Task.isCancelled, model.checklistCorrectionConnectionIsCurrent(ownerID: context.ownerID, version: context.connectionVersion) else { loading = false; return }
+            if let projection = response.request { controller?.apply(projection) }
+            if trackingReadFence.accepts(readGeneration) { controller?.updateTracking(response.tracking) }
+            quoteRequestID = nil
+        } catch {
+            guard !Task.isCancelled, model.checklistCorrectionConnectionIsCurrent(ownerID: context.ownerID, version: context.connectionVersion) else { loading = false; return }
+            quoteRefreshUnconfirmed = true
+        }
+        loading = false
+        reloadTrackingWhenReady()
+    }
+}
 
 private enum ActivityFilter: String, CaseIterable, Identifiable {
     case all = "All"

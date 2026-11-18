@@ -1,3 +1,7 @@
+import {
+  createImageResolutionReader,
+  verifyRevisionImage,
+} from './owner-release-image-resolution.js';
 /** Protected, GET-only observations. Never authorizes traffic or maintenance. */
 
 import { execFile } from 'node:child_process';
@@ -374,6 +378,7 @@ export async function collectInventory(
   observeEditor?: (target: EditorMetadataTarget) => Promise<unknown>,
   mark: InventoryStageMarker = () => undefined,
   current?: BootstrapReceipt,
+  resolveImage?: (image: string) => Promise<void>,
 ) {
   mark('source_manifest');
   const { groups } = verifyManifest(manifest);
@@ -435,10 +440,11 @@ export async function collectInventory(
       revision.name !== `${RUN_ROOT}/services/assistant-${service}/revisions/${facts.revision}` ||
       !Array.isArray(revision.containers) ||
       revision.containers.length !== 1 ||
-      record(revision.containers[0]).image !== facts.image ||
       revision.serviceAccount !== facts.account
     )
       throw new Error('serving revision mismatch');
+    if (record(revision.containers[0]).image !== facts.image) await resolveImage?.(facts.image);
+    verifyRevisionImage(revision, facts.image);
     if (current)
       verifyCurrentSnapshot(
         current.services[service],
@@ -778,6 +784,7 @@ async function main(mark: InventoryStageMarker) {
       ),
     mark,
     current,
+    createImageResolutionReader(token.trim(), fetch, started + 60000),
   );
   mark('receipt_serialization');
   const output = JSON.stringify({

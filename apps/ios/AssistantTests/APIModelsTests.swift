@@ -4,6 +4,234 @@ import CoreLocation
 @testable import Assistant
 
 extension APIModelsTests {
+    func testCostWireDatesAcceptWholeAndFractionalSecondsButRejectMissingOffset() throws {
+        let quote = try JSONDecoder().decode(EstimatedCostQuote.self, from: Data(#"{"type":"estimated-cost-approval","operationId":"a","taskId":"task","requestText":"Request A","quoteId":"q","quoteVersion":"v","expiresAt":"2030-01-01T00:00:00Z","nextAttemptMicros":1,"allowanceMicros":1,"recordedDailyMicros":0,"recordedMonthlyMicros":0,"totalHeldMicros":0,"eligibleHistoricalUnknownMicros":0,"pendingApprovalMicros":1,"dailyCeilingMicros":10,"monthlyCeilingMicros":10,"dailyProjectedGrossMicros":1,"monthlyProjectedGrossMicros":1,"complete":true,"canApprove":true}"#.utf8))
+        for value in ["2029-01-01T00:00:00Z", "2029-01-01T00:00:00.000Z", "2029-01-01T01:00:00+01:00"] {
+            let tracking = EstimatedCostBudgetTracking(observedAt: value, complete: true,
+                recordedDailyMicros: 0, recordedMonthlyMicros: 0, totalHeldMicros: 0,
+                historicalUnknownMicros: 0, pendingApprovalMicros: 1,
+                dailyPlannedExposureMicros: 1, monthlyPlannedExposureMicros: 1)
+            XCTAssertTrue(tracking.isValid, value)
+            XCTAssertTrue(EstimatedCostRequestProjection(status: "approved", operationId: "a", quote: quote,
+                grantExpiresAt: value, reason: nil).isValid(for: "a"), value)
+        }
+        let invalid = "2029-01-01T00:00:00"
+        let tracking = EstimatedCostBudgetTracking(observedAt: invalid, complete: false,
+            recordedDailyMicros: nil, recordedMonthlyMicros: nil, totalHeldMicros: nil,
+            historicalUnknownMicros: nil, pendingApprovalMicros: nil,
+            dailyPlannedExposureMicros: nil, monthlyPlannedExposureMicros: nil)
+        XCTAssertFalse(tracking.isValid)
+        XCTAssertFalse(EstimatedCostRequestProjection(status: "approved", operationId: "a", quote: quote,
+            grantExpiresAt: invalid, reason: nil).isValid(for: "a"))
+    }
+    func testCostTrackingReadFenceRejectsPreInvalidationResponse() {
+        var fence = CostTrackingReadFence()
+        let olderRead = fence.generation
+        XCTAssertTrue(fence.accepts(olderRead))
+        fence.invalidate()
+        XCTAssertFalse(fence.accepts(olderRead))
+        XCTAssertTrue(fence.accepts(fence.generation))
+    }
+    @MainActor func testCostApprovalRequiresCurrentTrackingAndFreshQuoteAfterStale() async throws {
+        @MainActor final class Store: CostPermissionRecoveryStore {
+            var saved: PendingCostPermissionDecision?
+            var stale: StaleCostQuote?
+            var failStaleLoad = false
+            func load(ownerID: String, operationID: String) throws -> PendingCostPermissionDecision? { saved }
+            func save(_ pending: PendingCostPermissionDecision) throws { saved = pending }
+            func remove(ownerID: String, operationID: String) throws { saved = nil }
+            func loadStale(ownerID: String, operationID: String) throws -> StaleCostQuote? {
+                if failStaleLoad { throw APIError.invalidResponse }
+                return stale
+            }
+            func saveStale(_ quote: StaleCostQuote, ownerID: String, operationID: String) throws { stale = quote }
+        }
+        let raw = #"{"type":"estimated-cost-approval","operationId":"a","taskId":"task","requestText":"Request A","quoteId":"q1","quoteVersion":"v1","expiresAt":"2030-01-01T00:00:00Z","nextAttemptMicros":50000,"allowanceMicros":500000,"recordedDailyMicros":100000,"recordedMonthlyMicros":100000,"totalHeldMicros":0,"eligibleHistoricalUnknownMicros":0,"pendingApprovalMicros":500000,"dailyCeilingMicros":2000000,"monthlyCeilingMicros":2000000,"dailyProjectedGrossMicros":600000,"monthlyProjectedGrossMicros":600000,"complete":true,"canApprove":true}"#
+        let quote = try JSONDecoder().decode(EstimatedCostQuote.self, from: Data(raw.utf8))
+        func snapshot(complete: Bool = true, recorded: Int64? = 100000) -> EstimatedCostBudgetTracking {
+            .init(observedAt: "2029-01-01T00:00:00Z", complete: complete, recordedDailyMicros: recorded,
+                recordedMonthlyMicros: 100000, totalHeldMicros: 0, historicalUnknownMicros: 0,
+                pendingApprovalMicros: 500000, dailyPlannedExposureMicros: recorded.map { $0 + 500000 },
+                monthlyPlannedExposureMicros: 600000)
+        }
+        let store = Store()
+        var sent: [String] = []
+        func controller() -> CostPermissionController {
+            CostPermissionController(ownerID: "owner", quote: quote, store: store, connectionIsCurrent: { true },
+                send: { decision in
+                    sent.append(decision.decision)
+                    return .init(decisionId: decision.decisionId, operationId: decision.operationId,
+                        quoteId: decision.quoteId, status: decision.decision == "approve" ? "stale" : "declined",
+                        allowanceMicros: nil, expiresAt: nil)
+                }, readReceipt: { _ in nil }, decisionID: { UUID().uuidString })
+        }
+        let first = controller(); first.restore()
+        let missingExposure = EstimatedCostBudgetTracking(observedAt: "2029-01-01T00:00:00Z", complete: true,
+            recordedDailyMicros: 100000, recordedMonthlyMicros: 100000, totalHeldMicros: 0,
+            historicalUnknownMicros: 0, pendingApprovalMicros: 500000,
+            dailyPlannedExposureMicros: nil, monthlyPlannedExposureMicros: 600000)
+        for current: EstimatedCostBudgetTracking? in [nil, snapshot(complete: false), snapshot(recorded: nil),
+                                                       snapshot(recorded: 200000), missingExposure] {
+            first.updateTracking(current)
+            XCTAssertFalse(CostPermissionDisplay(quote: quote, state: .pending, tracking: current).canApprove)
+            await first.decide("approve")
+        }
+        XCTAssertTrue(sent.isEmpty)
+        first.updateTracking(snapshot())
+        XCTAssertTrue(CostPermissionDisplay(quote: quote, state: .pending, tracking: first.tracking).canApprove)
+        first.updateTracking(nil) // A failed newer read must clear the earlier matching snapshot.
+        await first.decide("approve")
+        XCTAssertTrue(sent.isEmpty)
+        first.updateTracking(snapshot())
+        await first.decide("approve")
+        XCTAssertEqual(sent, ["approve"])
+        XCTAssertEqual(first.state, .changed)
+        XCTAssertEqual(store.stale, StaleCostQuote(quoteId: "q1", quoteVersion: "v1"))
+        XCTAssertNil(store.saved)
+        let reopened = controller(); reopened.restore()
+        reopened.apply(.init(status: "pending", operationId: "a", quote: quote, grantExpiresAt: nil, reason: nil))
+        reopened.updateTracking(snapshot())
+        XCTAssertEqual(reopened.state, .changed)
+        await reopened.decide("approve")
+        XCTAssertEqual(sent, ["approve"])
+        reopened.updateTracking(nil)
+        await reopened.decide("decline")
+        XCTAssertEqual(sent, ["approve", "decline"], "Decline remains available without tracking")
+        let fresh = try JSONDecoder().decode(EstimatedCostQuote.self, from: Data(raw.replacingOccurrences(of: "q1", with: "q2").utf8))
+        let newController = CostPermissionController(ownerID: "owner", quote: fresh, store: store, connectionIsCurrent: { true },
+            send: { _ in nil }, readReceipt: { _ in nil })
+        newController.restore(); newController.updateTracking(snapshot())
+        XCTAssertEqual(newController.state, .pending)
+        XCTAssertTrue(CostPermissionDisplay(quote: fresh, state: newController.state, tracking: newController.tracking).canApprove)
+        store.failStaleLoad = true
+        let inaccessible = controller(); inaccessible.restore()
+        inaccessible.apply(.init(status: "pending", operationId: "a", quote: quote, grantExpiresAt: nil, reason: nil))
+        inaccessible.updateTracking(snapshot())
+        XCTAssertEqual(inaccessible.state, .unavailable)
+        await inaccessible.decide("approve")
+        XCTAssertEqual(sent, ["approve", "decline"])
+    }
+    func testCostTrackingUsesCurrentSnapshotAndPreservesUnavailableAmounts() throws {
+        let quote = try JSONDecoder().decode(EstimatedCostQuote.self, from: Data(#"{"type":"estimated-cost-approval","operationId":"a","taskId":"task","requestText":"Request A","quoteId":"q","quoteVersion":"v","expiresAt":"2030-01-01T00:00:00Z","nextAttemptMicros":50000,"allowanceMicros":500000,"recordedDailyMicros":100000,"recordedMonthlyMicros":100000,"totalHeldMicros":0,"eligibleHistoricalUnknownMicros":0,"pendingApprovalMicros":500000,"dailyCeilingMicros":2000000,"monthlyCeilingMicros":2000000,"dailyProjectedGrossMicros":600000,"monthlyProjectedGrossMicros":600000,"complete":true,"canApprove":true}"#.utf8))
+        func snapshot(_ recorded: Int64, _ held: Int64, _ pending: Int64, _ exposure: Int64) -> EstimatedCostBudgetTracking {
+            .init(observedAt: "2029-01-01T00:00:00Z", complete: true, recordedDailyMicros: recorded,
+                  recordedMonthlyMicros: recorded, totalHeldMicros: held, historicalUnknownMicros: 0,
+                  pendingApprovalMicros: pending, dailyPlannedExposureMicros: exposure, monthlyPlannedExposureMicros: exposure)
+        }
+        let pending = CostPermissionDisplay(quote: quote, state: .pending, tracking: snapshot(100000, 0, 500000, 600000))
+        let bSpent = CostPermissionDisplay(quote: quote, state: .pending, tracking: snapshot(300000, 0, 500000, 800000))
+        let approved = CostPermissionDisplay(quote: quote, state: .approved, tracking: snapshot(300000, 500000, 0, 800000))
+        XCTAssertEqual(pending.pendingApprovalEstimate, "$0.50")
+        XCTAssertEqual(bSpent.recordedDailySpend, "$0.30")
+        XCTAssertEqual(approved.pendingApprovalEstimate, "$0.00")
+        XCTAssertEqual(approved.activeHeldEstimate, "$0.50")
+        XCTAssertEqual(approved.dailyProjectedGross, "$0.80", "The held grant is counted once")
+        let noTracking = CostPermissionDisplay(quote: quote, state: .approved)
+        XCTAssertEqual(noTracking.pendingApprovalEstimate, "Unavailable")
+        XCTAssertEqual(noTracking.activeHeldEstimate, "Unavailable")
+        let partial = try JSONDecoder().decode(EstimatedCostBudgetTracking.self, from: Data(#"{"observedAt":"2029-01-01T00:00:00Z","complete":false,"recordedDailyMicros":null,"recordedMonthlyMicros":300000,"totalHeldMicros":500000,"historicalUnknownMicros":null,"pendingApprovalMicros":0,"dailyPlannedExposureMicros":null,"monthlyPlannedExposureMicros":800000}"#.utf8))
+        let incomplete = CostPermissionDisplay(quote: quote, state: .approved, tracking: partial)
+        XCTAssertEqual(incomplete.recordedDailySpend, "Unavailable")
+        XCTAssertEqual(incomplete.historicalUnknownEstimate, "Unavailable")
+        XCTAssertEqual(incomplete.dailyProjectedGross, "Unavailable")
+        XCTAssertTrue(incomplete.trackingDescription.contains("some amounts are unavailable"))
+        let envelope = try JSONDecoder().decode(EstimatedCostQuoteResponse.self, from: Data(#"{"ok":true,"request":null,"tracking":null}"#.utf8))
+        XCTAssertNil(envelope.tracking)
+    }
+    @MainActor func testCostPermissionRecoversOnlySameDecisionAfterUnknownResponse() async throws {
+        @MainActor final class Store: CostPermissionRecoveryStore {
+            var saved: PendingCostPermissionDecision?
+            var stale: StaleCostQuote?
+            func load(ownerID: String, operationID: String) throws -> PendingCostPermissionDecision? { saved }
+            func save(_ pending: PendingCostPermissionDecision) throws { saved = pending }
+            func remove(ownerID: String, operationID: String) throws { saved = nil }
+            func loadStale(ownerID: String, operationID: String) throws -> StaleCostQuote? { stale }
+            func saveStale(_ quote: StaleCostQuote, ownerID: String, operationID: String) throws { stale = quote }
+        }
+        let quote = try JSONDecoder().decode(EstimatedCostQuote.self, from: Data(#"{"type":"estimated-cost-approval","operationId":"op-1","taskId":"task-1","requestText":"Compare options","quoteId":"quote-1","quoteVersion":"v1","expiresAt":"2030-01-01T00:00:00Z","nextAttemptMicros":50000,"allowanceMicros":500000,"recordedDailyMicros":100000,"recordedMonthlyMicros":200000,"totalHeldMicros":30000,"eligibleHistoricalUnknownMicros":20000,"pendingApprovalMicros":50000,"dailyCeilingMicros":1000000,"monthlyCeilingMicros":10000000,"dailyProjectedGrossMicros":180000,"monthlyProjectedGrossMicros":280000,"complete":true,"canApprove":true}"#.utf8))
+        let store = Store()
+        var writes = 0
+        let controller = CostPermissionController(ownerID: "owner", quote: quote, store: store,
+            connectionIsCurrent: { true }, send: { _ in writes += 1; return nil }, readReceipt: { decision in
+                .init(decisionId: decision.decisionId, operationId: decision.operationId, quoteId: decision.quoteId,
+                      status: "approved", allowanceMicros: 500000, expiresAt: "2030-01-01T00:20:00Z")
+            }, decisionID: { "decision-1" })
+        controller.restore()
+        controller.updateTracking(.init(observedAt: "2029-01-01T00:00:00Z", complete: true,
+            recordedDailyMicros: 100000, recordedMonthlyMicros: 200000, totalHeldMicros: 30000,
+            historicalUnknownMicros: 20000, pendingApprovalMicros: 50000,
+            dailyPlannedExposureMicros: 180000, monthlyPlannedExposureMicros: 280000))
+        await controller.decide("approve")
+        XCTAssertEqual(controller.state, .unconfirmed)
+        XCTAssertEqual(store.saved?.decision.decisionId, "decision-1")
+        await controller.decide("approve")
+        XCTAssertEqual(writes, 1, "Unknown decisions cannot replay their spending POST")
+        var reads = 0
+        let reopened = CostPermissionController(ownerID: "owner", quote: quote, store: store,
+            connectionIsCurrent: { true }, send: { _ in writes += 1; return nil }, readReceipt: { decision in
+                reads += 1
+                return .init(decisionId: reads == 1 ? "wrong-id" : decision.decisionId,
+                             operationId: decision.operationId, quoteId: decision.quoteId,
+                             status: "approved", allowanceMicros: 500000, expiresAt: "2030-01-01T00:20:00Z")
+            })
+        reopened.restore()
+        XCTAssertEqual(reopened.state, .unconfirmed)
+        reopened.apply(.init(status: "approved", operationId: quote.operationId, quote: quote,
+                             grantExpiresAt: "2030-01-01T00:20:00Z", reason: nil))
+        XCTAssertEqual(reopened.state, .unconfirmed, "Another device's request projection is not this decision's receipt")
+        reopened.updateTracking(nil)
+        XCTAssertEqual(store.saved?.decision.decisionId, "decision-1", "Tracking invalidation must retain the exact pending decision")
+        await reopened.checkDecision()
+        XCTAssertEqual(reopened.state, .unconfirmed)
+        XCTAssertNotNil(store.saved)
+        await reopened.checkDecision()
+        XCTAssertEqual(reopened.state, .approved)
+        XCTAssertNil(store.saved)
+        XCTAssertEqual(writes, 1)
+        var nextQuoteJSON = String(data: try JSONEncoder().encode(quote), encoding: .utf8)!
+        nextQuoteJSON = nextQuoteJSON.replacingOccurrences(of: "quote-1", with: "quote-2")
+        let nextQuote = try JSONDecoder().decode(EstimatedCostQuote.self, from: Data(nextQuoteJSON.utf8))
+        reopened.apply(.init(status: "pending", operationId: quote.operationId, quote: nextQuote,
+                             grantExpiresAt: nil, reason: nil))
+        XCTAssertEqual(reopened.state, .pending)
+        XCTAssertEqual(reopened.quote.quoteId, "quote-2")
+        XCTAssertEqual(reopened.receipt?.quoteId, "quote-1", "An earlier receipt remains distinct from a new quote")
+        XCTAssertEqual(reopened.canonicalStatus, "pending")
+        let expiredDisplay = CostPermissionDisplay(quote: nextQuote, state: .pending,
+                                                    now: nextQuote.expiry!.addingTimeInterval(1))
+        XCTAssertEqual(expiredDisplay.state, .expired)
+        XCTAssertFalse(expiredDisplay.canApprove)
+        let decision = EstimatedCostDecision(operationId: quote.operationId, quoteId: quote.quoteId,
+            quoteVersion: quote.quoteVersion, decisionId: "decision-1", decision: "approve")
+        let wrongAmount = EstimatedCostDecisionReceipt(decisionId: "decision-1", operationId: quote.operationId,
+            quoteId: quote.quoteId, status: "approved", allowanceMicros: quote.allowanceMicros + 1,
+            expiresAt: "2030-01-01T00:20:00Z")
+        XCTAssertFalse(wrongAmount.confirms(decision, quote: quote))
+        let wrongAction = EstimatedCostDecisionReceipt(decisionId: "decision-1", operationId: quote.operationId,
+            quoteId: quote.quoteId, status: "declined", allowanceMicros: nil, expiresAt: nil)
+        XCTAssertFalse(wrongAction.confirms(decision, quote: quote))
+    }
+    func testCostPermissionPresentationOnlyAllowsFreshPendingDecision() {
+        XCTAssertTrue(CostPermissionDisplayState.pending.canDecide)
+        for state: CostPermissionDisplayState in [.submitting, .unconfirmed, .approved, .declined, .expired, .changed, .cancelled, .unavailable] {
+            XCTAssertFalse(state.canDecide)
+        }
+        XCTAssertTrue(CostPermissionDisplayState.unconfirmed.canCheck)
+        XCTAssertFalse(CostPermissionDisplayState.pending.canCheck)
+        XCTAssertTrue(CostPermissionDisplayState.approved.message.contains("result and actual cost are separate"))
+        func display(complete: Bool, allowed: Bool) -> CostPermissionDisplay {
+            .init(requestName: "Compare options", estimatedNextAttempt: "$0.05", maximumAllowance: "$0.50",
+                  recordedDailySpend: "$0.10", recordedMonthlySpend: "$0.20", activeHeldEstimate: "$0.03",
+                  historicalUnknownEstimate: "$0.02", pendingApprovalEstimate: "$0.05", dailyLimit: "$1.00",
+                  monthlyLimit: "$10.00", dailyProjectedGross: "$0.20", monthlyProjectedGross: "$0.30",
+                  expiryDescription: "Expires soon", quoteComplete: complete,
+                  serverAllowsApproval: allowed, trackingMatchesQuote: true, state: .pending)
+        }
+        XCTAssertTrue(display(complete: true, allowed: true).canApprove)
+        XCTAssertFalse(display(complete: false, allowed: true).canDecide)
+        XCTAssertFalse(display(complete: true, allowed: false).canApprove)
+        XCTAssertTrue(display(complete: true, allowed: false).canDecide)
+    }
     func testOwnerMemoryCorrectionDTOsPreserveStoredSnapshotClaimsAndTypedReplyAuthority() throws {
         let decoder = JSONDecoder()
         let ineligible = try decoder.decode(OwnerMemoryCorrectionSnapshot.self, from: Data(
@@ -1248,8 +1476,40 @@ final class APIModelsTests: XCTestCase {
         let suggestion = ChatMessage(id: "suggestion", role: .assistant, parts: [.init(type: "suggestion", suggestionId: "s1", status: "pending")])
         XCTAssertFalse(TalkInteractionPolicy.requiresManualDecision(messages: [suggestion], pendingApprovals: 0))
         let budget = ChatMessage(id: "budget", role: .assistant, parts: [.init(type: "budget-request", status: "pending")])
-        XCTAssertTrue(TalkInteractionPolicy.requiresManualDecision(messages: [budget], pendingApprovals: 0))
-        XCTAssertEqual(TalkInteractionPolicy.decisionRoute(messages: [pending, budget]), .activity)
+        XCTAssertFalse(TalkInteractionPolicy.requiresManualDecision(messages: [budget], pendingApprovals: 0))
+        XCTAssertTrue(TalkInteractionPolicy.requiresManualDecision(messages: [pending, budget], pendingApprovals: 0))
+        XCTAssertEqual(TalkInteractionPolicy.decisionRoute(messages: [pending, budget]), .approvals)
+    }
+
+    func testLegacyBudgetRequestDoesNotBlockAnIndependentVoiceTurn() {
+        let budget = ChatMessage(id: "a", role: .assistant, parts: [.init(type: "budget-request", status: "pending")])
+        let manualDecision = TalkInteractionPolicy.requiresManualDecision(messages: [budget], pendingApprovals: 0)
+        XCTAssertFalse(manualDecision)
+        XCTAssertTrue(TalkInteractionPolicy.canAttemptHeldUtterance(waiting: true, ready: true,
+            attemptInProgress: false, manualDecision: manualDecision, sameScope: true))
+        XCTAssertTrue(TalkInteractionPolicy.requiresManualDecision(messages: [budget], pendingApprovals: 1))
+        for status in ["pending", "snoozed"] {
+            let approval = ChatMessage(id: "tool", role: .assistant, parts: [.init(type: "approval", status: status)])
+            XCTAssertTrue(TalkInteractionPolicy.requiresManualDecision(messages: [budget, approval], pendingApprovals: 0))
+        }
+    }
+
+    func testTalkKeepsCostReviewsIndependentAndWaitsForSendReadiness() {
+        let a = ChatMessage(id: "a", role: .assistant, parts: [.init(type: "estimated-cost-approval", operationId: "operation-a", requestText: "Compare train routes")])
+        let b = ChatMessage(id: "b", role: .assistant, parts: [.init(type: "estimated-cost-approval", operationId: "operation-b", requestText: "Research a hotel")])
+        XCTAssertFalse(TalkInteractionPolicy.requiresManualDecision(messages: [a, b], pendingApprovals: 0))
+        XCTAssertEqual(TalkInteractionPolicy.costReviews(messages: [a, b, a]), [
+            .init(id: "operation-a", request: "Compare train routes"),
+            .init(id: "operation-b", request: "Research a hotel"),
+        ])
+        XCTAssertFalse(TalkInteractionPolicy.canAttemptHeldUtterance(waiting: true, ready: false,
+            attemptInProgress: false, manualDecision: false, sameScope: true))
+        XCTAssertFalse(TalkInteractionPolicy.canAttemptHeldUtterance(waiting: true, ready: true,
+            attemptInProgress: true, manualDecision: false, sameScope: true))
+        XCTAssertFalse(TalkInteractionPolicy.canAttemptHeldUtterance(waiting: true, ready: true,
+            attemptInProgress: false, manualDecision: false, sameScope: false))
+        XCTAssertTrue(TalkInteractionPolicy.canAttemptHeldUtterance(waiting: true, ready: true,
+            attemptInProgress: false, manualDecision: false, sameScope: true))
     }
 
     func testHeldPollAsksAgainImmediatelyBecauseTheHoldWasTheWait() {

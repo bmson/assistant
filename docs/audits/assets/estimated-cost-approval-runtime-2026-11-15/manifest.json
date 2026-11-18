@@ -1,0 +1,46 @@
+{
+  "synthetic": true,
+  "productionMutation": false,
+  "providerSpending": false,
+  "backendReviewFreeze": "9806ab9598d59214547f7d7cb3624311d8155753",
+  "sourceSha256": {
+    "apps/agent/src/estimated-cost-worker.e2e.test.ts": "d1b788301ea5d720e32b8f8d1ddcc1300fd8e4a973643a27cec864ef889cf2fc",
+    "apps/agent/src/task-runner.ts": "ce1510b1562d5760735fe2ef633e6dda1c48a4d58aafe8f009e1b76e9d56c662",
+    "packages/application/src/chat-turn.ts": "96b8f45ed1fc779948d6a30ae857a11f76664d467deb48f2440db73574754a37",
+    "packages/core/src/model-router/router.ts": "6ccd06f25518194057e3f42f05936e83db6ff3ede4b6fbf773e838fb36e38559",
+    "packages/core/src/workflow/executor.ts": "973bb46b5e7f629ddde37bdc3070fd8abc51f56a9b0f83be6fb7817099b0b1cf",
+    "packages/db/src/cost-repository.ts": "24cd8f0c9d95980b1dbeb0a45dbb780efdb91bf7ce42e647a08c59647b7635ae",
+    "packages/db/src/estimated-cost-approval-transactions.ts": "88ebb6c3da3f73ca6eac5373d897b0fdd1f84d27c756a432ab2e71c2e7b09839",
+    "packages/db/src/estimated-cost-preparer.ts": "54100530f1db1845ae62455512e07b76950ae48b134b04bb583fff0d5a787b81",
+    "packages/db/src/estimated-cost-preparer.test.ts": "4d4232dde279313aadaabf8fa2c22833fb301af73d097e2f3e6f6ed714feacd9",
+    "packages/firestore/src/costs.ts": "dd1a7f7174ed7b7428c893590686cf06fef3e9df48d7b79967adefff93cb8b34",
+    "packages/firestore/src/estimated-cost-approval-transactions.ts": "f30e223aac68b9eab37b383b4059c43ec797561c890eb78ff081fcb91eeae122",
+    "packages/firestore/src/estimated-cost-preparer.ts": "ff55a972a3f93349fa162e56ee76e7048ec16156ae2d94d2e6d471f8215eece5",
+    "packages/persistence/src/estimated-cost-approval.ts": "01a01e1efa0d9ad304c5460e3e661fdf9edf0547f8ed5e3e0575a3e9b871b6a2",
+    "apps/web/lib/server.ts": "e2d0c45a9c554581c90602d85c8b8af18ee7fabc0677808a498d7b0b4be9dd19",
+    "apps/web/lib/estimated-cost-provider-source.ts": "72b2bdfa9d8f1ba93fdd418db950c5e57c3d8729b5342d52785521c201a2b215",
+    "infra/gcp/release-contracts.json": "111be11f1f7c739e6d03076f1523aadf6cdba71c88e8a72410efe9dc4ede2e02",
+    ".github/workflows/memory-witness-schema-135-qualification.yml": "c74be3ec358c1d45cc6d819438c9a06ad8e52345fd9212ed349855c3d2154314"
+  },
+  "assetsSha256": {
+    "firestore-worker.txt": "3017f38983511a873d34f5be980e2843b1222ec2c42a8ea01816e6ce3d7c9260",
+    "lint.txt": "b8f42a8509a1f3538a40a31237418b4ec02ba40b3b84fa20162749d0913cb142",
+    "migration-check.txt": "22fb6be5bdc800a30dbf490444cf624e87e3274c55b7f809a5ed4e2f716823b9",
+    "postgres-preparer-renewal.txt": "62e14539f432c14a90a079d45139ea1295fa43a04b516a2004c049ab8edb275f",
+    "release-contracts.txt": "6aca676cd76337e33c47765fff02f7405552b9de8b06b0a86cc4d60de8696fde",
+    "typecheck.txt": "50c46145b5ab34719429bb0e1d32ca6974e1a7dd492a52c1eb90818810cd7b2d"
+  },
+  "checks": {
+    "firestoreActualWorkerCases": 8,
+    "postgresTransactionPreparerCases": 8,
+    "releaseContractChecks": 22,
+    "typecheckedPackages": 14,
+    "lint": "passed"
+  },
+  "limits": [
+    "PostgreSQL worker was not exercised end to end.",
+    "Deployed secret binding and source manifest have not been qualified.",
+    "No production rollout, real spending decision, phone acceptance or provider billing check.",
+    "Local schema checks are not execution of the updated image qualification workflow."
+  ]
+}

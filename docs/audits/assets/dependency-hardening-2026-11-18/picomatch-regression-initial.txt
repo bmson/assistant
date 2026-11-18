@@ -1,0 +1,18 @@
+Retained executed Backend Engineer output, without repeating the passing check.
+Command: /bin/zsh -lc 'pnpm exec biome check --write --diagnostic-level=error scripts/picomatch-hardening.node-test.mjs && node --test scripts/picomatch-hardening.node-test.mjs'
+Exit code: 0
+Checked 1 file in 4ms. Fixed 1 file.
+✔ installed parser is bound to the exact reviewed lockfile patch (1.03725ms)
+✔ repeated extglobs fail closed through every string-pattern entry point (257.69125ms)
+✔ ordinary globs, braces, nonrepeated extglobs and paths retain behavior (1.425458ms)
+✔ arrays, ignore patterns, and exposed fastpaths do not compile repeated extglobs (0.535666ms)
+✔ noextglob treats the operators through its existing non-extglob parser (26.404291ms)
+ℹ tests 5
+ℹ suites 0
+ℹ pass 5
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 326.162458
+

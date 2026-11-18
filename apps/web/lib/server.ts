@@ -19,6 +19,7 @@ import {
   correctOwnerKnowledgeGraphFactFromRepository,
   createCardFormAdmissionService,
   createChatConversation,
+  createEstimatedCostApprovalService,
   createMcpConnection,
   decideApproval,
   deleteApprovalPolicy,
@@ -105,6 +106,7 @@ import {
 } from '@assistant/application/profile';
 import { getProviderBilling } from '@assistant/application/provider-billing';
 import {
+  estimatedCostApprovalEnabled,
   loadConfig,
   parseFirestoreEmbeddingSpace,
   repoRoot,
@@ -140,10 +142,14 @@ import {
   createPostgresCardFormAdmissionRepository,
   createPostgresCardRefreshRepository,
   createPostgresEmailSyncRepository,
+  createPostgresEstimatedCostApprovalRepository,
+  createPostgresEstimatedCostQuotePreparer,
+  createPostgresEstimatedCostTurnParking,
   createPostgresGeneratedCardRepository,
   createPostgresGoogleCalendarConnectionRepository,
   createPostgresModelCatalogRepository,
   createPostgresModelConnectionRepository,
+  createPostgresModelRoutingRepository,
   createPostgresRecallSurfacingRepository,
   createPostgresSelfRepairRepository,
   createPostgresTaskDiscoveryRepository,
@@ -159,6 +165,9 @@ import {
 import {
   assertPrivacyErasureFenceUnchanged,
   createFirestoreCardFormAdmissionRepository,
+  createFirestoreEstimatedCostApprovalRepository,
+  createFirestoreEstimatedCostQuotePreparer,
+  createFirestoreEstimatedCostTurnParking,
   createFirestoreExecutionPersistence,
   createFirestoreGoogleCalendarConnectionRepository,
   createFirestoreProfileMemoryCommandPersistence,
@@ -213,6 +222,7 @@ import { and, asc, desc, eq, gt, lt, or } from 'drizzle-orm';
 import { unstable_cache } from 'next/cache';
 import { cache } from 'react';
 import { isValidFormSessionScope } from '../app/auth-form-session-scope';
+import { estimatedCostProviderSource } from './estimated-cost-provider-source';
 import {
   decodeMobileDocumentCursor,
   encodeMobileDocumentCursor,
@@ -335,6 +345,7 @@ export function getFirestoreInstallationStore() {
     projectId: config.GCP_PROJECT,
     installationId: config.ASSISTANT_WORKSPACE_ID,
     databaseId: config.FIRESTORE_DATABASE_ID,
+    estimatedCostProviderSource: getEstimatedCostRuntimeProviderSource(),
   });
   return globalCache.__assistantFirestoreStore;
 }
@@ -534,7 +545,9 @@ export function getRouter(): ModelRouter {
   if (!globalCache.__assistantRouter) {
     const connections = createPostgresModelConnectionRepository(getDb());
     globalCache.__assistantRouter = new ModelRouter(
-      getDb(),
+      createPostgresModelRoutingRepository(getDb(), {
+        providerSource: getEstimatedCostRuntimeProviderSource(),
+      }),
       config.OPENROUTER_API_KEY,
       config.LLM_AUDIT_CAPTURE,
       createConnectedModelProviders(config, () => connections.list()),
@@ -550,6 +563,44 @@ export function getCalendarDuplicateRouter(): ModelRouter {
   return loadConfig().PERSISTENCE_DRIVER === 'firestore'
     ? getFirestoreChatApplication().calendarDuplicateRouter
     : getRouter();
+}
+
+/** Install the optional parking port only for the explicitly enabled profile.
+ * Client capability and exact router denial are checked by the application. */
+function getEstimatedCostTurnParking() {
+  const config = loadConfig();
+  if (!estimatedCostApprovalEnabled(config)) return undefined;
+  const options = {
+    mutationsEnabled: () => estimatedCostApprovalEnabled(config),
+    providerSource: getEstimatedCostRuntimeProviderSource(),
+  };
+  return config.PERSISTENCE_DRIVER === 'firestore'
+    ? createFirestoreEstimatedCostTurnParking(getFirestoreInstallationStore(), options)
+    : createPostgresEstimatedCostTurnParking(getDb(), options);
+}
+
+export function getEstimatedCostRuntimeProviderSource() {
+  return estimatedCostProviderSource(loadConfig(), process.env.BUILD_SHA);
+}
+
+/** OFF preserves scoped readback and decline without minting new authority. */
+export function getEstimatedCostApprovalService() {
+  const config = loadConfig();
+  const enabled = () => estimatedCostApprovalEnabled(config);
+  const options = {
+    mutationsEnabled: enabled,
+    providerSource: getEstimatedCostRuntimeProviderSource(),
+  };
+  const firestore = config.PERSISTENCE_DRIVER === 'firestore';
+  return createEstimatedCostApprovalService({
+    repository: firestore
+      ? createFirestoreEstimatedCostApprovalRepository(getFirestoreInstallationStore(), options)
+      : createPostgresEstimatedCostApprovalRepository(getDb(), options),
+    preparer: firestore
+      ? createFirestoreEstimatedCostQuotePreparer(getFirestoreInstallationStore(), options)
+      : createPostgresEstimatedCostQuotePreparer(getDb(), options),
+    enabled,
+  });
 }
 
 /**
@@ -829,7 +880,12 @@ function createApplication(options: { profileMemory?: ProfileMemoryCommandPersis
     cancelChatTurn: (input: { conversationId: string; clientOperationId: string }) =>
       cancelChatTurn(db, input),
     handleChatTurn: (request: Request) =>
-      handleChatTurn(request, { config: loadConfig(), db, router: getRouter() }),
+      handleChatTurn(request, {
+        config: loadConfig(),
+        db,
+        router: getRouter(),
+        estimatedCostTurnParking: getEstimatedCostTurnParking(),
+      }),
     checkReadiness: () => checkReadiness(db),
   };
 }
@@ -1664,7 +1720,13 @@ function createFirestoreChatApplication() {
     cancelChatTurn: (input: { conversationId: string; clientOperationId: string }) =>
       cancelChatTurn(chat, input),
     handleChatTurn: (request: Request) =>
-      handleChatTurn(request, { config, router, chat, persistence }),
+      handleChatTurn(request, {
+        config,
+        router,
+        chat,
+        persistence,
+        estimatedCostTurnParking: getEstimatedCostTurnParking(),
+      }),
     getChatUpdates: (input: Parameters<typeof waitForChatUpdates>[1]) =>
       waitForChatUpdates(chatReads, input),
     submitCardForm: async (submission: CardFormSubmission) => {
