@@ -74,6 +74,8 @@ export function proxy(request: NextRequest) {
       { status: 503 },
     );
   }
+  if (path === '/api/oauth/mcp/client-metadata' && ['GET', 'HEAD'].includes(request.method))
+    return NextResponse.next();
   // Browser chat and administration pages are owner surfaces. Native APIs
   // retain their existing persistence and authentication boundaries below.
   const adminPage = ['/settings', '/security', '/signin', '/setup'].includes(path);
