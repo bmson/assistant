@@ -208,15 +208,13 @@ import {
   getFirestoreMobilePeopleDirectoryPage,
   readPrivacyErasureFence,
 } from '@assistant/firestore';
+import { FirestoreSkillLibraryRepository } from '@assistant/firestore/skill-library';
 import {
   allowsManualMcpCredential,
-  FirestoreSkillLibraryRepository,
-} from '@assistant/firestore/skill-library';
-import type { SelfRepairRepository } from '@assistant/persistence';
-import {
   embeddingSpaceIdentityKey,
   POSTGRES_EMBEDDING_DIMENSIONS,
   type RecallSurfacingRepository,
+  type SelfRepairRepository,
   validateEmbedding,
 } from '@assistant/persistence';
 import type { CardFormSubmission } from '@assistant/persistence/card-form';

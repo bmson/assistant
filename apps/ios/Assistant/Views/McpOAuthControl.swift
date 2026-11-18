@@ -224,6 +224,7 @@ struct McpOAuthControl: View {
             do { try await work(context, current) } catch {
                 guard accepts(context, current) else { return }
                 notice = unknown
+                providerAvailable = false
                 unconfirmed = true
             }
         }

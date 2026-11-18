@@ -991,14 +991,14 @@ private struct AgentSettingsEditor: View {
     }
 }
 
-/// Owner-managed remote tool servers. Connection discovery is intentionally
-/// separate from tool use: a server can describe its tools here, but every
-/// later invocation follows the owner's normal approval and autonomy policy.
 private struct McpOAuthViewIdentity: Hashable {
     let connection: McpSignInOptionsIdentity
     let ownerVersion: Int
 }
 
+/// Owner-managed remote tool servers. Connection discovery is intentionally
+/// separate from tool use: a server can describe its tools here, but every
+/// later invocation follows the owner's normal approval and autonomy policy.
 private struct MCPConnectionsView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.colorScheme) private var colorScheme

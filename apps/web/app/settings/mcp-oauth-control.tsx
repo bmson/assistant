@@ -175,6 +175,7 @@ export function McpOAuthControl({
     } catch {
       if (!signal.aborted) {
         setNotice(unknown);
+        setProviderAvailable(undefined);
         setUnconfirmed(true);
       }
     } finally {
