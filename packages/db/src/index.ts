@@ -112,3 +112,5 @@ export { createPostgresVoiceContextRepository } from './voice-context-repository
 export { createPostgresWatchRepository } from './watch-repository.js';
 export { createPostgresWorkspaceFileLookup } from './workspace-file-lookup.js';
 export * from './write-fence.js';
+
+export * from './estimated-cost-baseline-provision.js';
