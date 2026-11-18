@@ -6,7 +6,7 @@ import type { ComponentProps } from 'react';
 import { SecurityClient } from '@/app/security/security-client';
 import { authMode, requireOwner } from '@/auth';
 import { getMobileAccessToken, hasMobileTokenRotationCapability } from '@/lib/mobile-access-token';
-import { getWorkspaceSettings, listOwnerMcpConnections } from '@/lib/server';
+import { getWorkspaceSettings, isMcpOAuthConfigured, listOwnerMcpConnections } from '@/lib/server';
 import { projectStandingApprovalPolicy } from '@/lib/standing-approval-view';
 import { btn, Card, PageHeader, PageShell, SectionHeading } from '@/lib/ui';
 import { McpConnectionsPanel } from './mcp-connections';
@@ -69,7 +69,11 @@ export default async function SettingsPage() {
       <section id="connected-tools" className="grid gap-4">
         <SectionHeading title="Connected tools" />
         {mcpConnections ? (
-          <McpConnectionsPanel key={owner.user?.email} connections={mcpConnections} />
+          <McpConnectionsPanel
+            key={owner.user?.email}
+            connections={mcpConnections}
+            oauthConfigured={isMcpOAuthConfigured()}
+          />
         ) : (
           <p role="alert" className="text-sm text-muted">
             Couldn’t load connected tools. Refresh this page to check them before making changes.

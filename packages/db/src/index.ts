@@ -46,6 +46,7 @@ export { createPostgresHistoryRecallRepository } from './history-recall-reposito
 export { assertPostgresInstallationOwner } from './installation-owner.js';
 export { createPostgresKnowledgeGraphSyncRepository } from './knowledge-graph-sync-repository.js';
 export { createPostgresLocationPingRepository } from './location-ping-repository.js';
+export * from './mcp-oauth-repository.js';
 export { createPostgresMemoryEmbeddingRefreshRepository } from './memory-embedding-refresh-repository.js';
 export { createPostgresMemorySupersedeRepository } from './memory-supersede-repository.js';
 export { createPostgresMemoryToolRepository } from './memory-tool-repository.js';

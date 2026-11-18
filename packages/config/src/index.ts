@@ -6,6 +6,7 @@ import dotenv from 'dotenv';
 import { z } from 'zod';
 import { type AssistantModule, assistantModuleNames, parseAssistantModules } from './modules.js';
 
+export { mcpOAuthReleaseReady } from './mcp-oauth-release.js';
 export {
   type AssistantModule,
   assistantModuleNames,
@@ -214,6 +215,9 @@ const ConfigSchema = z.object({
   PROFILE_ENC_KEY: z.string().default(''),
   /** Encryption key for owner-managed MCP bearer credentials. */
   MCP_ENC_KEY: z.string().default(''),
+  /** Opt in to owner-managed MCP OAuth once web, worker, and storage support it. */
+  MCP_OAUTH_ENABLED: booleanString,
+  MCP_OAUTH_REGISTRATIONS: z.string().default(''),
   /** local = detached child process; cloudrun = Cloud Run Job execution. */
   BROWSER_DRIVER: z.enum(['local', 'cloudrun']).default('local'),
   BROWSER_JOB_NAME: z.string().default('assistant-browser'),

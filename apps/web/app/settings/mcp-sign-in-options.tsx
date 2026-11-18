@@ -82,7 +82,7 @@ export function McpSignInOptionsResultView({ result }: { result: McpSignInOption
         {result.reason === 'connection_disabled'
           ? 'Enable this connection before checking sign-in options. Saved authentication hasn’t changed.'
           : result.status === 'supported'
-            ? 'This service reports browser sign-in options. Automatic sign-in is not available in Assistant.'
+            ? 'This service reports browser sign-in options. Checking setup doesn’t sign you in.'
             : result.status === 'unsupported'
               ? 'Assistant couldn’t validate a supported sign-in setup for this connection. Manual setup is still available.'
               : 'Your saved connection and authentication haven’t changed. You can try checking again.'}

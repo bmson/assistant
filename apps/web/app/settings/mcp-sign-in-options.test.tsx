@@ -75,7 +75,7 @@ describe('transient MCP sign-in options', () => {
     expect(container.querySelector('button')?.disabled).toBe(true);
     await act(async () => finish(result('supported', 'https://auth.example.test/oauth')));
     expect(container.textContent).toContain('Sign-in setup found');
-    expect(container.textContent).toContain('Automatic sign-in is not available in Assistant');
+    expect(container.textContent).toContain('Checking setup doesn’t sign you in');
     expect(container.textContent).toContain('auth.example.test');
     expect(container.querySelector('a')).toBeNull();
     expect(container.textContent).not.toContain('Ready');
@@ -139,7 +139,7 @@ describe('transient MCP sign-in options', () => {
     expect(html).not.toContain('secret');
     expect(html).not.toContain('private');
     expect(html).not.toContain('<a');
-    expect(html).toContain('Automatic sign-in');
+    expect(html).toContain('Checking setup');
     const longHost = `${'very-long-host-'.repeat(10)}example.test`;
     const wrapped = renderToStaticMarkup(
       <McpSignInOptionsResultView result={result('supported', `https://${longHost}/oauth`)} />,
