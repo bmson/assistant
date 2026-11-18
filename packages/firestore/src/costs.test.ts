@@ -133,7 +133,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore atomic cost led
       state: 'pending',
       quote: { ...quote, operationId: pendingOperationId, quoteId: 'other-quote' },
     });
-    const overview = () => costs.estimatedCostApprovalRepository().getOverview!(input.actor);
+    const overview = () => costs.estimatedCostApprovalRepository().getOverview?.(input.actor);
     expect(await overview()).toMatchObject({
       ok: true,
       requests: [
@@ -146,13 +146,13 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore atomic cost led
       tracking: { pendingApprovalMicros: 200_000, totalHeldMicros: 200_000 },
     });
     expect(
-      await costs.estimatedCostApprovalRepository().getOverview!({
+      await costs.estimatedCostApprovalRepository().getOverview?.({
         ...input.actor,
         ownerId: 'other',
       }),
     ).toMatchObject({ ok: true, requests: [] });
     expect(
-      await costs.estimatedCostApprovalRepository().getOverview!({
+      await costs.estimatedCostApprovalRepository().getOverview?.({
         ...input.actor,
         installationId: 'other',
       }),
@@ -165,16 +165,14 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore atomic cost led
       requests: null,
       tracking: { pendingApprovalMicros: null, complete: false },
     });
-    await store
-      .doc('estimatedCostRequests', pendingOperationId)
-      .update({
-        quote: {
-          ...quote,
-          operationId: pendingOperationId,
-          quoteId: 'other-quote',
-          expiresAt: new Date(now.getTime() - 1000).toISOString(),
-        },
-      });
+    await store.doc('estimatedCostRequests', pendingOperationId).update({
+      quote: {
+        ...quote,
+        operationId: pendingOperationId,
+        quoteId: 'other-quote',
+        expiresAt: new Date(now.getTime() - 1000).toISOString(),
+      },
+    });
     expect(await overview()).toMatchObject({
       ok: true,
       requests: [{ status: 'expired_or_needs_refresh', operationId: pendingOperationId }],
@@ -188,12 +186,10 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore atomic cost led
       requests: [{ status: 'expired_or_needs_refresh', operationId: pendingOperationId }],
       tracking: { pendingApprovalMicros: 0 },
     });
-    await store
-      .doc('estimatedCostRequests', pendingOperationId)
-      .update({
-        state: 'pending',
-        quote: { ...quote, operationId: pendingOperationId, quoteId: 'other-quote' },
-      });
+    await store.doc('estimatedCostRequests', pendingOperationId).update({
+      state: 'pending',
+      quote: { ...quote, operationId: pendingOperationId, quoteId: 'other-quote' },
+    });
     await store
       .doc('budgetPeriods', `day:${now.toISOString().slice(0, 10)}`)
       .set({ spentMicros: 0 });

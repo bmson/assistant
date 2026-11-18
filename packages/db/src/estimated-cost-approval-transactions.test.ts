@@ -322,7 +322,7 @@ describe('PostgreSQL independently parked spending permission', () => {
   it('parks A without a hold so B reserves and completes, then atomically approves only refreshed A', async () => {
     expect((await storePreparedPostgresQuote(db, prepared)).ok).toBe(true);
     expect(
-      await createPostgresEstimatedCostApprovalRepository(db).getOverview!(prepared.actor),
+      await createPostgresEstimatedCostApprovalRepository(db).getOverview?.(prepared.actor),
     ).toMatchObject({
       ok: true,
       requests: [{ status: 'pending', operationId }],
@@ -366,7 +366,7 @@ describe('PostgreSQL independently parked spending permission', () => {
       receipt: { status: 'approved', allowanceMicros: 500_000 },
     });
     expect(
-      await createPostgresEstimatedCostApprovalRepository(db).getOverview!(prepared.actor),
+      await createPostgresEstimatedCostApprovalRepository(db).getOverview?.(prepared.actor),
     ).toMatchObject({
       ok: true,
       requests: [],

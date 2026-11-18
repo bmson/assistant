@@ -208,7 +208,7 @@ describe('PostgreSQL idempotent cost events', () => {
     reservationIds.push(firstId, secondId);
     try {
       const overview = () =>
-        createPostgresEstimatedCostApprovalRepository(db).getOverview!(input.actor);
+        createPostgresEstimatedCostApprovalRepository(db).getOverview?.(input.actor);
       expect(await overview()).toMatchObject({
         ok: true,
         requests: [
@@ -221,13 +221,13 @@ describe('PostgreSQL idempotent cost events', () => {
         tracking: { pendingApprovalMicros: 200_000, totalHeldMicros: 200_000 },
       });
       expect(
-        await createPostgresEstimatedCostApprovalRepository(db).getOverview!({
+        await createPostgresEstimatedCostApprovalRepository(db).getOverview?.({
           ...input.actor,
           ownerId: 'other',
         }),
       ).toMatchObject({ ok: true, requests: [] });
       expect(
-        await createPostgresEstimatedCostApprovalRepository(db).getOverview!({
+        await createPostgresEstimatedCostApprovalRepository(db).getOverview?.({
           ...input.actor,
           installationId: 'other',
         }),

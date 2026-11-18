@@ -189,7 +189,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore estimated cost 
       });
       if (!before?.appendSequence) throw new Error('Missing prior message cursor');
       const parked = await storePreparedFirestoreQuote(store, prepared);
-      expect(await costs.estimatedCostApprovalRepository().getOverview!(actor)).toMatchObject({
+      expect(await costs.estimatedCostApprovalRepository().getOverview?.(actor)).toMatchObject({
         ok: true,
         requests: [{ status: 'pending', operationId: 'operation-a' }],
         tracking: { pendingApprovalMicros: allowance },
@@ -288,7 +288,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore estimated cost 
       expect(winner?.ok).toBe(true);
       expect(decisions.filter((item) => !item.ok)).toHaveLength(1);
       if (!winner?.ok) throw new Error('Expected approval receipt');
-      expect(await costs.estimatedCostApprovalRepository().getOverview!(actor)).toMatchObject({
+      expect(await costs.estimatedCostApprovalRepository().getOverview?.(actor)).toMatchObject({
         ok: true,
         requests: [],
         tracking: { pendingApprovalMicros: 0, totalHeldMicros: 800_000 + allowance },
