@@ -216,6 +216,7 @@ const ConfigSchema = z.object({
   MCP_ENC_KEY: z.string().default(''),
   /** Opt in to owner-managed MCP OAuth once web, worker, and storage support it. */
   MCP_OAUTH_ENABLED: booleanString,
+  MCP_OAUTH_REGISTRATIONS: z.string().default(''),
   /** local = detached child process; cloudrun = Cloud Run Job execution. */
   BROWSER_DRIVER: z.enum(['local', 'cloudrun']).default('local'),
   BROWSER_JOB_NAME: z.string().default('assistant-browser'),
