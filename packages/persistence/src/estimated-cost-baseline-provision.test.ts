@@ -1,12 +1,12 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
-  estimatedCostProvisionDigest,
+  type EstimatedCostBaselineWitness,
   estimatedCostBaselineCensusDigest,
+  estimatedCostProvisionDigest,
   makeEstimatedCostBaselineProposal,
   validateEstimatedCostBaselineProposal,
   validateEstimatedCostBaselineWitness,
-  type EstimatedCostBaselineWitness,
 } from './estimated-cost-baseline-provision.js';
 
 const target = {

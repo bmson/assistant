@@ -10,14 +10,15 @@ import {
   createInstallationStore,
   decodeRecord,
   documentKey,
-  inspectFirestoreEstimatedCostBaseline,
   type InstallationStore,
+  inspectFirestoreEstimatedCostBaseline,
   prepareFirestoreEstimatedCostBaseline,
   readbackFirestoreEstimatedCostBaseline,
 } from '@assistant/firestore';
 import {
   type EstimatedCostBaselineContext,
   type EstimatedCostBaselineProposal,
+  type EstimatedCostBaselineReceipt,
   type EstimatedCostBaselineWitness,
   estimatedCostProvisionDigest,
   parseHistoricalUnknownBaseline,
@@ -554,7 +555,7 @@ async function executeReviewedBaseline(
     packetDigest: estimatedCostProvisionDigest(packet),
     packet,
   });
-  let receipt;
+  let receipt: EstimatedCostBaselineReceipt;
   try {
     receipt = await applyFirestoreEstimatedCostBaseline(
       store,

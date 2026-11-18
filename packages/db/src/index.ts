@@ -26,6 +26,7 @@ export { createPostgresEmailAttachmentCustodyRepository } from './email-attachme
 export { createPostgresEmailSyncRepository } from './email-sync-repository.js';
 export * from './entities.js';
 export { capturePostgresEstimatedCostSourceBinding } from './estimated-cost-approval-transactions.js';
+export * from './estimated-cost-baseline-provision.js';
 export {
   createPostgresEstimatedCostQuotePreparer,
   createPostgresEstimatedCostTurnParking,
@@ -112,5 +113,3 @@ export { createPostgresVoiceContextRepository } from './voice-context-repository
 export { createPostgresWatchRepository } from './watch-repository.js';
 export { createPostgresWorkspaceFileLookup } from './workspace-file-lookup.js';
 export * from './write-fence.js';
-
-export * from './estimated-cost-baseline-provision.js';

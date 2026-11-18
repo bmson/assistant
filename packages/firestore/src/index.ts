@@ -37,6 +37,7 @@ export { FirestoreDreamRepository } from './dream.js';
 export { FirestoreEmailAttachmentCustodyRepository } from './email-attachment-custody.js';
 export { FirestoreEmailExtractionRepository } from './email-extraction.js';
 export { FirestoreEmailSyncRepository } from './email-sync.js';
+export * from './estimated-cost-baseline-provision.js';
 export {
   createFirestoreEstimatedCostQuotePreparer,
   createFirestoreEstimatedCostTurnParking,
@@ -200,5 +201,3 @@ export { FirestoreWorkspaceAnomalyRepository } from './workspace-anomalies.js';
 export { FirestoreWorkspaceCapabilityRepository } from './workspace-capabilities.js';
 export { FirestoreWorkspaceFileLookup } from './workspace-files.js';
 export { FirestoreWorkspaceImprovementRepository } from './workspace-improvements.js';
-
-export * from './estimated-cost-baseline-provision.js';

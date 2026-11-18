@@ -11,7 +11,7 @@ import {
   reconstructBaselineWriterManifest,
   verifyBaselineWriterDrain,
 } from './estimated-cost-baseline-writer-drain.js';
-import { bootstrapDigest, type BootstrapReceipt } from './owner-release-current-snapshot.js';
+import { type BootstrapReceipt, bootstrapDigest } from './owner-release-current-snapshot.js';
 
 const source = 'a'.repeat(40),
   root = 'projects/bmson-assistant/locations/us-west1',
@@ -281,7 +281,7 @@ describe('native writer drain verification', () => {
       const executable = join(folder, 'cosign'),
         log = join(folder, 'args');
       const code = (version: string) =>
-        `#!/bin/sh\nif [ \"$1\" = version ]; then echo '{\"gitVersion\":\"${version}\"}'; else printf '%s\\n' \"$@\" > \"$TEST_LOG\"; echo '[{}]'; fi\n`;
+        `#!/bin/sh\nif [ "$1" = version ]; then echo '{"gitVersion":"${version}"}'; else printf '%s\\n' "$@" > "$TEST_LOG"; echo '[{}]'; fi\n`;
       writeFileSync(executable, code('v3.1.2'), { mode: 0o700 });
       const make = () =>
         createBaselineCosignRegistryVerifier({

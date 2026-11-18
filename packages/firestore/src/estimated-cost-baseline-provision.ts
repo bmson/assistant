@@ -13,7 +13,7 @@ import {
   validateEstimatedCostBaselineProposal,
   validateEstimatedCostBaselineWitness,
 } from '@assistant/persistence';
-import { Timestamp, type DocumentSnapshot, type Transaction } from '@google-cloud/firestore';
+import { type DocumentSnapshot, Timestamp, type Transaction } from '@google-cloud/firestore';
 import { ownerEditorFirestorePrivacyToken } from './owner-editor-repository.js';
 import { documentKey, type InstallationStore } from './store.js';
 

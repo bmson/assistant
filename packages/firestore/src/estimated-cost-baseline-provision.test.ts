@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import {
-  type EstimatedCostBaselineContext,
-  type EstimatedCostBaselineWitness,
+import type {
+  EstimatedCostBaselineContext,
+  EstimatedCostBaselineWitness,
 } from '@assistant/persistence';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {

@@ -1,13 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import {
   applyFirestoreEstimatedCostBaseline,
-  inspectFirestoreEstimatedCostBaseline,
   InstallationStore,
+  inspectFirestoreEstimatedCostBaseline,
   prepareFirestoreEstimatedCostBaseline,
 } from '@assistant/firestore';
-import {
-  type EstimatedCostBaselineContext,
-  type EstimatedCostBaselineWitness,
+import type {
+  EstimatedCostBaselineContext,
+  EstimatedCostBaselineWitness,
 } from '@assistant/persistence';
 import { afterEach, describe, expect, it } from 'vitest';
 import { disposeStore, emulatorStore } from '../packages/firestore/src/test-store.js';

@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
 import {
   canonicalEstimatedCostJson,
-  parseHistoricalUnknownBaseline,
   type HistoricalUnknownBaselineRow,
+  parseHistoricalUnknownBaseline,
 } from './estimated-cost-approval.js';
 
 /** A target independently selected by the operator's trusted runtime. */

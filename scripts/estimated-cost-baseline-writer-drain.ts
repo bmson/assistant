@@ -1,6 +1,7 @@
 /** Read-only native writer inventory. The transport and cryptographic verifier are trusted code dependencies. */
-import { createHash } from 'node:crypto';
+
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { canonicalEstimatedCostJson } from '@assistant/persistence';

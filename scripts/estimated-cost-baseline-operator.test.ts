@@ -8,8 +8,8 @@ import {
   parseBaselineOperatorPacket,
   requireReviewedBaselineFreeze,
 } from './estimated-cost-baseline-operator.js';
-import { type BootstrapReceipt } from './owner-release-current-snapshot.js';
-import { type serviceFacts } from './owner-editor-release-inventory.js';
+import type { serviceFacts } from './owner-editor-release-inventory.js';
+import type { BootstrapReceipt } from './owner-release-current-snapshot.js';
 
 const target = {
   driver: 'firestore' as const,
