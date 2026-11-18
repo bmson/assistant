@@ -4,6 +4,7 @@ import {
   validateEstimatedCostReleaseProfile,
 } from '../infra/gcp/estimated-cost-release-config.mjs';
 import { googleCalendarReleaseCallback } from '../infra/gcp/google-calendar-release-config.mjs';
+import { createImageResolutionReader } from './owner-release-image-resolution.js';
 import { matchesNativeServiceDigest } from './owner-release-native-service-defaults.js';
 /** Fixed BASIC5 paired web lifecycle controller; caller supplies protected transport and operator hold verifier. */
 
@@ -48,6 +49,19 @@ export async function protectedNativeReleaseDependencies(
   receipts: Receipts,
 ): Promise<FixtureDependencies> {
   const token = await protectedWebTagCredential();
+  const resolveImage = createImageResolutionReader(token);
+  // Bootstrap capture has no lifecycle yet; its current bindings are checked by
+  // the admission entrypoint. Every later phase must preload its own old parent.
+  let context: Context | undefined;
+  try {
+    context = receipts.readCurrent().context;
+  } catch {
+    /* Capture precedes initialization. */
+  }
+  if (context) {
+    await resolveImage(context.image);
+    if (context.currentBinding) await resolveImage(context.currentBinding.proof.image);
+  }
   return {
     request: async (url, options) => {
       if (!url.startsWith(NATIVE_ROOT) || !/^[A-Za-z0-9._~-]{1,16384}$/.test(token))

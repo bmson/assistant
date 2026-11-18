@@ -1,6 +1,7 @@
 // biome-ignore-all lint/style/noNonNullAssertion: Synthetic wire fixtures explicitly populate referenced fields.
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { syntheticImage } from './fixtures/owner-image-resolution.synthetic.js';
 import {
   type BootstrapReceipt,
   bootstrapDigest,
@@ -13,6 +14,7 @@ import {
   verifyBootstrapRevisionTemplate,
   verifyCurrentSnapshot,
 } from './owner-release-bootstrap.js';
+import { registerImageResolution } from './owner-release-image-resolution.js';
 
 const source = 'a'.repeat(40),
   manifest = 'b'.repeat(64),
@@ -114,6 +116,63 @@ function fixture(role: 'agent' | 'web' = 'web') {
   };
 }
 describe('reviewed current snapshot and bootstrap restoration', () => {
+  it.each(['agent', 'web'] as const)(
+    'binds %s index resolution without weakening raw hashes or template drift checks',
+    (role) => {
+      const f = fixture(role),
+        image = syntheticImage(role, 'bootstrap');
+      f.service.template.containers[0]!.image = image.image;
+      const native = {
+        ...f.native,
+        containers: [{ ...f.native.containers[0], name: `${role}-1`, image: image.childImage }],
+        containerStatuses: image.revision.containerStatuses,
+      };
+      const before = JSON.stringify(native);
+      expect(() =>
+        verifyBootstrapRevisionTemplate(
+          f.service.name,
+          f.service.template,
+          native,
+          f.expected.revision,
+        ),
+      ).toThrow();
+      registerImageResolution(image.image, image.parentBytes, image.childBytes);
+      expect(() =>
+        verifyBootstrapRevisionTemplate(
+          f.service.name,
+          f.service.template,
+          native,
+          f.expected.revision,
+        ),
+      ).not.toThrow();
+      const b = {
+        ...f.receipt.services[role],
+        service: f.service.name,
+        uid: f.service.uid,
+        revision: f.expected.revision,
+        image: image.image,
+        serviceSha256: bootstrapDigest(f.service),
+        revisionSha256: bootstrapDigest(native),
+      };
+      expect(() => verifyCurrentSnapshot(b, f.service, native, false)).not.toThrow();
+      expect(() =>
+        verifyCurrentSnapshot(b, f.service, { ...native, uid: 'changed' }, false),
+      ).toThrow();
+      for (const changed of [
+        { ...native, timeout: '60s' },
+        { ...native, maxInstanceRequestConcurrency: 99 },
+      ])
+        expect(() =>
+          verifyBootstrapRevisionTemplate(
+            f.service.name,
+            f.service.template,
+            changed,
+            f.expected.revision,
+          ),
+        ).toThrow();
+      expect(JSON.stringify(native)).toBe(before);
+    },
+  );
   it.each(['agent', 'web'] as const)(
     'accepts exact %s full and provider-shaped revision identities without mutating raw evidence',
     (role) => {

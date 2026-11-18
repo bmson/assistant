@@ -1,6 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { estimatedCostReleaseEnvironment } from '../infra/gcp/estimated-cost-release-config.mjs';
+import { syntheticImage } from './fixtures/owner-image-resolution.synthetic.js';
+import { registerImageResolution } from './owner-release-image-resolution.js';
 import {
   type Context,
   captureLifecycle,
@@ -173,6 +175,31 @@ describe('sanitized native current web profile compatibility', () => {
     },
   );
 
+  it('projects an index parent with raw child hashes and rejects unrelated drift', () => {
+    const { service, revision, context } = prepareCurrentProfile();
+    const image = syntheticImage('web', 'current-profile');
+    service.template.containers[0].image = image.image;
+    revision.containers[0].image = image.childImage;
+    revision.containerStatuses = image.revision.containerStatuses;
+    const expectedTemplate = revisionTemplate(revision, canonical);
+    expectedTemplate.containers = [{ ...revision.containers[0], image: image.image }];
+    const binding = context.currentBinding;
+    if (!binding) throw new Error('Fixture current binding missing');
+    binding.proof.image = image.image;
+    binding.proof.templateSha256 = digest(expectedTemplate);
+    binding.serviceSha256 = digest(service);
+    binding.revisionSha256 = digest(revision);
+    const before = JSON.stringify({ service, revision });
+    expect(() => project(service, revision, context)).toThrow();
+    registerImageResolution(image.image, image.parentBytes, image.childBytes);
+    const snapshot = project(service, revision, context);
+    expect(snapshot.revisions[canonical]?.image).toBe(image.image);
+    expect(snapshot.revisions[canonical]?.templateSha256).toBe(digest(expectedTemplate));
+    expect(snapshot.template).toEqual(expectedTemplate);
+    expect(JSON.stringify({ service, revision })).toBe(before);
+    expect(() => project(service, { ...revision, timeout: '1s' }, context)).toThrow();
+    expect(() => project(service, { ...revision, containerStatuses: [] }, context)).toThrow();
+  });
   it('labels fixture as synthetic and retains the two source URL hashes in response order', () => {
     expect(fixture.fixtureKind).toBe('SYNTHETIC_SANITIZED_NATIVE_PROFILE_SHAPE_ONLY');
     expect(fixture.sourceCaptureMetadata.sourceUrlsSha256InResponseOrder).toEqual([

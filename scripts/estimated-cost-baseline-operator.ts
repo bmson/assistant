@@ -54,6 +54,7 @@ import {
   reviewedCurrentEnvironment,
   verifyCurrentSnapshot,
 } from './owner-release-current-snapshot.js';
+import { createImageResolutionReader } from './owner-release-image-resolution.js';
 
 const project = 'bmson-assistant',
   database = 'assistant-production',
@@ -343,6 +344,7 @@ async function main(
       undefined,
       undefined,
       current,
+      createImageResolutionReader(token),
     );
     if (
       inventory.indexes.status !== 'exact_manifest_parity' ||

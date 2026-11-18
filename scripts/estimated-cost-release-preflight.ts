@@ -24,6 +24,7 @@ import {
 } from './estimated-cost-release-profile.js';
 import { verifyPreAuthEnvironment } from './owner-editor-release-inventory.js';
 import { bootstrapDigest, reviewedCurrentEnvironment } from './owner-release-current-snapshot.js';
+import { createImageResolutionReader } from './owner-release-image-resolution.js';
 import { protectedWebTagCredential } from './owner-web-tag-cloud.js';
 
 export async function runEstimatedCostReleasePreflight(mode?: string) {
@@ -49,6 +50,8 @@ export async function runEstimatedCostReleasePreflight(mode?: string) {
   if (!current || !env.RUNNER_TEMP) throw new Error('Reviewed paired snapshot required');
   const token = await protectedWebTagCredential();
   const read = estimatedCostMetadataRead(token, Date.now() + 180000);
+  const resolveImage = createImageResolutionReader(token);
+  for (const role of ['web', 'agent'] as const) await resolveImage(current.services[role].image);
   const metadataSha256 = await verifyEstimatedCostReleaseMetadata(profile, current, read);
   if (profile.mode === 'compatible-off') {
     if (env.ESTIMATED_COST_DRAIN_PACKET_JSON) throw new Error('Unexpected activation evidence');
