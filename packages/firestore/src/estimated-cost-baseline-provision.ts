@@ -13,11 +13,33 @@ import {
   validateEstimatedCostBaselineProposal,
   validateEstimatedCostBaselineWitness,
 } from '@assistant/persistence';
-import { type DocumentSnapshot, Timestamp, type Transaction } from '@google-cloud/firestore';
+import {
+  type CollectionReference,
+  type DocumentSnapshot,
+  FieldPath,
+  Timestamp,
+  type Transaction,
+} from '@google-cloud/firestore';
 import { ownerEditorFirestorePrivacyToken } from './owner-editor-repository.js';
 import { documentKey, type InstallationStore } from './store.js';
 
-const limit = 10000;
+const limit = 100000;
+const pageSize = 1000;
+
+/** Read the complete collection in the caller's transaction, or fail closed at the ceiling. */
+async function readBaselineCensusDocuments(tx: Transaction, collection: CollectionReference) {
+  const docs: DocumentSnapshot[] = [];
+  let cursor: DocumentSnapshot | undefined;
+  for (;;) {
+    let query = collection.orderBy(FieldPath.documentId()).limit(pageSize);
+    if (cursor) query = query.startAfter(cursor);
+    const page = await tx.get(query);
+    if (docs.length + page.size > limit) throw new Error('Baseline census exceeds limit');
+    docs.push(...page.docs);
+    if (page.empty) return docs;
+    cursor = page.docs[page.docs.length - 1];
+  }
+}
 function version(doc: DocumentSnapshot): string {
   if (!doc.updateTime) throw new Error('Missing native version');
   return `${doc.updateTime.seconds}:${doc.updateTime.nanoseconds}`;
@@ -84,13 +106,9 @@ async function observe(
     holds.get('heldMicros') < 0
   )
     throw new Error('Baseline ledger unavailable');
-  const [reservations, grants] = await Promise.all([
-    tx.get(store.collection('costReservations').limit(limit + 1)),
-    tx.get(store.collection('estimatedCostGrants').limit(limit + 1)),
-  ]);
-  if (reservations.size > limit || grants.size > limit)
-    throw new Error('Baseline census exceeds limit');
-  const rows = reservations.docs
+  const reservations = await readBaselineCensusDocuments(tx, store.collection('costReservations'));
+  const grants = await readBaselineCensusDocuments(tx, store.collection('estimatedCostGrants'));
+  const rows = reservations
     .map((doc) => {
       const id = doc.get('id'),
         status = doc.get('status'),
@@ -123,7 +141,7 @@ async function observe(
     .sort((a, b) =>
       a.reservationId < b.reservationId ? -1 : a.reservationId > b.reservationId ? 1 : 0,
     );
-  const grantRows = grants.docs
+  const grantRows = grants
     .map((doc) => {
       const id = doc.get('id'),
         expires = doc.get('expiresAt');
