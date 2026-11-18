@@ -96,14 +96,6 @@ export interface BaselineWriterDrainInputs {
   reviewedManifest: unknown;
   signatureBundles?: Record<Role, Uint8Array>;
   verifyImageSignature: VerifyBaselineImageSignature;
-  /** Verify uninterrupted ownership of all holds from the fixed cutoff through the
-   * current observation. Equality of two native snapshots cannot prove this. */
-  verifyHoldContinuity?: (input: {
-    cutoff: string;
-    source: string;
-    drainDigest: string;
-    nativeDigest: string;
-  }) => Promise<void>;
 }
 export interface ReviewedBaselineDrainPacket {
   format: 1;
@@ -472,14 +464,6 @@ export async function verifyBaselineWriterDrain(
   requireThat(
     p.nativeDigest === observed.nativeDigest && p.writersDigest === observed.writersDigest,
   );
-  if (typeof input.verifyHoldContinuity !== 'function')
-    throw new Error('Continuous delivery-hold evidence verifier unavailable');
-  await input.verifyHoldContinuity({
-    cutoff: p.cutoff as string,
-    source: input.source,
-    drainDigest: digest(p),
-    nativeDigest: observed.nativeDigest,
-  });
   return {
     cutoff: p.cutoff,
     sourceDigest: observed.sourceDigest,

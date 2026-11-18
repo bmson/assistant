@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
   estimatedCostProvisionDigest,
+  estimatedCostBaselineCensusDigest,
+  makeEstimatedCostBaselineProposal,
   validateEstimatedCostBaselineProposal,
   validateEstimatedCostBaselineWitness,
   type EstimatedCostBaselineWitness,
@@ -104,5 +106,53 @@ describe('estimated cost baseline provision contract', () => {
         witness,
       ),
     ).toThrow();
+  });
+  it('excludes unknowns whose native Firestore update is at or after the cutoff', () => {
+    const cutoff = Date.parse(witness.cutoff),
+      seconds = Math.floor(cutoff / 1000);
+    const census = {
+      ownerVersion: '1:0',
+      privacyGeneration: null,
+      heldMicros: 3,
+      ledgerVersion: '1:0',
+      grants: [],
+      reservations: [
+        {
+          reservationId: 'a',
+          status: 'unknown',
+          estimatedMicros: 1,
+          reservationKind: 'attempt',
+          grantId: null,
+          createdMicros: String((cutoff - 10000) * 1000),
+          version: `${seconds - 1}:999999999`,
+        },
+        {
+          reservationId: 'b',
+          status: 'unknown',
+          estimatedMicros: 1,
+          reservationKind: 'attempt',
+          grantId: null,
+          createdMicros: String((cutoff - 10000) * 1000),
+          version: `${seconds}:0`,
+        },
+        {
+          reservationId: 'c',
+          status: 'unknown',
+          estimatedMicros: 1,
+          reservationKind: 'attempt',
+          grantId: null,
+          createdMicros: String((cutoff - 10000) * 1000),
+          version: `${seconds}:1`,
+        },
+      ],
+    };
+    const fireWitness = {
+      ...witness,
+      target: { ...target, driver: 'firestore' as const },
+      observedCensusDigest: estimatedCostBaselineCensusDigest(census),
+    };
+    expect(makeEstimatedCostBaselineProposal(census, fireWitness).rows).toEqual([
+      { reservationId: 'a', estimatedMicros: 1 },
+    ]);
   });
 });

@@ -205,4 +205,33 @@ describe.skipIf(!host)('Firestore baseline provisioning on local emulator', () =
       readbackFirestoreEstimatedCostBaseline(store, later, witness, proposal),
     ).rejects.toThrow();
   });
+  it('protects a reservation that becomes unknown after the witnessed cutoff', async () => {
+    const ref = store.doc('costReservations', reservationId);
+    await ref.update({ status: 'reconciled' });
+    const before = await ref.get();
+    const cutoff = new Date(before.updateTime!.toMillis() + 1).toISOString();
+    await ref.update({ status: 'unknown' });
+    const updated = await ref.get();
+    expect(updated.updateTime!.toMillis()).toBeGreaterThan(Date.parse(cutoff));
+    const { censusDigest } = await inspectFirestoreEstimatedCostBaseline(store, context);
+    const t = Date.now();
+    const witness: EstimatedCostBaselineWitness = {
+      format: 1,
+      operationId: randomUUID(),
+      ownerId: context.ownerId,
+      target: context.target,
+      releaseSha: context.releaseSha,
+      cutoff,
+      issuedAt: new Date(t).toISOString(),
+      expiresAt: new Date(t + 60000).toISOString(),
+      sourceDigest: 'b'.repeat(64),
+      drainDigest: 'c'.repeat(64),
+      observedCensusDigest: censusDigest,
+    };
+    const proposal = await prepareFirestoreEstimatedCostBaseline(store, context, witness);
+    expect(proposal.rows).toEqual([]);
+    expect(proposal.heldMicros).toBe(100000);
+    await applyFirestoreEstimatedCostBaseline(store, context, witness, proposal);
+    expect((await ref.get()).get('status')).toBe('unknown');
+  });
 });

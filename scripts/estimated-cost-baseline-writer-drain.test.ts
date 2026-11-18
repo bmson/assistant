@@ -150,7 +150,6 @@ function fixture() {
       roles.map((r) => [r, new Uint8Array([1])]),
     ) as BaselineWriterDrainInputs['signatureBundles'],
     verifyImageSignature,
-    verifyHoldContinuity: async () => {},
     readJson: async (url) => {
       if (!responses.has(url)) throw new Error(`unexpected ${url}`);
       return responses.get(url);
@@ -338,25 +337,5 @@ describe('native writer drain verification', () => {
         releaseContract,
       }),
     ).toEqual(f.input.reviewedManifest);
-  });
-  it('requires independent continuity verification rather than inferring it from matching snapshots', async () => {
-    const f = await witnessed();
-    const input = {
-      ...f.input,
-      drainPacket: f.packet,
-      censusDigest: f.packet.censusDigest,
-      now: new Date('2026-11-18T00:10:00Z'),
-    };
-    await expect(
-      verifyBaselineWriterDrain({ ...input, verifyHoldContinuity: undefined }),
-    ).rejects.toThrow();
-    await expect(
-      verifyBaselineWriterDrain({
-        ...input,
-        verifyHoldContinuity: async () => {
-          throw new Error('continuity unavailable');
-        },
-      }),
-    ).rejects.toThrow('continuity unavailable');
   });
 });

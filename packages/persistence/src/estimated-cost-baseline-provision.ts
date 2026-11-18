@@ -214,13 +214,23 @@ export function makeEstimatedCostBaselineProposal(
   const censusDigest = estimatedCostBaselineCensusDigest(census);
   if (censusDigest !== witness.observedCensusDigest) throw new Error('Baseline census changed');
   const cutoffMicros = BigInt(new Date(witness.cutoff).getTime()) * 1000n;
+  const cutoffNanos = BigInt(new Date(witness.cutoff).getTime()) * 1000000n;
+  const existedUnknownBeforeCutoff = (version: string) => {
+    // Firestore's native update time proves the current status was already
+    // present before the cutoff, even when creation predates the transition.
+    if (witness.target.driver !== 'firestore') return true;
+    const match = /^(-?\d+):(\d{1,9})$/.exec(version);
+    if (!match || Number(match[2]) >= 1000000000) throw new Error('Invalid reservation version');
+    return BigInt(match[1]!) * 1000000000n + BigInt(match[2]!) < cutoffNanos;
+  };
   const rows = census.reservations
     .filter(
       (r) =>
         r.status === 'unknown' &&
         r.reservationKind === 'attempt' &&
         r.grantId === null &&
-        BigInt(r.createdMicros) < cutoffMicros,
+        BigInt(r.createdMicros) < cutoffMicros &&
+        existedUnknownBeforeCutoff(r.version),
     )
     .map((r) => ({ reservationId: r.reservationId, estimatedMicros: r.estimatedMicros }));
   const proposal: EstimatedCostBaselineProposal = {
