@@ -16,7 +16,8 @@ set -euo pipefail
    "${REQUESTED_PERSISTENCE:-}" == firestore &&
    ( "${NATIVE_WEB_QUALIFICATION:-}" == off || -z "${NATIVE_WEB_QUALIFICATION:-}" ) &&
    "${BREAK_GLASS:-false}" == false &&
-   -z "${BOOTSTRAP_SNAPSHOT:-}" && -z "${BOOTSTRAP_SNAPSHOT_SHA256:-}" ]] || {
+   -z "${BOOTSTRAP_SNAPSHOT:-}" && -z "${BOOTSTRAP_SNAPSHOT_SHA256:-}" &&
+   -z "${ESTIMATED_COST_RELEASE_PROFILE_JSON:-}" && -z "${ESTIMATED_COST_DRAIN_PACKET_JSON:-}" ]] || {
   echo 'Build-only requires the first exact-main paired Firestore dispatch, without break-glass, qualification or bootstrap inputs.' >&2
   exit 2
 }

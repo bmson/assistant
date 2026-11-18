@@ -98,9 +98,9 @@ describe('owner-editor migration tail guard', () => {
     expect(() => assertCompatibleOwnerEditorMigrationTail(expected, applied(6), true)).toThrow(
       'Incompatible owner-editor migration ledger.',
     );
-    expect(() =>
-      assertCompatibleOwnerEditorMigrationTail(expected, applied(7), true),
-    ).toThrow('Incompatible owner-editor migration ledger.');
+    expect(() => assertCompatibleOwnerEditorMigrationTail(expected, applied(7), true)).toThrow(
+      'Incompatible owner-editor migration ledger.',
+    );
     expect(() =>
       assertCompatibleOwnerEditorMigrationTail(expected, applied(8), true),
     ).not.toThrow();

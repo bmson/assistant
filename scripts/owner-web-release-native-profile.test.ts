@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { estimatedCostReleaseEnvironment } from '../infra/gcp/estimated-cost-release-config.mjs';
 import {
   type Context,
   captureLifecycle,
@@ -99,6 +100,79 @@ function project(service: Obj, revision: Obj, context: Context) {
 }
 
 describe('sanitized native current web profile compatibility', () => {
+  it.each(['P', 'R'] as const)(
+    'binds the cost manifest to the actual provider version for %s',
+    (role) => {
+      const service = clone(fixture.service),
+        revision = clone(fixture.revision);
+      for (const container of [service.template.containers[0], revision.containers[0]]) {
+        container.env.push(
+          { name: 'GCP_PROJECT', value: 'bmson-assistant' },
+          { name: 'ASSISTANT_WORKSPACE_ID', value: 'synthetic-cost-installation' },
+          { name: 'FIRESTORE_AGENT_ID', value: 'synthetic-owner' },
+          {
+            name: 'OPENROUTER_API_KEY',
+            valueSource: { secretKeyRef: { secret: 'existing-openrouter', version: 'latest' } },
+          },
+        );
+      }
+      const context = contextFor(service, revision);
+      context.estimatedCost = {
+        format: 1,
+        mode: 'enable',
+        source: context.source,
+        projectId: 'bmson-assistant',
+        installationId: 'synthetic-cost-installation',
+        ownerId: 'synthetic-owner',
+        providerSecret: 'existing-openrouter',
+        providerVersion: '31',
+        reviewedAt: '2026-11-18T09:00:00.000Z',
+        expiresAt: '2026-11-18T09:30:00.000Z',
+        baselineReceiptSha256: 'b'.repeat(64),
+        writersReceiptSha256: 'c'.repeat(64),
+        drainReceiptSha256: 'd'.repeat(64),
+      };
+      Object.assign(context.releaseEnv, estimatedCostReleaseEnvironment(context.estimatedCost));
+      const before = project(service, revision, context),
+        oldTemplate = clone(before.template),
+        planned = creationTemplate(before.template, context, role) as Obj,
+        candidate = releaseIdentity(context, role),
+        next = clone(service),
+        candidateRevision = clone(revision);
+      expect(before.template).toEqual(oldTemplate);
+      const pinned = planned.containers[0].env.find(
+        (entry: Obj) => entry.name === 'OPENROUTER_API_KEY',
+      );
+      expect(pinned.valueSource.secretKeyRef).toEqual({
+        secret: 'existing-openrouter',
+        version: '31',
+      });
+      candidateRevision.name = `${WEB_SERVICE}/revisions/${candidate.revision}`;
+      candidateRevision.service = 'assistant-web';
+      for (const key of TEMPLATE_FIELDS)
+        if (key !== 'revision' && planned[key] !== undefined)
+          candidateRevision[key] = clone(planned[key]);
+      next.latestReadyRevision = next.latestCreatedRevision = candidate.revision;
+      next.template = clone(planned);
+      next.traffic[0].revision =
+        next.trafficStatuses[0].revision = `${WEB_SERVICE}/revisions/${candidate.revision}`;
+      const revisions = { [canonical]: revision, [candidate.revision]: candidateRevision };
+      expect(
+        projectNativeWebSnapshot(next, revisions, context).revisions[candidate.revision]
+          ?.templateSha256,
+      ).toBe(digest(planned));
+      pinned.valueSource.secretKeyRef.version = 'latest';
+      candidateRevision.containers = clone(planned.containers);
+      expect(() => projectNativeWebSnapshot(next, revisions, context)).toThrow();
+      pinned.valueSource.secretKeyRef.version = '31';
+      candidateRevision.containers = clone(planned.containers);
+      candidateRevision.containers[0].env.find(
+        (entry: Obj) => entry.name === 'ESTIMATED_COST_APPROVAL_ENABLED',
+      ).value = 'false';
+      expect(() => projectNativeWebSnapshot(next, revisions, context)).toThrow();
+    },
+  );
+
   it('labels fixture as synthetic and retains the two source URL hashes in response order', () => {
     expect(fixture.fixtureKind).toBe('SYNTHETIC_SANITIZED_NATIVE_PROFILE_SHAPE_ONLY');
     expect(fixture.sourceCaptureMetadata.sourceUrlsSha256InResponseOrder).toEqual([

@@ -1,3 +1,8 @@
+import {
+  type EstimatedCostReleaseProfile,
+  estimatedCostReleaseEnvironment,
+  verifyEstimatedCostProvider,
+} from '../infra/gcp/estimated-cost-release-config.mjs';
 import { googleCalendarReleaseCallback } from '../infra/gcp/google-calendar-release-config.mjs';
 import { disabled, retiredCurrentCondition } from './owner-release-current-snapshot.js';
 import {
@@ -71,18 +76,30 @@ function template(value: unknown): Obj {
   requireNative(Object.keys(t).every((k) => (TEMPLATE_FIELDS as readonly string[]).includes(k)));
   return t;
 }
-function environment(r: Obj, expectedCallback?: string): Record<string, string> {
+function environment(
+  r: Obj,
+  expectedCallback?: string,
+  estimatedCost?: EstimatedCostReleaseProfile,
+): Record<string, string> {
   const containers = r.containers;
   requireNative(Array.isArray(containers) && containers.length === 1);
   const env = nativeObject(containers[0]).env;
   requireNative(Array.isArray(env) && env.length <= 256);
   const result: Record<string, string> = {},
     seen = new Set<string>();
+  if (estimatedCost) verifyEstimatedCostProvider(env, estimatedCost);
+  const budgetEnv = estimatedCost ? estimatedCostReleaseEnvironment(estimatedCost) : {};
   for (const e of env) {
     const entry = nativeObject(e),
       name = text(entry.name, /^[A-Za-z_][A-Za-z0-9_]{0,127}$/);
     requireNative(!seen.has(name));
     seen.add(name);
+    if (Object.hasOwn(budgetEnv, name)) {
+      requireNative(
+        Object.keys(entry).sort().join(',') === 'name,value' && entry.value === budgetEnv[name],
+      );
+      result[name] = budgetEnv[name] as string;
+    }
     if (name === 'GOOGLE_CALENDAR_OAUTH_CALLBACK_URL' && expectedCallback !== undefined) {
       requireNative(Object.keys(entry).sort().join(',') === 'name,value');
       const callback = googleCalendarReleaseCallback(entry.value);
@@ -129,6 +146,7 @@ function revisionProof(raw: unknown, name: string, c: Context): NativeProof {
     env = environment(
       r,
       name === c.canonical ? undefined : c.releaseEnv.GOOGLE_CALENDAR_OAUTH_CALLBACK_URL,
+      name === c.canonical ? undefined : c.estimatedCost,
     ),
     pin = HISTORICAL_WEB_TAGS.find((p) => p.revision === name && p.revision === c.canonical);
   let image: string,

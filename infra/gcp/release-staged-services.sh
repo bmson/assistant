@@ -337,6 +337,19 @@ release_verify_google_calendar_candidate() {
   fi
 }
 
+release_verify_estimated_cost_candidate() {
+  local service_json="$1" service="$2" tag="$3" revision candidate
+  [[ -n "${ESTIMATED_COST_RELEASE_PROFILE_JSON:-}" ]] || return 0
+  revision="$(node -e 'const s=JSON.parse(process.argv[1]);const rows=(s.status?.traffic??[]).filter(x=>x.tag===process.argv[2]);if(rows.length!==1||!rows[0].revisionName)process.exit(2);process.stdout.write(rows[0].revisionName)' "$service_json" "$tag")" || return 1
+  candidate="$(release_revision_json "$service" "$revision")" || return 1
+  node "${BASH_SOURCE[0]%/*}/estimated-cost-release-config.mjs" --verify-revision <<<"$candidate"
+}
+
+release_verify_estimated_cost_forward_profile() {
+  [[ -n "${ESTIMATED_COST_RELEASE_PROFILE_JSON:-}" ]] || return 0
+  pnpm exec tsx scripts/estimated-cost-release-preflight.ts --verify
+}
+
 release_validate_worker_override() {
   case "${RELEASE_EMAIL_OBSERVER_WORKER_ENABLED:-}" in
     ''|true|false) return 0 ;;
@@ -423,6 +436,7 @@ release_basic_editor_forward_only() {
 release_validate_basic_editor_preflight_context() {
   local selected="$1" source_sha="$2" basic_editor
   basic_editor="$(release_basic_editor_forward_only)" || return 1
+  node "${BASH_SOURCE[0]%/*}/estimated-cost-release-config.mjs" --preflight || return 2
   if [[ -n "${OWNER_RELEASE_BOOTSTRAP_RECEIPT:-}" ]]; then release_reviewed_snapshot_kind "$source_sha" >/dev/null || return 2; fi
   [[ "$basic_editor" == true ]] || return 0
   case "$selected" in full|agent,web|web,agent) selected=agent,web ;; esac
@@ -557,6 +571,12 @@ release_staged_services() {
     agent_old_traffic="$(release_traffic_map "$agent_before")" || return 1
     agent_owned_tags="$(release_owned_tags_on_traffic "$agent_before")" || return 1
   fi
+  # Source-bound provider declarations must be refreshed deliberately. Inherit
+  # neither a stale source manifest nor a flag that the new image cannot bind.
+  node "${BASH_SOURCE[0]%/*}/estimated-cost-release-config.mjs" --require-profile <<<"$web_before" || return 1
+  if [[ "$selected" == agent,web ]]; then
+    node "${BASH_SOURCE[0]%/*}/estimated-cost-release-config.mjs" --require-profile <<<"$agent_before" || return 1
+  fi
 
   # BASIC5 may only admit writes after the exact pre-release web aliases have
   # been captured for the paired Firestore transition.
@@ -589,12 +609,22 @@ release_staged_services() {
     if [[ -n "${GOOGLE_CALENDAR_OAUTH_CALLBACK_URL:-}" ]]; then
       agent_candidate_env="${agent_candidate_env},GOOGLE_CALENDAR_OAUTH_CALLBACK_URL=${GOOGLE_CALENDAR_OAUTH_CALLBACK_URL}"
     fi
+    local agent_secret_args=()
+    if [[ -n "${ESTIMATED_COST_RELEASE_PROFILE_JSON:-}" ]]; then
+      release_verify_estimated_cost_forward_profile || return 1
+      local cost_agent_plan
+      cost_agent_plan="$(node "${BASH_SOURCE[0]%/*}/estimated-cost-release-config.mjs" --agent-plan "$agent_candidate_env" <<<"$agent_before")" || return 1
+      agent_candidate_env="$(jq -er '.envArgument' <<<"$cost_agent_plan")" || return 1
+      agent_secret_args=(--update-secrets "$(jq -er '.secretArgument' <<<"$cost_agent_plan")")
+    fi
     gcloud run services update assistant-agent --project "$PROJECT" --region "$REGION" \
       --image "${IMAGE_ROOT}/agent@${agent_digest}" --no-traffic --tag "$staging_tag" \
+      ${agent_secret_args[@]+"${agent_secret_args[@]}"} \
       --update-env-vars "$agent_candidate_env" --quiet || return 1
     local staged_agent_json
     staged_agent_json="$(release_service_json assistant-agent)" || return 1
     release_verify_google_calendar_candidate "$staged_agent_json" assistant-agent "$staging_tag" || return 1
+    release_verify_estimated_cost_candidate "$staged_agent_json" assistant-agent "$staging_tag" || return 1
     agent_candidate_url="$(release_tag_url "$staged_agent_json" "$staging_tag")" || return 1
     release_wait_http "$agent_candidate_url" /ready true ready || return 1
   fi
@@ -620,6 +650,7 @@ release_staged_services() {
     staged_web_json="$(release_service_json assistant-web)" || return 1
   fi
   release_verify_google_calendar_candidate "$staged_web_json" assistant-web "$staging_tag" || return 1
+  release_verify_estimated_cost_candidate "$staged_web_json" assistant-web "$staging_tag" || return 1
   if [[ "$basic_editor_forward_only" == true ]]; then
     release_record_owned_web_tag candidate "$TAG" "$manifest_path" "$manifest_sha" "$staging_tag" || {
       echo '  could not record the freshly observed paused web candidate; refusing to promote it.' >&2
@@ -658,6 +689,7 @@ release_staged_services() {
       old_image="$(release_job_image "$description")"
       [[ -n "$old_image" ]] || { release_restore_jobs || true; return 1; }
       new_image="${IMAGE_ROOT}/${worker}@${digest}"
+      release_verify_estimated_cost_forward_profile || { release_restore_jobs || true; return 1; }
       RELEASE_CHANGED_JOBS="${RELEASE_CHANGED_JOBS}${job}|${old_image}"$'\n'
       if ! gcloud run jobs update "$job" --project "$PROJECT" --region "$REGION" \
         --image "$new_image" --service-account "$service_account" --quiet; then
@@ -728,6 +760,8 @@ release_staged_services() {
         promoted_ok=false
       elif ! staged_agent_json="$(release_service_json assistant-agent)"; then
         promoted_ok=false
+      elif ! release_verify_estimated_cost_candidate "$staged_agent_json" assistant-agent "$staging_tag"; then
+        promoted_ok=false
       elif ! node -e '
         const s=JSON.parse(process.argv[1]), old=process.argv[2], tag=process.argv[3];
         const rows=(s.status?.traffic??[]).filter(t=>t.tag===tag);
@@ -752,10 +786,14 @@ release_staged_services() {
       promoted_ok=false
     else
       agent_serving_revision="$staged_agent_revision"
+      if ! release_verify_estimated_cost_forward_profile; then
+        promoted_ok=false
+      else
       agent_promotion_attempted=true
       if ! gcloud run services update-traffic assistant-agent \
         --project "$PROJECT" --region "$REGION" --to-revisions "${staged_agent_revision}=100" --quiet; then
         promoted_ok=false
+      fi
       fi
       if [[ "$promoted_ok" == true && "$bootstrap_disabled" == true ]]; then
         bootstrap_agent_attempted=true

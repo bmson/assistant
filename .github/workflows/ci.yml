@@ -33,6 +33,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Verify the installed Picomatch hardening before its scoped advisory exception
         run: node --test scripts/picomatch-hardening.node-test.mjs
+      - name: Verify the bounded spending-approval release configuration
+        run: node --test infra/gcp/estimated-cost-release-config.test.mjs
       # Narrow brace-expansion overrides retain the 1.x and 2.x CommonJS export
       # shapes required by ExcelJS > archiver > glob > minimatch 3. The document
       # processor XLSX round-trip regression exercises that compatibility path.

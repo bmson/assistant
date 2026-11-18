@@ -4,6 +4,7 @@ import { nativeServiceDefaults } from './owner-release-native-service-defaults.j
 import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import { reviewedEstimatedCostReleaseProfile } from './estimated-cost-release-profile.js';
 import { verifyPreAuthEnvironment } from './owner-editor-release-inventory.js';
 import {
   bootstrapDigest,
@@ -441,6 +442,7 @@ export async function runWebTagAdmission(mode: string | undefined) {
       manifestDigest,
       manifest,
       current,
+      estimatedCostProfile: reviewedEstimatedCostReleaseProfile(),
     });
     initializePairedWebLifecycle(context, raw, native, receipts);
     return;
@@ -449,6 +451,12 @@ export async function runWebTagAdmission(mode: string | undefined) {
     if (!bootstrap || !preclosed) throw new Error('Reviewed disabled bootstrap required');
     const receipts = openPrivateReleasePhaseReceipts(temp, receiptIdentity),
       state = receipts.readCurrent();
+    if (
+      state.context.estimatedCost &&
+      bootstrapDigest(reviewedEstimatedCostReleaseProfile()) !==
+        bootstrapDigest(state.context.estimatedCost)
+    )
+      throw new Error('Reviewed estimated cost profile changed');
     await verifyOperatorOwnedHold(state.context);
     if (
       state.context.currentBinding?.reviewedEvidenceSha256 !== bootstrapEvidence ||
@@ -507,6 +515,13 @@ export async function runWebTagAdmission(mode: string | undefined) {
     const receipts = openPrivateReleasePhaseReceipts(temp, receiptIdentity),
       state = receipts.readCurrent();
     await verifyOperatorOwnedHold(state.context);
+    if (
+      mode === '--bootstrap-restore' &&
+      state.context.estimatedCost &&
+      bootstrapDigest(reviewedEstimatedCostReleaseProfile()) !==
+        bootstrapDigest(state.context.estimatedCost)
+    )
+      throw new Error('Reviewed estimated cost profile changed');
     if (
       state.context.currentBinding?.reviewedEvidenceSha256 !== bootstrapEvidence ||
       !state.context.currentBinding?.preclosed
@@ -662,6 +677,13 @@ export async function runWebTagAdmission(mode: string | undefined) {
       receipts,
       async (state) => {
         await verifyOperatorOwnedHold(state.context);
+        if (
+          state.context.estimatedCost &&
+          ['createP', 'attachP', 'promoteP', 'createR', 'attachR', 'promoteR'].includes(phase) &&
+          bootstrapDigest(reviewedEstimatedCostReleaseProfile()) !==
+            bootstrapDigest(state.context.estimatedCost)
+        )
+          throw new Error('Reviewed estimated cost profile changed');
       },
     );
     if (completedPhase.context.currentBinding && ['attachP', 'attachR'].includes(phase))

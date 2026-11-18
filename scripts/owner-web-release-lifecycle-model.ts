@@ -1,3 +1,9 @@
+import {
+  type EstimatedCostReleaseProfile,
+  estimatedCostReleaseEnvironment,
+  pinEstimatedCostProvider,
+  validateEstimatedCostReleaseProfile,
+} from '../infra/gcp/estimated-cost-release-config.mjs';
 import { googleCalendarReleaseCallback } from '../infra/gcp/google-calendar-release-config.mjs';
 /** Pure source-only BASIC5 lifecycle. No IO, transport, credentials or production caller. */
 import { operationName } from './owner-web-tag-native.js';
@@ -60,6 +66,7 @@ export type Context = {
   image: string;
   canonical: string;
   releaseEnv: Record<string, string>;
+  estimatedCost?: EstimatedCostReleaseProfile;
   retiredTags: string[];
   currentBinding?: {
     proof: NativeProof;
@@ -247,9 +254,21 @@ function context(c: Context) {
   const callbackKey = 'GOOGLE_CALENDAR_OAUTH_CALLBACK_URL';
   const callback = googleCalendarReleaseCallback(c.releaseEnv[callbackKey]);
   assert(!Object.hasOwn(c.releaseEnv, callbackKey) || callback !== undefined);
+  const budgetEnv = c.estimatedCost
+    ? estimatedCostReleaseEnvironment(
+        validateEstimatedCostReleaseProfile(c.estimatedCost, {
+          source: c.source,
+          projectId: 'bmson-assistant',
+        }),
+      )
+    : {};
   assert(
-    equal(Object.keys(c.releaseEnv).sort(), [...ENV, ...(callback ? [callbackKey] : [])].sort()),
+    equal(
+      Object.keys(c.releaseEnv).sort(),
+      [...ENV, ...(callback ? [callbackKey] : []), ...Object.keys(budgetEnv)].sort(),
+    ),
   );
+  for (const [key, value] of Object.entries(budgetEnv)) assert(c.releaseEnv[key] === value);
   for (const key of ENV)
     assert(
       typeof c.releaseEnv[key] === 'string' && /^[A-Za-z0-9_.:-]{1,128}$/.test(c.releaseEnv[key]),
@@ -292,6 +311,8 @@ export function creationTemplate(before: Obj, c: Context, role: 'P' | 'R') {
       .sort()
       .map(([name, value]) => ({ name, value })),
   );
+  if (c.estimatedCost)
+    container.env = pinEstimatedCostProvider(container.env as unknown[], c.estimatedCost);
   container.image = c.image;
   next.revision = releaseIdentity(c, role).revision;
   // All other keys/values survive the complete copy, including secret references and side settings.
