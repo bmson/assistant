@@ -249,6 +249,7 @@ describe('mounted request-scoped estimated spending approval', () => {
       tracking: current,
     }));
     await click('Refresh estimate');
+    const grantExpiresAt = new Date(Date.now() + 600_000).toISOString();
     api.decide = vi.fn<EstimatedCostTransport['decide']>(async (decision) => ({
       ok: true,
       receipt: {
@@ -257,21 +258,46 @@ describe('mounted request-scoped estimated spending approval', () => {
         decisionId: decision.decisionId,
         status: 'approved',
         allowanceMicros: 200_000,
-        expiresAt: new Date(Date.now() + 600_000).toISOString(),
+        expiresAt: grantExpiresAt,
       },
     }));
-    api.read = vi.fn<EstimatedCostTransport['read']>(async (operationId) => ({
-      ok: true,
-      request: {
-        status: 'approved',
-        operationId,
-        quote: revised,
-        grantExpiresAt: new Date(Date.now() + 600_000).toISOString(),
-      },
-      tracking: { ...current, totalHeldMicros: 5_960_000, pendingApprovalMicros: 0 },
-    }));
+    let finishRead!: (result: Awaited<ReturnType<EstimatedCostTransport['read']>>) => void;
+    const readback = new Promise<Awaited<ReturnType<EstimatedCostTransport['read']>>>((resolve) => {
+      finishRead = resolve;
+    });
+    api.read = vi.fn<EstimatedCostTransport['read']>(() => readback);
     await click('Approve $0.20');
     await click('Approve $0.20?');
+    expect(api.decide).toHaveBeenCalledTimes(1);
+    expect(api.decide).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operationId: 'request-a',
+        quoteId: 'revised',
+        decision: 'approve',
+      }),
+    );
+    expect(api.read).toHaveBeenCalledOnce();
+    expect(api.read).toHaveBeenCalledWith('request-a');
+    expect(container.textContent).toContain('Your approval of $0.20 was confirmed.');
+    expect(container.textContent).toContain('Updating request status');
+    expect(container.textContent).toContain('Current budget tracking is unavailable');
+    expect(container.textContent).not.toContain('Awaiting approval · planned');
+    expect(container.textContent).not.toContain('Reserved or unresolved');
+
+    await act(async () => {
+      finishRead({
+        ok: true,
+        request: {
+          status: 'approved',
+          operationId: 'request-a',
+          quote: revised,
+          grantExpiresAt,
+        },
+        tracking: { ...current, totalHeldMicros: 5_960_000, pendingApprovalMicros: 0 },
+      });
+      await readback;
+    });
+    expect(container.textContent).toContain('Allowance approved');
     const pendingRow = [...container.querySelectorAll('tr')].find((row) =>
       row.textContent?.includes('Awaiting approval'),
     );
