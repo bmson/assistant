@@ -328,6 +328,31 @@ export const OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1: MigrationRuntimeExclusionsV1 = 
   maintenanceCursorPrefixes: ['owner-editor-epoch:'],
 };
 
+/** Estimated-cost authority is installation-local and may only be excluded when empty. */
+export const ESTIMATED_COST_AUTHORITY_TABLES = [
+  'estimated_cost_baselines',
+  'estimated_cost_decisions',
+  'estimated_cost_grants',
+  'estimated_cost_requests',
+  'estimated_cost_quote_requests',
+] as const;
+
+export type MigrationRuntimeExclusionsV2 = {
+  version: 2;
+  tables: ['owner_editor_operations', ...typeof ESTIMATED_COST_AUTHORITY_TABLES];
+  maintenanceCursorPrefixes: ['owner-editor-epoch:'];
+};
+
+export type MigrationRuntimeExclusions =
+  | MigrationRuntimeExclusionsV1
+  | MigrationRuntimeExclusionsV2;
+
+export const INSTALLATION_RUNTIME_EXCLUSIONS_V2: MigrationRuntimeExclusionsV2 = {
+  version: 2,
+  tables: ['owner_editor_operations', ...ESTIMATED_COST_AUTHORITY_TABLES],
+  maintenanceCursorPrefixes: ['owner-editor-epoch:'],
+};
+
 export type MigrationManifest = {
   format: 'assistant-workspace-migration';
   /**
@@ -354,7 +379,7 @@ export type MigrationManifest = {
     complete: boolean;
     supportedTables: MigrationTable[];
     omittedTables: string[];
-    runtimeExclusions?: MigrationRuntimeExclusionsV1;
+    runtimeExclusions?: MigrationRuntimeExclusions;
   };
   recordCount: number;
   bundleChecksum: string;
@@ -377,7 +402,7 @@ export function isOwnerEditorRuntimeCursorName(name: unknown): name is string {
 export function migrationCoverageOmittedTables(
   sourceTables: readonly string[],
   selectedTables: readonly string[],
-  runtimeExclusions?: MigrationRuntimeExclusionsV1,
+  runtimeExclusions?: MigrationRuntimeExclusions,
 ): string[] {
   const selected = new Set(selectedTables);
   const excluded = new Set<string>(runtimeExclusions?.tables ?? []);
@@ -387,7 +412,7 @@ export function migrationCoverageOmittedTables(
 export function migrationCoverageIsComplete(
   sourceTables: readonly string[],
   selectedTables: readonly string[],
-  runtimeExclusions?: MigrationRuntimeExclusionsV1,
+  runtimeExclusions?: MigrationRuntimeExclusions,
 ): boolean {
   const selected = new Set(selectedTables);
   const source = new Set(sourceTables);
@@ -403,14 +428,14 @@ export function migrationCoverageIsComplete(
 export function migrationBundleChecksum(
   records: readonly MigrationRecord[],
   version: MigrationManifest['formatVersion'],
-  runtimeExclusions?: MigrationRuntimeExclusionsV1,
+  runtimeExclusions?: MigrationRuntimeExclusions,
 ): string {
   return runtimeExclusions
     ? checksumForMigrationVersion({ records, runtimeExclusions }, version)
     : checksumForMigrationVersion(records, version);
 }
 
-function validateRuntimeExclusions(value: unknown): value is MigrationRuntimeExclusionsV1 {
+function validateRuntimeExclusions(value: unknown): value is MigrationRuntimeExclusions {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const exclusion = value as Record<string, unknown>;
   const keys = Object.keys(exclusion).sort();
@@ -419,10 +444,12 @@ function validateRuntimeExclusions(value: unknown): value is MigrationRuntimeExc
     keys[0] === 'maintenanceCursorPrefixes' &&
     keys[1] === 'tables' &&
     keys[2] === 'version' &&
-    exclusion.version === 1 &&
-    Array.isArray(exclusion.tables) &&
-    exclusion.tables.length === 1 &&
-    exclusion.tables[0] === 'owner_editor_operations' &&
+    ((exclusion.version === 1 &&
+      JSON.stringify(exclusion.tables) ===
+        JSON.stringify(OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1.tables)) ||
+      (exclusion.version === 2 &&
+        JSON.stringify(exclusion.tables) ===
+          JSON.stringify(INSTALLATION_RUNTIME_EXCLUSIONS_V2.tables))) &&
     Array.isArray(exclusion.maintenanceCursorPrefixes) &&
     exclusion.maintenanceCursorPrefixes.length === 1 &&
     exclusion.maintenanceCursorPrefixes[0] === 'owner-editor-epoch:'
