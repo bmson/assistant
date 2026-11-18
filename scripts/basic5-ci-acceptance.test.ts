@@ -247,6 +247,8 @@ class FakeOps implements Basic5CiOps {
   };
   absent = true;
   failCleanup = false;
+  cleanupFailure?: unknown;
+  absenceFailure?: unknown;
   prepareAdvanceMs = 0;
   prepareThrows = false;
   neverResolvePreparation = false;
@@ -341,6 +343,7 @@ class FakeOps implements Basic5CiOps {
   ): Promise<void> {
     this.events.push('cleanup');
     expect(deadline).toBe(400_000);
+    if (this.cleanupFailure) throw this.cleanupFailure;
     if (this.failCleanup) throw new Error('redacted cleanup error');
   }
   async verifyTargetAbsent(
@@ -349,6 +352,7 @@ class FakeOps implements Basic5CiOps {
     _signal: AbortSignal,
   ): Promise<boolean> {
     this.events.push('verify-absent');
+    if (this.absenceFailure) throw this.absenceFailure;
     return this.absent;
   }
   async writeContentFreeReceipt(
@@ -2620,6 +2624,86 @@ describe('one-shot BASIC5 CI controller', () => {
     expect(ops.events).toEqual(['preflight', 'prepare', 'case', 'receipt']);
     expect(JSON.stringify(result)).not.toMatch(/pid|https?:\/\/|private/);
   });
+
+  it.each(['cleanup', 'verify-absent'] as const)(
+    'retains a closed %s census diagnostic without claiming cleanup or retrying',
+    async (phase) => {
+      const ops = new FakeOps();
+      const error = new Basic5CiHold(
+        'owned_session_census_unverified',
+        false,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { stage: 'known_identity_read', reason: 'process_stat_permission_denied' },
+      );
+      if (phase === 'cleanup') ops.cleanupFailure = error;
+      else ops.absenceFailure = error;
+      const result = await runBasic5CiAcceptance(ops);
+      expect(result).toMatchObject({
+        result: 'hold',
+        errorCode: 'owned_session_census_unverified',
+        operationSettled: false,
+        cleanupComplete: false,
+        targetStatus: 'unknown',
+        targetRetained: null,
+        cleanupCensusDiagnostic: {
+          stage: 'known_identity_read',
+          reason: 'process_stat_permission_denied',
+        },
+      });
+      expect(ops.writtenReceipt?.cleanupCensusDiagnostic).toEqual(result.cleanupCensusDiagnostic);
+      expect(ops.events.filter((event) => event === 'cleanup')).toHaveLength(1);
+      expect(ops.events).toEqual([
+        'preflight',
+        'prepare',
+        'case',
+        'quiesce',
+        'cleanup',
+        ...(phase === 'verify-absent' ? ['verify-absent'] : []),
+        'receipt',
+      ]);
+      expect(JSON.stringify(result)).not.toMatch(/pid|https?:\/\/|private/);
+    },
+  );
+
+  it.each([
+    { stage: 'snapshot', reason: 'process_census_unavailable', pid: 123, raw: 'private-secret' },
+    { stage: 'private-stage', reason: 'process_census_unavailable' },
+    { stage: 'snapshot', reason: 'private-reason' },
+  ])(
+    'rejects malformed cleanup census diagnostic without leaking its contents',
+    async (diagnostic) => {
+      const ops = new FakeOps();
+      ops.cleanupFailure = new Basic5CiHold(
+        'owned_session_census_unverified',
+        false,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        diagnostic as never,
+      );
+      const result = await runBasic5CiAcceptance(ops);
+      expect(result).toMatchObject({
+        result: 'hold',
+        errorCode: 'cleanup_census_diagnostic_invalid',
+        operationSettled: false,
+        cleanupComplete: false,
+        targetStatus: 'unknown',
+      });
+      expect(result.cleanupCensusDiagnostic).toBeUndefined();
+      expect(JSON.stringify(result)).not.toMatch(
+        /private-secret|private-stage|private-reason|"pid"/,
+      );
+      expect(ops.events.filter((event) => event === 'cleanup')).toHaveLength(1);
+    },
+  );
 
   it.each([
     {
