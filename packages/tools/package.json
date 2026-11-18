@@ -23,7 +23,8 @@
     "./watches": "./src/watches.ts",
     "./workspace": "./src/workspace-store.ts",
     "./question-regression": "./src/question-regression/index.ts",
-    "./mcp-authorization": "./src/mcp-authorization.ts"
+    "./mcp-authorization": "./src/mcp-authorization.ts",
+    "./github-app-reader": "./src/github-app-reader.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"
