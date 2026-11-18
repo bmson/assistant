@@ -192,6 +192,15 @@ export function proxy(request: NextRequest) {
   if (
     path.startsWith('/api/auth/') ||
     (path === '/api/oauth/google-calendar/callback' && request.method === 'GET') ||
+    (path === '/api/oauth/mcp/callback' && request.method === 'GET') ||
+    (/^\/api\/mobile\/v1\/mcp\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/oauth$/i.test(
+      path,
+    ) &&
+      ['GET', 'POST', 'DELETE'].includes(request.method)) ||
+    (/^\/api\/mobile\/v1\/mcp\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/oauth\/flow$/i.test(
+      path,
+    ) &&
+      ['GET', 'DELETE'].includes(request.method)) ||
     (path === '/api/mobile/v1/connections/google-calendar' &&
       ['GET', 'DELETE'].includes(request.method)) ||
     (path === '/api/mobile/v1/connections/google-calendar/connect' && request.method === 'POST') ||

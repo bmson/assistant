@@ -3374,8 +3374,20 @@ struct ImprovementActionPresentation: Equatable, Sendable {
     }
 }
 
+struct McpConnectionUpdateResponse: Decodable, Sendable {
+    let status: String?
+
+    var requiresOAuthReconnectForRefresh: Bool { status == "oauth_reconnect_to_refresh" }
+}
+
 struct McpConnectionsResponse: Codable, Sendable {
     let connections: [McpConnection]
+    let oauthConfigured: Bool?
+
+    init(connections: [McpConnection], oauthConfigured: Bool? = nil) {
+        self.connections = connections
+        self.oauthConfigured = oauthConfigured
+    }
 }
 
 struct McpConnection: Codable, Identifiable, Sendable {
