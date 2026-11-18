@@ -1968,6 +1968,7 @@ struct ActivityStatusResponse: Codable, Sendable {
     let hasPendingApproval: Bool
     let hasActiveAutonomy: Bool
     let stuckWaiting: Bool
+    var estimatedCostOperationId: String? = nil
 }
 
 enum ActivityStatusReadOutcome: Sendable {
@@ -2035,8 +2036,14 @@ extension ActivityItem {
             conversationId: conversationId,
             source: source,
             externalEventId: externalEventId,
-            estimatedCostOperationId: status.status == "waiting_estimated_cost" && self.status == "waiting_estimated_cost" ? estimatedCostOperationId : nil
+            estimatedCostOperationId: status.status == "waiting_estimated_cost" ? Self.validCostOperationID(status.estimatedCostOperationId) : nil
         )
+    }
+
+    private static func validCostOperationID(_ value: String?) -> String? {
+        guard let value, !value.isEmpty, value.utf8.count <= 128,
+              value.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 45 || $0 == 95 }) else { return nil }
+        return value
     }
 
     private static func activityDate(_ value: String) -> Date? {

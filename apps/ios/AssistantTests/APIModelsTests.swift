@@ -3432,6 +3432,26 @@ final class APIModelsTests: XCTestCase {
         XCTAssertEqual(unmatched.status, "running")
     }
 
+    func testActivityStatusDecodesAndReplacesCostRequestLocator() throws {
+        let original = ActivityItem(id: "task-1", type: "chat_turn", status: "running", title: nil,
+            progress: "", trust: "owner", spentUsd: "0", budgetUsdLimit: "1",
+            updatedAt: "2026-10-11T11:00:00Z", archivedAt: nil, hasPendingApproval: false,
+            hasActiveAutonomy: false, stuckWaiting: false)
+        func status(_ id: String?, state: String = "waiting_estimated_cost") throws -> ActivityStatusResponse {
+            let data = try JSONSerialization.data(withJSONObject: ["id": "task-1", "status": state,
+                "progress": "", "spentUsd": "0", "budgetUsdLimit": "1", "updatedAt": "2026-10-11T12:00:00Z",
+                "hasPendingApproval": false, "hasActiveAutonomy": false, "stuckWaiting": false,
+                "estimatedCostOperationId": id as Any? ?? NSNull()])
+            return try JSONDecoder().decode(ActivityStatusResponse.self, from: data)
+        }
+        let waiting = original.applying(try status("operation-123"))
+        XCTAssertEqual(waiting.estimatedCostOperationId, "operation-123")
+        XCTAssertEqual(waiting.applying(try status("operation-456")).estimatedCostOperationId, "operation-456")
+        XCTAssertNil(waiting.applying(try status(nil)).estimatedCostOperationId)
+        XCTAssertNil(waiting.applying(try status("bad/id")).estimatedCostOperationId)
+        XCTAssertNil(waiting.applying(try status("operation-123", state: "running")).estimatedCostOperationId)
+    }
+
     func testActivityStatusAvailabilityIsScopedAndOnlyReflectsCurrentFailures() {
         let key = ActivityStatusAvailabilityKey(ownerID: "owner-1", taskID: "task-1")
         let otherOwner = ActivityStatusAvailabilityKey(ownerID: "owner-2", taskID: "task-1")

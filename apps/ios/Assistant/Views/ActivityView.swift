@@ -118,6 +118,7 @@ struct EstimatedCostOverviewCard: View {
                     .frame(maxWidth: .infinity, minHeight: 24, alignment: .leading)
                     .accessibilityAddTraits(.isHeader)
                 Image(systemName: "dollarsign.circle").font(.system(size: 20))
+                    .foregroundStyle(AssistantTheme.accent(for: colorScheme))
                     .frame(width: 24, height: 24).accessibilityHidden(true)
             }.padding(24)
             Divider()

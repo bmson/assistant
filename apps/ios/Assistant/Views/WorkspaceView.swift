@@ -475,7 +475,7 @@ struct WorkspaceView: View {
         .assistantSubmenuChrome()
         .toolbarBackground(area == .skills ? .visible : .hidden, for: .navigationBar)
         .toolbarBackground(AssistantTheme.canvas(for: colorScheme), for: .navigationBar)
-        .refreshable { await refresh() }
+        .refreshable { await refresh(userInitiated: true) }
         .onDisappear { cancelFileImport() }
         .task(id: scenePhase) {
             guard scenePhase == .active else { return }
@@ -3109,8 +3109,9 @@ struct WorkspaceView: View {
         }
     }
 
-    private func refresh() async {
+    private func refresh(userInitiated: Bool = false) async {
         guard !isLoading, workspaceActionInFlight == nil else { return }
+        if userInitiated && area == .costs { model.invalidateCostTrackingForUserRefresh() }
         isLoading = true
         let refreshed: Bool
         if area == .documents {

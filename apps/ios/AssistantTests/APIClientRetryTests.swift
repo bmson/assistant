@@ -5780,6 +5780,14 @@ extension APIClientRetryTests {
     }
 
     @MainActor
+    func testUserCostRefreshInvalidatesOverviewRevision() async throws {
+        let model = try await notificationModel()
+        let revision = model.costTrackingRevision
+        model.invalidateCostTrackingForUserRefresh()
+        XCTAssertEqual(model.costTrackingRevision, revision + 1)
+    }
+
+    @MainActor
     func testParkedCostRequestReleasesSendBeforeAnotherTurnCompletes() async throws {
         let model = try await notificationModel()
         let first = "33333333-3333-4333-8333-333333333333"
