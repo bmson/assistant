@@ -44,10 +44,11 @@ const statuses = {
 /** One handler shared by the owner web and authenticated mobile routes. */
 export async function handleEstimatedCostHttp(
   request: Request,
-  kind: 'quote' | 'decision',
+  kind: 'quote' | 'decision' | 'overview',
   dependencies: Dependencies,
 ): Promise<Response> {
   const method = request.method.toUpperCase();
+  if (kind === 'overview' && method !== 'GET') return error('invalid', 'Method not allowed.', 405);
   if (method !== 'GET' && method !== 'POST') return error('invalid', 'Method not allowed.', 405);
   if (method === 'POST' && !dependencies.checkOrigin(request))
     return error('forbidden', 'Forbidden.', 403);
@@ -56,6 +57,19 @@ export async function handleEstimatedCostHttp(
       return error('unauthorized', 'Authentication required.', 401);
   } catch {
     return error('unavailable', 'Authentication is unavailable.', 503);
+  }
+  if (kind === 'overview') {
+    if ([...new URL(request.url).searchParams.keys()].length)
+      return error('invalid', 'Invalid request.', 400);
+    try {
+      const service = dependencies.service();
+      const result = await service.getOverview?.(await dependencies.actor());
+      return result
+        ? response(result, result.ok ? 200 : 503)
+        : error('unavailable', 'Estimated cost approval is unavailable.', 503);
+    } catch {
+      return error('unavailable', 'Estimated cost approval is unavailable.', 503);
+    }
   }
   let operationId: string | undefined;
   let decisionId: string | undefined;

@@ -749,6 +749,13 @@ struct APIClient: Sendable, GoogleCalendarConnectionService {
         value.utf8.count == 36 && UUID(uuidString: value) != nil
     }
 
+    func estimatedCostOverview() async throws -> EstimatedCostOverviewResponse {
+        let url = configuration.baseURL.appending(path: "api/mobile/v1/chat/estimated-cost/overview")
+        let envelope = try await perform(makeRequest(url: url), as: EstimatedCostOverviewResponse.self)
+        guard envelope.isValid else { throw APIError.invalidResponse }
+        return envelope
+    }
+
     func estimatedCostQuote(operationID: String) async throws -> EstimatedCostQuoteResponse {
         var components = URLComponents(url: configuration.baseURL.appending(path: "api/mobile/v1/chat/estimated-cost/quote"), resolvingAgainstBaseURL: false)
         components?.queryItems = [.init(name: "operationId", value: operationID)]

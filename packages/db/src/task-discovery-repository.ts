@@ -1,4 +1,7 @@
-import type { TaskDiscoveryRepository, TaskDiscoveryRow } from '@assistant/persistence';
+import {
+  estimatedCostOperationLocator,
+  type TaskDiscoveryRepository,
+} from '@assistant/persistence';
 import { and, count, desc, eq, inArray, isNotNull, lt, or, sql } from 'drizzle-orm';
 import { notChatAdmissionCancellationSql } from './chat-admission-projection.js';
 import type { Db } from './client.js';
@@ -9,12 +12,13 @@ export function createPostgresTaskDiscoveryRepository(db: Db): TaskDiscoveryRepo
     async scan(agentId, input) {
       if (!agentId || input.limit < 1 || input.limit > 500)
         throw new Error('Invalid owner task scan');
-      const rows: TaskDiscoveryRow[] = await db
+      const rows = await db
         .select({
           id: tasks.id,
           agentId: tasks.agentId,
           type: tasks.type,
           status: tasks.status,
+          state: tasks.state,
           title: tasks.title,
           progress: tasks.progress,
           trust: tasks.trust,
@@ -47,7 +51,10 @@ export function createPostgresTaskDiscoveryRepository(db: Db): TaskDiscoveryRepo
         )
         .orderBy(desc(tasks.updatedAt), tasks.id)
         .limit(input.limit + 1);
-      const selected = rows.slice(0, input.limit);
+      const selected = rows.slice(0, input.limit).map(({ state, ...row }) => ({
+        ...row,
+        estimatedCostOperationId: estimatedCostOperationLocator(row.status, state),
+      }));
       const waiting = selected
         .filter((row) => row.status === 'waiting_approval')
         .map((row) => row.id);

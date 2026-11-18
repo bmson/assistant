@@ -4,6 +4,24 @@ import CoreLocation
 @testable import Assistant
 
 extension APIModelsTests {
+    func testEstimatedCostOverviewPreservesUnavailableInventoryAndAmounts() throws {
+        let data = Data(#"{"ok":true,"requests":null,"tracking":{"observedAt":"2029-01-01T00:00:00Z","complete":false,"recordedDailyMicros":null,"recordedMonthlyMicros":200000,"totalHeldMicros":300000,"historicalUnknownMicros":null,"pendingApprovalMicros":null,"dailyPlannedExposureMicros":null,"monthlyPlannedExposureMicros":null}}"#.utf8)
+        let decoded = try JSONDecoder().decode(EstimatedCostOverviewResponse.self, from: data)
+        XCTAssertTrue(decoded.isValid)
+        XCTAssertNil(decoded.requests)
+        XCTAssertNil(decoded.tracking?.pendingApprovalMicros)
+        XCTAssertNil(decoded.tracking?.dailyPlannedExposureMicros)
+        XCTAssertEqual(decoded.tracking?.recordedMonthlyMicros, 200_000)
+    }
+
+    func testActivityEstimatedCostLocatorIsOptionalAndExact() throws {
+        let raw = #"{"id":"task-a","type":"chat_turn","status":"waiting_estimated_cost","title":"Research","progress":"Waiting","trust":"owner","spentUsd":"0","budgetUsdLimit":"1","updatedAt":"2029-01-01T00:00:00Z","archivedAt":null,"hasPendingApproval":false,"estimatedCostOperationId":"operation-a"}"#
+        let item = try JSONDecoder().decode(ActivityItem.self, from: Data(raw.utf8))
+        XCTAssertEqual(item.estimatedCostOperationId, "operation-a")
+        let legacy = raw.replacingOccurrences(of: #","estimatedCostOperationId":"operation-a""#, with: "")
+        XCTAssertNil(try JSONDecoder().decode(ActivityItem.self, from: Data(legacy.utf8)).estimatedCostOperationId)
+    }
+
     func testCostWireDatesAcceptWholeAndFractionalSecondsButRejectMissingOffset() throws {
         let quote = try JSONDecoder().decode(EstimatedCostQuote.self, from: Data(#"{"type":"estimated-cost-approval","operationId":"a","taskId":"task","requestText":"Request A","quoteId":"q","quoteVersion":"v","expiresAt":"2030-01-01T00:00:00Z","nextAttemptMicros":1,"allowanceMicros":1,"recordedDailyMicros":0,"recordedMonthlyMicros":0,"totalHeldMicros":0,"eligibleHistoricalUnknownMicros":0,"pendingApprovalMicros":1,"dailyCeilingMicros":10,"monthlyCeilingMicros":10,"dailyProjectedGrossMicros":1,"monthlyProjectedGrossMicros":1,"complete":true,"canApprove":true}"#.utf8))
         for value in ["2029-01-01T00:00:00Z", "2029-01-01T00:00:00.000Z", "2029-01-01T01:00:00+01:00"] {
@@ -3412,6 +3430,26 @@ final class APIModelsTests: XCTestCase {
             hasPendingApproval: false, hasActiveAutonomy: false, stuckWaiting: false
         ))
         XCTAssertEqual(unmatched.status, "running")
+    }
+
+    func testActivityStatusDecodesAndReplacesCostRequestLocator() throws {
+        let original = ActivityItem(id: "task-1", type: "chat_turn", status: "running", title: nil,
+            progress: "", trust: "owner", spentUsd: "0", budgetUsdLimit: "1",
+            updatedAt: "2026-10-11T11:00:00Z", archivedAt: nil, hasPendingApproval: false,
+            hasActiveAutonomy: false, stuckWaiting: false)
+        func status(_ id: String?, state: String = "waiting_estimated_cost") throws -> ActivityStatusResponse {
+            let data = try JSONSerialization.data(withJSONObject: ["id": "task-1", "status": state,
+                "progress": "", "spentUsd": "0", "budgetUsdLimit": "1", "updatedAt": "2026-10-11T12:00:00Z",
+                "hasPendingApproval": false, "hasActiveAutonomy": false, "stuckWaiting": false,
+                "estimatedCostOperationId": id as Any? ?? NSNull()])
+            return try JSONDecoder().decode(ActivityStatusResponse.self, from: data)
+        }
+        let waiting = original.applying(try status("operation-123"))
+        XCTAssertEqual(waiting.estimatedCostOperationId, "operation-123")
+        XCTAssertEqual(waiting.applying(try status("operation-456")).estimatedCostOperationId, "operation-456")
+        XCTAssertNil(waiting.applying(try status(nil)).estimatedCostOperationId)
+        XCTAssertNil(waiting.applying(try status("bad/id")).estimatedCostOperationId)
+        XCTAssertNil(waiting.applying(try status("operation-123", state: "running")).estimatedCostOperationId)
     }
 
     func testActivityStatusAvailabilityIsScopedAndOnlyReflectsCurrentFailures() {

@@ -75,7 +75,7 @@
     }
   },
   "agentWebSchemaCompatible": true,
-  "webApiRouteCount": 112,
+  "webApiRouteCount": 114,
   "routes": {
     "apps/web/app/api/audit/[id]/route.ts": {
       "methods": ["GET"],
@@ -96,6 +96,10 @@
     "apps/web/app/api/chat/estimated-cost/decision/route.ts": {
       "methods": ["GET", "POST"],
       "sha256": "57e38b80798c61a32065867a7b26720672fd8ebbd80b572ecef263287fd88280"
+    },
+    "apps/web/app/api/chat/estimated-cost/overview/route.ts": {
+      "methods": ["GET"],
+      "sha256": "e27bd1980be7023ef75b75e1ea9f609f68455921a9e9496efc2955f8ccbf5a37"
     },
     "apps/web/app/api/chat/estimated-cost/quote/route.ts": {
       "methods": ["GET", "POST"],
@@ -192,6 +196,10 @@
     "apps/web/app/api/mobile/v1/chat/estimated-cost/decision/route.ts": {
       "methods": ["GET", "POST"],
       "sha256": "7b4818c455b518f23d94b5e689dd1ecca10ada1fdc72d625c2473d55085c6f1f"
+    },
+    "apps/web/app/api/mobile/v1/chat/estimated-cost/overview/route.ts": {
+      "methods": ["GET"],
+      "sha256": "ce8b7d2b770657e58f9cce1e9b94e96a29dcc69dbd9da12d962900edd7aa391c"
     },
     "apps/web/app/api/mobile/v1/chat/estimated-cost/quote/route.ts": {
       "methods": ["GET", "POST"],

@@ -2973,6 +2973,10 @@ final class AppModel {
         _ = await (workspaceRead, peopleRead)
     }
 
+    func invalidateCostTrackingForUserRefresh() {
+        costTrackingRevision += 1
+    }
+
     @discardableResult
     func refreshWorkspace(reportFailure: Bool = true) async -> Bool {
         guard let client else { return false }
