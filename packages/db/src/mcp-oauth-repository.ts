@@ -1,7 +1,23 @@
 import { createMcpOAuthRepository, parseMcpOAuthState } from '@assistant/persistence';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
 import { agents, mcpConnections } from './schema.js';
+
+/**
+ * Read only a boolean. The row-to-JSON lookup also works before migration 0138,
+ * where this key is absent. An installed grant always blocks manual fallback.
+ */
+export function manualMcpCredentialAvailable() {
+  const state = sql`(to_jsonb(${mcpConnections}) -> 'oauth_state')`;
+  return sql<boolean>`COALESCE(
+    ${state} IS NULL OR ${state} = 'null'::jsonb OR (
+      ${state} -> 'version' = '1'::jsonb
+      AND ${state} ->> 'ownerId' = ${mcpConnections.agentId}::text
+      AND ${state} ->> 'connectionId' = ${mcpConnections.id}::text
+      AND ${state} -> 'grant' = 'null'::jsonb
+    ), FALSE
+  )`;
+}
 
 export function createPostgresMcpOAuthRepository(db: Db) {
   return createMcpOAuthRepository({

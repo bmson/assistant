@@ -153,6 +153,19 @@ export function parseMcpOAuthState(
   return parsed.data;
 }
 
+/** A stored grant owns this connection even if it needs reconnection or OAuth is off. */
+export function allowsManualMcpCredential(
+  raw: unknown,
+  key: McpOAuthConnectionKey,
+  endpoint: string,
+): boolean {
+  try {
+    return parseMcpOAuthState(raw, key, endpoint).grant === null;
+  } catch {
+    return false;
+  }
+}
+
 export type McpOAuthRefreshClaim =
   | { kind: 'claimed'; grant: McpOAuthGrant }
   | { kind: 'current' | 'wait' | 'reconnect_required' | 'unavailable' };

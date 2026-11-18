@@ -18,13 +18,13 @@ const tokens: McpOAuthTokens = {
   accessTokenExpiresAt: '2026-11-18T12:10:00Z',
   scopes: ['read'],
 };
-const connected = {
+export const mcpTestConnected = {
   outcome: 'connected' as const,
   tokens,
   discovery: { serverName: 'Bound server', tools: [{ name: 'read' }] },
 };
 
-function pending(): McpOAuthPendingFlow {
+export function mcpTestPending(): McpOAuthPendingFlow {
   return {
     id: randomUUID(),
     client: 'ios',
@@ -58,7 +58,7 @@ interface Harness {
 export function mcpOAuthStorageScenarios(harness: () => Harness) {
   it('claims a callback once and persists a terminal result without a grant', async () => {
     const { key, repo, reopened } = harness();
-    const flow = pending();
+    const flow = mcpTestPending();
     await expect(
       repo.begin(key, { ...flow, verifierEncrypted: 'raw-secret' }, now),
     ).rejects.toThrow('Invalid stored MCP OAuth state');
@@ -76,8 +76,8 @@ export function mcpOAuthStorageScenarios(harness: () => Harness) {
     expect(await repo.poll(key, endpoint, flow.id, 'ios', now)).toBe('denied');
     expect(await repo.poll(key, endpoint, flow.id, 'web', now)).toBeNull();
     expect((await repo.get(key, endpoint))?.grant).toBeNull();
-    expect(await repo.finish(key, endpoint, flow.id, connected, now)).toBe(false);
-    const expiring = pending();
+    expect(await repo.finish(key, endpoint, flow.id, mcpTestConnected, now)).toBe(false);
+    const expiring = mcpTestPending();
     expect(await repo.begin(key, expiring, now)).toBe(true);
     expect(await repo.poll(key, endpoint, expiring.id, 'ios', new Date(expiring.expiresAt))).toBe(
       'expired',
@@ -87,25 +87,25 @@ export function mcpOAuthStorageScenarios(harness: () => Harness) {
 
   it('preserves the manual credential and working grant across failed reconnect and pause', async () => {
     const { key, repo, reopened, setEnabled, readManualBearer } = harness();
-    const flow = pending();
+    const flow = mcpTestPending();
     expect(await repo.begin(key, flow, now)).toBe(true);
     expect(await repo.consume(key, endpoint, flow.id, flow.stateHash, now)).toEqual(flow);
-    expect(await repo.finish(key, endpoint, flow.id, connected, now)).toBe(true);
-    const denied = pending();
+    expect(await repo.finish(key, endpoint, flow.id, mcpTestConnected, now)).toBe(true);
+    const denied = mcpTestPending();
     await repo.begin(key, denied, now);
     await repo.consume(key, endpoint, denied.id, denied.stateHash, now);
     await repo.finish(key, endpoint, denied.id, { outcome: 'denied' }, now);
-    const reconnect = pending();
+    const reconnect = mcpTestPending();
     await repo.begin(key, reconnect, now);
     await repo.consume(key, endpoint, reconnect.id, reconnect.stateHash, now);
     await setEnabled(false);
     expect(await reopened.get(key, endpoint)).toBeNull();
     expect(await reopened.poll(key, endpoint, reconnect.id, 'ios', now)).toBe('superseded');
     await setEnabled(true);
-    expect(await repo.finish(key, endpoint, reconnect.id, connected, now)).toBe(false);
+    expect(await repo.finish(key, endpoint, reconnect.id, mcpTestConnected, now)).toBe(false);
     expect((await reopened.get(key, endpoint))?.grant).toMatchObject({
       generation: flow.id,
-      discovery: connected.discovery,
+      discovery: mcpTestConnected.discovery,
       tokens,
     });
     await setEnabled(false);
@@ -117,10 +117,10 @@ export function mcpOAuthStorageScenarios(harness: () => Harness) {
 
   it('serializes refresh and rejects stale completion after pause and disconnect', async () => {
     const { key, repo, reopened, setEnabled } = harness();
-    const flow = pending();
+    const flow = mcpTestPending();
     await repo.begin(key, flow, now);
     await repo.consume(key, endpoint, flow.id, flow.stateHash, now);
-    await repo.finish(key, endpoint, flow.id, connected, now);
+    await repo.finish(key, endpoint, flow.id, mcpTestConnected, now);
     const claim = () => repo.acquireRefresh(key, endpoint, flow.id, 0, randomUUID(), now);
     expect((await Promise.all([claim(), claim()])).map((result) => result?.kind).sort()).toEqual([
       'claimed',
@@ -162,11 +162,11 @@ export function mcpOAuthStorageScenarios(harness: () => Harness) {
       reconnectRequired: true,
       refresh: null,
     });
-    const late = pending();
+    const late = mcpTestPending();
     await repo.begin(key, late, expired);
     await repo.consume(key, endpoint, late.id, late.stateHash, expired);
     await reopened.disconnect(key, endpoint);
-    expect(await repo.finish(key, endpoint, late.id, connected, expired)).toBe(false);
+    expect(await repo.finish(key, endpoint, late.id, mcpTestConnected, expired)).toBe(false);
     expect((await reopened.get(key, endpoint))?.grant).toBeNull();
   });
 }

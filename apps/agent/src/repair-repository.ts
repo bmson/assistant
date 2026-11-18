@@ -1,7 +1,7 @@
 import type { RepairRepositoryReader } from '@assistant/core/workflow/self-repair';
-import { mcpConnections } from '@assistant/db';
+import { manualMcpCredentialAvailable, mcpConnections } from '@assistant/db';
 import { FirestoreMcpConnectionReadRepository } from '@assistant/firestore';
-import { repairPathBlocked } from '@assistant/persistence';
+import { allowsManualMcpCredential, repairPathBlocked } from '@assistant/persistence';
 import { invokeMcpTool, type McpToolConnectionRecord } from '@assistant/tools/mcp';
 import { and, eq } from 'drizzle-orm';
 import type { AgentDeps } from './deps.js';
@@ -15,27 +15,29 @@ export function repairRepositoryReader(
     const unavailable = { source: 'unavailable' as const, files: [] };
     if (!deps.config.SELF_REPAIR_ENABLED || !/^[\w.-]+\/[\w.-]+$/.test(deps.config.GITHUB_REPO))
       return unavailable;
-    let rows: McpToolConnectionRecord[];
-    if (deps.firestoreStore) {
-      const repository = new FirestoreMcpConnectionReadRepository(
-        deps.firestoreStore,
-        deps.config.FIRESTORE_AGENT_ID,
-      );
-      const summaries = await repository.list(agentId);
-      rows = (
-        await Promise.all(
-          summaries
-            .filter(
-              (r) =>
-                r.enabled &&
-                r.status === 'ready' &&
-                r.endpoint === 'https://api.githubcopilot.com/mcp/',
-            )
-            .map((r) => repository.getForTools(agentId, r.id)),
+    const endpoint = 'https://api.githubcopilot.com/mcp/';
+    const isRepairConnection = (row: McpToolConnectionRecord) =>
+      row.enabled &&
+      row.status === 'ready' &&
+      row.endpoint === endpoint &&
+      Array.isArray(row.tools) &&
+      row.tools.some((tool: { name?: string }) => tool?.name === 'get_file_contents');
+
+    const firestore = deps.firestoreStore
+      ? new FirestoreMcpConnectionReadRepository(
+          deps.firestoreStore,
+          deps.config.FIRESTORE_AGENT_ID,
         )
-      ).filter((row): row is NonNullable<typeof row> => row !== null);
-    } else {
-      rows = await deps.db
+      : null;
+    const firestoreManualConnection = async (connectionId: string) => {
+      const row = await firestore?.getForTools(agentId, connectionId);
+      return row &&
+        allowsManualMcpCredential(row.oauthState, { ownerId: agentId, connectionId }, row.endpoint)
+        ? row
+        : null;
+    };
+    const postgresManualConnections = async (connectionId?: string) => {
+      const rows = await deps.db
         .select({
           id: mcpConnections.id,
           name: mcpConnections.name,
@@ -45,6 +47,7 @@ export function repairRepositoryReader(
           status: mcpConnections.status,
           tools: mcpConnections.tools,
           bearerTokenEncrypted: mcpConnections.bearerTokenEncrypted,
+          manualCredentialAvailable: manualMcpCredentialAvailable(),
         })
         .from(mcpConnections)
         .where(
@@ -52,17 +55,21 @@ export function repairRepositoryReader(
             eq(mcpConnections.agentId, agentId),
             eq(mcpConnections.enabled, true),
             eq(mcpConnections.status, 'ready'),
+            eq(mcpConnections.endpoint, endpoint),
+            connectionId ? eq(mcpConnections.id, connectionId) : undefined,
           ),
         );
-    }
-    const connection = rows.find(
-      (r) =>
-        r.enabled &&
-        r.status === 'ready' &&
-        r.endpoint === 'https://api.githubcopilot.com/mcp/' &&
-        Array.isArray(r.tools) &&
-        r.tools.some((t: { name?: string }) => t.name === 'get_file_contents'),
-    );
+      return rows.filter((row) => row.manualCredentialAvailable);
+    };
+
+    const rows = firestore
+      ? await Promise.all(
+          (await firestore.list(agentId))
+            .filter((row) => row.enabled && row.status === 'ready' && row.endpoint === endpoint)
+            .map((row) => firestoreManualConnection(row.id)),
+        )
+      : await postgresManualConnections();
+    const connection = rows.find((row) => row !== null && isRepairConnection(row));
     if (!connection) return unavailable;
     const [owner, repo] = deps.config.GITHUB_REPO.split('/');
     const selected = [...new Set(paths.length ? paths : ['README.md'])]
@@ -73,11 +80,24 @@ export function repairRepositoryReader(
     const files: Array<{ path: string; excerpt: string }> = [];
     for (const path of selected) {
       try {
+        // A grant can be installed between files. Read the same connection again
+        // before each request and never substitute another credential or connection.
+        const current = firestore
+          ? await firestoreManualConnection(connection.id)
+          : (await postgresManualConnections(connection.id)).find(
+              (row) => row.id === connection.id,
+            );
+        if (
+          !current ||
+          !isRepairConnection(current) ||
+          current.bearerTokenEncrypted !== connection.bearerTokenEncrypted
+        )
+          break;
         const result = await invoke(
-          connection.endpoint,
+          current.endpoint,
           'get_file_contents',
           { owner, repo, path },
-          connection.bearerTokenEncrypted,
+          current.bearerTokenEncrypted,
         );
         if (result.isError) continue;
         // The remote output is untrusted source material, bounded before it is

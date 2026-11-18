@@ -1,5 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import { parseMcpOAuthState, pauseMcpOAuthState, type Records } from '@assistant/persistence';
+import {
+  allowsManualMcpCredential,
+  parseMcpOAuthState,
+  pauseMcpOAuthState,
+  type Records,
+} from '@assistant/persistence';
 import type { Transaction } from '@google-cloud/firestore';
 import {
   assertPrivacyErasureFenceUnchanged,
@@ -114,6 +119,7 @@ export class FirestoreMcpConnectionReadRepository {
     tools: McpConnectionTool[];
     endpoint: string;
     bearerTokenEncrypted: string | null;
+    oauthState?: unknown;
   } | null> {
     if (agentId !== this.configuredAgentId)
       throw new Error('MCP connection read is outside the configured installation');
@@ -146,6 +152,7 @@ export class FirestoreMcpConnectionReadRepository {
           tools: safeTools(row.tools),
           endpoint: row.endpoint,
           bearerTokenEncrypted: row.bearerTokenEncrypted,
+          ...(row.oauthState === undefined ? {} : { oauthState: row.oauthState }),
         };
     await this.assertConfiguredOwner();
     await assertPrivacyErasureFenceUnchanged(this.store, agentId, fence);
@@ -327,6 +334,14 @@ export class FirestoreMcpConnectionMutationRepository {
         row.id !== id ||
         documentKey(row.id) !== snapshot.id ||
         row.agentId !== this.configuredAgentId ||
+        !allowsManualMcpCredential(
+          row.oauthState,
+          {
+            ownerId: this.configuredAgentId,
+            connectionId: id,
+          },
+          row.endpoint,
+        ) ||
         !row.enabled
       )
         return null;
@@ -360,6 +375,14 @@ export class FirestoreMcpConnectionMutationRepository {
         row.id !== id ||
         documentKey(row.id) !== snapshot.id ||
         row.agentId !== this.configuredAgentId ||
+        !allowsManualMcpCredential(
+          row.oauthState,
+          {
+            ownerId: this.configuredAgentId,
+            connectionId: id,
+          },
+          row.endpoint,
+        ) ||
         !row.enabled ||
         row.status !== 'checking' ||
         snapshot.get('discoveryAttemptId') !== attemptId

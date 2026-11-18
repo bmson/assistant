@@ -1,6 +1,6 @@
 import { getAgent } from '@assistant/core/chat';
 import { encryptMcpBearerToken } from '@assistant/core/mcp-secrets';
-import { type Db, mcpConnections } from '@assistant/db';
+import { type Db, manualMcpCredentialAvailable, mcpConnections } from '@assistant/db';
 import { and, asc, eq, sql } from 'drizzle-orm';
 
 export type McpConnectionStatus =
@@ -142,7 +142,13 @@ export async function saveMcpDiscovery(
       lastError: discovery.error ?? null,
       updatedAt: sql`now()`,
     })
-    .where(and(eq(mcpConnections.id, connectionId), eq(mcpConnections.agentId, agent.id)))
+    .where(
+      and(
+        eq(mcpConnections.id, connectionId),
+        eq(mcpConnections.agentId, agent.id),
+        manualMcpCredentialAvailable(),
+      ),
+    )
     .returning({ id: mcpConnections.id });
   return rows.length === 1;
 }
@@ -156,7 +162,13 @@ export async function getMcpConnection(db: Db, connectionId: string) {
       bearerTokenEncrypted: mcpConnections.bearerTokenEncrypted,
     })
     .from(mcpConnections)
-    .where(and(eq(mcpConnections.id, connectionId), eq(mcpConnections.agentId, agent.id)));
+    .where(
+      and(
+        eq(mcpConnections.id, connectionId),
+        eq(mcpConnections.agentId, agent.id),
+        manualMcpCredentialAvailable(),
+      ),
+    );
   return connection ?? null;
 }
 
