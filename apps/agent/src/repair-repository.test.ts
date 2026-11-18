@@ -95,19 +95,17 @@ it('rechecks Firestore mode before invoking a previously eligible manual connect
   const id = 'e1f5d01b-8e13-4809-8337-63ee9fbd74b4';
   const ownerId = 'owner-id';
   const row = { ...h.row, id, name: 'Source', serverName: null };
-  const list = vi
-    .spyOn(FirestoreMcpConnectionReadRepository.prototype, 'list')
-    .mockResolvedValue([
-      {
-        ...row,
-        instructions: null,
-        serverVersion: null,
-        hasBearerToken: true,
-        lastCheckedAt: null,
-        lastError: null,
-        status: 'ready',
-      },
-    ]);
+  const list = vi.spyOn(FirestoreMcpConnectionReadRepository.prototype, 'list').mockResolvedValue([
+    {
+      ...row,
+      instructions: null,
+      serverVersion: null,
+      hasBearerToken: true,
+      lastCheckedAt: null,
+      lastError: null,
+      status: 'ready',
+    },
+  ]);
   const get = vi
     .spyOn(FirestoreMcpConnectionReadRepository.prototype, 'getForTools')
     .mockResolvedValueOnce(row)
