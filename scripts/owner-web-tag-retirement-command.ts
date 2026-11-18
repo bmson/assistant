@@ -86,6 +86,15 @@ export async function runRetirementCommand(tracker: ReturnType<typeof retirement
     native[name] = await io.readRevision(name);
   }
   tracker.mark('plan_validation');
+  if (canonical) {
+    const template = (before as { template: { containers: { image: string }[] } }).template;
+    await io.ensureImage?.(template.containers[0]?.image ?? '');
+  }
+  for (const pin of [old, pinnedCurrent]) {
+    const revision = native[pin.revision] as { containers?: { image?: string }[] } | undefined;
+    if (revision && revision.containers?.[0]?.image !== pin.image)
+      await io.ensureImage?.(pin.image);
+  }
   let plan: RetirementPlan;
   try {
     const current = canonical

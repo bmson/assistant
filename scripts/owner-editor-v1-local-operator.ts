@@ -31,6 +31,7 @@ import {
   reviewedCurrentEnvironment,
   verifyCurrentService,
 } from './owner-release-current-snapshot.js';
+import { createImageResolutionReader } from './owner-release-image-resolution.js';
 
 const modes = ['prepare-initialize', 'prepare-disable', 'dry-run', 'apply'] as const;
 const account = 'bmson@bmson.com';
@@ -287,6 +288,7 @@ async function main() {
       undefined,
       undefined,
       current,
+      createImageResolutionReader(token, fetch, started + 60000),
     );
     if (receipt.services.some((s) => s.admissionDisabled) && current?.kind !== 'disabled-bootstrap')
       throw new Error('Disabled current pair requires reviewed bootstrap binding');

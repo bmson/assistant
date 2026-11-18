@@ -1,5 +1,6 @@
 import { googleCalendarReleaseCallback } from '../infra/gcp/google-calendar-release-config.mjs';
 import { disabled, retiredCurrentCondition } from './owner-release-current-snapshot.js';
+import { revisionWithRequestedImage } from './owner-release-image-resolution.js';
 import {
   matchesNativeServiceDigest,
   nativeServiceDefaults,
@@ -183,9 +184,10 @@ function revisionProof(raw: unknown, name: string, c: Context): NativeProof {
   }
   requireNative(env.ASSISTANT_RELEASE_WRITES_PAUSED === String(paused));
   immutableWebRevision(r, name, image, paused);
+  const semantic = revisionWithRequestedImage(r, image);
   const projected: Obj = {};
   for (const key of TEMPLATE_FIELDS)
-    if (key !== 'revision' && r[key] !== undefined) projected[key] = r[key];
+    if (key !== 'revision' && semantic[key] !== undefined) projected[key] = semantic[key];
   projected.revision = name;
   if (reviewedCurrent)
     requireNative(digest(template(projected)) === reviewedCurrent.proof.templateSha256);

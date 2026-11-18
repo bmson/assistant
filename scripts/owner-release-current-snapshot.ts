@@ -1,3 +1,4 @@
+import { verifyRevisionImage } from './owner-release-image-resolution.js';
 import {
   matchesNativeServiceDigest,
   nativeServiceDefaults,
@@ -234,11 +235,7 @@ export function verifyCurrentSnapshot(
     bootstrapDigest(r) === binding.revisionSha256 &&
       r.name === `${binding.service}/revisions/${binding.revision}`,
   );
-  requireProof(
-    Array.isArray(r.containers) &&
-      r.containers.length === 1 &&
-      object(r.containers[0]).image === binding.image,
-  );
+  verifyRevisionImage(r, binding.image);
   const conditions = r.conditions;
   requireProof(Array.isArray(conditions) && conditions.length > 0 && conditions.length <= 16);
   const retired = (c: Obj) => mustBeDisabled && retiredCurrentCondition(c);
