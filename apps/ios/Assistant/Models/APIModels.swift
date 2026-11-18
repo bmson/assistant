@@ -1,6 +1,11 @@
 import Foundation
 import CryptoKit
 
+/// The cost API accepts ISO-8601 timestamps with or without fractional seconds.
+private func estimatedCostWireDate(_ value: String) -> Date? {
+    value.assistantDate ?? ISO8601DateFormatter().date(from: value)
+}
+
 /// The cost permission contract uses integer microdollars, never rounded
 /// display strings, as the authority for an owner's decision.
 struct EstimatedCostQuote: Codable, Equatable, Sendable {
@@ -59,7 +64,7 @@ struct EstimatedCostRequestProjection: Codable, Equatable, Sendable {
         if let quote, (!quote.isValid || quote.operationId != operation) { return false }
         switch status {
         case "pending", "declined", "expired_or_needs_refresh": return quote != nil
-        case "approved": return quote != nil && grantExpiresAt?.assistantDate != nil
+        case "approved": return quote != nil && grantExpiresAt.flatMap(estimatedCostWireDate) != nil
         case "cancelled": return true
         case "unavailable": return !(reason ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         default: return false
@@ -81,7 +86,7 @@ struct EstimatedCostBudgetTracking: Codable, Equatable, Sendable {
     var isValid: Bool {
         let amounts = [recordedDailyMicros, recordedMonthlyMicros, totalHeldMicros, historicalUnknownMicros,
                        pendingApprovalMicros, dailyPlannedExposureMicros, monthlyPlannedExposureMicros]
-        guard observedAt.assistantDate != nil,
+        guard estimatedCostWireDate(observedAt) != nil,
               amounts.allSatisfy({ $0.map { (0...9_007_199_254_740_991).contains($0) } ?? true }) else { return false }
         if let historicalUnknownMicros, let totalHeldMicros, historicalUnknownMicros > totalHeldMicros { return false }
         if let recordedDailyMicros, let totalHeldMicros, let pendingApprovalMicros, let dailyPlannedExposureMicros,

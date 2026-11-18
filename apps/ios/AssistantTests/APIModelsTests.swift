@@ -4,6 +4,26 @@ import CoreLocation
 @testable import Assistant
 
 extension APIModelsTests {
+    func testCostWireDatesAcceptWholeAndFractionalSecondsButRejectMissingOffset() throws {
+        let quote = try JSONDecoder().decode(EstimatedCostQuote.self, from: Data(#"{"type":"estimated-cost-approval","operationId":"a","taskId":"task","requestText":"Request A","quoteId":"q","quoteVersion":"v","expiresAt":"2030-01-01T00:00:00Z","nextAttemptMicros":1,"allowanceMicros":1,"recordedDailyMicros":0,"recordedMonthlyMicros":0,"totalHeldMicros":0,"eligibleHistoricalUnknownMicros":0,"pendingApprovalMicros":1,"dailyCeilingMicros":10,"monthlyCeilingMicros":10,"dailyProjectedGrossMicros":1,"monthlyProjectedGrossMicros":1,"complete":true,"canApprove":true}"#.utf8))
+        for value in ["2029-01-01T00:00:00Z", "2029-01-01T00:00:00.000Z", "2029-01-01T01:00:00+01:00"] {
+            let tracking = EstimatedCostBudgetTracking(observedAt: value, complete: true,
+                recordedDailyMicros: 0, recordedMonthlyMicros: 0, totalHeldMicros: 0,
+                historicalUnknownMicros: 0, pendingApprovalMicros: 1,
+                dailyPlannedExposureMicros: 1, monthlyPlannedExposureMicros: 1)
+            XCTAssertTrue(tracking.isValid, value)
+            XCTAssertTrue(EstimatedCostRequestProjection(status: "approved", operationId: "a", quote: quote,
+                grantExpiresAt: value, reason: nil).isValid(for: "a"), value)
+        }
+        let invalid = "2029-01-01T00:00:00"
+        let tracking = EstimatedCostBudgetTracking(observedAt: invalid, complete: false,
+            recordedDailyMicros: nil, recordedMonthlyMicros: nil, totalHeldMicros: nil,
+            historicalUnknownMicros: nil, pendingApprovalMicros: nil,
+            dailyPlannedExposureMicros: nil, monthlyPlannedExposureMicros: nil)
+        XCTAssertFalse(tracking.isValid)
+        XCTAssertFalse(EstimatedCostRequestProjection(status: "approved", operationId: "a", quote: quote,
+            grantExpiresAt: invalid, reason: nil).isValid(for: "a"))
+    }
     func testCostTrackingReadFenceRejectsPreInvalidationResponse() {
         var fence = CostTrackingReadFence()
         let olderRead = fence.generation
