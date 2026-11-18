@@ -132,7 +132,15 @@ export function recordVerifiedEstimatedCostReleaseProfile(
       attempt: env.GITHUB_RUN_ATTEMPT,
       verifiedAt: new Date(now).toISOString(),
       metadataSha256,
-      ...(evidence ? { evidence } : {}),
+      ...(evidence
+        ? {
+            evidence: {
+              baselineReceiptSha256: evidence.baselineReceiptSha256,
+              writersReceiptSha256: evidence.writersReceiptSha256,
+              drainReceiptSha256: evidence.drainReceiptSha256,
+            },
+          }
+        : {}),
     })}\n`,
     { flag: 'wx', mode: 0o600 },
   );
