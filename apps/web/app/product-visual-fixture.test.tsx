@@ -1120,7 +1120,9 @@ it('accounts for all 36 source routes and asserts the legacy person redirect', a
         : (page.repairState ?? (page.empty ? 'empty' : 'loaded')),
     availability: page.route.startsWith('/chat')
       ? 'owner-chat-route'
-      : 'retained-product-redirected-by-proxy',
+      : page.productName === 'spending-request'
+        ? 'owner-spending-review-route'
+        : 'retained-product-redirected-by-proxy',
     evidence:
       'Actual source component with synthetic read dependencies; route admission and live account behavior are not exercised.',
     persistenceFixture:
