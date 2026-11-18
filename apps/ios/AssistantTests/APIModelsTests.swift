@@ -1476,8 +1476,22 @@ final class APIModelsTests: XCTestCase {
         let suggestion = ChatMessage(id: "suggestion", role: .assistant, parts: [.init(type: "suggestion", suggestionId: "s1", status: "pending")])
         XCTAssertFalse(TalkInteractionPolicy.requiresManualDecision(messages: [suggestion], pendingApprovals: 0))
         let budget = ChatMessage(id: "budget", role: .assistant, parts: [.init(type: "budget-request", status: "pending")])
-        XCTAssertTrue(TalkInteractionPolicy.requiresManualDecision(messages: [budget], pendingApprovals: 0))
-        XCTAssertEqual(TalkInteractionPolicy.decisionRoute(messages: [pending, budget]), .activity)
+        XCTAssertFalse(TalkInteractionPolicy.requiresManualDecision(messages: [budget], pendingApprovals: 0))
+        XCTAssertTrue(TalkInteractionPolicy.requiresManualDecision(messages: [pending, budget], pendingApprovals: 0))
+        XCTAssertEqual(TalkInteractionPolicy.decisionRoute(messages: [pending, budget]), .approvals)
+    }
+
+    func testLegacyBudgetRequestDoesNotBlockAnIndependentVoiceTurn() {
+        let budget = ChatMessage(id: "a", role: .assistant, parts: [.init(type: "budget-request", status: "pending")])
+        let manualDecision = TalkInteractionPolicy.requiresManualDecision(messages: [budget], pendingApprovals: 0)
+        XCTAssertFalse(manualDecision)
+        XCTAssertTrue(TalkInteractionPolicy.canAttemptHeldUtterance(waiting: true, ready: true,
+            attemptInProgress: false, manualDecision: manualDecision, sameScope: true))
+        XCTAssertTrue(TalkInteractionPolicy.requiresManualDecision(messages: [budget], pendingApprovals: 1))
+        for status in ["pending", "snoozed"] {
+            let approval = ChatMessage(id: "tool", role: .assistant, parts: [.init(type: "approval", status: status)])
+            XCTAssertTrue(TalkInteractionPolicy.requiresManualDecision(messages: [budget, approval], pendingApprovals: 0))
+        }
     }
 
     func testTalkKeepsCostReviewsIndependentAndWaitsForSendReadiness() {

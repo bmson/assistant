@@ -8,16 +8,17 @@ struct TalkCostReviewChoice: Identifiable, Equatable {
 /// Voice can capture a request, but only an explicit on-screen decision can
 /// release a pending approval or budget gate. Suggestions do not stop a chat.
 enum TalkInteractionPolicy {
-    static func requiresManualDecision(messages: [ChatMessage], pendingApprovals: Int) -> Bool {
-        pendingApprovals > 0 || messages.contains(where: \.hasPendingDecision)
+    static func hasPendingToolApproval(_ message: ChatMessage) -> Bool {
+        (message.approvalSummary?.pendingCount ?? 0) > 0 || message.decisionParts.contains { part in
+            part.type == "approval" && (part.status == nil || part.status == "pending" || part.status == "snoozed")
+        }
     }
 
-    static func decisionRoute(messages: [ChatMessage]) -> AssistantRoute {
-        let latest = messages.last(where: \.hasPendingDecision)
-        return latest?.decisionParts.contains(where: { $0.type == "budget-request" }) == true
-            && latest?.decisionParts.contains(where: { $0.type == "approval" }) != true
-            ? .activity : .approvals
+    static func requiresManualDecision(messages: [ChatMessage], pendingApprovals: Int) -> Bool {
+        pendingApprovals > 0 || messages.contains(where: hasPendingToolApproval)
     }
+
+    static func decisionRoute(messages: [ChatMessage]) -> AssistantRoute { .approvals }
 
     static func costReviews(messages: [ChatMessage]) -> [TalkCostReviewChoice] {
         var seen = Set<String>()
@@ -408,9 +409,9 @@ struct TalkView: View {
             return model.messages.last { $0.role == .assistant }?.text ?? ""
         case .needsDecision:
             guard requiresManualDecision else { return "The decision is resolved. Resume when you’re ready." }
-            let decision = model.messages.last(where: \.hasPendingDecision)
+            let decision = model.messages.last(where: TalkInteractionPolicy.hasPendingToolApproval)
             return decision?.approvalSummary?.purpose
-                ?? decision?.decisionParts.first(where: { $0.status == nil || $0.status == "pending" })?.summary
+                ?? decision?.decisionParts.first(where: { $0.type == "approval" && ($0.status == nil || $0.status == "pending" || $0.status == "snoozed") })?.summary
                 ?? model.overview?.approvals.pending.first?.approval.summary
                 ?? "Review the next step on screen before the assistant continues."
         }
