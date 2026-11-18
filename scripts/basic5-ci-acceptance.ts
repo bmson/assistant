@@ -1005,6 +1005,22 @@ function contentFreeCaseEntryDiagnostic(value: unknown): Basic5CiCaseEntryDiagno
   return { stage: diagnostic.stage, category: diagnostic.category };
 }
 
+function contentFreeCleanupCensusDiagnostic(value: unknown): Basic5CiCensusDiagnostic {
+  if (
+    !value ||
+    typeof value !== 'object' ||
+    Array.isArray(value) ||
+    Object.keys(value).length !== 2 ||
+    !Object.hasOwn(value, 'stage') ||
+    !Object.hasOwn(value, 'reason') ||
+    !CENSUS_STAGES.includes((value as Basic5CiCensusDiagnostic).stage) ||
+    !CENSUS_REASONS.includes((value as Basic5CiCensusDiagnostic).reason)
+  )
+    throw new Basic5CiHold('cleanup_census_diagnostic_invalid');
+  const diagnostic = value as Basic5CiCensusDiagnostic;
+  return { stage: diagnostic.stage, reason: diagnostic.reason };
+}
+
 /** Parse only the bounded version banner; output bytes themselves are never retained. */
 export function observeBasic5CiChromeVersion(result: {
   exitCode: number;
@@ -2129,6 +2145,7 @@ function contentFreeReceipt(record: Record<string, unknown>): Record<string, unk
     'preparationDiagnostic',
     'utilityChildDiagnostic',
     'caseEntryDiagnostic',
+    'cleanupCensusDiagnostic',
     'vitestDiagnostic',
     'elapsedSeconds',
   ]);
@@ -2168,6 +2185,10 @@ function contentFreeReceipt(record: Record<string, unknown>): Record<string, unk
     );
   if ('caseEntryDiagnostic' in clean)
     clean.caseEntryDiagnostic = contentFreeCaseEntryDiagnostic(clean.caseEntryDiagnostic);
+  if ('cleanupCensusDiagnostic' in clean)
+    clean.cleanupCensusDiagnostic = contentFreeCleanupCensusDiagnostic(
+      clean.cleanupCensusDiagnostic,
+    );
   if ('vitestDiagnostic' in clean)
     clean.vitestDiagnostic = contentFreeBasic5CiVitestDiagnostic(clean.vitestDiagnostic);
   if ('standaloneBuildDiagnostic' in clean)
@@ -2446,6 +2467,15 @@ export async function runBasic5CiAcceptance(
       } catch (error) {
         receipt.errorCode =
           error instanceof Basic5CiHold ? error.code : 'target_cleanup_unverified';
+        if (error instanceof Basic5CiHold && error.censusDiagnostic !== undefined) {
+          try {
+            receipt.cleanupCensusDiagnostic = contentFreeCleanupCensusDiagnostic(
+              error.censusDiagnostic,
+            );
+          } catch {
+            receipt.errorCode = 'cleanup_census_diagnostic_invalid';
+          }
+        }
         if (error instanceof Basic5CiHold && !error.operationSettled) {
           phaseOperationUnsettled = true;
           receipt.operationSettled = false;
