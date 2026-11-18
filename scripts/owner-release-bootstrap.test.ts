@@ -397,6 +397,62 @@ describe('reviewed current snapshot and bootstrap restoration', () => {
     for (const changed of changes)
       expect(() => verifyCurrentSnapshot(b, changed, f.native)).toThrow();
   });
+  it('accepts the retained retired resource condition only for a closed stable current revision', () => {
+    const f = fixture(),
+      s = clone(f.service);
+    delete (s.traffic[0] as { tag?: string }).tag;
+    delete (s.trafficStatuses[0] as { tag?: string }).tag;
+    // Condition fields from the retained Cloud Run v2 retired profile; no provider identifiers.
+    const conditions = [
+      { type: 'Ready', state: 'CONDITION_SUCCEEDED', revisionReason: 'RETIRED' },
+      { type: 'Active', state: 'CONDITION_FAILED', revisionReason: 'RETIRED' },
+      { type: 'ResourcesAvailable', state: 'CONDITION_RECONCILING', revisionReason: 'RETIRED' },
+      { type: 'TrafficShutDown', state: 'CONDITION_SUCCEEDED' },
+      { type: 'ContainerReady', state: 'CONDITION_SUCCEEDED' },
+      { type: 'ContainerHealthy', state: 'CONDITION_SUCCEEDED' },
+    ];
+    const revision = { ...f.native, conditions, reconciling: false };
+    const binding = (service: typeof s, native: typeof revision) => ({
+      ...f.receipt.services.web,
+      revision: f.expected.revision,
+      image: f.expected.image,
+      serviceSha256: bootstrapDigest(service),
+      revisionSha256: bootstrapDigest(native),
+    });
+    expect(() => verifyCurrentSnapshot(binding(s, revision), s, revision)).not.toThrow();
+    expect(() => verifyCurrentSnapshot(binding(s, revision), s, revision, false)).toThrow();
+    const activeService = { ...s, scaling: { scalingMode: 'AUTOMATIC', manualInstanceCount: 0 } };
+    expect(() =>
+      verifyCurrentSnapshot(binding(activeService, revision), activeService, revision),
+    ).toThrow();
+    const changingService = { ...s, reconciling: true };
+    expect(() =>
+      verifyCurrentSnapshot(binding(changingService, revision), changingService, revision),
+    ).toThrow();
+    const changingRevision = { ...revision, reconciling: true };
+    expect(() =>
+      verifyCurrentSnapshot(binding(s, changingRevision), s, changingRevision),
+    ).toThrow();
+    for (const invalid of [
+      { type: 'Ready', state: 'CONDITION_RECONCILING', revisionReason: 'RETIRED' },
+      { type: 'Active', state: 'CONDITION_RECONCILING', revisionReason: 'RETIRED' },
+      { type: 'ContainerHealthy', state: 'CONDITION_RECONCILING', revisionReason: 'RETIRED' },
+      { type: 'ResourcesAvailable', state: 'CONDITION_RECONCILING', revisionReason: 'OTHER' },
+      { type: 'ResourcesAvailable', state: 'CONDITION_UNKNOWN', revisionReason: 'RETIRED' },
+    ]) {
+      const changed = { ...revision, conditions: [...conditions, invalid] };
+      expect(() => verifyCurrentSnapshot(binding(s, changed), s, changed)).toThrow();
+    }
+    const terminal = {
+      ...s,
+      terminalCondition: {
+        type: 'ResourcesAvailable',
+        state: 'CONDITION_RECONCILING',
+        revisionReason: 'RETIRED',
+      },
+    };
+    expect(() => verifyCurrentSnapshot(binding(terminal, revision), terminal, revision)).toThrow();
+  });
   it.each(['agent', 'web'] as const)(
     'restores only positively promoted new %s revision with strict real readiness',
     (role) => {
