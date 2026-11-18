@@ -51,6 +51,7 @@ on:
       - "workers/document-processor/**"
       - "package.json"
       - "pnpm-lock.yaml"
+      - "patches/**"
       - "pnpm-workspace.yaml"
       - "turbo.json"
       - "tsconfig.base.json"
