@@ -1201,6 +1201,9 @@ private struct MCPConnectionsView: View {
             }
 
             connectionActions(connection, viewportWidth: viewportWidth)
+            Divider()
+            McpSignInOptionsControl(connection: connection,
+                disabled: workingConnectionID != nil || isAdding || isLoading || loadFailed)
         }
         .assistantCard(in: colorScheme)
     }

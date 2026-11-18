@@ -10,6 +10,7 @@ import {
 } from '@/app/settings/actions';
 import { Badge, btn, btnSm, inputClass, labelClass } from '@/lib/ui';
 import { ConfirmButton } from '@/lib/ui-client';
+import { McpSignInOptions } from './mcp-sign-in-options';
 
 type McpConnection = {
   id: string;
@@ -105,7 +106,7 @@ export function McpConnectionsPanel({
           );
         }}
       >
-        <label className={`${labelClass} min-w-0`}>
+        <label className={`${labelClass} grid min-w-0 gap-1.5`}>
           Name
           <input
             required
@@ -116,8 +117,10 @@ export function McpConnectionsPanel({
             maxLength={80}
           />
         </label>
-        <label className={`${labelClass} min-w-0 sm:col-span-2`}>
-          Bearer token <span className="font-normal normal-case text-muted">(optional)</span>
+        <label className={`${labelClass} grid min-w-0 gap-1.5 sm:col-span-2`}>
+          <span>
+            Bearer token <span className="font-normal normal-case text-muted">(optional)</span>
+          </span>
           <input
             type="password"
             value={bearerToken}
@@ -130,7 +133,7 @@ export function McpConnectionsPanel({
             maxLength={8_192}
           />
         </label>
-        <label className={`${labelClass} min-w-0 sm:col-span-2`}>
+        <label className={`${labelClass} grid min-w-0 gap-1.5 sm:col-span-2`}>
           MCP endpoint
           <input
             required
@@ -197,7 +200,7 @@ export function McpConnectionsPanel({
                       </p>
                     ) : null}
                   </div>
-                  <div className="flex shrink-0 flex-wrap gap-2">
+                  <div className="flex min-w-0 max-w-full shrink-0 flex-wrap gap-2">
                     {discoveryAvailable ? (
                       <button
                         type="button"
@@ -244,6 +247,13 @@ export function McpConnectionsPanel({
                     </ConfirmButton>
                   </div>
                 </div>
+                <McpSignInOptions
+                  connection={{
+                    ...connection,
+                    revision: JSON.stringify([connection.status, connection.lastCheckedAt]),
+                  }}
+                  disabled={pending}
+                />
                 {connection.tools.length > 0 ? (
                   <details className="mt-3 border-t border-edge pt-3">
                     <summary className="flex cursor-pointer list-none items-center gap-1 text-xs font-medium text-muted">

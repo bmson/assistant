@@ -18,6 +18,15 @@ describe('Firestore mobile and web ingress', () => {
     runtimeConfig.RESTORE_REHEARSAL = false;
   });
 
+  it('admits only the exact owner-authenticated MCP authorization diagnostic GET', () => {
+    const path = `/api/mobile/v1/mcp/${randomUUID()}/authorization`;
+    expect(status(path, 'GET')).toBe(200);
+    for (const method of ['POST', 'PUT', 'DELETE', 'PATCH']) expect(status(path, method)).toBe(503);
+    expect(status('/api/mobile/v1/mcp/not-a-uuid/authorization', 'GET')).toBe(503);
+    expect(status(`${path}/extra`, 'GET')).toBe(503);
+    runtimeConfig.RESTORE_REHEARSAL = true;
+    expect(status(path, 'GET')).toBe(503);
+  });
   it('passes exact calendar snapshot writes to owner-authenticated portable handlers', () => {
     for (const method of ['GET', 'POST', 'PUT', 'DELETE'])
       expect(status('/api/mobile/v1/calendars', method)).toBe(200);
