@@ -68,6 +68,23 @@ function repository(
   return { repo, commits };
 }
 
+it('limits a repair schedule rearmed every minute to 96 task creations in 24 hours', async () => {
+  const row = schedule({ name: 'self-repair', taskTemplate: { job: 'self.repair' } });
+  const { repo, commits } = repository([row], async (input) => {
+    row.lastRunAt = input.now;
+    return { schedule: row, task: taskResult(String(input.now.getTime()), row.agentId, true) };
+  });
+  for (let minute = 0; minute < 24 * 60; minute++) {
+    const now = new Date(NOW.getTime() + minute * 60_000);
+    row.nextRunAt = now;
+    await runScheduleBatch(repo, 'UTC', { now, isJobEnabled: () => true });
+  }
+  expect(commits).toHaveLength(96);
+  expect(
+    commits.every((commit, i) => commit.now.getTime() === NOW.getTime() + i * 15 * 60_000),
+  ).toBe(true);
+});
+
 describe('runScheduleBatch', () => {
   it('normalizes the occurrence identity and advances recurring schedules', async () => {
     const row = schedule();
