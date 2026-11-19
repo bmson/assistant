@@ -49,6 +49,7 @@ import {
   routeApplicationConfirmation,
 } from './application-confirmations.js';
 import { bulkByHeaders, scoreEmailImportanceOutcome } from './email-importance.js';
+import { observableMailLabels } from './email-observation-scope.js';
 import { emailIngestForwarded, gmailSyncEnabled } from './runtime.js';
 
 /**
@@ -1132,6 +1133,7 @@ export async function processForwardedIngest(
       await input.lease?.assertCurrent();
       const outcome = await scoreEmailImportanceOutcome(deps.router, {
         from,
+        receivedAt: input.providerReceivedAt ?? gmailReceivedAt(msg) ?? new Date(),
         subject,
         body: text,
         ...(msg.payload ? { payload: msg.payload } : {}),
@@ -1654,6 +1656,7 @@ async function processDirectAdmission(
       await input.lease?.assertCurrent();
       const outcome = await scoreEmailImportanceOutcome(deps.router, {
         from: input.from,
+        receivedAt: gmailReceivedAt(input.message) ?? new Date(),
         subject: input.subject,
         body: input.text,
         ...(input.message.payload ? { payload: input.message.payload } : {}),
@@ -1884,7 +1887,7 @@ export async function processMessage(
 
   // Never triage the bot's own outbound mail.
   if (from === botEmail.toLowerCase()) return 'skipped';
-  if (!msg.labelIds?.includes('INBOX')) return 'skipped';
+  if (!observableMailLabels(msg.labelIds, emailIngestForwarded(deps.config))) return 'skipped';
 
   const fullText = extractGmailText(msg.payload);
   const text = fullText.slice(0, 20000);
@@ -2351,8 +2354,8 @@ export async function recoverDirectIngests(
  * Incremental Gmail sync. Pub/Sub pushes and the local poll both land here —
  * the notification is only a poke; history.list is the source of truth.
  * Work is durably checkpointed within each page and bounded per invocation.
- * A stale history cursor falls back to a resumable current-inbox reconciliation
- * instead of silently advancing past messages we have never inspected.
+ * A stale history cursor falls back to a resumable reconciliation: received
+ * mail in forwarded mode, or the current inbox for direct correspondence.
  */
 async function syncMailboxOnce(
   deps: EmailSyncDeps,
@@ -2428,7 +2431,7 @@ async function syncMailboxOnce(
         url.searchParams.set('startHistoryId', cursor.startHistoryId as string);
         url.searchParams.append('historyTypes', 'messageAdded');
         url.searchParams.append('historyTypes', 'labelAdded');
-        url.searchParams.set('labelId', 'INBOX');
+        if (!emailIngestForwarded(deps.config)) url.searchParams.set('labelId', 'INBOX');
         url.searchParams.set('maxResults', String(HISTORY_PAGE_SIZE));
         if (cursor.pageToken) url.searchParams.set('pageToken', cursor.pageToken);
         try {
@@ -2443,7 +2446,8 @@ async function syncMailboxOnce(
           for (const history of page.history ?? []) {
             for (const added of history.messagesAdded ?? []) ids.add(added.message.id);
             for (const labeled of history.labelsAdded ?? []) {
-              if (labeled.labelIds?.includes('INBOX')) ids.add(labeled.message.id);
+              if (emailIngestForwarded(deps.config) || labeled.labelIds?.includes('INBOX'))
+                ids.add(labeled.message.id);
             }
           }
           cursor.pending = {
@@ -2453,7 +2457,7 @@ async function syncMailboxOnce(
           };
         } catch (error) {
           if ((error as { status?: number }).status !== 404) throw error;
-          console.warn('email-sync: stale historyId, reconciling the current inbox');
+          console.warn('email-sync: stale historyId, reconciling observable mail');
           cursor = { mode: 'inbox', targetHistoryId: profile.historyId };
           await saveCursor();
           continue;
@@ -2461,7 +2465,11 @@ async function syncMailboxOnce(
       } else {
         await lease.renew();
         const url = new URL(`${GMAIL}/messages`);
-        url.searchParams.append('labelIds', 'INBOX');
+        // The legacy cursor mode name remains "inbox" for resumability. In
+        // forwarded mode this recovery now covers received archived mail too.
+        if (emailIngestForwarded(deps.config))
+          url.searchParams.set('q', '-in:sent -in:drafts -in:spam -in:trash');
+        else url.searchParams.append('labelIds', 'INBOX');
         url.searchParams.set('maxResults', String(HISTORY_PAGE_SIZE));
         if (cursor.pageToken) url.searchParams.set('pageToken', cursor.pageToken);
         const page = await gmailSyncApi<{
@@ -2550,7 +2558,12 @@ export async function renewWatch(deps: EmailSyncDeps, topicName: string): Promis
     `${GMAIL}/watch`,
     {
       method: 'POST',
-      body: JSON.stringify({ topicName, labelIds: ['INBOX'], labelFilterBehavior: 'INCLUDE' }),
+      body: JSON.stringify({
+        topicName,
+        ...(emailIngestForwarded(deps.config)
+          ? {}
+          : { labelIds: ['INBOX'], labelFilterBehavior: 'INCLUDE' }),
+      }),
     },
   );
   const expiration = new Date(Number(res.expiration));
