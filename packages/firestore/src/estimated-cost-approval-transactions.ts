@@ -23,6 +23,7 @@ import {
   storedTaskBudgetToMicros,
 } from '@assistant/persistence';
 import type { DocumentSnapshot } from '@google-cloud/firestore';
+import { hasCostEventAccountedSince } from './costs.js';
 import { firestoreEstimatedCostBaseline } from './estimated-cost-baseline.js';
 import { firestoreEstimatedCostSourceBinding } from './estimated-cost-binding.js';
 import { createWakeIntent } from './outbox.js';
@@ -857,26 +858,12 @@ export async function storePreparedFirestoreQuote(
     if (!holds?.exists || !taskHolds || !policy?.exists) return unavailable;
     if (
       !daily?.exists &&
-      !(
-        await tx.get(
-          store
-            .collection('costEvents')
-            .where('createdAt', '>=', new Date(`${day}T00:00:00.000Z`))
-            .limit(1),
-        )
-      ).empty
+      (await hasCostEventAccountedSince(tx, store, new Date(`${day}T00:00:00.000Z`)))
     )
       return unavailable;
     if (
       !monthly?.exists &&
-      !(
-        await tx.get(
-          store
-            .collection('costEvents')
-            .where('createdAt', '>=', new Date(`${month}-01T00:00:00.000Z`))
-            .limit(1),
-        )
-      ).empty
+      (await hasCostEventAccountedSince(tx, store, new Date(`${month}-01T00:00:00.000Z`)))
     )
       return unavailable;
     const heldMicros = counter(holds, 'heldMicros');

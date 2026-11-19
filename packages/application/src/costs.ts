@@ -14,6 +14,25 @@ import {
 } from '@assistant/persistence';
 import { and, count, desc, eq, gte, lt, sql, sum } from 'drizzle-orm';
 
+export type DailyBudgetHoldHealth =
+  | 'within_limit'
+  | 'above_threshold'
+  | 'paused'
+  | 'uncapped'
+  | 'unavailable';
+
+export function classifyDailyBudgetHolds({
+  dailyHeldUsd: held,
+  dailyLimitUsd: cap,
+}: Pick<CostTotals, 'dailyHeldUsd' | 'dailyLimitUsd'>): DailyBudgetHoldHealth {
+  if (held === undefined || !Number.isFinite(held) || held < 0 || Number.isNaN(cap) || cap < 0)
+    return 'unavailable';
+  if (cap === Number.POSITIVE_INFINITY) return 'uncapped';
+  if (!Number.isFinite(cap)) return 'unavailable';
+  if (held > cap / 4) return 'above_threshold';
+  return cap === 0 ? 'paused' : 'within_limit';
+}
+
 export interface ModelCostEvidenceTotal {
   provider: string | null;
   model: string | null;

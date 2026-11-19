@@ -14,7 +14,10 @@ export type SpendSource =
 export interface CostTotals {
   dailySpentUsd: number;
   monthlySpentUsd: number;
+  /** All unresolved estimates, including exposure from prior periods. */
   heldUsd: number;
+  dailyHeldUsd?: number;
+  monthlyHeldUsd?: number;
   dailyLimitUsd: number;
   monthlyLimitUsd: number;
   softPct: number;
@@ -77,6 +80,18 @@ export interface CostAttemptMetadata {
   reasoning: 'enabled' | 'disabled' | 'unsupported' | 'unknown';
 }
 
+export interface CostReservationSweep {
+  released: number;
+  markedUnknown: number;
+  settledAtEstimate?: number;
+}
+
+export interface CostProviderReceipt {
+  requestId?: string;
+  endpoint?: string;
+  outcome?: 'unpriced_result';
+}
+
 export interface CostRepository {
   readonly kind: 'cost-repository';
   getRate(key: string): Promise<{ unit: string; unitPriceUsd: number } | null>;
@@ -98,12 +113,16 @@ export interface CostRepository {
   markAttemptUnknown(
     reservationId: string,
     reason: string,
-    providerReceipt?: { requestId?: string; endpoint?: string },
+    providerReceipt?: CostProviderReceipt,
   ): Promise<void>;
   record(input: CostEventInput): Promise<void>;
   reconcile(reservationId: string, actual: ReservationActual): Promise<void>;
   release(reservationId: string): Promise<void>;
-  releaseStale(olderThanMinutes?: number, batch?: number): Promise<number>;
+  releaseStale(
+    olderThanMinutes?: number,
+    batch?: number,
+    unknownModelTtlMinutes?: number,
+  ): Promise<CostReservationSweep>;
 }
 
 export interface ReminderCancellation {
