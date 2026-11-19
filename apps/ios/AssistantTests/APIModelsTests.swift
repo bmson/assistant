@@ -947,6 +947,17 @@ enum PeopleMapFixture {
 }
 
 final class APIModelsTests: XCTestCase {
+    func testAutomationVisibilityForCurrentAndOlderServers() throws {
+        let rows = try JSONDecoder().decode([WorkspaceSchedule].self, from: Data(#"""
+        [
+          {"id":"1","name":"daily-briefing","cron":"0 8 * * *","enabled":false},
+          {"id":"2","name":"self-repair","cron":"*/15 * * * *","enabled":true},
+          {"id":"3","name":"garden-check","cron":"0 9 * * *","enabled":true,"visibleInAutomations":true}
+        ]
+        """#.utf8))
+        XCTAssertEqual(rows.filter(\.isVisibleInAutomations).map(\.id), ["1", "3"])
+    }
+
     func testSuggestionContextOnlySuppressesItsExplicitMatchingAlert() throws {
         let message = ChatMessage(id: "m", role: .assistant, parts: [
             RichMessageFixture.suggestion, .init(type: "data-card", data: RichMessageFixture.alert),

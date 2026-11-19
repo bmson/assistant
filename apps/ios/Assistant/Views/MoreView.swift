@@ -247,12 +247,12 @@ struct MoreView: View {
                         .listRowSeparator(.hidden)
                 }
             } else if let settings = model.workspace?.settings {
-                Section("Recurring jobs") {
-                    if settings.schedules.isEmpty {
-                        Label("No recurring jobs", systemImage: "clock")
+                Section("Automations") {
+                    if settings.visibleAutomations.isEmpty {
+                        Label("No automations configured", systemImage: "clock")
                             .foregroundStyle(.secondary)
                     } else {
-                        ForEach(settings.schedules) { schedule in
+                        ForEach(settings.visibleAutomations) { schedule in
                             scheduleRow(schedule)
                         }
                     }
