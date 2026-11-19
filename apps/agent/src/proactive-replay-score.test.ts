@@ -75,6 +75,34 @@ describe('proactive replay scorer', () => {
     });
   });
 
+  it('counts a push-only false alarm towards delivered notices and quiet violations', () => {
+    expect(
+      scoreReplayCase(
+        fixture,
+        [arrival, { ...retry, pushSinkCalls: 1, pushAcknowledged: true }],
+        {},
+      ),
+    ).toMatchObject({ passed: false, matched: 1, delivered: 2, quietViolations: 1 });
+  });
+
+  it('keeps a failed setup delivery outside the benchmark denominator', () => {
+    const setup: ReplayCase = {
+      id: 'S14',
+      ticks: {
+        arrival: {
+          deliveries: 1,
+          kind: 'mail-action',
+          earliestMinutes: 5,
+          latestMinutes: 10,
+          setup: true,
+        },
+      },
+    };
+    expect(
+      scoreReplayCase(setup, [{ ...arrival, moments: [{ ...moment, exactSource: false }] }], {}),
+    ).toMatchObject({ passed: false, delivered: 1, setupDeliveries: 1, setupMatches: 0 });
+  });
+
   it('keeps logical coverage independent from push acknowledgment', () => {
     expect(
       scoreReplayCase(fixture, [{ ...arrival, pushAcknowledged: false }, retry], {}),

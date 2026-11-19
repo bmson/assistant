@@ -31,6 +31,12 @@ export interface ReplayCase {
   ticks: Record<string, Suppression | ({ deliveries: 1; kind: string; setup?: true } & Timing)>;
 }
 
+// The three observations overlap for a normal delivery. Excess ledger entries,
+// messages or push calls are distinct over-delivery on the observed surface.
+function observedDeliveries(tick: ReplayTick): number {
+  return Math.max(tick.moments.length, tick.ownerNotices, tick.pushSinkCalls);
+}
+
 export function scoreReplayCase(
   definition: ReplayCase,
   ticks: readonly ReplayTick[],
@@ -52,6 +58,7 @@ export function scoreReplayCase(
     }
     const tick = seen[0];
     if (!tick) continue;
+    if (expected.deliveries === 1 && expected.setup) setupDeliveries += observedDeliveries(tick);
     if (
       tick.moments.length !== expected.deliveries ||
       tick.ownerNotices !== expected.deliveries ||
@@ -89,7 +96,6 @@ export function scoreReplayCase(
       const credit = tick.pushSinkCalls === 1 && tick.pushAcknowledged ? 1 : 0.5;
       matched += credit;
       if (expected.setup) {
-        setupDeliveries++;
         setupMatches += credit;
       }
     }
@@ -101,10 +107,7 @@ export function scoreReplayCase(
     passed: findings.length === 0,
     findings,
     expected: Object.values(definition.ticks).filter((tick) => tick.deliveries === 1).length,
-    delivered: ticks.reduce(
-      (sum, tick) => sum + Math.max(tick.moments.length, tick.ownerNotices),
-      0,
-    ),
+    delivered: ticks.reduce((sum, tick) => sum + observedDeliveries(tick), 0),
     matched,
     setupExpected: Object.values(definition.ticks).filter(
       (tick) => tick.deliveries === 1 && tick.setup,
