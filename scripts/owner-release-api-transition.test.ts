@@ -1,9 +1,16 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import * as recovery from '../infra/gcp/api3-recovery-proof.mjs';
+import * as metadata from './estimated-cost-release-native-read.js';
+import * as spending from './estimated-cost-release-profile.js';
 import {
   verifyDrainedApiTransition,
+  verifyProductionApiTransition,
   verifyTransitionCandidateContract,
 } from './owner-release-api-transition.js';
 import { type BootstrapReceipt, bootstrapDigest } from './owner-release-current-snapshot.js';
+import * as images from './owner-release-image-resolution.js';
+import * as holds from './owner-web-release-operator-hold.js';
+import * as credentials from './owner-web-tag-cloud.js';
 import { tagHash } from './owner-web-tag-retirement.js';
 
 const scope = {
@@ -178,4 +185,102 @@ describe('protected drained Firestore API transition', () => {
     candidate.components.web.peerApi.min = 1;
     expect(() => verifyTransitionCandidateContract(candidate)).toThrow();
   });
+});
+
+describe('protected transition entry point', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  function protectedRun() {
+    const pair = scenario();
+    for (const [key, value] of Object.entries({
+      GITHUB_ACTIONS: 'true',
+      GITHUB_REPOSITORY: 'bmson/assistant',
+      GITHUB_REF: 'refs/heads/main',
+      GITHUB_EVENT_NAME: 'workflow_dispatch',
+      GITHUB_WORKFLOW_REF: 'bmson/assistant/.github/workflows/deploy.yml@refs/heads/main',
+      GITHUB_WORKFLOW_SHA: source,
+      GITHUB_SHA: source,
+      GITHUB_RUN_ID: '456',
+      GITHUB_RUN_ATTEMPT: '1',
+      GCP_PROJECT: 'bmson-assistant',
+      GCP_DEPLOY_SERVICE_ACCOUNT: 'release@fixture.iam.gserviceaccount.com',
+      GCP_WORKLOAD_IDENTITY_PROVIDER:
+        'projects/123/locations/global/workloadIdentityPools/test/providers/test',
+      IMAGE_TAG: source,
+      RELEASE_COMPONENTS: 'agent,web',
+      OWNER_RELEASE_BOOTSTRAP_RECEIPT: JSON.stringify(pair.receipt),
+      OWNER_RELEASE_BOOTSTRAP_SHA256: bootstrapDigest(pair.receipt),
+      ESTIMATED_COST_DRAIN_PACKET_JSON: '',
+      API3_RECOVERY_PROOF: '',
+    }))
+      vi.stubEnv(key, value);
+    const credential = vi
+      .spyOn(credentials, 'protectedWebTagCredential')
+      .mockResolvedValue('fixture');
+    return { pair, credential };
+  }
+
+  it('holds before cloud access when an independent recovery review is missing', async () => {
+    const { credential } = protectedRun();
+    const hold = vi.spyOn(holds, 'verifyOperatorOwnedHold');
+    const review = vi.spyOn(recovery, 'protectedRecoveryReview');
+    await expect(verifyProductionApiTransition()).rejects.toThrow();
+    expect(review).toHaveBeenCalledWith(process.env, source);
+    expect(hold).not.toHaveBeenCalled();
+    expect(credential).not.toHaveBeenCalled();
+  });
+
+  it.each(['same review', 'changed review', 'expired review'] as const)(
+    'requires a stable, current qualification after both native readbacks (%s)',
+    async (outcome) => {
+      const { pair } = protectedRun();
+      const review = vi.spyOn(recovery, 'protectedRecoveryReview').mockReturnValueOnce({ source });
+      review.mockImplementationOnce(() => {
+        if (outcome === 'expired review') throw new Error('expired review');
+        return outcome === 'same review' ? { source } : { source, replacement: true };
+      });
+      vi.spyOn(spending, 'reviewedEstimatedCostReleaseProfile').mockReturnValue({
+        ...scope,
+        format: 1,
+        mode: 'compatible-off',
+        source,
+        projectId: 'bmson-assistant',
+        providerSecret: 'fixture',
+        providerVersion: '1',
+        reviewedAt: new Date(0).toISOString(),
+        expiresAt: new Date(1000).toISOString(),
+      });
+      vi.spyOn(holds, 'verifyOperatorOwnedHold').mockResolvedValue({
+        source,
+        runId: '456',
+        attempt: '1',
+        currentJob: 'release',
+        deployWorkflowId: 1,
+        cleanupWorkflowId: 2,
+        workspaceImportWorkflowId: 3,
+        cleanupVariable: 'false',
+      });
+      vi.spyOn(images, 'createImageResolutionReader').mockReturnValue(async () => {});
+      const read = vi.fn(async (url: string) => {
+        for (const native of Object.values(pair.native)) {
+          if (url === `https://run.googleapis.com/v2/${native.service.name}`) return native.service;
+          if (url === `https://run.googleapis.com/v2/${native.revision.name}`)
+            return native.revision;
+        }
+        throw new Error('Unexpected provider read');
+      });
+      vi.spyOn(metadata, 'estimatedCostMetadataRead').mockReturnValue(read);
+      const preflight = verifyProductionApiTransition();
+      if (outcome === 'same review') await expect(preflight).resolves.toBeUndefined();
+      else await expect(preflight).rejects.toThrow();
+      expect(read).toHaveBeenCalledTimes(4);
+      expect(review).toHaveBeenCalledTimes(2);
+      expect(Math.max(...read.mock.invocationCallOrder)).toBeLessThan(
+        Math.max(...review.mock.invocationCallOrder),
+      );
+    },
+  );
 });
