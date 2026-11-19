@@ -718,6 +718,26 @@ describe('restore target checkpoint routing', () => {
       verifyRestoreCheckpointPair(f.review, f.pair, 'post_admission_forward'),
     ).not.toThrow();
   });
+  it('preserves provider-quoted etags in action preconditions and holds malformed values', () => {
+    const f = staged();
+    const quoted = `"${'aB3/'.repeat(26)}ZQ=="`;
+    f.pair.web.service.etag = quoted;
+    expect(() => verifyRestoreCheckpointPair(f.review, f.pair, 'before_admission')).not.toThrow();
+    expect(planApi3ForwardRecovery(f.review, f.pair)).toMatchObject({
+      outcome: 'action',
+      action: { body: { etag: quoted } },
+    });
+    for (const malformed of [
+      quoted.slice(1),
+      quoted.slice(0, -1),
+      '""',
+      `W/${quoted}`,
+      'malformed\r\netag',
+    ]) {
+      f.pair.web.service.etag = malformed;
+      expect(() => verifyRestoreCheckpointPair(f.review, f.pair, 'before_admission')).toThrow();
+    }
+  });
   it('requires the resumed canonical agent and the paused canonical web immediately before web admission', () => {
     const f = staged();
     const agent = f.add('agent', 'r');

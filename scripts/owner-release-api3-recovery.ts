@@ -248,7 +248,8 @@ function readRole(review: RecoveryNativeContext, role: Role, native: Native, age
   const service = object(native.service);
   const resource = `${SERVICE_ROOT}${role}`;
   requireProof(service.name === resource && service.uid === original.uid);
-  text(service.etag, /^[A-Za-z0-9_+=./-]{1,256}$/);
+  // Cloud Run v2 can return an already quoted opaque token. Preserve its bytes for the write precondition.
+  text(service.etag, /^(?:[A-Za-z0-9_+=./-]{1,256}|"[A-Za-z0-9_+=./-]{1,254}")$/);
   text(service.generation, /^[1-9][0-9]{0,18}$/);
   requireProof(service.generation === service.observedGeneration && service.reconciling !== true);
   requireProof(service.deleteTime === undefined && service.expireTime === undefined);
