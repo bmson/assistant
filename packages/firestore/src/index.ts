@@ -8,7 +8,7 @@ export { FirestoreApprovalRepository } from './approvals.js';
 export { FirestoreAssistantHealthRepository } from './assistant-health.js';
 export { FirestoreAuditInvestigationRepository } from './audit-investigation.js';
 export { FirestoreBriefingRepository } from './briefing.js';
-export { readFirestoreSavedBriefing } from './briefing-watchdog.js';
+export { readFirestoreBriefingHealth, readFirestoreSavedBriefing } from './briefing-watchdog.js';
 export { FirestoreBudgetCapsRepository } from './budget-caps.js';
 export { FirestoreCallSessionRepository } from './call-sessions.js';
 export { createFirestoreCardFormAdmissionRepository } from './card-form-admission.js';
@@ -149,6 +149,7 @@ export {
   readPrivacyErasureFence,
 } from './privacy-erasure.js';
 export { FirestorePrivacyExportRepository } from './privacy-export.js';
+export { createFirestoreProactiveCanaryRepository } from './proactive-canaries.js';
 export { FirestoreProactiveHealthRepository } from './proactive-health.js';
 export { FirestoreProfileOverviewRepository } from './profile-full-overview.js';
 export { FirestoreProfileLibraryRepository } from './profile-library.js';

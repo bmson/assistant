@@ -4,6 +4,7 @@ import { ApnsClient } from '@assistant/tools/modules/push';
 import { defineModule, type ModuleHooks } from '../platform.js';
 import {
   drainPushNotificationOutbox,
+  healthCanaryAdmission,
   notifyApprovalsByPush,
   notifyOwnerByPush,
   type PushChannelDeps,
@@ -59,6 +60,7 @@ export const pushModule = defineModule<ApnsClient>({
           channel: notificationDeliveryKey('answer-ready', deliveryKey),
           now,
         }),
+      admitHealthCanary: healthCanaryAdmission(owner, policy, persistence.proactiveCanaries),
       admitWatchdog: async (deliveryKey, now) => {
         const agent = await owner();
         return policy.evaluate(agent, {

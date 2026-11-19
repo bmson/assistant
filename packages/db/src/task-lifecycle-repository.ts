@@ -10,12 +10,13 @@ import {
   missionTaskTerminalReport,
   newTaskRecord,
   normalizeTaskBudget,
+  pulseCompletionFor,
   redactTerminalArrivalTask,
 } from '@assistant/persistence';
 import { and, desc, eq, inArray, isNull, lt, lte, notInArray, or, sql } from 'drizzle-orm';
 import { savePostgresBriefingWatchdog } from './briefing-watchdog.js';
 import type { Db } from './client.js';
-import { missionReports, type TaskRow, tasks } from './schema.js';
+import { maintenanceCursors, missionReports, type TaskRow, tasks } from './schema.js';
 import { createTask } from './task-creation-repository.js';
 import { activeLease, createPostgresTaskLeaseRepository } from './task-lease-repository.js';
 
@@ -204,10 +205,24 @@ export async function completeTask(
         trigger: tasks.trigger,
         externalEventId: tasks.externalEventId,
         createdAt: tasks.createdAt,
+        updatedAt: tasks.updatedAt,
       });
     if (!updated) return false;
     if (outcome.status === 'done' && outcome.briefingOutcome)
       await savePostgresBriefingWatchdog(tx, updated, outcome.briefingOutcome);
+    const pulse =
+      outcome.status === 'done' && outcome.pulseCompleted
+        ? pulseCompletionFor(updated, 'postgres', updated.updatedAt)
+        : null;
+    if (pulse)
+      await tx
+        .insert(maintenanceCursors)
+        .values(pulse)
+        .onConflictDoUpdate({
+          target: maintenanceCursors.name,
+          set: { cursor: pulse.cursor, updatedAt: pulse.updatedAt },
+          setWhere: lte(maintenanceCursors.updatedAt, pulse.updatedAt),
+        });
 
     const arrivalRedaction = redactTerminalArrivalTask(
       updated.trigger,

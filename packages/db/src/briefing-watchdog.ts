@@ -2,13 +2,17 @@ import {
   type BriefingRunOutcome,
   briefingCursorName,
   createBriefingWatchdogRecord,
+  DAILY_BRIEFING,
+  evaluateBriefingWatchdog,
   readBriefingWatchdogRecord,
   savedBriefingMatches,
   shouldReplaceBriefingWatchdog,
 } from '@assistant/persistence';
 import { and, eq, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
-import { conversations, maintenanceCursors, messages, type TaskRow } from './schema.js';
+import { assertPostgresInstallationOwner } from './installation-owner.js';
+import { createPostgresScheduleRepository } from './schedule-repository.js';
+import { conversations, maintenanceCursors, messages, type TaskRow, tasks } from './schema.js';
 
 export async function savePostgresBriefingWatchdog(
   tx: Pick<Db, 'select' | 'insert' | 'execute'>,
@@ -63,4 +67,34 @@ export async function readPostgresSavedBriefing(
         createdAt: message.createdAt,
       }
     : null;
+}
+
+export async function readPostgresBriefingHealth(
+  db: Db,
+  clock = new Date(),
+  expectedOwner?: string,
+) {
+  const owner = await assertPostgresInstallationOwner(db, expectedOwner);
+  const schedule = await createPostgresScheduleRepository(db).getByName(owner, DAILY_BRIEFING);
+  return evaluateBriefingWatchdog({
+    scope: 'postgres',
+    owner,
+    schedule,
+    clock,
+    async cursor(name) {
+      const [row] = await db
+        .select({ cursor: maintenanceCursors.cursor })
+        .from(maintenanceCursors)
+        .where(eq(maintenanceCursors.name, name));
+      return row?.cursor;
+    },
+    async task(id) {
+      const [task] = await db
+        .select()
+        .from(tasks)
+        .where(and(eq(tasks.id, id), eq(tasks.agentId, owner)));
+      return task ?? null;
+    },
+    saved: (taskId, messageId) => readPostgresSavedBriefing(db, owner, taskId, messageId),
+  });
 }

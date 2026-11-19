@@ -457,6 +457,7 @@ export async function runCodeJobPhase(
       status: 'done',
       progress: outcome.summary.slice(0, 500),
       briefingOutcome: outcome.briefingOutcome,
+      pulseCompleted: outcome.pulseCompleted,
     });
     if (!completed) return LOST_LEASE;
     return { outcome: 'done', detail: outcome.summary.slice(0, 200) };
