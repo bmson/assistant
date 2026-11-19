@@ -40,6 +40,18 @@ Complete browser and native sign-in, canonical status confirmation, refresh, can
 
 Qualify two independently implemented OAuth MCP servers through connect, an approved read, expiry recovery, and disconnect. Mocked HTTP and local persistence tests are required source evidence; they do not replace real provider and installed-iPhone acceptance.
 
+## Local qualification for the July 2026 transport
+
+Run the discovery qualification and legacy transport tests from the repository root:
+
+```sh
+pnpm exec vitest run packages/tools/src/mcp-discovery-qualification.test.ts packages/tools/src/mcp-transport.test.ts packages/tools/src/mcp.test.ts
+```
+
+The qualification client sends `server/discover` to a loopback HTTP fixture and requests one page of `tools/list` when the server advertises the requested revision and tool support. Each request carries its protocol version and client metadata. The fixture exercises JSON replies and request-scoped Server-Sent Events. A continuation cursor marks the list as partial. Tool schemas that request custom HTTP headers are outside this qualification. This exercise uses synthetic tools and requires no provider account or credentials.
+
+Saved connections still use the November 2025 transport. Modern tool execution, complete pagination, protocol selection between revisions, and interoperability with a hosted provider remain open before enabling this revision for saved connections. See the [Streamable HTTP binding](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http) and [versioning rules](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning).
+
 ## Remaining Phase 3 work
 
 1. Qualify the newer MCP transport independently while preserving existing server compatibility.
