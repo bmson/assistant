@@ -58,10 +58,12 @@ export function createPostgresSignalRepository(db: Db): SignalRepository {
           .where(
             and(
               eq(signals.agentId, query.agentId),
-              eq(signals.kind, query.kind),
-              arrayContains(signals.subjectPersonIds, [query.personId]),
-              gte(signals.at, from),
-              lt(signals.at, to),
+              query.kind === undefined ? undefined : eq(signals.kind, query.kind),
+              query.personId === undefined
+                ? undefined
+                : arrayContains(signals.subjectPersonIds, [query.personId]),
+              from === undefined ? undefined : gte(signals.at, from),
+              to === undefined ? undefined : lt(signals.at, to),
             ),
           );
         return signalsValidAt(

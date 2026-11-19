@@ -57,14 +57,13 @@ export function createFirestoreSignalRepository(store: InstallationStore): Signa
     async list(query) {
       const { from, to, asOf } = signalQueryTimes(query);
       const fence = await readPrivacyErasureFence(store, query.agentId);
-      const rows = await store
-        .collection('signals')
-        .where('agentId', '==', query.agentId)
-        .where('kind', '==', query.kind)
-        .where('subjectPersonIds', 'array-contains', query.personId)
-        .where('at', '>=', from)
-        .where('at', '<', to)
-        .get();
+      let scoped = store.collection('signals').where('agentId', '==', query.agentId);
+      if (query.kind !== undefined) scoped = scoped.where('kind', '==', query.kind);
+      if (query.personId !== undefined)
+        scoped = scoped.where('subjectPersonIds', 'array-contains', query.personId);
+      if (from !== undefined && to !== undefined)
+        scoped = scoped.where('at', '>=', from).where('at', '<', to);
+      const rows = await scoped.orderBy('at').get();
       await assertPrivacyErasureFenceUnchanged(store, query.agentId, fence);
       return signalsValidAt(
         rows.docs.flatMap((doc) => readSignal(doc, query.agentId) ?? []),

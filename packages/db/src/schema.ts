@@ -3800,6 +3800,7 @@ export const signals = pgTable(
     record: jsonb().$type<Signal>().notNull(),
   },
   (t) => [
+    index('signals_agent_at_idx').on(t.agentId, t.at),
     index('signals_agent_kind_at_idx').on(t.agentId, t.kind, t.at),
     index('signals_subject_person_ids_idx').using('gin', t.subjectPersonIds),
   ],

@@ -58,7 +58,7 @@ const expected: MigrationTailMetadata[] = [
   },
   {
     folderMillis: 1795126823025,
-    hash: '92d28b7179d9ab391bc3096c78d6de1634cefdbb09ea56e6e931fa0b9559dcae',
+    hash: 'f7a937e2cde1800ee035b19a6ecc799e790b62631d77e7027430b3523de5d267',
   },
 ];
 const applied = (count: number): AppliedMigrationTailRow[] =>

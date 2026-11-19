@@ -13530,6 +13530,27 @@
         }
       },
       "indexes": {
+        "signals_agent_at_idx": {
+          "name": "signals_agent_at_idx",
+          "columns": [
+            {
+              "expression": "agent_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
         "signals_agent_kind_at_idx": {
           "name": "signals_agent_kind_at_idx",
           "columns": [

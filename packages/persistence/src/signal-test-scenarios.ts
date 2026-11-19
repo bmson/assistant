@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { expect, it } from 'vitest';
 import { extractBillEmailEvidence } from './bill-email-evidence.js';
 import type { Records } from './records.js';
-import type { SignalRepository } from './signals.js';
+import type { Signal, SignalQuery, SignalRepository } from './signals.js';
 
 const billTime = new Date('2026-11-19T12:00:00Z');
 const paymentTime = new Date('2026-11-20T12:00:00Z');
@@ -74,7 +74,7 @@ export function signalContract(
     await expect(
       repository.record({ ...billInput, emailIngestId: unauthenticated.id }),
     ).rejects.toThrow('not admitted');
-    await repository.record({
+    const spouseBill = await repository.record({
       ...billInput,
       emailIngestId: otherPerson.id,
       subjectPersonIds: ['spouse'],
@@ -147,6 +147,41 @@ export function signalContract(
       'Conflicting replay',
     );
     expect(await repository.get(agentId, record.id)).toEqual(closed);
+
+    const range = { from: billTime, to: tomorrow };
+    const kind = { kind: 'bill' } as const;
+    const person = { personId: 'owner' };
+    const scope = { agentId, asOf: paymentTime };
+    const filters: Array<[Partial<SignalQuery>, Signal[]]> = [
+      [kind, [spouseBill, unrelatedBill]],
+      [person, [payment, unrelatedBill]],
+      [range, [spouseBill, payment]],
+      [{ ...kind, ...person }, [unrelatedBill]],
+      [{ ...kind, ...range }, [spouseBill]],
+      [{ ...person, ...range }, [payment]],
+      [{ ...kind, ...person, ...range }, []],
+    ];
+    for (const [filter, expected] of filters) {
+      expect(await repository.list({ ...scope, ...filter })).toEqual(expected);
+      expect(await repository.list({ ...scope, ...filter, agentId: otherAgentId })).toEqual([
+        foreignBill,
+      ]);
+    }
+    expect(await repository.list({ ...scope, from: paymentTime, to: tomorrow })).toEqual([payment]);
+    expect(
+      await repository.list({
+        ...scope,
+        from: new Date(paymentTime.getTime() + 1),
+        to: tomorrow,
+      }),
+    ).toEqual([]);
+    await expect(repository.list(scope)).rejects.toThrow('at least one filter');
+    await expect(repository.list({ ...scope, ...kind, from: billTime })).rejects.toThrow(
+      'both endpoints',
+    );
+    await expect(repository.list({ ...scope, from: tomorrow, to: tomorrow })).rejects.toThrow(
+      'nonempty time range',
+    );
   });
 }
 

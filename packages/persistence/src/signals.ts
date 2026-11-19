@@ -32,11 +32,11 @@ export interface RecordBillSignal {
 
 export interface SignalQuery {
   agentId: string;
-  kind: Signal['kind'];
-  personId: string;
-  /** Event time range [from, to), independent of the signal's validity. */
-  from: Date;
-  to: Date;
+  kind?: Signal['kind'];
+  personId?: string;
+  /** Specify both endpoints for an event-time range [from, to). */
+  from?: Date;
+  to?: Date;
   /** Validity instant. Producers supply their current clock or a historical instant. */
   asOf: Date;
 }
@@ -45,7 +45,7 @@ export interface SignalRepository {
   record(input: RecordBillSignal): Promise<Signal>;
   /** Canonical record, including its durable supersession metadata. */
   get(agentId: string, id: string): Promise<Signal | null>;
-  /** Signals valid at asOf, in event-time order, with canonical metadata. */
+  /** Apply one or more filters within the agent and return signals valid at asOf. */
   list(query: SignalQuery): Promise<Signal[]>;
 }
 
@@ -141,9 +141,17 @@ export function planSignalWrite(
 }
 
 export function signalQueryTimes(query: SignalQuery) {
-  const from = query.from.toISOString();
-  const to = query.to.toISOString();
-  if (from >= to || !query.personId.trim()) throw new Error('Invalid signal query');
+  const from = query.from?.toISOString();
+  const to = query.to?.toISOString();
+  if (query.personId !== undefined && !query.personId.trim())
+    throw new Error('Signal query person is empty');
+  if (
+    (from === undefined) !== (to === undefined) ||
+    (from !== undefined && to !== undefined && from >= to)
+  )
+    throw new Error('Signal query requires a nonempty time range with both endpoints');
+  if (query.kind === undefined && query.personId === undefined && from === undefined)
+    throw new Error('Signal query requires at least one filter');
   return { from, to, asOf: query.asOf.toISOString() };
 }
 
