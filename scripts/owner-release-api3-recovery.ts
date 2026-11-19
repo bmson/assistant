@@ -64,8 +64,11 @@ type Traffic = { revision: string; percent: number; tag?: string };
 type Action = {
   role: Role;
   step: 'close' | 'warm' | 'pin' | 'create-paused';
+  reviewSha256: string;
+  pairSha256: string;
+  settlementSha256?: string;
   beforeSha256: string;
-  updateMask: 'scaling,traffic' | 'traffic' | 'template,traffic';
+  updateMask: 'scaling,traffic' | 'traffic' | 'template';
   body: Obj;
 };
 type Plan =
@@ -282,7 +285,12 @@ function readRole(review: Review, role: Role, native: Native, agentUri: string) 
   );
   const revisions = object(native.revisions);
   requireProof(Object.keys(revisions).every((key) => recognized.includes(key)));
-  const relevant = new Set([...rows.map((row) => row.revision), latest, ...Object.keys(revisions)]);
+  const relevant = new Set([
+    ...rows.map((row) => row.revision),
+    latest,
+    ...(ready ? [ready] : []),
+    ...Object.keys(revisions),
+  ]);
   let pausedTemplate: Obj | undefined;
   const revisionObjects: Record<string, Obj> = {};
   for (const revision of relevant) {
@@ -391,6 +399,10 @@ export function planApi3ForwardRecovery(
     web: bootstrapDigest(state.web.service),
     agent: bootstrapDigest(state.agent.service),
   };
+  const actionBinding = {
+    reviewSha256: bootstrapDigest(review),
+    pairSha256: bootstrapDigest(pair),
+  };
   for (const role of roles) {
     const current = state[role];
     if (
@@ -401,6 +413,7 @@ export function planApi3ForwardRecovery(
     return {
       outcome: 'action',
       action: {
+        ...actionBinding,
         role,
         step: 'close',
         beforeSha256: serviceSha256[role],
@@ -453,7 +466,10 @@ export function planApi3ForwardRecovery(
     ) {
       requireProof(matching(settlement.serviceSha256, serviceSha256));
       const create = current.latest !== desired;
-      const warm = create || current.ready !== desired;
+      const warm =
+        !current.warming &&
+        (current.ready !== desired ||
+          (desired === current.parked && current.canonical !== desired));
       requireProof(!create || !current.revisionObjects[desired]);
       const route = warm
         ? [target(current.canonical), target(desired, `park-${review.runId}-1`)]
@@ -461,15 +477,18 @@ export function planApi3ForwardRecovery(
       return {
         outcome: 'action',
         action: {
+          ...actionBinding,
+          settlementSha256: bootstrapDigest(settlement),
           role,
           step: create ? 'create-paused' : warm ? 'warm' : 'pin',
           beforeSha256: serviceSha256[role],
-          updateMask: create ? 'template,traffic' : 'traffic',
+          updateMask: create ? 'template' : 'traffic',
           body: {
             name: current.resource,
             etag: current.service.etag,
-            ...(create ? { template: { ...current.pausedTemplate, revision: desired } } : {}),
-            traffic: route,
+            ...(create
+              ? { template: { ...current.pausedTemplate, revision: desired } }
+              : { traffic: route }),
           },
         },
       };
@@ -560,15 +579,20 @@ export function planApi3ForwardRecovery(
 }
 type PriorAction = { pair: Snapshots; settlement?: Settlement; action: Action };
 
+function reviewedPriorAction(review: Review, prior: PriorAction) {
+  const plan = planApi3ForwardRecovery(review, prior.pair, prior.settlement);
+  requireProof(plan.outcome === 'action' && matching(plan.action, prior.action));
+  return plan.action;
+}
+
 /** Inspect the exact intended effect of one attempted action using saved GETs. */
 export function reconcileApi3ForwardRecovery(
   review: Review,
   prior: PriorAction,
   observed: Snapshots,
 ) {
-  const plan = planApi3ForwardRecovery(review, prior.pair, prior.settlement);
-  requireProof(plan.outcome === 'action' && matching(plan.action, prior.action));
-  const { role, step, updateMask, body } = plan.action;
+  const action = reviewedPriorAction(review, prior);
+  const { role, step, updateMask, body } = action;
   const before = object(prior.pair[role].service),
     after = object(observed[role].service);
   const other = role === 'agent' ? 'web' : 'agent';
@@ -586,11 +610,12 @@ export function reconcileApi3ForwardRecovery(
       Object.fromEntries(Object.entries(s).filter(([name]) => !fields.has(name))),
     );
   requireProof(unchanged(before) === unchanged(after));
+  const expectedTraffic = body.traffic ?? before.traffic;
   for (const rows of [after.traffic, after.trafficStatuses])
     requireProof(
       matching(
         routeRows(String(after.name), rows, role, review.runId),
-        routeRows(String(after.name), body.traffic, role, review.runId),
+        routeRows(String(after.name), expectedTraffic, role, review.runId),
       ),
     );
   if (step === 'create-paused') {
@@ -598,16 +623,37 @@ export function reconcileApi3ForwardRecovery(
     const revision = name(String(after.name), after.latestCreatedRevision);
     requireProof(revision === template.revision);
     const raw = observed[role].revisions[revision];
+    requireProof(!Object.hasOwn(prior.pair[role].revisions, revision));
     verifyBootstrapRevisionTemplate(String(after.name), template, raw, revision);
     verifyBootstrapRevisionTemplate(String(after.name), after.template, raw, revision);
+  } else {
+    requireProof(after.latestCreatedRevision === before.latestCreatedRevision);
+  }
+  const original = review.original.services[role];
+  const priorRevisions = prior.pair[role].revisions;
+  const afterRevisions = observed[role].revisions;
+  const expectedRevisions = new Set(Object.keys(priorRevisions));
+  if (step === 'create-paused')
+    expectedRevisions.add(name(String(after.name), after.latestCreatedRevision));
+  requireProof(matching(Object.keys(afterRevisions).sort(), [...expectedRevisions].sort()));
+  for (const [revision, raw] of Object.entries(priorRevisions)) {
+    const current = object(afterRevisions[revision]);
+    const image = revision === original.revision ? original.image : review.images[role];
+    requireProof(object(raw).uid === current.uid);
+    requireProof(
+      matching(
+        semanticTemplate(object(raw), image, revision),
+        semanticTemplate(current, image, revision),
+      ),
+    );
   }
   return {
     outcome: 'observed-exact-effect' as const,
     source: review.source,
     role,
     step,
-    beforeSha256: plan.action.beforeSha256,
-    requestSha256: bootstrapDigest(plan.action),
+    beforeSha256: action.beforeSha256,
+    requestSha256: bootstrapDigest(action),
     afterSha256: bootstrapDigest(after),
     operationProven: false,
   };
@@ -626,6 +672,7 @@ function main() {
     pair: Snapshots;
     settlement?: Settlement;
     imageProofs: { image: string; parent: string; child: string }[];
+    expectedActionSha256?: string;
     unresolvedAttemptSha256?: string;
     reconcile?: PriorAction;
   };
@@ -637,16 +684,36 @@ function main() {
       privateBytes(proof.parent, 2 * 1024 * 1024),
       privateBytes(proof.child, 2 * 1024 * 1024),
     );
-  let plan: Plan | ReturnType<typeof reconcileApi3ForwardRecovery>;
-  if (packet.unresolvedAttemptSha256) {
+  let plan:
+    | Plan
+    | ReturnType<typeof reconcileApi3ForwardRecovery>
+    | { outcome: 'observation-required'; requestSha256: string; operationProven: false };
+  if (packet.unresolvedAttemptSha256 !== undefined) {
     requireProof(
-      packet.reconcile &&
-        bootstrapDigest(packet.reconcile.action) === packet.unresolvedAttemptSha256,
+      packet.expectedActionSha256 === undefined &&
+        packet.reconcile &&
+        bootstrapDigest(packet.reconcile.action) === text(packet.unresolvedAttemptSha256, sha),
     );
-    plan = reconcileApi3ForwardRecovery(packet.review, packet.reconcile, packet.pair);
+    reviewedPriorAction(packet.review, packet.reconcile);
+    try {
+      plan = reconcileApi3ForwardRecovery(packet.review, packet.reconcile, packet.pair);
+    } catch {
+      // The original request is authenticated by the reviewed input digest.
+      // Any insufficient or conflicting GET leaves it unresolved, with no action.
+      plan = {
+        outcome: 'observation-required',
+        requestSha256: packet.unresolvedAttemptSha256,
+        operationProven: false,
+      };
+    }
   } else {
     requireProof(!packet.reconcile);
     plan = planApi3ForwardRecovery(packet.review, packet.pair, packet.settlement);
+    if (packet.expectedActionSha256 !== undefined)
+      requireProof(
+        plan.outcome === 'action' &&
+          bootstrapDigest(plan.action) === text(packet.expectedActionSha256, sha),
+      );
   }
   writeFileSync(output, `${JSON.stringify({ inputSha256: expected, ...plan }, null, 2)}\n`, {
     mode: 0o600,

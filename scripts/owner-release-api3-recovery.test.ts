@@ -247,7 +247,7 @@ function advance(f: Case, plan: ReturnType<typeof planApi3ForwardRecovery>) {
     native = f.pair[action.role];
   const before = structuredClone(f.pair);
   const settlement = settle(f);
-  const traffic = action.body.traffic as ReturnType<typeof route>[];
+  const traffic = (action.body.traffic ?? native.service.traffic) as ReturnType<typeof route>[];
   native.service.traffic = structuredClone(traffic);
   native.service.trafficStatuses = observedRoutes(traffic, native.service.uri);
   if (action.body.scaling) native.service.scaling = structuredClone(manual);
@@ -269,6 +269,12 @@ function advance(f: Case, plan: ReturnType<typeof planApi3ForwardRecovery>) {
   return observed;
 }
 function readyAndPin(f: Case, role: Role, target = phase(role, 'park')) {
+  const warm = planApi3ForwardRecovery(f.review, f.pair, settle(f));
+  expect(warm).toMatchObject({
+    outcome: 'action',
+    action: { role, step: 'warm', updateMask: 'traffic' },
+  });
+  advance(f, warm);
   const pending = planApi3ForwardRecovery(f.review, f.pair, settle(f));
   expect(pending).toEqual({ outcome: 'startup-required', role, revision: target });
   f.pair[role].service.latestReadyRevision = target;
@@ -446,12 +452,9 @@ describe('recover a partially staged Firestore transition', () => {
         action: {
           role: 'agent',
           step: 'create-paused',
+          updateMask: 'template',
           body: {
             template: template('agent', phase('agent', 'park'), 'paused'),
-            traffic: [
-              route(promoted ? agent : f.old.agent),
-              route(phase('agent', 'park'), 0, warmTag),
-            ],
           },
         },
       });
@@ -528,6 +531,7 @@ describe('recover a partially staged Firestore transition', () => {
       agent: template('agent', phase('agent', 'p'), 'paused'),
     };
     advance(f, planApi3ForwardRecovery(f.review, f.pair, settle(f)));
+    advance(f, planApi3ForwardRecovery(f.review, f.pair, settle(f)));
     const state = f.pair.web.service;
     state.trafficStatuses = state.trafficStatuses.map((row) => ({
       ...row,
@@ -579,4 +583,102 @@ describe('recover a partially staged Firestore transition', () => {
     f.pair.agent.service.ingress = 'INGRESS_TRAFFIC_ALL';
     expect(() => reconcileApi3ForwardRecovery(f.review, prior, f.pair)).toThrow();
   });
+
+  it('rehearses an actual mixed-pair recovery through successive offline CLI invocations', () => {
+    const f = scenario();
+    const web = f.add('web', 'p');
+    f.add('agent', 'p');
+    const agentSuccessor = f.add('agent', 'r');
+    f.setRouting('web', [route(web, 100, candidate)], true);
+    f.setRouting('agent', [route(f.old.agent), route(agentSuccessor, 0, candidate)]);
+    const directory = mkdtempSync(join(tmpdir(), 'assistant-api3-mixed-rehearsal-'));
+    const script = fileURLToPath(new URL('./owner-release-api3-recovery.ts', import.meta.url));
+    type Plan = ReturnType<typeof planApi3ForwardRecovery>;
+    type Prior = Parameters<typeof reconcileApi3ForwardRecovery>[1];
+    let call = 0;
+    function offline(
+      settlement?: ReturnType<typeof settle>,
+      prior?: Prior,
+      observed = f.pair,
+      expectedActionSha256?: string,
+    ) {
+      const input = join(directory, `input-${++call}.json`);
+      const output = join(directory, `output-${call}.json`);
+      const packet = {
+        review: f.review,
+        pair: observed,
+        imageProofs: [],
+        settlement,
+        expectedActionSha256,
+        ...(prior
+          ? { reconcile: prior, unresolvedAttemptSha256: bootstrapDigest(prior.action) }
+          : {}),
+      };
+      const serialized = JSON.stringify(packet);
+      const digest = bootstrapDigest(JSON.parse(serialized));
+      writeFileSync(input, serialized, { mode: 0o600, flag: 'wx' });
+      execFileSync(process.execPath, ['--import', 'tsx', script, input, digest, output], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: 10000,
+      });
+      expect(statSync(output).mode & 0o777).toBe(0o600);
+      return JSON.parse(readFileSync(output, 'utf8')) as Plan;
+    }
+    function dispatch(step: string, role: Role, settlement?: ReturnType<typeof settle>) {
+      const plan = offline(settlement);
+      if (plan.outcome !== 'action') throw new Error('Expected a reviewed recovery action');
+      expect(plan.action).toMatchObject({ step, role, pairSha256: bootstrapDigest(f.pair) });
+      const requestDigest = bootstrapDigest(plan.action);
+      expect(offline(settlement, undefined, f.pair, requestDigest)).toMatchObject({
+        outcome: 'action',
+        action: plan.action,
+      });
+      if (settlement) {
+        const swapped = { ...settlement, evidenceSha256: '9'.repeat(64) };
+        expect(() => offline(swapped, undefined, f.pair, requestDigest)).toThrow();
+      }
+      const prior = { pair: structuredClone(f.pair), settlement, action: plan.action };
+      const unknown = offline(undefined, prior);
+      expect(unknown).toMatchObject({ outcome: 'observation-required', operationProven: false });
+      expect(unknown).not.toHaveProperty('action');
+      advance(f, plan);
+      expect(offline(undefined, prior)).toMatchObject({
+        outcome: 'observed-exact-effect',
+        requestSha256: requestDigest,
+        operationProven: false,
+      });
+      expect(() => offline(settlement, undefined, f.pair, requestDigest)).toThrow();
+      return plan.action;
+    }
+    try {
+      dispatch('close', 'web');
+      dispatch('close', 'agent');
+      expect(offline()).toMatchObject({ outcome: 'settlement-required' });
+      const create = dispatch('create-paused', 'agent', settle(f));
+      expect(create.updateMask).toBe('template');
+      expect(create.body).not.toHaveProperty('traffic');
+      expect(f.pair.agent.service.traffic).toEqual([route(f.old.agent)]);
+      const warm = dispatch('warm', 'agent', settle(f));
+      const parked = phase('agent', 'park');
+      expect(warm.body.traffic).toEqual([route(f.old.agent), route(parked, 0, warmTag)]);
+      expect(offline(settle(f))).toMatchObject({
+        outcome: 'startup-required',
+        role: 'agent',
+        revision: parked,
+      });
+      f.pair.agent.service.latestReadyRevision = parked;
+      const pin = dispatch('pin', 'agent', settle(f));
+      expect(pin.body.traffic).toEqual([route(parked)]);
+      expect(offline(settle(f))).toMatchObject({
+        outcome: 'closed-api3-pair',
+        receipt: {
+          source: resumeSource,
+          services: { web: { revision: web }, agent: { revision: parked } },
+        },
+      });
+      assertClosed(f, { web, agent: parked });
+    } finally {
+      rmSync(directory, { recursive: true });
+    }
+  }, 45000);
 });
