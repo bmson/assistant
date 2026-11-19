@@ -204,7 +204,7 @@ for (const driver of ['postgres', 'firestore'] as const) {
             trust: 'assistant',
             trigger: { source: 'schedule', payload: { job } },
           });
-          return executeTask(deps, task.id);
+          return { ...(await executeTask(deps, task.id)), taskId: task.id };
         }
 
         expect(await runScheduled('email.extract')).toMatchObject({
@@ -269,15 +269,20 @@ for (const driver of ['postgres', 'firestore'] as const) {
           await db.insert(emailIngest).values([stuck, fresh, review]);
         }
         const stalledExtraction = await runScheduled('email.extract');
-        expect(stalledExtraction).toMatchObject({
-          outcome: 'done',
-          detail: expect.stringContaining(
+        expect(stalledExtraction.outcome).toBe('done');
+        const recorded = await persistence.executionContext?.getTask(
+          agentId,
+          stalledExtraction.taskId,
+        );
+        expect(recorded).toMatchObject({
+          status: 'done',
+          progress: expect.stringContaining(
             '0 still pending extraction; recent intake (last 7 days): 1 stuck in scoring for over six hours, ' +
               '1 still in intake within six hours, 1 in intake awaiting review',
           ),
         });
-        expect(stalledExtraction.detail).not.toContain(stuck.subject);
-        expect(stalledExtraction.detail).not.toContain(stuck.fromEmail);
+        expect(recorded?.progress).not.toContain(stuck.subject);
+        expect(recorded?.progress).not.toContain(stuck.fromEmail);
         expect(object).toHaveBeenCalledTimes(2);
 
         const warning = 'Mail processing has waited over six hours: 1 in scoring.';
