@@ -123,6 +123,10 @@ export function occurrenceIsCurrent(current: ScheduleRecord, input: ScheduleOccu
 
 export const GOAL_TASK_TERMINAL = ['done', 'failed', 'cancelled'];
 export const GOAL_SUPERSEDED_PROGRESS = 'superseded by the next automatic session';
+/** Unknown future assignment records must never enter generic goal automation. */
+export function goalAutomationEligible(goal: object): boolean {
+  return !('researchAssignment' in goal) || goal.researchAssignment == null;
+}
 /** Compare the complete goal and the exact open task versions while locked. */
 export function goalOccurrenceIsCurrent(
   input: ScheduleOccurrence,
@@ -147,6 +151,7 @@ export function goalOccurrenceIsCurrent(
     canonical(goal) !== canonical(guard.goal)
   )
     return false;
+  if (!goalAutomationEligible(goal)) return false;
   const ordered = (rows: GoalSessionState['openTasks']) =>
     [...rows].sort((a, b) => a.id.localeCompare(b.id));
   if (canonical(ordered(openTasks)) !== canonical(ordered(guard.openTasks))) return false;

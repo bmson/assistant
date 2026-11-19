@@ -5,7 +5,7 @@ import {
   goalScheduleName,
 } from '@assistant/core/workflow/schedules';
 import { conversations, type Db, goals, schedules, tasks } from '@assistant/db';
-import type { GoalReadRepository } from '@assistant/persistence';
+import type { GoalReadRepository, ResearchAssignmentState } from '@assistant/persistence';
 import { and, asc, count, desc, eq, isNotNull, isNull, notInArray } from 'drizzle-orm';
 
 export const goalStatuses = ['active', 'paused', 'done', 'abandoned'] as const;
@@ -27,6 +27,7 @@ export interface GoalSnapshot {
   mirrorToPrimary: boolean;
   autonomy: boolean;
   taintedOrigin: boolean;
+  researchAssignment: ResearchAssignmentState | null;
 }
 
 export interface GoalDashboardItem {
@@ -90,7 +91,7 @@ export async function listGoalsDashboardWithRepository(
     items: rows.map((goal) => {
       const automation = schedules.find((schedule) => schedule.name === goalScheduleName(goal.id));
       return {
-        goal,
+        goal: { ...goal, researchAssignment: goal.researchAssignment ?? null },
         conversationId: chatByGoalId.get(goal.id),
         workActive: activeGoalIds.has(goal.id),
         ...(automation

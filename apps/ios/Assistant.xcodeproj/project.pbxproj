@@ -183,6 +183,9 @@
 		B20000000000000000000006 /* Models/GoogleCalendarConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = E61C00000000000000000006 /* Models/GoogleCalendarConnection.swift */; };
 		B20000000000000000000007 /* Models/McpSignInOptions.swift in Sources */ = {isa = PBXBuildFile; fileRef = E63C00000000000000000008 /* Models/McpSignInOptions.swift */; };
 		B20000000000000000000008 /* System/GoogleCalendarAuthenticationSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = E61C00000000000000000002 /* System/GoogleCalendarAuthenticationSession.swift */; };
+		B13A99000000000000000006 /* Models/NativeMemoryCorrectionConsumer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C13A99000000000000000006 /* Models/NativeMemoryCorrectionConsumer.swift */; };
+		B13A99000000000000000007 /* NativeMemoryCorrectionConsumerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C13A99000000000000000007 /* NativeMemoryCorrectionConsumerTests.swift */; };
+		B20000000000000000000009 /* Models/NativeMemoryCorrectionConsumer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C13A99000000000000000006 /* Models/NativeMemoryCorrectionConsumer.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -331,6 +334,8 @@
 		C10000000000000000000003 /* MobileControlsUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileControlsUITests.swift; sourceTree = "<group>"; };
 		C10000000000000000000013 /* AssistantUITestHost.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AssistantUITestHost.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		C10000000000000000000021 /* AssistantUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AssistantUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		C13A99000000000000000006 /* Models/NativeMemoryCorrectionConsumer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models/NativeMemoryCorrectionConsumer.swift; sourceTree = "<group>"; };
+		C13A99000000000000000007 /* NativeMemoryCorrectionConsumerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeMemoryCorrectionConsumerTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -450,6 +455,7 @@
 				C13A99000000000000000002 /* Views/MemoryCorrectionReview.swift */,
 				C13A99000000000000000001 /* Models/MemoryCorrectionPresentation.swift */,
 				C13A99000000000000000004 /* Models/NativeMemoryCorrectionRecovery.swift */,
+				C13A99000000000000000006 /* Models/NativeMemoryCorrectionConsumer.swift */,
 				C00000000000000000000076 /* Views/MemoryDataView.swift */,
 				C00000000000000000000078 /* Views/CommitmentsView.swift */,
 				C00000000000000000000077 /* Views/MemoryLibraryView.swift */,
@@ -490,6 +496,7 @@
 				C00000000000000000000020 /* APIModelsTests.swift */,
 				C13A99000000000000000003 /* MemoryCorrectionPresentationTests.swift */,
 				C13A99000000000000000005 /* NativeMemoryCorrectionRecoveryTests.swift */,
+				C13A99000000000000000007 /* NativeMemoryCorrectionConsumerTests.swift */,
 				C000000000000000000000BD /* OptimisticEditsTests.swift */,
 				C000000000000000000000B5 /* PhoneCalendarStoreTests.swift */,
 				C000000000000000000000A2 /* ConversationDraftsTests.swift */,
@@ -768,6 +775,7 @@
 				B13A99000000000000000002 /* Views/MemoryCorrectionReview.swift in Sources */,
 				B13A99000000000000000001 /* Models/MemoryCorrectionPresentation.swift in Sources */,
 				B13A99000000000000000004 /* Models/NativeMemoryCorrectionRecovery.swift in Sources */,
+				B13A99000000000000000006 /* Models/NativeMemoryCorrectionConsumer.swift in Sources */,
 				B00000000000000000000076 /* Views/MemoryDataView.swift in Sources */,
 				B00000000000000000000078 /* Views/CommitmentsView.swift in Sources */,
 				B00000000000000000000077 /* Views/MemoryLibraryView.swift in Sources */,
@@ -803,6 +811,7 @@
 				B00000000000000000000012 /* APIModelsTests.swift in Sources */,
 				B13A99000000000000000003 /* MemoryCorrectionPresentationTests.swift in Sources */,
 				B13A99000000000000000005 /* NativeMemoryCorrectionRecoveryTests.swift in Sources */,
+				B13A99000000000000000007 /* NativeMemoryCorrectionConsumerTests.swift in Sources */,
 				B000000000000000000000BD /* OptimisticEditsTests.swift in Sources */,
 				B000000000000000000000B5 /* PhoneCalendarStoreTests.swift in Sources */,
 				B000000000000000000000A2 /* ConversationDraftsTests.swift in Sources */,
@@ -832,6 +841,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B20000000000000000000009 /* Models/NativeMemoryCorrectionConsumer.swift in Sources */,
 				B20000000000000000000001 /* Views/GoogleCalendarConnectionView.swift in Sources */,
 				B20000000000000000000002 /* Views/McpSignInOptionsSection.swift in Sources */,
 				B20000000000000000000003 /* Views/McpOAuthControl.swift in Sources */,

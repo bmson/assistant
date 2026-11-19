@@ -140,5 +140,4 @@ Code-side, the agent has two paths left that `validateAgentPersistenceConfig` ke
 1. Canaries. `CANARY_ENABLED` must stay false; `/internal/canaries/*` answers 501 because `canary_runs` is SQL.
 2. Agent-side location pings. `LOCATION_PING_SECRET` must stay empty; `/webhooks/location` and its arrival nudge are SQL. Mobile pings go through the web instead.
 
-
 The production cutover itself is an owner action, run from `docs/firestore-cutover-checklist.md`.

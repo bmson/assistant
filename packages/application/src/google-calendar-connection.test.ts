@@ -7,7 +7,9 @@ import {
   createGoogleCalendarConnectionRepository,
   emptyGoogleCalendarConnection,
   GOOGLE_CALENDAR_READ_SCOPE,
+  GOOGLE_CALENDAR_WRITE_SCOPE,
   type GoogleCalendarConnectionState,
+  parseGoogleCalendarConnection,
 } from '@assistant/persistence';
 import { describe, expect, it, vi } from 'vitest';
 import { createGoogleCalendarConnectionService } from './google-calendar-connection.js';
@@ -52,7 +54,16 @@ function fixture() {
     email_verified: true,
     nonce: row?.flow?.nonce,
   }));
-  const ports = { repository, config, encrypt, decrypt, fetcher, verifyIdentity, now: () => clock };
+  const ports = {
+    repository,
+    config,
+    writeContractReady: true,
+    encrypt,
+    decrypt,
+    fetcher,
+    verifyIdentity,
+    now: () => clock,
+  };
   const service = createGoogleCalendarConnectionService(ports);
   async function begin() {
     const flow = await service.connect('owner');
@@ -529,3 +540,239 @@ function required<T>(value: T | null | undefined): T {
   if (value === null || value === undefined) throw new Error('Expected fixture value');
   return value;
 }
+
+describe('optional personal Calendar event-write upgrade', () => {
+  async function upgrade(f: ReturnType<typeof fixture>) {
+    const flow = await f.service.connect('owner', 'calendarWrite');
+    return { flow, state: required(new URL(flow.authorizationUrl).searchParams.get('state')) };
+  }
+  function writeToken() {
+    return Response.json({
+      access_token: 'write-access',
+      refresh_token: 'write-refresh',
+      token_type: 'Bearer',
+      expires_in: 3600,
+      scope: `${scopes} ${GOOGLE_CALENDAR_WRITE_SCOPE}`,
+      id_token: 'id',
+    });
+  }
+  it('requires an existing read connection and requests only explicit event-write scope', async () => {
+    const f = fixture();
+    await expect(upgrade(f)).rejects.toThrow('disconnected');
+    await f.connect();
+    expect((await f.service.status('owner')).capabilities.calendarWrite).toBe(false);
+    const { flow } = await upgrade(f);
+    const params = new URL(flow.authorizationUrl).searchParams;
+    expect(params.get('scope')).toBe(`${scopes} ${GOOGLE_CALENDAR_WRITE_SCOPE}`);
+    expect(params.get('include_granted_scopes')).toBe('false');
+    expect(params.get('login_hint')).toBe('owner@example.com');
+  });
+  it.each([
+    'denied',
+    'cancelled',
+    'expired',
+    'partial',
+    'wrong-account',
+    'outage',
+    'invalid-grant',
+    'missing-refresh',
+  ])('preserves read credentials on %s upgrade', async (scenario) => {
+    const f = fixture();
+    await f.connect();
+    const before = required((await f.repository.get('owner'))?.connection);
+    const { flow, state } = await upgrade(f);
+    if (scenario === 'cancelled') await f.service.flow('owner', flow.flowId, true);
+    if (scenario === 'expired') f.advance();
+    if (scenario === 'wrong-account')
+      f.verifyIdentity.mockImplementationOnce(async () => ({
+        sub: 'other',
+        email: 'other@example.com',
+        email_verified: true,
+        nonce: (await f.repository.get('owner'))?.flow?.nonce,
+      }));
+    if (scenario === 'outage')
+      f.fetcher
+        .mockResolvedValueOnce(writeToken())
+        .mockResolvedValueOnce(new Response('', { status: 503 }));
+    if (scenario === 'invalid-grant')
+      f.fetcher.mockResolvedValueOnce(Response.json({ error: 'invalid_grant' }, { status: 400 }));
+    if (scenario === 'missing-refresh')
+      f.fetcher.mockResolvedValueOnce(
+        Response.json({
+          access_token: 'write',
+          token_type: 'Bearer',
+          expires_in: 3600,
+          scope: `${scopes} ${GOOGLE_CALENDAR_WRITE_SCOPE}`,
+          id_token: 'id',
+        }),
+      );
+    if (scenario === 'wrong-account') f.fetcher.mockResolvedValueOnce(writeToken());
+    const outcome = await f.service.callback(
+      new URLSearchParams({
+        state,
+        ...(scenario === 'denied' ? { error: 'access_denied' } : { code: 'code' }),
+      }),
+    );
+    expect(outcome.accepted).toBe(false);
+    expect((await f.repository.get('owner'))?.connection).toEqual(before);
+    expect(await f.token()).toMatchObject({ connectionId: before.id });
+    expect((await f.service.status('owner')).capabilities).toEqual({
+      calendarRead: true,
+      calendarWrite: false,
+    });
+  });
+  it('keeps stable identity, fences old refreshes, and consumes the callback once', async () => {
+    const f = fixture();
+    await f.connect();
+    const before = required((await f.repository.get('owner'))?.connection);
+    const { state } = await upgrade(f);
+    const leaseId = randomUUID();
+    const claim = await f.repository.acquireRefresh(
+      'owner',
+      before.id,
+      leaseId,
+      f.ports.now(),
+      true,
+    );
+    expect(claim.kind).toBe('claimed');
+    f.fetcher.mockResolvedValueOnce(writeToken());
+    const callback = new URLSearchParams({ state, code: 'code' });
+    expect((await f.service.callback(callback)).accepted).toBe(true);
+    expect(await f.service.status('owner')).toMatchObject({
+      connectionId: before.id,
+      capabilities: { calendarRead: true, calendarWrite: true },
+    });
+    expect((await f.repository.get('owner'))?.connection).toMatchObject({
+      id: before.id,
+      account: before.account,
+      credentialVersion: before.credentialVersion + 1,
+      refreshLease: null,
+    });
+    expect(
+      await f.repository.completeRefresh(
+        'owner',
+        before.id,
+        leaseId,
+        before.credentialVersion,
+        before,
+      ),
+    ).toBe(false);
+    f.fetcher.mockClear();
+    expect((await f.service.callback(callback)).accepted).toBe(false);
+    expect(f.fetcher).not.toHaveBeenCalled();
+  });
+  it('retains read access if a refreshed token loses write scope, and does not add unrequested scope', async () => {
+    const f = fixture();
+    await f.connect();
+    f.fetcher.mockResolvedValueOnce(writeToken());
+    await f.token({ forceRefresh: true });
+    expect((await f.service.status('owner')).capabilities.calendarWrite).toBe(false);
+    const { state } = await upgrade(f);
+    f.fetcher.mockResolvedValueOnce(writeToken());
+    await f.service.callback(new URLSearchParams({ state, code: 'code' }));
+    f.fetcher.mockResolvedValueOnce(
+      Response.json({
+        access_token: 'read-again',
+        token_type: 'Bearer',
+        expires_in: 3600,
+        scope: scopes,
+      }),
+    );
+    await expect(f.token({ forceRefresh: true, requireWrite: true })).rejects.toThrow(
+      'missing_scope',
+    );
+    expect((await f.service.status('owner')).capabilities).toEqual({
+      calendarRead: true,
+      calendarWrite: false,
+    });
+    await expect(f.token()).resolves.toMatchObject({ accessToken: 'read-again' });
+  });
+  it('a write-only insufficient scope error removes write capability while keeping read credentials', async () => {
+    const f = fixture();
+    await f.connect();
+    const { state } = await upgrade(f);
+    f.fetcher.mockResolvedValueOnce(writeToken());
+    await f.service.callback(new URLSearchParams({ state, code: 'code' }));
+    const before = required((await f.repository.get('owner'))?.connection);
+    await reportGoogleCalendarReadFailure({
+      repository: f.repository,
+      ownerId: 'owner',
+      connectionId: before.id,
+      accessToken: 'write-access',
+      status: 403,
+      body: { error: { errors: [{ reason: 'insufficientPermissions' }] } },
+      method: 'POST',
+      decrypt: f.ports.decrypt,
+    });
+    const after = required((await f.repository.get('owner'))?.connection);
+    expect(after.accessTokenEncrypted).toBe(before.accessTokenEncrypted);
+    expect((await f.service.status('owner')).capabilities).toEqual({
+      calendarRead: true,
+      calendarWrite: false,
+    });
+  });
+});
+
+describe('disabled Calendar write contract', () => {
+  it('omits the upgrade affordance and rejects consent before provider access while preserving read', async () => {
+    const f = fixture();
+    await f.connect();
+    const off = createGoogleCalendarConnectionService({ ...f.ports, writeContractReady: false });
+    f.fetcher.mockClear();
+    expect(await off.status('owner')).toMatchObject({
+      state: 'connected',
+      account: { subject: 'subject' },
+      capabilities: { calendarRead: true },
+    });
+    expect((await off.status('owner')).capabilities).not.toHaveProperty('calendarWrite');
+    await expect(off.connect('owner', 'calendarWrite')).rejects.toThrow('provider_unavailable');
+    expect(f.fetcher).not.toHaveBeenCalled();
+    expect((await f.repository.get('owner'))?.version).toBe(1);
+    await expect(f.token()).resolves.toMatchObject({ account: { subject: 'subject' } });
+  });
+  it('keeps upgraded credentials readable with writes disabled and rejects a pending upgrade after gate removal', async () => {
+    const f = fixture();
+    await f.connect();
+    const flow = await f.service.connect('owner', 'calendarWrite');
+    const state = required(new URL(flow.authorizationUrl).searchParams.get('state'));
+    expect(Object.keys(required((await f.repository.get('owner'))?.flow)).sort()).toEqual([
+      'expiresAt',
+      'id',
+      'nonce',
+      'outcome',
+      'stateHash',
+      'verifierEncrypted',
+    ]);
+    f.fetcher.mockResolvedValueOnce(
+      Response.json({
+        access_token: 'write',
+        refresh_token: 'refresh-write',
+        token_type: 'Bearer',
+        expires_in: 3600,
+        scope: `${scopes} ${GOOGLE_CALENDAR_WRITE_SCOPE}`,
+        id_token: 'id',
+      }),
+    );
+    await f.service.callback(new URLSearchParams({ state, code: 'code' }));
+    const upgraded = required((await f.repository.get('owner'))?.connection);
+    expect((await f.repository.get('owner'))?.version).toBe(2);
+    const upgradedState = required(await f.repository.get('owner'));
+    expect(() => parseGoogleCalendarConnection({ ...upgradedState, version: 1 }, 'owner')).toThrow(
+      'contract version 2',
+    );
+    const off = createGoogleCalendarConnectionService({ ...f.ports, writeContractReady: false });
+    expect((await off.status('owner')).capabilities).toEqual({ calendarRead: true });
+    await expect(f.token()).resolves.toMatchObject({
+      connectionId: upgraded.id,
+      accessToken: 'write',
+    });
+    const pending = await f.service.connect('owner', 'calendarWrite');
+    f.fetcher.mockClear();
+    const pendingState = required(new URL(pending.authorizationUrl).searchParams.get('state'));
+    expect(
+      (await off.callback(new URLSearchParams({ state: pendingState, code: 'code' }))).accepted,
+    ).toBe(false);
+    expect(f.fetcher).not.toHaveBeenCalled();
+    expect((await f.repository.get('owner'))?.connection).toEqual(upgraded);
+  });
+});

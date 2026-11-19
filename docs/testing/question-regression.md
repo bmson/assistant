@@ -62,7 +62,6 @@ Native rendering, keyboard, scrolling, accessibility and physical-device perform
 4. Run `pnpm test:questions`, then a scoped live run. Inspect its answer, card parts, ledger and saved details.
 5. Run repository validation before shipping runtime changes uncovered by a case. Retain failed reports as the baseline; do not overwrite them with a passing rerun.
 
-
 ## Calendar diagnostic preparation
 
 Prepare the six diagnostic cases or six separate, development-exposed holdouts

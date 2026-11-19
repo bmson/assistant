@@ -119,7 +119,10 @@ import {
   getAgent,
   getOrCreatePrimaryConversation,
 } from '@assistant/core/chat';
-import { googleCalendarOAuthConfig } from '@assistant/core/google-calendar-oauth';
+import {
+  googleCalendarOAuthConfig,
+  googleCalendarWriteContractReady,
+} from '@assistant/core/google-calendar-oauth';
 import {
   decryptStoredCredential,
   encryptMcpBearerToken,
@@ -153,6 +156,7 @@ import {
   createPostgresModelConnectionRepository,
   createPostgresModelRoutingRepository,
   createPostgresRecallSurfacingRepository,
+  createPostgresResearchAssignmentRepository,
   createPostgresSelfRepairRepository,
   createPostgresTaskDiscoveryRepository,
   createPostgresToolExecutionRepository,
@@ -2170,6 +2174,7 @@ export function getGoogleCalendarConnectionService() {
   return createGoogleCalendarConnectionService({
     repository,
     config: googleCalendarOAuthConfig(config),
+    writeContractReady: googleCalendarWriteContractReady(),
   });
 }
 
@@ -2329,4 +2334,9 @@ export function getMcpOAuthManagementService(): McpOAuthManagementService | null
       return connection ?? null;
     },
   });
+}
+
+export async function getPostgresResearchAssignments() {
+  const db = getDb();
+  return createPostgresResearchAssignmentRepository(db, (await getAgent(db)).id);
 }

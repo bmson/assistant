@@ -10,6 +10,7 @@ enum NativeMemoryCorrectionRecoveryError: Error, Equatable {
     case recordTooLarge
     case operationConflict
     case operationNotFound
+    case recoveryCleanupUncertain
 }
 
 /// Recovery-only file surface. The install operation must never replace an existing operation file.
@@ -113,6 +114,8 @@ struct NativeMemoryCorrectionRecoveryRecord: Codable, Equatable, Sendable {
     let draft: String
     /// Opaque, purpose-bound server authorization handle. Never put the mobile bearer here.
     let authorizationHandle: String
+    /// Server-issued metadata retained for exact authorization restoration when present.
+    let authorizationExpiresAt: String?
 
     init(
         serverIdentity: String,
@@ -120,7 +123,8 @@ struct NativeMemoryCorrectionRecoveryRecord: Codable, Equatable, Sendable {
         operation: Operation,
         snapshot: Snapshot,
         draft: String,
-        authorizationHandle: String
+        authorizationHandle: String,
+        authorizationExpiresAt: String? = nil
     ) {
         self.serverIdentity = serverIdentity
         self.target = target
@@ -128,6 +132,7 @@ struct NativeMemoryCorrectionRecoveryRecord: Codable, Equatable, Sendable {
         self.snapshot = snapshot
         self.draft = draft
         self.authorizationHandle = authorizationHandle
+        self.authorizationExpiresAt = authorizationExpiresAt
     }
 }
 
@@ -138,6 +143,16 @@ struct NativeMemoryCorrectionRecoveryRecord: Codable, Equatable, Sendable {
 actor NativeMemoryCorrectionRecoveryStore {
     static let maximumRecordBytes = 48 * 1024
     private static let magic = Data([0x4e, 0x4d, 0x43, 0x52, 0x01]) // NMCR, envelope v1
+    private static let pendingMagic = Data([0x4e, 0x4d, 0x43, 0x50, 0x01]) // NMCP, pending locator v1
+    private static let pendingFilename = "pending.nmcp"
+    private static let cleanupMagic = Data([0x4e, 0x4d, 0x43, 0x54, 0x01]) // NMCT, terminal cleanup v1
+    private static let cleanupFilename = "terminal-cleanup.nmct"
+    private static let mutationLock = NSLock()
+
+    private struct TerminalCleanupMarker: Codable, Equatable {
+        let operationID: String
+        let disposition: String
+    }
 
     private let root: URL
     private let keyVault: any CardFormDraftKeyVault
@@ -159,31 +174,91 @@ actor NativeMemoryCorrectionRecoveryStore {
     }
 
     func saveBeforeDispatch(_ record: NativeMemoryCorrectionRecoveryRecord) throws {
+        Self.mutationLock.lock()
+        defer { Self.mutationLock.unlock() }
         try Self.validate(record)
         let partition = Self.partition(record)
         try keyVault.assertOpen(partition: partition)
+        try resumeCleanupIfPresent(serverIdentity: record.serverIdentity, target: record.target, partition: partition)
+        let pendingURL = pendingURL(partition: partition)
+        if files.exists(pendingURL) {
+            let pendingID = try loadPendingOperationID(at: pendingURL, serverIdentity: record.serverIdentity,
+                                                       target: record.target, partition: partition)
+            guard pendingID == record.operation.operationID else { throw NativeMemoryCorrectionRecoveryError.operationConflict }
+        }
         let url = recordURL(record)
         let plaintext = try encoder.encode(record)
         guard plaintext.count <= Self.maximumRecordBytes else { throw NativeMemoryCorrectionRecoveryError.recordTooLarge }
 
+        var installedOperation = false
         if files.exists(url) {
             let existing = try loadFile(at: url, record: record, partition: partition)
             guard existing == record else { throw NativeMemoryCorrectionRecoveryError.operationConflict }
-            return
+        } else {
+            let key = try keyVault.key(for: partition, createIfMissing: true)
+            guard let sealed = try AES.GCM.seal(
+                plaintext,
+                using: key,
+                authenticating: Self.associatedData(record, partition: partition)
+            ).combined else { throw NativeMemoryCorrectionRecoveryError.corruptRecord }
+            do {
+                installedOperation = try files.installAtomicallyIfAbsent(Self.magic + sealed, to: url)
+            } catch {
+                // An adapter error can follow a successful rename. Authenticate any apparent
+                // winner, but do not claim ownership of it for rollback.
+                guard files.exists(url) else { throw error }
+                let existing = try loadFile(at: url, record: record, partition: partition)
+                guard existing == record else { throw NativeMemoryCorrectionRecoveryError.operationConflict }
+            }
+            if !installedOperation {
+                // A different store actor may have installed this operation after our initial read.
+                // Authenticate the winner and accept only an exact idempotent save.
+                let existing = try loadFile(at: url, record: record, partition: partition)
+                guard existing == record else { throw NativeMemoryCorrectionRecoveryError.operationConflict }
+            }
         }
-
-        let key = try keyVault.key(for: partition, createIfMissing: true)
-        guard let sealed = try AES.GCM.seal(
-            plaintext,
-            using: key,
-            authenticating: Self.associatedData(record, partition: partition)
-        ).combined else { throw NativeMemoryCorrectionRecoveryError.corruptRecord }
-        let installed = try files.installAtomicallyIfAbsent(Self.magic + sealed, to: url)
-        if !installed {
-            // A different store actor may have installed this operation after our initial read.
-            // Authenticate the winner and accept only an exact idempotent save.
-            let existing = try loadFile(at: url, record: record, partition: partition)
-            guard existing == record else { throw NativeMemoryCorrectionRecoveryError.operationConflict }
+        // Publish discoverability only after the immutable operation is durable. A conflict here
+        // throws before the caller can dispatch this operation.
+        do {
+            try installPendingLocator(serverIdentity: record.serverIdentity, target: record.target,
+                                      operationID: record.operation.operationID, partition: partition)
+        } catch let publishError {
+            if !installedOperation {
+                do {
+                    if try pendingLocatorPointsTo(serverIdentity: record.serverIdentity, target: record.target,
+                                                  operationID: record.operation.operationID, partition: partition) {
+                        return
+                    }
+                    // One more exclusive install can recover a transient locator write failure
+                    // for a preexisting exact operation without mutating that operation file.
+                    try installPendingLocator(serverIdentity: record.serverIdentity, target: record.target,
+                                              operationID: record.operation.operationID, partition: partition)
+                    return
+                } catch {
+                    throw NativeMemoryCorrectionRecoveryError.recoveryCleanupUncertain
+                }
+            }
+            do {
+                if try pendingLocatorPointsTo(serverIdentity: record.serverIdentity, target: record.target,
+                                              operationID: record.operation.operationID, partition: partition) {
+                    return // The atomic install succeeded even though its adapter reported failure.
+                }
+                try removeUnpublishedCandidate(record, partition: partition)
+            } catch {
+                do {
+                    // The new operation was never dispatched. This authenticated no-write marker
+                    // keeps cleanup discoverable if the immediate rollback itself is ambiguous.
+                    let marker = TerminalCleanupMarker(operationID: record.operation.operationID,
+                                                       disposition: Self.cleanupCode(.rejectedNoWrite))
+                    try installCleanupMarker(marker, serverIdentity: record.serverIdentity,
+                                             target: record.target, partition: partition)
+                    try finishCleanup(marker, serverIdentity: record.serverIdentity,
+                                      target: record.target, partition: partition)
+                } catch {
+                    throw NativeMemoryCorrectionRecoveryError.recoveryCleanupUncertain
+                }
+            }
+            throw publishError
         }
     }
 
@@ -200,6 +275,26 @@ actor NativeMemoryCorrectionRecoveryStore {
                             operationID: operationID, partition: identity)
     }
 
+    /// Finds the exact pending operation for this server and target without enumerating files.
+    func loadPending(
+        serverIdentity: String,
+        target: NativeMemoryCorrectionRecoveryRecord.Target
+    ) throws -> NativeMemoryCorrectionRecoveryRecord? {
+        Self.mutationLock.lock()
+        defer { Self.mutationLock.unlock() }
+        let partition = try Self.partition(serverIdentity: serverIdentity, target: target)
+        try keyVault.assertOpen(partition: partition)
+        try resumeCleanupIfPresent(serverIdentity: serverIdentity, target: target, partition: partition)
+        let url = pendingURL(partition: partition)
+        guard files.exists(url) else { return nil }
+        let operationID = try loadPendingOperationID(at: url, serverIdentity: serverIdentity,
+                                                     target: target, partition: partition)
+        guard let record = try load(serverIdentity: serverIdentity, target: target, operationID: operationID) else {
+            throw NativeMemoryCorrectionRecoveryError.operationNotFound
+        }
+        return record
+    }
+
     /// Removal is an explicit caller action after a qualified operation-bound disposition.
     /// This method does not infer terminality from HTTP, queue acceptance, or readback alone.
     func remove(
@@ -208,15 +303,215 @@ actor NativeMemoryCorrectionRecoveryStore {
         operationID: String,
         disposition: NativeMemoryCorrectionRecoveryTerminalDisposition
     ) throws {
-        _ = disposition // A required, explicit acknowledgement from the qualified adapter.
+        Self.mutationLock.lock()
+        defer { Self.mutationLock.unlock() }
+        let dispositionCode = Self.cleanupCode(disposition)
         let identity = try Self.identity(serverIdentity: serverIdentity, target: target, operationID: operationID)
         try keyVault.assertOpen(partition: identity)
+        let cleanupURL = cleanupMarkerURL(partition: identity)
+        if files.exists(cleanupURL) {
+            let marker = try loadCleanupMarker(at: cleanupURL, serverIdentity: serverIdentity,
+                                               target: target, partition: identity)
+            guard marker.operationID == operationID, marker.disposition == dispositionCode else {
+                throw NativeMemoryCorrectionRecoveryError.operationConflict
+            }
+            try finishCleanup(marker, serverIdentity: serverIdentity, target: target, partition: identity)
+            return
+        }
         let url = operationURL(partition: identity, operationID: operationID)
         guard files.exists(url) else { throw NativeMemoryCorrectionRecoveryError.operationNotFound }
         // Authenticate and compare the exact tuple before deleting; corrupt or foreign bytes stay in place.
         _ = try loadFile(at: url, serverIdentity: serverIdentity, target: target,
                          operationID: operationID, partition: identity)
+        let locator = pendingURL(partition: identity)
+        if files.exists(locator) {
+            let pendingID = try loadPendingOperationID(at: locator, serverIdentity: serverIdentity,
+                                                       target: target, partition: identity)
+            guard pendingID == operationID else { throw NativeMemoryCorrectionRecoveryError.operationConflict }
+        }
+        let marker = TerminalCleanupMarker(operationID: operationID, disposition: dispositionCode)
+        try installCleanupMarker(marker, serverIdentity: serverIdentity, target: target, partition: identity)
+        try finishCleanup(marker, serverIdentity: serverIdentity, target: target, partition: identity)
+    }
+
+    private func resumeCleanupIfPresent(
+        serverIdentity: String,
+        target: NativeMemoryCorrectionRecoveryRecord.Target,
+        partition: String
+    ) throws {
+        let url = cleanupMarkerURL(partition: partition)
+        guard files.exists(url) else { return }
+        let marker = try loadCleanupMarker(at: url, serverIdentity: serverIdentity, target: target, partition: partition)
+        try finishCleanup(marker, serverIdentity: serverIdentity, target: target, partition: partition)
+    }
+
+    private func installCleanupMarker(
+        _ marker: TerminalCleanupMarker,
+        serverIdentity: String,
+        target: NativeMemoryCorrectionRecoveryRecord.Target,
+        partition: String
+    ) throws {
+        let url = cleanupMarkerURL(partition: partition)
+        if files.exists(url) {
+            let existing = try loadCleanupMarker(at: url, serverIdentity: serverIdentity, target: target, partition: partition)
+            guard existing == marker else { throw NativeMemoryCorrectionRecoveryError.operationConflict }
+            return
+        }
+        let key = try keyVault.key(for: partition, createIfMissing: true)
+        guard let sealed = try AES.GCM.seal(
+            try encoder.encode(marker),
+            using: key,
+            authenticating: Self.cleanupAssociatedData(serverIdentity: serverIdentity, target: target, partition: partition)
+        ).combined else { throw NativeMemoryCorrectionRecoveryError.corruptRecord }
+        if try !files.installAtomicallyIfAbsent(Self.cleanupMagic + sealed, to: url) {
+            let existing = try loadCleanupMarker(at: url, serverIdentity: serverIdentity, target: target, partition: partition)
+            guard existing == marker else { throw NativeMemoryCorrectionRecoveryError.operationConflict }
+        }
+    }
+
+    private func loadCleanupMarker(
+        at url: URL,
+        serverIdentity: String,
+        target: NativeMemoryCorrectionRecoveryRecord.Target,
+        partition: String
+    ) throws -> TerminalCleanupMarker {
+        let data = try files.read(url, maximumBytes: 4_096)
+        guard data.count >= Self.cleanupMagic.count,
+              data.prefix(Self.cleanupMagic.count) == Self.cleanupMagic else {
+            if data.first == 0x4e { throw NativeMemoryCorrectionRecoveryError.unsupportedVersion }
+            throw NativeMemoryCorrectionRecoveryError.corruptRecord
+        }
+        do {
+            let key = try keyVault.key(for: partition, createIfMissing: false)
+            let box = try AES.GCM.SealedBox(combined: Data(data.dropFirst(Self.cleanupMagic.count)))
+            let plaintext = try AES.GCM.open(
+                box,
+                using: key,
+                authenticating: Self.cleanupAssociatedData(serverIdentity: serverIdentity, target: target, partition: partition)
+            )
+            let marker = try decoder.decode(TerminalCleanupMarker.self, from: plaintext)
+            guard Self.validIdentifier(marker.operationID, max: 256),
+                  Self.validCleanupCode(marker.disposition) else {
+                throw NativeMemoryCorrectionRecoveryError.corruptRecord
+            }
+            return marker
+        } catch let error as NativeMemoryCorrectionRecoveryError {
+            throw error
+        } catch {
+            throw NativeMemoryCorrectionRecoveryError.corruptRecord
+        }
+    }
+
+    private func finishCleanup(
+        _ marker: TerminalCleanupMarker,
+        serverIdentity: String,
+        target: NativeMemoryCorrectionRecoveryRecord.Target,
+        partition: String
+    ) throws {
+        let operationFile = operationURL(partition: partition, operationID: marker.operationID)
+        let locator = pendingURL(partition: partition)
+        // Authenticate both files before mutating either. Missing files are accepted only because
+        // this authenticated marker records a previously qualified, exact terminal disposition.
+        if files.exists(operationFile) {
+            _ = try loadFile(at: operationFile, serverIdentity: serverIdentity, target: target,
+                             operationID: marker.operationID, partition: partition)
+        }
+        if files.exists(locator) {
+            let pendingID = try loadPendingOperationID(at: locator, serverIdentity: serverIdentity,
+                                                       target: target, partition: partition)
+            guard pendingID == marker.operationID else { throw NativeMemoryCorrectionRecoveryError.operationConflict }
+        }
+        if files.exists(operationFile) { try files.removeFile(operationFile) }
+        if files.exists(locator) { try files.removeFile(locator) }
+        guard !files.exists(operationFile), !files.exists(locator) else {
+            throw NativeMemoryCorrectionRecoveryError.recoveryCleanupUncertain
+        }
+        let markerURL = cleanupMarkerURL(partition: partition)
+        if files.exists(markerURL) { try files.removeFile(markerURL) }
+        guard !files.exists(markerURL) else { throw NativeMemoryCorrectionRecoveryError.recoveryCleanupUncertain }
+    }
+
+    private func pendingLocatorPointsTo(
+        serverIdentity: String,
+        target: NativeMemoryCorrectionRecoveryRecord.Target,
+        operationID: String,
+        partition: String
+    ) throws -> Bool {
+        let url = pendingURL(partition: partition)
+        guard files.exists(url) else { return false }
+        return try loadPendingOperationID(at: url, serverIdentity: serverIdentity, target: target,
+                                          partition: partition) == operationID
+    }
+
+    private func removeUnpublishedCandidate(
+        _ record: NativeMemoryCorrectionRecoveryRecord,
+        partition: String
+    ) throws {
+        let url = recordURL(record)
+        guard files.exists(url) else { throw NativeMemoryCorrectionRecoveryError.recoveryCleanupUncertain }
+        _ = try loadFile(at: url, record: record, partition: partition)
         try files.removeFile(url)
+        guard !files.exists(url) else { throw NativeMemoryCorrectionRecoveryError.recoveryCleanupUncertain }
+    }
+
+    private func installPendingLocator(
+        serverIdentity: String,
+        target: NativeMemoryCorrectionRecoveryRecord.Target,
+        operationID: String,
+        partition: String
+    ) throws {
+        let url = pendingURL(partition: partition)
+        if files.exists(url) {
+            let existingID = try loadPendingOperationID(at: url, serverIdentity: serverIdentity,
+                                                        target: target, partition: partition)
+            guard existingID == operationID else { throw NativeMemoryCorrectionRecoveryError.operationConflict }
+            return
+        }
+        let key = try keyVault.key(for: partition, createIfMissing: true)
+        guard let sealed = try AES.GCM.seal(
+            Data(operationID.utf8),
+            using: key,
+            authenticating: Self.pendingAssociatedData(serverIdentity: serverIdentity, target: target,
+                                                       partition: partition)
+        ).combined else { throw NativeMemoryCorrectionRecoveryError.corruptRecord }
+        if try !files.installAtomicallyIfAbsent(Self.pendingMagic + sealed, to: url) {
+            let existingID = try loadPendingOperationID(at: url, serverIdentity: serverIdentity,
+                                                        target: target, partition: partition)
+            guard existingID == operationID else { throw NativeMemoryCorrectionRecoveryError.operationConflict }
+        }
+    }
+
+    private func loadPendingOperationID(
+        at url: URL,
+        serverIdentity: String,
+        target: NativeMemoryCorrectionRecoveryRecord.Target,
+        partition: String
+    ) throws -> String {
+        let data = try files.read(url, maximumBytes: 4_096)
+        guard data.count >= Self.pendingMagic.count,
+              data.prefix(Self.pendingMagic.count) == Self.pendingMagic else {
+            if data.first == 0x4e { throw NativeMemoryCorrectionRecoveryError.unsupportedVersion }
+            throw NativeMemoryCorrectionRecoveryError.corruptRecord
+        }
+        do {
+            let box = try AES.GCM.SealedBox(combined: Data(data.dropFirst(Self.pendingMagic.count)))
+            let key = try keyVault.key(for: partition, createIfMissing: false)
+            let plaintext = try AES.GCM.open(
+                box,
+                using: key,
+                authenticating: Self.pendingAssociatedData(serverIdentity: serverIdentity, target: target,
+                                                          partition: partition)
+            )
+            guard let operationID = String(data: plaintext, encoding: .utf8),
+                  Self.validIdentifier(operationID, max: 256) else {
+                throw NativeMemoryCorrectionRecoveryError.corruptRecord
+            }
+            return operationID
+        } catch let error as NativeMemoryCorrectionRecoveryError {
+            throw error
+        } catch {
+            throw NativeMemoryCorrectionRecoveryError.corruptRecord
+        }
     }
 
     private func loadFile(
@@ -278,18 +573,35 @@ actor NativeMemoryCorrectionRecoveryStore {
         return root.appendingPathComponent(partition, isDirectory: true).appendingPathComponent(filename)
     }
 
+    private func pendingURL(partition: String) -> URL {
+        root.appendingPathComponent(partition, isDirectory: true).appendingPathComponent(Self.pendingFilename)
+    }
+
+    private func cleanupMarkerURL(partition: String) -> URL {
+        root.appendingPathComponent(partition, isDirectory: true).appendingPathComponent(Self.cleanupFilename)
+    }
+
     private static func identity(
         serverIdentity: String,
         target: NativeMemoryCorrectionRecoveryRecord.Target,
         operationID: String
     ) throws -> String {
-        guard validServerIdentity(serverIdentity), validTarget(target), validIdentifier(operationID, max: 256) else {
+        guard validIdentifier(operationID, max: 256) else {
             throw NativeMemoryCorrectionRecoveryError.invalidRecord
         }
-        let partition = digest(tuple(["native-memory-correction-partition-v1", serverIdentity,
-                                      target.ownerID, target.serverID, target.memoryID,
-                                      target.sourceIdentity ?? ""]))
-        return (partition)
+        return try partition(serverIdentity: serverIdentity, target: target)
+    }
+
+    private static func partition(
+        serverIdentity: String,
+        target: NativeMemoryCorrectionRecoveryRecord.Target
+    ) throws -> String {
+        guard validServerIdentity(serverIdentity), validTarget(target) else {
+            throw NativeMemoryCorrectionRecoveryError.invalidRecord
+        }
+        return digest(tuple(["native-memory-correction-partition-v1", serverIdentity,
+                             target.ownerID, target.serverID, target.memoryID,
+                             target.sourceIdentity ?? ""]))
     }
 
     private static func validate(_ record: NativeMemoryCorrectionRecoveryRecord) throws {
@@ -301,6 +613,7 @@ actor NativeMemoryCorrectionRecoveryStore {
               record.snapshot.storedContentHash == record.operation.expectedStoredContentHash,
               record.snapshot.content.utf8.count <= 16_000, record.snapshot.sourceLabel.utf8.count <= 1_000,
               record.draft.utf8.count <= 16_000,
+              record.authorizationExpiresAt.map({ $0.utf8.count <= 256 }) ?? true,
               record.authorizationHandle.utf8.count <= 8_192,
               record.authorizationHandle.hasPrefix("omc1."),
               record.authorizationHandle.split(separator: ".").count == 3,
@@ -319,6 +632,21 @@ actor NativeMemoryCorrectionRecoveryStore {
 
     private static func validIdentifier(_ value: String, max: Int) -> Bool {
         !value.isEmpty && value.utf8.count <= max
+    }
+
+    private static func cleanupCode(_ disposition: NativeMemoryCorrectionRecoveryTerminalDisposition) -> String {
+        switch disposition {
+        case .savedWithOperationBoundReadback: "saved_with_operation_bound_readback"
+        case .unchangedWithOperationBoundReadback: "unchanged_with_operation_bound_readback"
+        case .unchangedNoWrite: "unchanged_no_write"
+        case .rejectedNoWrite: "rejected_no_write"
+        case .staleNoWrite: "stale_no_write"
+        }
+    }
+
+    private static func validCleanupCode(_ code: String) -> Bool {
+        ["saved_with_operation_bound_readback", "unchanged_with_operation_bound_readback",
+         "unchanged_no_write", "rejected_no_write", "stale_no_write"].contains(code)
     }
 
     private static func validServerIdentity(_ value: String) -> Bool {
@@ -353,6 +681,24 @@ actor NativeMemoryCorrectionRecoveryStore {
                target.serverID, target.memoryID, target.sourceIdentity ?? "", operationID])
     }
 
+    private static func pendingAssociatedData(
+        serverIdentity: String,
+        target: NativeMemoryCorrectionRecoveryRecord.Target,
+        partition: String
+    ) -> Data {
+        tuple(["native-memory-correction-pending-v1", partition, serverIdentity, target.ownerID,
+               target.serverID, target.memoryID, target.sourceIdentity ?? ""])
+    }
+
+    private static func cleanupAssociatedData(
+        serverIdentity: String,
+        target: NativeMemoryCorrectionRecoveryRecord.Target,
+        partition: String
+    ) -> Data {
+        tuple(["native-memory-correction-terminal-cleanup-v1", partition, serverIdentity,
+               target.ownerID, target.serverID, target.memoryID, target.sourceIdentity ?? ""])
+    }
+
     private static func tuple(_ values: [String]) -> Data {
         var data = Data()
         for value in values {
@@ -378,9 +724,10 @@ actor NativeMemoryCorrectionRecoveryStore {
 
 /// Marker values can only be supplied explicitly after the adapter has qualified disposition
 /// against the original operation. Pending readback is intentionally not a removal case.
-enum NativeMemoryCorrectionRecoveryTerminalDisposition: Sendable {
+enum NativeMemoryCorrectionRecoveryTerminalDisposition: Equatable, Sendable {
     case savedWithOperationBoundReadback
     case unchangedWithOperationBoundReadback
+    case unchangedNoWrite
     case rejectedNoWrite
     case staleNoWrite
 }

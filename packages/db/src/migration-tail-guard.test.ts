@@ -44,6 +44,10 @@ const expected: MigrationTailMetadata[] = [
     folderMillis: 1_795_023_841_106,
     hash: 'e43420d5b6b4ab8ca0b90404718db314a90fdb13196b05bde0918c855d0f65d3',
   },
+  {
+    folderMillis: 1795053032784,
+    hash: 'b5009dc3e813daad969187df0e759ca6a196ae56691b1afa5819f862be916da0',
+  },
 ];
 const applied = (count: number): AppliedMigrationTailRow[] =>
   expected.slice(0, count).map((migration) => ({
@@ -61,9 +65,14 @@ describe('owner-editor migration tail guard', () => {
     expect(shipped).toEqual(expected);
   });
 
-  it.each([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])('accepts canonical strict prefix length %i', (count) => {
-    expect(() => assertCompatibleOwnerEditorMigrationTail(expected, applied(count))).not.toThrow();
-  });
+  it.each([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10])(
+    'accepts canonical strict prefix length %i',
+    (count) => {
+      expect(() =>
+        assertCompatibleOwnerEditorMigrationTail(expected, applied(count)),
+      ).not.toThrow();
+    },
+  );
 
   it('rejects the historical contact-only 0131 watermark', () => {
     expect(() =>
@@ -108,8 +117,11 @@ describe('owner-editor migration tail guard', () => {
     expect(() => assertCompatibleOwnerEditorMigrationTail(expected, applied(8), true)).toThrow(
       'Incompatible owner-editor migration ledger.',
     );
+    expect(() => assertCompatibleOwnerEditorMigrationTail(expected, applied(9), true)).toThrow(
+      'Incompatible owner-editor migration ledger.',
+    );
     expect(() =>
-      assertCompatibleOwnerEditorMigrationTail(expected, applied(9), true),
+      assertCompatibleOwnerEditorMigrationTail(expected, applied(10), true),
     ).not.toThrow();
   });
 

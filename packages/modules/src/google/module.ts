@@ -284,8 +284,9 @@ export const googleModule = defineModule<GoogleClient>({
           googleAvailable: client.configured(),
           phoneCalendars: (agentId) => readPhoneCalendars(persistence.toolExecution, agentId),
           personalAccount,
+          creationExecution: persistence.toolExecution,
         },
-        { readOnly: !client.configured() },
+        { readOnly: !client.configured(), personalCreate: true },
       );
     }
     if (!client.configured()) {

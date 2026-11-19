@@ -224,6 +224,7 @@ export function createProductVisualData(empty: boolean) {
               mirrorToPrimary: true,
               autonomy: false,
               taintedOrigin: false,
+              researchAssignment: null,
             },
             workActive: true,
             conversationId: visualSecondId,

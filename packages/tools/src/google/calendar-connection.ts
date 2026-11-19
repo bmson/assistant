@@ -1,3 +1,4 @@
+import type { ToolExecutionRepository } from '@assistant/persistence';
 import { z } from 'zod';
 import { ToolRegistry } from '../registry.js';
 import type { ToolContext } from '../types.js';
@@ -6,16 +7,20 @@ import {
   registerCalendarReadTools,
   registerCalendarTools,
 } from './calendar.js';
+import { registerPersonalCalendarCreation } from './calendar-create.js';
 
 export interface PersonalCalendarReadAccount {
   client: CalendarToolDeps['client'];
   subject: string;
   email: string;
+  connectionId?: string;
+  calendarWrite?: boolean;
 }
 
 export interface AccountAwareCalendarDeps extends CalendarToolDeps {
   /** Null means never connected. Disconnected/revoked accounts must reject. */
   personalAccount(agentId: string): Promise<PersonalCalendarReadAccount | null>;
+  creationExecution?: ToolExecutionRepository;
 }
 
 const readTools = new Set([
@@ -61,13 +66,35 @@ function bindRosterTokens(result: unknown, name: string, client: CalendarToolDep
 export function registerAccountAwareCalendarTools(
   registry: ToolRegistry,
   deps: AccountAwareCalendarDeps,
-  options: { readOnly?: boolean } = {},
+  options: { readOnly?: boolean; personalCreate?: boolean } = {},
 ): ToolRegistry {
   const definitions = new ToolRegistry();
-  registerCalendarTools(definitions, deps, options);
+  registerCalendarTools(definitions, deps, options.personalCreate ? { readOnly: false } : options);
   for (const { tool, flags } of definitions.all()) {
     if (!readTools.has(tool.name)) {
-      registry.register(tool, flags);
+      if (tool.name === 'calendar.create_event') {
+        registerPersonalCalendarCreation(
+          registry,
+          deps,
+          { tool, flags },
+          { personalOnly: options.readOnly },
+        );
+      } else if (!options.readOnly) {
+        // Personal move/update/cancel follow in later slices. Never strip an
+        // explicit personal selector and accidentally use assistant credentials.
+        registry.register(
+          {
+            ...tool,
+            inputSchema: (tool.inputSchema as z.ZodObject).safeExtend({
+              account: z
+                .literal('assistant')
+                .optional()
+                .describe('This action currently supports only the assistant account.'),
+            }),
+          },
+          flags,
+        );
+      }
       continue;
     }
     const inputSchema = (tool.inputSchema as z.ZodObject).extend({
@@ -85,7 +112,7 @@ export function registerAccountAwareCalendarTools(
       {
         ...tool,
         inputSchema,
-        description: `${tool.description} Personal Google Calendar access is read-only. Results identify the Google account used; select account explicitly when needed.`,
+        description: `${tool.description} Personal Google Calendar reads remain independently available. Results identify the Google account used; select account explicitly when needed.`,
         execute: async (input: unknown, ctx: ToolContext) => {
           const { account, ...args } = inputSchema.parse(input);
           const personal = account === 'assistant' ? null : await deps.personalAccount(ctx.agentId);

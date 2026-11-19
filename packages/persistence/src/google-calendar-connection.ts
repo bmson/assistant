@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 export const GOOGLE_CALENDAR_READ_SCOPE = 'https://www.googleapis.com/auth/calendar.readonly';
+export const GOOGLE_CALENDAR_WRITE_SCOPE = 'https://www.googleapis.com/auth/calendar.events';
 export const googleCalendarFlowOutcome = z.enum([
   'pending',
   'processing',
@@ -19,7 +20,7 @@ const instant = z.string().datetime({ offset: true });
 const account = z.object({ subject: z.string().min(1), email: z.string().email() }).strict();
 export const googleCalendarConnectionSchema = z
   .object({
-    version: z.literal(1),
+    version: z.union([z.literal(1), z.literal(2)]),
     adopted: z.boolean(),
     ownerId: z.string().min(1),
     revision: z.number().int().nonnegative(),
@@ -50,7 +51,14 @@ export const googleCalendarConnectionSchema = z
       .strict()
       .nullable(),
   })
-  .strict();
+  .strict()
+  .superRefine((state, ctx) => {
+    if (state.connection?.scopes.includes(GOOGLE_CALENDAR_WRITE_SCOPE) && state.version !== 2)
+      ctx.addIssue({
+        code: 'custom',
+        message: 'Calendar event-write credentials require connection contract version 2',
+      });
+  });
 export type GoogleCalendarConnectionState = z.infer<typeof googleCalendarConnectionSchema>;
 export type GoogleCalendarPendingFlow = NonNullable<GoogleCalendarConnectionState['flow']>;
 export type GoogleCalendarCredential = NonNullable<GoogleCalendarConnectionState['connection']>;
@@ -72,7 +80,11 @@ export type GoogleCalendarRefreshClaim =
   | { kind: 'disconnected' };
 export interface GoogleCalendarConnectionRepository {
   get(ownerId: string): Promise<GoogleCalendarConnectionState | null>;
-  begin(ownerId: string, flow: GoogleCalendarPendingFlow): Promise<void>;
+  begin(
+    ownerId: string,
+    flow: GoogleCalendarPendingFlow,
+    expectedConnectionId?: string,
+  ): Promise<void>;
   consume(
     ownerId: string,
     flowId: string,
@@ -86,6 +98,7 @@ export interface GoogleCalendarConnectionRepository {
     outcome: GoogleCalendarFlowOutcome,
     credential: GoogleCalendarCredential | null,
     now: Date,
+    expectedConnectionId?: string,
   ): Promise<boolean>;
   disconnect(ownerId: string): Promise<void>;
   cancel(ownerId: string, flowId: string): Promise<boolean>;
@@ -128,11 +141,15 @@ export function createGoogleCalendarConnectionRepository(
 ): GoogleCalendarConnectionRepository {
   return {
     get: (ownerId) => storage.read(ownerId),
-    begin: (ownerId, flow) =>
-      storage.update(ownerId, (s) => ({
-        state: { ...s, revision: s.revision + 1, flow },
-        result: undefined,
-      })),
+    begin: (ownerId, flow, expectedConnectionId) =>
+      storage.update(ownerId, (s) => {
+        if (
+          expectedConnectionId !== undefined &&
+          (s.connection?.id !== expectedConnectionId || s.connection.status !== 'connected')
+        )
+          throw new Error('Calendar connection changed before access upgrade');
+        return { state: { ...s, revision: s.revision + 1, flow }, result: undefined };
+      }),
     consume: (ownerId, flowId, stateHash, now) =>
       storage.update(ownerId, (s) => {
         const f = s.flow;
@@ -148,7 +165,7 @@ export function createGoogleCalendarConnectionRepository(
           result: { flow: f, revision: s.revision },
         };
       }),
-    finish: (ownerId, flowId, revision, outcome, credential, now) =>
+    finish: (ownerId, flowId, revision, outcome, credential, now, expectedConnectionId) =>
       storage.update(ownerId, (s) => {
         if (s.revision !== revision || s.flow?.id !== flowId || s.flow.outcome !== 'processing')
           return { state: s, result: false };
@@ -158,13 +175,34 @@ export function createGoogleCalendarConnectionRepository(
           credential.account.subject !== s.connection.account.subject
         )
           return { state: s, result: false };
+        if (
+          credential &&
+          expectedConnectionId !== undefined &&
+          (!s.connection ||
+            s.connection.id !== expectedConnectionId ||
+            credential.id !== s.connection.id ||
+            !credential.scopes.includes(GOOGLE_CALENDAR_WRITE_SCOPE))
+        )
+          return { state: s, result: false };
         const expired = Date.parse(s.flow.expiresAt) <= now.getTime();
         return {
           state: {
             ...s,
             revision: s.revision + 1,
             adopted: s.adopted || (!expired && credential !== null),
-            connection: !expired && credential ? credential : s.connection,
+            version:
+              !expired && credential?.scopes.includes(GOOGLE_CALENDAR_WRITE_SCOPE) ? 2 : s.version,
+            connection:
+              !expired && credential
+                ? {
+                    ...credential,
+                    refreshLease: null,
+                    credentialVersion:
+                      s.connection?.id === credential.id
+                        ? s.connection.credentialVersion + 1
+                        : credential.credentialVersion,
+                  }
+                : s.connection,
             flow: { ...s.flow, verifierEncrypted: null, outcome: expired ? 'expired' : outcome },
           },
           result: !expired,

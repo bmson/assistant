@@ -10,7 +10,9 @@ export class PartialGoogleArtifactError extends Error {
     cause: unknown,
   ) {
     super(
-      'Google created an external object, but completion could not be established; inspect the recorded object before retrying.',
+      progress.kind === 'calendar_event'
+        ? 'Calendar event completion could not be established; reconcile the original operation without another create request.'
+        : 'Google created an external object, but completion could not be established; inspect the recorded object before retrying.',
       { cause },
     );
   }

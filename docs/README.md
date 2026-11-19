@@ -46,6 +46,14 @@ These guides document implemented source separately from product direction and d
 - [On-device speech and Talk mode](on-device-speech.md)
 - [Outgoing phone calls](phone-calls.md)
 
+## Proactive assistant program
+
+- [Program index, status board and how to work an item](proactive/README.md)
+- [How proactive behavior works today, with known defects](proactive/current-system.md)
+- [Target design](proactive/target-design.md)
+- [Phase 0 briefs](proactive/phase-0-briefs.md) and [backlog](proactive/backlog.md)
+- [Golden-signal benchmark](proactive/golden-signals.md)
+
 ## Governance and operations
 
 - [Costs, provider billing, and operation budgets](cost-tracking.md)

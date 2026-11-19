@@ -3236,7 +3236,6 @@ Source references: [reference 1](https://developers.openai.com/api/docs/guides/l
 
 Source references: [reference 1](https://github.com/bmson/assistant/blob/ce348d48ef0a9629907873e79c0c97a9ed891f11/packages/core/src/realtime-voice/openai.ts#L110-L269), [reference 2](https://developers.openai.com/api/docs/deprecations)
 
-
 ## Execution packets
 
 Each packet retains its original prerequisites, non-goals and acceptance conditions in the local source inventory. All packets are accounted for; none is certified complete as a packet.
@@ -3631,7 +3630,6 @@ No live provider call, managed cloud restore, Firestore activation, PostgreSQL r
 - [WEB14 native generated-card contract parity](/Users/baldvinsmarason/Code/Personal/assistant/.workspace/playbook-review/WEB14-native-parity-status.md)
 - [WEB14 specialized-card admission status](/Users/baldvinsmarason/Code/Personal/assistant/.workspace/playbook-review/WEB14-specialized-admission-status.md)
 
-
 ## Browser and iPhone testing checkpoint, 2026-10-08
 
 The HC-01 web and native callers are now installed. The browser mounted runner passed six actual ChatClient/AI SDK scenarios at source `64a276cf58735e84a17930690cac0cfbb25b795da0990ffc1ec12bdc2607db83`: exact ordinary Stop identity, retained unknown cancellation and explicit retry, task-terminal polling, cancellation-first admission rejection, late old-operation fencing, and protected pre-receipt form admission. Transport is controlled and CSS is omitted; this is not live-provider or physical-device acceptance. The focused preview regression passed 281/281 tests without skips at `eea7807d26ae9a19ca04c212a4112403a27d50726cab80375a7ce337c7cfa21a`. The only following runtime-source change was a type-safe harness property setter. All five static/build checks passed at `64a276cf`, with unchanged source and restored local environment.
@@ -3641,7 +3639,6 @@ The five installed native Stop files match the reviewed v3 candidate and passed 
 User testing uses a dedicated local PostgreSQL database and a private runtime copy, preserving the existing application data. The user authorized reuse of the existing OpenAI key; it was stored encrypted through the production credential repository and was not displayed or copied into a new key file. The loopback browser chat preview now renders at localhost:3000/chat. The first real user-interface test returned 503 before inference: the chat preflight incorrectly requires the bootstrap OpenRouter environment key even when a saved OpenAI connection and OpenAI model roles are configured. A product fix is being staged; real answering and iPhone readiness remain unverified.
 
 Canonical finding counts remain unchanged. The 168-page Word artifact retains its earlier `340df1a` checkpoint. Current evidence receipts are `20261008-hc01-web-mounted-v5-terminal.json`, `20261008-hc01-preview-focused-v1-terminal.json`, and `20261008-hc01-preview-v2-static-build-terminal.json` under /tmp/assistant-playbook-review.
-
 
 ### Live test follow-up, 2026-10-08
 
@@ -3653,7 +3650,6 @@ After the owner closed the phone app, the reviewed signed build installed in pla
 
 Original requirement counts and acceptance conditions remain unchanged. No merge, push, production deployment, Firestore activation or database retirement occurred.
 
-
 ## Production flight-answer investigation and parallel follow-up
 
 Owner testing was confirmed to use the existing production backend, not the dedicated local test server. Read-only service and durable-tool traces identified a future-flight lookup incorrectly narrowed by email received age, plus a successful calendar correction followed by stale pre-update answer grounding. The booking body independently confirmed the owner-reported departure time and a connecting itinerary; the calendar label also disagreed with the booking. This investigation did not write production data. A replay of the historical unsupported calendar creation through the current local workspace-write grounding function was rejected before dispatch; this is a pure function check, not production acceptance.
@@ -3661,7 +3657,6 @@ Owner testing was confirmed to use the existing production backend, not the dedi
 Flight lookup/date grounding, canonical calendar update receipts and conservative proactive flight-lead suppression are staged outside the checkout pending root review and qualification. A separate composed stable-operation retry regression is being prepared; native cancellation runtime verification is continuing on dedicated disposable simulators. The current local browser duplicate-reply repair was independently retested through the actual preview UI: the new reply appeared once. Physical installation and owner-reported production chat are established; dedicated local phone acceptance and native cancellation XCTest execution are separate gates.
 
 The preceding 458-method focused qualification and all five static/build checks passed at runtime/config/test source `3b29f404836b6b68dba6721427162c81ac310a1e54844bd4d7f37948059e9381` (3,667 files). These precede the new flight candidates and do not qualify them. Original requirement counts and acceptance conditions remain unchanged; no production deployment or full-playbook completion is claimed.
-
 
 ### Integrated flight and admission checkpoint, 2026-10-08
 
@@ -3675,7 +3670,6 @@ A disjoint offline `apps/agent` shard is running at the same frozen source. HC-0
 
 Receipts under `/tmp/assistant-playbook-review`: `20261008-flight-grounding-proactive-focused-v3-terminal.json`, `20261008-flight-grounding-proactive-v3-static-build-terminal.json`, and the explicitly limited `flight-time-grounding-stage-v6-addendum/offline-incident-replay-report.json`.
 
-
 ### Composed chat identity follow-up, 2026-10-08
 
 The broader `apps/agent` attempt was stopped after reproducing an obsolete synthetic model fixture: the admission preflight called `ModelRouter.route`, which those test doubles lacked, so they returned 503 before the tested journeys. Its partial log and exit-143 receipt are preserved; no full-shard aggregate is claimed. All five newly allocated parent/child PostgreSQL databases were independently cleaned only after verifying their exact ownership sentinels and absence of active clients; all pre-existing allocator targets were preserved.
@@ -3687,7 +3681,6 @@ A subsequent actual Firestore emulator test passed **1/1 with zero skips** at un
 The production runtime/config code remains byte-identical to the prior qualified flight checkpoint; only three composed test files and then one new Firestore test were changed. The private preview remains on that flight checkpoint. HC-05 is still staged for root review and composed verification. These receipts do not close the full P02/P03 packets or the 246-finding playbook. No production merge, push or deployment occurred.
 
 Evidence under `/tmp/assistant-playbook-review`: `20261008-chat-composed-p02-focused-v2-terminal.json`, `20261008-chat-composed-p02-v2-static-build-terminal.json`, `chat-composed-p02-production-runtime-continuity-v2.json`, `20261008-p02-firestore-operation-focused-v1-terminal.json`, and `20261008-agent-shard-bb97-v1-cleanup-followup.json`.
-
 
 ### Contact lookup and fresh-request qualification, 2026-10-08
 
@@ -3701,7 +3694,6 @@ The separate P03 explicit source-read prohibition candidate remains uninstalled.
 
 Receipts under `/tmp/assistant-playbook-review`: `20261008-flight-chat-hc05-union-focused-v3-terminal.json`, `20261008-flight-chat-hc05-union-v3-static-build-terminal.json`, `hc05-fresh-request-root-applied-v2/receipt.json`, `20261008-hc05-ambiguity-diagnostic-v1-terminal.json`, and `p03-explicit-read-prohibition-review-v1.md`.
 
-
 ### Explicit source-read fence qualification, 2026-10-08
 
 A reviewed bounded source-read prohibition is installed at `ToolDispatcher`. Direct owner-authored prohibitions apply to the named confidential source before dispatch/replay and before approved private-read execution or result return. The parser uses already-separated owner text, so quoted third-party prohibitions do not constrain a direct owner request. Common Gmail, Calendar, Docs, Drive, Sheets and Contacts source words are mapped; other protected sources and full semantic negative-scope interpretation are not closed by this packet.
@@ -3714,7 +3706,6 @@ The private preview was refreshed to this qualified source; both local server he
 
 Evidence under `/tmp/assistant-playbook-review`: `20261008-flight-chat-contact-read-union-focused-v4-terminal.json`, `20261008-flight-chat-contact-read-union-v4-static-build-terminal.json`, `p03-explicit-read-prohibition-root-applied-v4/receipt.json`, and `p03-explicit-read-prohibition-review-v4-acceptance.md`.
 
-
 ### Generic-document no-read composition, 2026-10-09
 
 R7's common “Do not open this document” wording is now recognized at the Docs dispatcher boundary. The composed scripted executor case proposes `docs.get` anyway and proves zero document callbacks, zero document tool-call rows and a useful general URL explanation without claiming a temporarily unavailable read. The existing ordinary owner-shared Google Doc positive control still succeeds. The fixture now supplies real classify/plan response shapes and counts those roles separately.
@@ -3725,7 +3716,6 @@ Full R7 acceptance remains open: the current source-level prohibition still bloc
 
 Evidence under `/tmp/assistant-playbook-review`: `20261009-r7-generic-document-focused-v1-terminal.json`, `20261009-r7-flight-chat-read-union-focused-v1-terminal.json`, `20261009-r7-flight-chat-read-union-v1-static-build-terminal.json`, `r7-generic-document-root-applied-v1/receipt.json`, and `r7-target-and-companion-review-v1.md`.
 
-
 ### Document target permissions and native composer readability, 2026-10-09
 
 The R7 dispatcher now binds an explicit Docs URL prohibition to that document ID. A separate document is eligible only when the same owner-authored request directly asks to read its exact URL; unmentioned targets, explanatory wording, quoted instructions and compact receipts without resource arguments remain blocked. A source-wide no-read instruction still blocks the entire source. Approved replay checks the effective resolution payload before returning an existing result. Normal scope and policy checks still apply. The composed scripted executor regression proposes the denied document, receives the refusal, then reads only the explicitly permitted second document; persistence records only that allowed call.
@@ -3735,7 +3725,6 @@ The 25-file selected flight/chat/contact/read-permission union passed **875/875 
 The iPhone composer now uses short visible state prompts at accessibility text sizes and retains the full prompt as its accessibility label. Root and the native reviewer inspected eight current/candidate idle renders at ordinary Large and Accessibility 5 in both themes: current A5 clips “Ask anything…” while candidate “Message” fits; ordinary-size wording is unchanged. Actual checkout app/test-target `build-for-testing` succeeded. No XCTest methods, VoiceOver interaction or physical-device checks ran. Exact render/build/source evidence is in the [native manifest](/tmp/assistant-playbook-review/native-composer-shadow-qual-v1/qualification-manifest-final.json).
 
 The private browser/phone runtime was refreshed to this exact source. Both local health checks returned 200, and unauthenticated phone bootstrap returned 401. Fresh visible browser acceptance was not obtained: the computer-use surface reported the Mac locked and preview navigation timed out. Earlier live-chat evidence retains its earlier source and is not promoted to this revision. MC-04 durable email observer storage and module integration are being staged in parallel; its atomic admission, paid-result recovery, notification deduplication, independent rate budget and privacy acceptance remain unfinished. No rewrite changes were merged or deployed, and the 246 finding counts remain unchanged.
-
 
 ### Recorded-resource replay and card recovery checkpoint, 2026-10-09
 
@@ -3781,7 +3770,6 @@ An isolated metadata check adds the schema declaration for the constraint alread
 
 These persistence, notice, recovery, task and writing-sample changes remain outside the primary checkout. Atomic application claim/task handoff now has the bounded copied qualification above; later owner notices and Sheets/Docs effects still need lifecycle acceptance. Attachment custody, the recovery consumer, enabled-worker behavior, full browser/iPhone acceptance and release remain open. The original 246 finding statuses remain unchanged; no merge, push, deployment or external notification is claimed.
 
-
 ### Attachment lifecycle composition checkpoint, 2026-10-09
 
 The Firestore attachment successor is frozen separately: its focused producer, duplicate replay, actual owner-erasure and exact-generation storage tests pass **39/39** with unchanged source before and after. The [32-file manifest](/tmp/assistant-playbook-review/mc04-email-attachment-firestore-lifecycle-stage-v6/manifest-v6.json) records real emulator calls and no live provider or GCS calls. Root composed those files into the isolated attachment candidate while preserving the newer atomic handoff, post-insert fence and migration metadata. Review resolved the queue-notifier import and removed a duplicated shared extractor export introduced by composition.
@@ -3798,7 +3786,6 @@ Five index declarations were added only to the copied deployment specification. 
 
 Further review found that the public GCS custody metadata wrapper dropped its optional generation argument even though its private implementation handled exact versions. That repair, historical-version regression, both-generation document cleanup and foreign-owner deletion controls are being qualified in separate successors. The [next activation review](/tmp/assistant-playbook-review/mc04-next-activation-review-v1.md) also records the still-missing runtime observer consumer and the downstream Sheets/Docs effect and final-notice erasure boundaries. These are concrete implementation gaps, not completed acceptance.
 
-
 ### Attachment producer and deletion qualification, 2026-10-09
 
 The combined copied attachment candidate passes **336/336 selected tests across 104 suites and 43 actual files, zero failures/skips**, including actual PostgreSQL and Firestore calls, at unchanged source `c63666ffe87d633d852266c9797b0df4f863ca696a38857fd9e57e9556821025` (3,709 files). Forced all-package typecheck, script typecheck, full lint, the auth-bypass-disabled production build and changed-source whitespace check also pass at this same source. The [qualified snapshot manifest](/tmp/assistant-playbook-review/mc04-attachment-lifecycle-composed-stage-v1/attachment-c636-qualified-snapshot-v1/manifest.json) freezes **122 changed source paths** against installed `29a69190`. The prior 102-path whitespace helper omitted 20 inherited new foundation files; its passing result is incomplete patch coverage. The corrected v3 check includes all 122, preserves the old receipts, verifies every installed baseline hash and performs read-only application checking.
@@ -3809,19 +3796,15 @@ A separate test-only addition then passes **3/3 actual PostgreSQL producer bound
 
 The portable background observer sweep and stable application-task notice generation fence are being implemented in separate copies. The observer rollout remains disabled, and new durable intake currently defers its observer effects while disabled; the foundation is not installed as a ready pipeline. The remaining Sheet/Doc effect gate must serialize final local acceptance against the owner generation and retain an honest nonretryable unknown receipt for uncertain remote outcomes. Memory erasure does not imply a blanket owner-authorized workflow wipe. Original finding counts remain unchanged: 232 Partial, 10 Implemented and locally verified, two Open, one Proposal and one Withdrawn. No backend installation, worker activation, merge, push or production deployment occurred.
 
-
 A disjoint copied regression of 25 earlier grounded-answer, source-permission, contact/chat, calendar, proactive-card and model-contract files passes **909 tests with zero failures and 37 explicitly skipped embedded Firestore cases** at `09c9afa9` (3,710 files). [Prior feature regression receipt](/tmp/assistant-playbook-review/mc04-attachment-lifecycle-composed-stage-v1/runs/attachment-prior-feature-regression-v1/terminal.json). Two separate Firestore files were excluded from that selected run while the owned emulator was reserved for another adapter review. This is useful compatibility evidence, not a zero-skip/full-suite qualification, and is not combined with the differently pinned 336-test total.
 
 Activation review also identified a durable-card feature-switch gap: the legacy callback respected `GENERATIVE_CARDS_ENABLED`, but the staged durable card handler did not check it before paid reservation/composition. The runtime successor must pause disabled work without losing its frozen identity or charging/composing, and must check live Gmail/rollout/readiness transitions during a drain. Prepared attachment replay must also respect the documents feature switch. These acceptance cases are added to the background-worker work; no worker is activated while they remain open.
 
-
 A bounded native-toolchain repair attempt invoked Xcode's required first-launch setup. The verified owned process produced no output over 190 seconds and was stopped without operating on any simulator. The first-launch status remains exit 69; zero native tests executed. [Native setup attempt receipt](/tmp/assistant-playbook-review/native-first-launch-repair-attempt-v1.json). This does not supersede earlier compile evidence or establish iPhone interaction/accessibility acceptance.
-
 
 The background-worker agent reports a final **30/30** actual PostgreSQL/Firestore runtime-sweep group, including disabled-feature handling, dynamic pause boundaries, unused paid reservation release before composition and prepared-result reservation retention. Root review first caught an encoded SDK document ID being passed to the logical-ID Firestore adapter in the new fixture; the corrected agent run preserves the earlier failure separately. The file-scoped packet is not yet frozen/composed, so this is agent-reported source-specific evidence rather than root candidate qualification or activation. Root also rejected the permissive missing-card-flag predicate; the successor requires explicit `GENERATIVE_CARDS_ENABLED === true` and explicit rollout enablement.
 
 The separate Google Sheet/Doc effect successor uses the existing durable action state to record an opaque, terminal unknown outcome before provider dispatch, with conditional settlement for that exact claim. Review requires canonical tool/action/idempotency identity, exact confirmation-source lineage, explicit producer-generation membership, an immutable task lease and a fresh clock after locks. Missing generations must not silently become null, and a provider timeout must not be classified as a definitive rejection merely because it has a 4xx status. These controls and actual registered Doc/replay tests are being implemented before composition. No new table, broad workflow erasure or automatic retry of uncertain remote writes is introduced by this scoped design.
-
 
 ### Background worker and external-write composition, 2026-10-09
 
@@ -3831,7 +3814,6 @@ The broader 47-file group passed **360 tests and failed two, with zero skips**, 
 
 Installed local source remains `29a69190` / 3,672 files. No backend installation, worker activation, production deployment, merge or push is recorded. The 246 finding statuses are unchanged.
 
-
 ### Combined worker, effect and final-notice qualification, 2026-10-09
 
 The complete 30-path final-notice dependency packet is now composed with the default-off worker, attachment custody/recovery, application effect gate and receipt-preservation repair. Review found and fixed two additional boundaries: legacy application tasks without an explicit producer-generation field now stop before effects or result notices, and uncertain Sheet/Doc results carry the existing receipt classifier’s `effectStatus: unknown` and `retrySuppressed` markers. Internal successful tool results expose only application ID, action and status. This minimizes output; it does not expand memory erasure to retained application business records or ordinary tool-call history. The migration journal, snapshot and release contracts are aligned to schema 126.
@@ -3840,9 +3822,7 @@ The final copied source `d96d9fce1c304e64665a1361890f0942910d7d3ea6baa4d1e2e53c0
 
 This remains a copied qualification, not backend installation, worker activation, merge, push or deployment. Broader prior chat/flight regressions are running separately; the atomic ambiguous-observer successor and original browser/iPhone/provider/recovery acceptance remain open. Canonical 246 finding statuses are unchanged.
 
-
 The separate earlier-feature regression group subsequently passed **952/952 selected tests across 107 suites and 27 files, zero failures/skips**, including actual Firestore dispatcher/chat operation isolation, at the same `d96d9fce` source. The [prior-feature addendum](/tmp/assistant-playbook-review/mc04-attachment-lifecycle-composed-stage-v1/notice-effect-worker-d96-qualified-snapshot-v1/prior-feature-addendum-v1.json) archives that independent run without changing the frozen qualification manifest. These results cover selected chat/flight/read-permission/card behavior; they are not the complete original browser/iPhone/provider journeys. The ambiguous-observer packet remains separately under review.
-
 
 ### Combined ambiguous email successor qualification, 2026-10-09
 
@@ -3854,13 +3834,11 @@ The composed successor passes **388/388 selected tests across 117 suites and 49 
 
 The preceding 952-test group remains scoped to `d96d9fce`; no exact-source 952 rerun is claimed for this successor. Installed local source remains `29a69190`. No backend installation, worker activation, merge, push or deployment occurred. Full browser/iPhone interaction, authenticated provider-backed installation, restore/cutover and production acceptance remain open. The 246 finding statuses are unchanged. The user-facing tracker now separates the current checklist from its preserved historical evidence log.
 
-
 ### Observer rollout setting follow-up, 2026-10-09
 
 Normal provisioning replaces the agent environment but previously omitted `EMAIL_OBSERVER_WORKER_ENABLED`, silently discarding an explicit rollout setting. The private successor now forwards the optional setting only to the agent service; unset retains the schema default false, explicit false remains off, and local documentation explains the coupled Gmail-sync/polling requirement. Root review caught swallowed shell errors in the first helper because command substitution clears Bash errexit. The corrected helper explicitly propagates the real env reader failure; the negative old-helper control is retained.
 
 At copied source `df8dc2db583221d88397165cb34a881ea00107dfd1f9ea21000aa6af8ce70f2c` (3,722 files), shell syntax and the side-effect-free contract pass, as do all 5 deploy-environment tests and the complete 148-path whitespace check. The [scoped delta manifest](/tmp/assistant-playbook-review/mc04-attachment-lifecycle-composed-stage-v1/worker-rollout-df8-qualified-delta-v1/manifest.json) preserves these results. This five-path delta has no full 388-test/build rerun; those remain tied to `313d2654`. No cloud command, activation, installed-source change or deployment occurred.
-
 
 ### Combined rollout and authenticated-route qualification, 2026-10-09
 
@@ -3869,7 +3847,6 @@ The successor combines the rollout-setting delta with a new PostgreSQL HTTP-appl
 All **394/394 selected tests across 121 suites and 51 files pass, with zero failures/skips**, including real PostgreSQL and the owned Firestore emulator. All five package/agent TypeScript, script TypeScript, lint, auth-bypass-disabled production build and complete 149-path whitespace checks pass at unchanged copied source `a2e97b05bb330aa450a892eef5e48984a79d7595577c88ace43cab106cd30ffd` (3,723 files). The real shell environment contract, Bash syntax and separate Node release-contract checks also pass at that source. The [frozen combined manifest](/tmp/assistant-playbook-review/mc04-attachment-lifecycle-composed-stage-v1/rollout-route-a2e-qualified-snapshot-v1/manifest.json) has SHA-256 `7983ee242ba26c5ca0253012f8aa4c1b4c3226afea1e891485d289712adde323` and preserves all corresponding receipts and guarded changed files. The build retains the documented unpdf warning.
 
 The prior 952-test group remains tied to `d96d9fce`; no rerun is claimed at the successor. Installed source remains `29a69190`; no backend installation, worker activation, merge, push, cloud action or deployment occurred. Mounted browser replay/Stop/read-permission journeys are still open and currently blocked by the locked Mac. Native checks await first-launch Xcode setup. The full original acceptance register and finding counts remain unchanged.
-
 
 ### Latest native iPhone installation, 2026-10-09
 

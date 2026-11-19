@@ -35,6 +35,7 @@ final class MobileScreenProjection {
 }
 
 enum MobileEditResource: Hashable {
+    case memoryTarget(String)
     case memory, workspace, overview, archivedGoals, people, personCaches, person(String), commitments, providers, cards, library(MemoryLibraryQuery), voiceProfile
 }
 
@@ -102,7 +103,7 @@ final class OptimisticEditStore {
                 let records = try await journal.load()
                 guard let self, self.generation == epoch, self.recoveryScope == scope else { return }
                 for record in records where !self.entries.contains(where: { $0.id == record.id }) {
-                    var edit = Edit(id: record.id, title: record.title, resources: record.memoryRelated == true ? [.memory] : [], patch: { _ in },
+                    var edit = Edit(id: record.id, title: record.title, resources: (record.memoryRelated == true ? Set<MobileEditResource>([.memory]) : []).union(record.memoryTargetID.map { [.memoryTarget($0)] } ?? []), patch: { _ in },
                                     write: {}, retrySafe: false, draft: record.draft)
                     edit.phase = .failed
                     edit.failure = Failure(id: record.id, title: record.title,
@@ -190,6 +191,19 @@ final class OptimisticEditStore {
         rebuild()
     }
 
+    /// Known unrelated note writes do not block this target. Old unscoped unknown journals
+    /// cannot prove that they concern another note, so this consumer remains unavailable.
+    func hasUnresolvedMemoryWrite(memoryID: String) -> Bool {
+        entries.contains { edit in
+            let targets = edit.resources.compactMap { resource -> String? in
+                if case .memoryTarget(let id) = resource { return id }; return nil
+            }
+            let unresolved = edit.phase == .queued || edit.phase == .saving || edit.failure?.outcomeUnknown == true
+            if !targets.isEmpty { return unresolved && targets.contains(memoryID) }
+            return edit.resources.contains(.memory) && edit.failure?.outcomeUnknown == true
+        }
+    }
+
     func hasUnknownWrite(in resources: Set<MobileEditResource>) -> Bool {
         entries.contains { !$0.resources.isDisjoint(with: resources) && $0.failure?.outcomeUnknown == true }
     }
@@ -266,7 +280,7 @@ final class OptimisticEditStore {
                     do {
                         await self.recoveryCleanup?.value
                         guard self.generation == epoch, !Task.isCancelled else { return }
-                        try await self.journal?.save(MobileEditRecoveryRecord(id: edit.id, title: edit.title, draft: edit.draft, memoryRelated: edit.resources.contains(.memory)))
+                        try await self.journal?.save(MobileEditRecoveryRecord(id: edit.id, title: edit.title, draft: edit.draft, memoryRelated: edit.resources.contains(.memory), memoryTargetID: edit.resources.compactMap { if case .memoryTarget(let id) = $0 { return id }; return nil }.first))
                         guard self.generation == epoch, !Task.isCancelled else { return }
                         dispatched = true
                         try await edit.write()
@@ -341,6 +355,7 @@ struct MobileEditRecoveryRecord: Codable, Identifiable, Sendable {
     let title: String
     let draft: String
     var memoryRelated: Bool? = nil
+    var memoryTargetID: String? = nil
 }
 
 actor MobileEditRecoveryJournal {
