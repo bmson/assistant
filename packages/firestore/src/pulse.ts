@@ -7,6 +7,8 @@ import {
   commitmentIsActive,
   emailIngestReadable,
   mergeCalendarRecovery,
+  PULSE_BILL_DISCOVERY_LIMIT,
+  type PulseBillMailQuery,
   type PulseCalendarSnapshot,
   type PulseCommitment,
   type PulseMail,
@@ -14,6 +16,8 @@ import {
   type PulseNoticeOutcome,
   type PulseRepository,
   practiceChangeFromMail,
+  pulseBillDueThrough,
+  pulseBillMailCandidate,
   pulseDailyCap,
   type Records,
   type SuggestionRecord,
@@ -262,6 +266,66 @@ export class FirestorePulseRepository implements PulseRepository {
     return readFirestoreEmailBillStatus(this.store, ...args);
   }
 
+  private async latestMailInThread(agentId: string, threadId: string) {
+    const thread = await this.store
+      .collection('emailIngest')
+      .where('agentId', '==', agentId)
+      .where('providerThreadId', '==', threadId)
+      .limit(10_001)
+      .get();
+    if (thread.size > 10_000) throw new Error('Pulse email thread scan exceeded bound');
+    return (
+      thread.docs
+        .map((candidate) => decodeRecord<Records['emailIngest']>(candidate.data()))
+        .filter((candidate) => candidate.agentId === agentId)
+        .sort((a, b) => {
+          const at = a.providerReceivedAt?.getTime() ?? a.createdAt.getTime();
+          const bt = b.providerReceivedAt?.getTime() ?? b.createdAt.getTime();
+          return at === bt
+            ? String(a.providerMessageId ?? a.channelMessageId).localeCompare(
+                String(b.providerMessageId ?? b.channelMessageId),
+              )
+            : at - bt;
+        })
+        .at(-1)?.channelMessageId ?? null
+    );
+  }
+
+  async dueBillMail(agentId: string, input: PulseBillMailQuery): Promise<PulseMail[]> {
+    if (input.limit <= 0) return [];
+    const page = await this.store
+      .collection('emailIngest')
+      .where('agentId', '==', agentId)
+      .where('actionable', '==', true)
+      .where('billEvidence.kind', '==', 'invoice')
+      .where('billEvidence.dueDate', '<=', input.dueThrough)
+      .orderBy('billEvidence.dueDate', 'desc')
+      .limit(PULSE_BILL_DISCOVERY_LIMIT)
+      .get();
+    const candidates: PulseMail[] = [];
+    const latestByThread = new Map<string, string | null>();
+    for (const doc of page.docs) {
+      const row = decodeRecord<Records['emailIngest']>(doc.data());
+      if (typeof row.id !== 'string' || documentKey(row.id) !== doc.id || row.agentId !== agentId)
+        continue;
+      const candidate = pulseBillMailCandidate(row, input);
+      if (!candidate) continue;
+      if (await this.momentAlreadyAdmitted(agentId, `bill-due:${candidate.billInvoice.identity}`))
+        continue;
+      if ((await this.billStatus(agentId, candidate.billInvoice, input.now)).kind !== 'due')
+        continue;
+      let latest = latestByThread.get(candidate.providerThreadId);
+      if (latest === undefined) {
+        latest = await this.latestMailInThread(agentId, candidate.providerThreadId);
+        latestByThread.set(candidate.providerThreadId, latest);
+      }
+      if (latest !== row.channelMessageId) continue;
+      candidates.push(candidate);
+      if (candidates.length >= input.limit) break;
+    }
+    return candidates;
+  }
+
   async actionableMail(
     agentId: string,
     input: { since: Date; until: Date; now: Date; minImportance: number; limit: number },
@@ -277,7 +341,7 @@ export class FirestorePulseRepository implements PulseRepository {
       .orderBy('createdAt', 'asc')
       .orderBy('id', 'asc');
     const rows: PulseMail[] = [];
-    const latestByThread = new Map<string, Records['emailIngest'] | null>();
+    const latestByThread = new Map<string, string | null>();
     const seenIncidents = new Set<string>();
     let cursor: QueryDocumentSnapshot | undefined;
     let scanned = 0;
@@ -293,6 +357,7 @@ export class FirestorePulseRepository implements PulseRepository {
         const practiceChange = practiceChangeFromMail(row);
         if (!practiceChange && row.createdAt > input.until) continue;
         if (practiceChange && new Date(practiceChange.iso) <= input.now) continue;
+        if (!practiceChange && !row.securityIncidentId && admittedBillEmailEvidence(row)) continue;
         if (!row.providerThreadId) continue;
         if (row.obligationStatus === 'resolved' || row.obligationStatus === 'superseded') continue;
         if (
@@ -303,30 +368,10 @@ export class FirestorePulseRepository implements PulseRepository {
           continue;
         let latest = latestByThread.get(row.providerThreadId);
         if (latest === undefined) {
-          const thread = await this.store
-            .collection('emailIngest')
-            .where('agentId', '==', agentId)
-            .where('providerThreadId', '==', row.providerThreadId)
-            .limit(10_001)
-            .get();
-          if (thread.size > 10_000) throw new Error('Pulse email thread scan exceeded bound');
-          latest =
-            thread.docs
-              .map((candidate) => decodeRecord<Records['emailIngest']>(candidate.data()))
-              .filter((candidate) => candidate.agentId === agentId)
-              .sort((a, b) => {
-                const at = a.providerReceivedAt?.getTime() ?? a.createdAt.getTime();
-                const bt = b.providerReceivedAt?.getTime() ?? b.createdAt.getTime();
-                return at === bt
-                  ? String(a.providerMessageId ?? a.channelMessageId).localeCompare(
-                      String(b.providerMessageId ?? b.channelMessageId),
-                    )
-                  : at - bt;
-              })
-              .at(-1) ?? null;
+          latest = await this.latestMailInThread(agentId, row.providerThreadId);
           latestByThread.set(row.providerThreadId, latest);
         }
-        if (!latest || latest.channelMessageId !== row.channelMessageId) continue;
+        if (latest !== row.channelMessageId) continue;
         let security: Pick<
           PulseMail,
           | 'securityIncidentId'
@@ -363,12 +408,6 @@ export class FirestorePulseRepository implements PulseRepository {
           momentKey = `security-incident:${incident.id}:r${incident.revision}`;
         }
 
-        const bill = admittedBillEmailEvidence(row);
-        const billInvoice = bill?.kind === 'invoice' && !row.obligationDecision ? bill : null;
-        if (billInvoice) {
-          if ((await this.billStatus(agentId, billInvoice, input.now)).kind !== 'due') continue;
-          momentKey = `bill-due:${billInvoice.identity}`;
-        }
         if (await this.momentAlreadyAdmitted(agentId, momentKey)) continue;
         if (row.securityIncidentId) seenIncidents.add(row.securityIncidentId);
         rows.push({
@@ -383,7 +422,6 @@ export class FirestorePulseRepository implements PulseRepository {
           importance: row.importance,
           obligationStatus: row.obligationStatus ?? 'unknown',
           ...(practiceChange ? { practiceChange } : {}),
-          ...(billInvoice ? { billInvoice } : {}),
           ...security,
         });
         if (rows.length >= input.limit) return rows;
@@ -524,10 +562,15 @@ export class FirestorePulseRepository implements PulseRepository {
           return { status: 'stale-source' };
         if (source.billInvoice) {
           const invoice = admittedBillEmailEvidence(current);
+          const owner = await tx.get(this.store.doc('agents', input.agentId));
+          const timeZone = owner.get('timezone');
           if (
+            owner.get('id') !== input.agentId ||
+            typeof timeZone !== 'string' ||
             invoice?.kind !== 'invoice' ||
             invoice.identity !== source.billInvoice.identity ||
             invoice.evidenceLine !== source.billInvoice.evidenceLine ||
+            invoice.dueDate > pulseBillDueThrough(timeZone, input.now) ||
             current.obligationDecision ||
             (await readFirestoreEmailBillStatus(this.store, input.agentId, invoice, input.now, tx))
               .kind !== 'due'

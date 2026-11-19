@@ -4,6 +4,7 @@ import {
   emailIngestReadable,
   type PulseRepository,
   practiceChangeFromMail,
+  pulseBillDueThrough,
   pulseDailyCap,
   validatePulseNotice,
 } from '@assistant/persistence';
@@ -38,7 +39,7 @@ export function createPostgresPulseAdmissionRepository(
       validatePulseNotice(input);
       return db.transaction(async (tx) => {
         const [owner] = await tx
-          .select({ id: agents.id })
+          .select({ id: agents.id, timeZone: agents.timezone })
           .from(agents)
           .where(eq(agents.id, input.agentId))
           // Admissions and erasure must serialize, while another notifier may
@@ -101,6 +102,7 @@ export function createPostgresPulseAdmissionRepository(
               invoice?.kind !== 'invoice' ||
               invoice.identity !== source.billInvoice.identity ||
               invoice.evidenceLine !== source.billInvoice.evidenceLine ||
+              invoice.dueDate > pulseBillDueThrough(owner.timeZone, input.now) ||
               current.obligationDecision ||
               (await readPostgresEmailBillStatus(tx, input.agentId, invoice, input.now)).kind !==
                 'due'

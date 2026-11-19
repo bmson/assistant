@@ -2191,6 +2191,28 @@
           "order": "ASCENDING"
         },
         {
+          "fieldPath": "actionable",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "billEvidence.kind",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "billEvidence.dueDate",
+          "order": "DESCENDING"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "emailIngest",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "agentId",
+          "order": "ASCENDING"
+        },
+        {
           "fieldPath": "providerReceivedAt",
           "order": "DESCENDING"
         }
