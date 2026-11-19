@@ -1,14 +1,11 @@
 import { loadConfig, resetConfigForTest } from '@assistant/config';
-import { createDb, createPostgresExecutionPersistence, schedules } from '@assistant/db';
+import { createPostgresExecutionPersistence, schedules } from '@assistant/db';
 import { installModules, noopOwnerNotifier } from '@assistant/modules';
 import { ToolRegistry } from '@assistant/tools/registry';
 import { eq } from 'drizzle-orm';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import {
-  assertAllocatedTestDatabaseOwnership,
-  assertAllocatedTestTargetMarker,
-} from '../../../scripts/test-target.js';
 import type { AgentDeps } from './deps.js';
+import { createIsolatedTestDatabase } from './isolated-test-database.fixture.js';
 import { runPostgresSweep } from './postgres-sweep.js';
 import { internal } from './routes/internal.js';
 import { readPostgresSweepHealth } from './sweep-heartbeat.js';
@@ -24,14 +21,9 @@ afterEach(() => {
 
 describe('independent scheduler health', () => {
   it('reads PostgreSQL completion through the authenticated GET endpoint', async () => {
-    const target = assertAllocatedTestTargetMarker({
-      databaseUrl: process.env.DATABASE_URL,
-      testDatabaseUrl: process.env.TEST_DATABASE_URL,
-      token: process.env.ASSISTANT_TEST_TARGET_TOKEN,
-    });
-    const db = createDb(target.databaseUrl);
+    const { db, databaseUrl, close } = await createIsolatedTestDatabase();
     try {
-      await assertAllocatedTestDatabaseOwnership(db, target);
+      vi.stubEnv('DATABASE_URL', databaseUrl);
       // Disable seeded schedules in this disposable database. The quiet sweep
       // should execute maintenance without creating or notifying any work.
       await db.update(schedules).set({ enabled: false });
@@ -153,7 +145,7 @@ describe('independent scheduler health', () => {
       });
       expect(embed).not.toHaveBeenCalled();
     } finally {
-      await db.$client.end();
+      await close();
     }
-  });
+  }, 90_000);
 });
