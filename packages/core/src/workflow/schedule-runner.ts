@@ -1,5 +1,6 @@
 import {
   type GoalOccurrenceGuard,
+  REPAIR_POLL_INTERVAL_MS,
   type ScheduleRecord,
   type ScheduleRepository,
   scheduleBatch,
@@ -59,6 +60,15 @@ export async function runScheduleBatch(
   for (const row of await repository.listDue(now, batch)) {
     if (!scheduleCanRun(row) || !row.nextRunAt) continue;
     const template = (row.taskTemplate ?? {}) as ScheduledTaskTemplate;
+    // A second report or restored checkpoint may have armed this occurrence early.
+    // The stored last firing survives retries and is fenced by commitOccurrence.
+    if (
+      row.name === 'self-repair' &&
+      template.job === 'self.repair' &&
+      row.lastRunAt &&
+      now.getTime() < row.lastRunAt.getTime() + REPAIR_POLL_INTERVAL_MS
+    )
+      continue;
     let preparation: SchedulePreparation = { action: 'fire' };
     if (template.job && !(options.isJobEnabled ?? isCodeJobEnabled)(template.job)) {
       preparation = { action: 'skip' };

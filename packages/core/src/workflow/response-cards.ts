@@ -197,18 +197,12 @@ function details(
   return entries.flatMap(([label, value]) => (value ? [{ label, value }] : []));
 }
 
-function formatTime(value: string, timeZone?: string): string {
-  if (!timeZone) {
-    const local = /T(\d{2}):(\d{2})/.exec(value);
-    if (local?.[1] && local[2]) {
-      const hour = Number(local[1]);
-      const minute = local[2];
-      const suffix = hour >= 12 ? 'PM' : 'AM';
-      return `${hour % 12 || 12}:${minute} ${suffix}`;
-    }
-  }
+const EXPLICIT_OFFSET = /(?:Z|[+-]\d{2}:\d{2})$/i;
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+
+function formatTime(value: string, timeZone: string): string {
   const date = new Date(value);
-  if (Number.isNaN(date.valueOf())) return value;
+  if (!EXPLICIT_OFFSET.test(value) || !Number.isFinite(date.valueOf())) return '';
   return calendarDateFormatter({
     hour: 'numeric',
     minute: '2-digit',
@@ -216,24 +210,31 @@ function formatTime(value: string, timeZone?: string): string {
   }).format(date);
 }
 
-function calendarDate(value: string, timeZone?: string): string {
-  if (!timeZone) return value.slice(0, 10);
-  const date = new Date(value);
-  if (!Number.isFinite(date.valueOf())) return value.slice(0, 10);
+function calendarDate(value: string, timeZone: string): string {
   return calendarDateFormatter({
     timeZone,
     year: 'numeric',
     month: 'short',
     day: 'numeric',
-  }).format(date);
+  }).format(new Date(value));
 }
+
 function calendarTimeRange(start: string, end: string, timeZone?: string): string {
+  if (!timeZone) return 'Time unavailable';
   const from = formatTime(start, timeZone);
-  if (!end) return from;
+  if (!from) return 'Time unavailable';
   const to = formatTime(end, timeZone);
+  if (!to) return from;
   const fromDay = calendarDate(start, timeZone);
   const toDay = calendarDate(end, timeZone);
   return fromDay !== toDay ? `${fromDay}, ${from}–${toDay}, ${to}` : `${from}–${to}`;
+}
+
+function formatCalendarUpdateTime(start: string, timeZone?: string): string {
+  if (DATE_ONLY.test(start)) return start;
+  if (!start || !timeZone) return '';
+  const time = formatTime(start, timeZone);
+  return time ? `${calendarDate(start, timeZone)}, ${time}` : '';
 }
 
 function isVideoMeetingLink(link: RecordValue | undefined): boolean {
@@ -269,12 +270,13 @@ function isSpecificCalendarLink(link: RecordValue | undefined): boolean {
 export function calendarResponseCards(
   evidence: ActionEvidence[],
   request?: PersonalReadRequest | null,
-  options?: { includeUnresolvedDates?: boolean },
+  options?: { includeUnresolvedDates?: boolean; ownerTimeZone?: string },
 ): ResponseCard[] {
   // A flight departure answer is reconciled against its dated booking. A raw
   // calendar row would present an unverified airline/time as the answer again.
   // Ordinary agenda requests still show their calendar entries below.
   if (request?.answerFocus === 'flight') return [];
+  const timeZone = options?.ownerTimeZone ?? request?.timeZone;
   const updatedEventIds = new Set(
     evidence.flatMap((row) => {
       const result = record(row.result);
@@ -307,7 +309,7 @@ export function calendarResponseCards(
           )
       : [];
   });
-  const groups = presentationOccurrenceGroups(events, request?.timeZone) as EventGroup[];
+  const groups = presentationOccurrenceGroups(events, timeZone) as EventGroup[];
   return groups
     .map((group) => {
       const probableMatch = canonicalOccurrenceGroups(group).length > 1;
@@ -434,6 +436,7 @@ export function calendarResponseCards(
           : 'consistent';
       return {
         kind: 'calendar-event' as const,
+        ...(timeZone ? { timeZone } : {}),
         id: `calendar-${group.map((entry) => `${string(entry.calendarId)}:${string(entry.eventId)}`).join('|')}`,
         ...(probableMatch ? { probableMatch: true } : {}),
         title:
@@ -458,7 +461,7 @@ export function calendarResponseCards(
                   : 'All day'
                 : windowMembership === 'source-date-only'
                   ? `Local time unresolved · ${start || 'start unavailable'} – ${end || 'end unavailable'}`
-                  : calendarTimeRange(start, end, request?.timeZone),
+                  : calendarTimeRange(start, end, timeZone),
         allDay,
         ...(options?.includeUnresolvedDates ? { windowMembership } : {}),
         ...(!canonicalValuesDiffer('calendarTimeZone') && string(event.calendarTimeZone)
@@ -649,6 +652,7 @@ export interface WeatherCardDay {
   lowC: number;
   highC: number;
   precipPct?: number;
+  precipitationType?: 'unspecified';
   description: string;
   symbol?: string;
 }
@@ -670,6 +674,9 @@ function weatherCardDay(
     lowC,
     highC,
     ...(precipPct === undefined ? {} : { precipPct }),
+    ...(day.dailyPrecipitationType === 'unspecified'
+      ? { precipitationType: 'unspecified' as const }
+      : {}),
     description,
     ...(symbol ? { symbol } : {}),
   };
@@ -709,7 +716,16 @@ export function weatherResponseCards(ambient?: string): ResponseCard[] {
     .map((day) => weatherDetail(day[1] ?? '', day[2] ?? '', day[2] ?? ''));
   const symbol = weatherSymbol(condition);
   const days = [
-    weatherCardDay('Today', { lowC: low, highC: high, precipProbabilityMax: rain }, condition),
+    weatherCardDay(
+      'Today',
+      {
+        lowC: low,
+        highC: high,
+        precipProbabilityMax: rain,
+        dailyPrecipitationType: precipName === 'precipitation' ? 'unspecified' : undefined,
+      },
+      condition,
+    ),
     ...coming.split(';').map((entry) => {
       const day =
         /^(\w+)\s+(-?\d+)–(-?\d+)°C,\s*([^,]+?)(?:,\s*(\d+)% chance of (?:rain|precipitation))?\.?$/.exec(
@@ -1273,7 +1289,10 @@ export function searchResponseCards(evidence: ActionEvidence[]): ResponseCard[] 
 }
 
 /** Free/busy answers render the raw busy blocks; the owner reads the gaps. */
-export function availabilityResponseCards(evidence: ActionEvidence[]): ResponseCard[] {
+export function availabilityResponseCards(
+  evidence: ActionEvidence[],
+  ownerTimeZone?: string,
+): ResponseCard[] {
   return evidence.flatMap((row, index) => {
     if (!succeeded(row) || row.toolName !== 'calendar.availability') return [];
     const result = record(row.result);
@@ -1294,6 +1313,7 @@ export function availabilityResponseCards(evidence: ActionEvidence[]): ResponseC
     return [
       {
         kind: 'availability' as const,
+        ...(ownerTimeZone ? { timeZone: ownerTimeZone } : {}),
         id: `availability-${index}-${string(args?.timeMin)}`,
         timeMin: string(args?.timeMin),
         timeMax: string(args?.timeMax),
@@ -1413,7 +1433,10 @@ export function resourceResponseCards(evidence: ActionEvidence[]): ResponseCard[
 }
 
 /** Writes that have no browseable artifact still receive a factual completion card. */
-export function statusResponseCards(evidence: ActionEvidence[]): ResponseCard[] {
+export function statusResponseCards(
+  evidence: ActionEvidence[],
+  ownerTimeZone?: string,
+): ResponseCard[] {
   return evidence.flatMap((row, index) => {
     if (!succeeded(row)) return [];
     const result = record(row.result);
@@ -1463,7 +1486,7 @@ export function statusResponseCards(evidence: ActionEvidence[]): ResponseCard[] 
           detail: string(result.summary) || 'The event details were updated.',
           symbol: 'calendar.badge.checkmark',
           details: details([
-            ['Time', string(result.start)],
+            ['Time', formatCalendarUpdateTime(string(result.start), ownerTimeZone)],
             ['Location', string(args?.location)],
             ['Invited', strings(args?.addAttendees).join(', ')],
           ]),
@@ -1583,7 +1606,10 @@ export function statusResponseCards(evidence: ActionEvidence[]): ResponseCard[] 
 }
 
 /** Event creation returns an id and link while its executed inputs contain the complete event. */
-export function calendarWriteResponseCards(evidence: ActionEvidence[]): ResponseCard[] {
+function calendarWriteResponseCards(
+  evidence: ActionEvidence[],
+  ownerTimeZone?: string,
+): ResponseCard[] {
   return evidence.flatMap((row, index) => {
     if (!succeeded(row) || row.toolName !== 'calendar.create_event') return [];
     const result = record(row.result);
@@ -1592,14 +1618,17 @@ export function calendarWriteResponseCards(evidence: ActionEvidence[]): Response
     const start = string(args?.start);
     if (!result || !title || !start) return [];
     const end = string(args?.end);
+    const allDay = DATE_ONLY.test(start);
     return [
       {
         kind: 'calendar-event' as const,
+        ...(ownerTimeZone ? { timeZone: ownerTimeZone } : {}),
         id: `calendar-${string(result.eventId) || index}`,
         title,
         start,
         end,
-        time: [formatTime(start), end ? formatTime(end) : ''].filter(Boolean).join('–'),
+        time: allDay ? 'All day' : calendarTimeRange(start, end, ownerTimeZone),
+        allDay,
         location: string(args?.location),
         attendees: strings(result.invited).length
           ? strings(result.invited)
@@ -1671,6 +1700,7 @@ export function responseCardsForFinal(input: {
   resolvedReadIntent?: ResolvedReadIntent;
   evidence: ActionEvidence[];
   readRequest?: PersonalReadRequest | null;
+  ownerTimeZone?: string;
   ambient?: string;
   requestText?: string;
   /** The live lookups the request asked for, in the order it asked them. */
@@ -1685,12 +1715,15 @@ export function responseCardsForFinal(input: {
       readRequest: null,
       ambient: undefined,
     };
+  const ownerTimeZone = input.ownerTimeZone ?? input.readRequest?.timeZone;
   const agendaEvidence = calendarAgendaScopedEvidence(input.evidence, input.readRequest);
   const agenda = calendarAgendaCards({
     evidence: agendaEvidence,
     events: calendarResponseCards(agendaEvidence, input.readRequest, {
       includeUnresolvedDates: true,
+      ownerTimeZone,
     }),
+    ownerTimeZone,
     request: input.readRequest,
     requestText: input.requestText,
   });
@@ -1717,15 +1750,15 @@ export function responseCardsForFinal(input: {
   const cards = orderForLookups(
     [
       ...resourceResponseCards(input.evidence),
-      ...statusResponseCards(input.evidence),
-      ...calendarWriteResponseCards(input.evidence),
+      ...statusResponseCards(input.evidence, ownerTimeZone),
+      ...calendarWriteResponseCards(input.evidence, ownerTimeZone),
       ...reminderResponseCards(input.evidence),
       ...(agenda.length
         ? agenda
         : synthesizedRead
           ? []
-          : calendarResponseCards(input.evidence, input.readRequest)),
-      ...(synthesizedRead ? [] : availabilityResponseCards(input.evidence)),
+          : calendarResponseCards(input.evidence, input.readRequest, { ownerTimeZone })),
+      ...(synthesizedRead ? [] : availabilityResponseCards(input.evidence, ownerTimeZone)),
       // Flight answers use mail only to reconcile the requested itinerary.
       // Do not turn every booking hit, historical message, or newsletter into
       // a second inbox result surface below the one calendar answer.

@@ -224,13 +224,6 @@ export function executorDeps(deps: AgentDeps): ExecutorDeps {
     // (a dead-letter or budget stall the owner is waiting on, never held), and
     // proactive producers pass `ambient` so quiet hours and the daily cap
     // govern whether the phone actually buzzes.
-    notifyOwner: ({ taskId, conversationId, text, urgency, applicationConfirmationNoticeFence }) =>
-      services.ownerNotifier.notifyOwner({
-        ...(taskId ? { taskId } : {}),
-        conversationId,
-        text,
-        ...(urgency ? { urgency } : {}),
-        ...(applicationConfirmationNoticeFence ? { applicationConfirmationNoticeFence } : {}),
-      }),
+    notifyOwner: (input) => services.ownerNotifier.notifyOwner(input),
   };
 }

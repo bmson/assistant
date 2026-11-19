@@ -2,9 +2,13 @@ import { createHash, randomUUID } from 'node:crypto';
 import {
   addLedgerMicros,
   addMicros,
+  assertUnknownModelSettlementTtl,
   type CostEventInput,
+  type CostProviderReceipt,
   type CostRepository,
+  type CostReservationSweep,
   type CostTotals,
+  canCorrectModelAttemptEstimate,
   type EstimatedCostActor,
   type EstimatedCostApprovalRepository,
   type EstimatedCostBudgetTracking,
@@ -18,6 +22,8 @@ import {
   MAX_LEDGER_USD_MICROS,
   matchesEstimatedCostParkedTask,
   microsToUsd,
+  modelAttemptEstimateKey,
+  modelAttemptSampleOutcome,
   nextUtcDailyReset,
   nextUtcMonthlyReset,
   parseEstimatedCostQuote,
@@ -27,14 +33,44 @@ import {
   type ReservationActual,
   type ReserveCostInput,
   type ReserveOutcome,
+  staleModelAttemptEstimate,
   storedLedgerUsdToMicros,
   storedTaskBudgetToMicros,
   usdToMicros,
 } from '@assistant/persistence';
-import type { DocumentSnapshot, Transaction } from '@google-cloud/firestore';
+import {
+  type DocumentSnapshot,
+  FieldPath,
+  type QueryDocumentSnapshot,
+  Timestamp,
+  type Transaction,
+} from '@google-cloud/firestore';
 import { withEmulatorTransactionRetry } from './emulator-transaction.js';
 import { firestoreEstimatedCostBaseline } from './estimated-cost-baseline.js';
-import { decodeRecord, encodeRecord, type InstallationStore } from './store.js';
+import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from './store.js';
+
+/** Missing period counters are acceptable only when no cost event supports a charge. */
+export async function hasCostEventAccountedSince(
+  tx: Transaction,
+  store: InstallationStore,
+  periodStart: Date,
+): Promise<boolean> {
+  const limit = 100;
+  const events = await tx.get(
+    store
+      .collection('costEvents')
+      .where('createdAt', '>=', periodStart)
+      .select('accountedAt')
+      .limit(limit),
+  );
+  return (
+    events.size === limit ||
+    events.docs.some((event) => {
+      const stamp = decodeRecord<Date | null | undefined>(event.get('accountedAt'));
+      return !(stamp instanceof Date && stamp < periodStart);
+    })
+  );
+}
 
 interface Policy {
   dailyLimitMicros: number;
@@ -71,6 +107,11 @@ function fingerprint(input: ReserveCostInput): string {
       ]),
     )
     .digest('hex');
+}
+
+function costEventId(key: string): ReturnType<typeof randomUUID> {
+  const digest = createHash('sha256').update(key).digest('hex').slice(0, 32);
+  return `${digest.slice(0, 8)}-${digest.slice(8, 12)}-4${digest.slice(13, 16)}-a${digest.slice(17, 20)}-${digest.slice(20)}`;
 }
 
 /** Counters, hold transitions, ledger events, and per-task spend commit together. */
@@ -697,10 +738,69 @@ export class FirestoreCostRepository implements CostRepository {
     };
   }
 
+  private async periodHolds(tx: Transaction, now: Date, held: number) {
+    const dayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+    const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+    if (held === 0) return { dailyHeld: 0, monthlyHeld: 0 };
+
+    // Reuse the stale-dispatch index. The global hold document is the write
+    // fence even while the amount stays unchanged during an unknown transition.
+    const oldAttempts = await tx.get(
+      this.store
+        .collection('costReservations')
+        .where('status', '==', 'unknown')
+        .where('attemptStartedAt', '<', dayStart)
+        .orderBy('attemptStartedAt')
+        .select(
+          'status',
+          'source',
+          'reservationKind',
+          'costGrantId',
+          'attemptStartedAt',
+          'createdAt',
+          'estimatedUsd',
+        )
+        .limit(500),
+    );
+
+    let dailyRelief = 0;
+    let monthlyRelief = 0;
+    for (const reservation of oldAttempts.docs) {
+      const startedAt = this.accountableUnknownAttempt(reservation, now);
+      if (!startedAt) continue;
+      const estimate = storedLedgerUsdToMicros(reservation.get('estimatedUsd'));
+      dailyRelief = addMicros(dailyRelief, estimate);
+      if (startedAt < monthStart) monthlyRelief = addMicros(monthlyRelief, estimate);
+    }
+    if (dailyRelief > held) throw new Error('Unknown attempts exceed total budget hold');
+    return { dailyHeld: held - dailyRelief, monthlyHeld: held - monthlyRelief };
+  }
+
+  private accountableUnknownAttempt(reservation: DocumentSnapshot, now: Date): Date | undefined {
+    const kind = reservation.get('reservationKind');
+    if (
+      reservation.get('status') !== 'unknown' ||
+      reservation.get('source') !== 'model' ||
+      (kind !== undefined && kind !== 'attempt') ||
+      reservation.get('costGrantId') != null
+    )
+      return;
+    const startedAt = decodeRecord<Date>(reservation.get('attemptStartedAt'));
+    const createdAt = decodeRecord<Date>(reservation.get('createdAt'));
+    if (
+      startedAt instanceof Date &&
+      createdAt instanceof Date &&
+      startedAt >= createdAt &&
+      startedAt <= now
+    )
+      return startedAt;
+  }
+
   async totals(): Promise<CostTotals> {
     return this.store.db.runTransaction(
       async (tx) => {
-        const refs = this.refs(this.store.now());
+        const now = this.store.now();
+        const refs = this.refs(now);
         const [p, holds, daily, monthly] = await tx.getAll(
           refs.policy,
           refs.holds,
@@ -709,10 +809,14 @@ export class FirestoreCostRepository implements CostRepository {
         );
         if (!p || !holds || !daily || !monthly) throw new Error('Incomplete budget snapshot');
         const limits = policy(p);
+        const held = integer(holds, 'heldMicros');
+        const { dailyHeld, monthlyHeld } = await this.periodHolds(tx, now, held);
         return {
           dailySpentUsd: microsToUsd(integer(daily, 'spentMicros')),
           monthlySpentUsd: microsToUsd(integer(monthly, 'spentMicros')),
-          heldUsd: microsToUsd(integer(holds, 'heldMicros')),
+          heldUsd: microsToUsd(held),
+          dailyHeldUsd: microsToUsd(dailyHeld),
+          monthlyHeldUsd: microsToUsd(monthlyHeld),
           dailyLimitUsd: microsToUsd(limits.dailyLimitMicros),
           monthlyLimitUsd: microsToUsd(limits.monthlyLimitMicros),
           softPct: limits.softPct,
@@ -753,16 +857,21 @@ export class FirestoreCostRepository implements CostRepository {
       const limits = policy(p);
       const held = integer(holds, 'heldMicros');
       const factor = input.critical ? 1.1 : 1;
-      for (const [name, spent, cap, reset] of [
-        [
-          'monthly',
-          integer(monthly, 'spentMicros'),
-          limits.monthlyLimitMicros,
-          nextUtcMonthlyReset(now),
-        ],
-        ['daily', integer(daily, 'spentMicros'), limits.dailyLimitMicros, nextUtcDailyReset(now)],
+      const dailySpent = integer(daily, 'spentMicros');
+      const monthlySpent = integer(monthly, 'spentMicros');
+      const dailyCap = Math.floor(limits.dailyLimitMicros * factor);
+      const monthlyCap = Math.floor(limits.monthlyLimitMicros * factor);
+      const needsPeriodHolds =
+        addMicros(dailySpent, held, amount) > dailyCap ||
+        addMicros(monthlySpent, held, amount) > monthlyCap;
+      const { dailyHeld, monthlyHeld } = needsPeriodHolds
+        ? await this.periodHolds(tx, now, held)
+        : { dailyHeld: held, monthlyHeld: held };
+      for (const [name, spent, periodHeld, cap, reset] of [
+        ['monthly', monthlySpent, monthlyHeld, monthlyCap, nextUtcMonthlyReset(now)],
+        ['daily', dailySpent, dailyHeld, dailyCap, nextUtcDailyReset(now)],
       ] as const) {
-        if (addMicros(spent, held, amount) > Math.floor(cap * factor)) {
+        if (addMicros(spent, periodHeld, amount) > cap) {
           return {
             ok: false,
             reason: `${name} budget cannot cover this reservation`,
@@ -853,7 +962,7 @@ export class FirestoreCostRepository implements CostRepository {
   async markAttemptUnknown(
     reservationId: string,
     reason: string,
-    providerReceipt?: { requestId?: string; endpoint?: string },
+    providerReceipt?: CostProviderReceipt,
   ): Promise<void> {
     const ref = this.store.doc('costReservations', reservationId);
     await withEmulatorTransactionRetry(() =>
@@ -890,6 +999,77 @@ export class FirestoreCostRepository implements CostRepository {
     );
   }
 
+  /** Update the original period and receipt together, with no second ledger event. */
+  private async correctModelAttemptEstimate(
+    tx: Transaction,
+    reservation: DocumentSnapshot,
+    reservationId: string,
+    actual: ReservationActual,
+  ): Promise<boolean> {
+    const kind = reservation.get('reservationKind');
+    if (
+      reservation.get('source') !== 'model' ||
+      (kind !== undefined && kind !== 'attempt') ||
+      reservation.get('costGrantId') != null ||
+      !canCorrectModelAttemptEstimate(actual.evidence)
+    )
+      return false;
+    const key = modelAttemptEstimateKey(reservationId);
+    const eventRef = this.store.doc('costEvents', costEventId(key));
+    const event = await tx.get(eventRef);
+    if (
+      !event.exists ||
+      event.get('reservationId') !== reservationId ||
+      event.get('idempotencyKey') !== key ||
+      event.get('evidence.modelAttemptEstimate') !== 'usage_missing_after_ttl'
+    )
+      return false;
+    const prior = storedLedgerUsdToMicros(event.get('usd'));
+    if (
+      reservation.get('actualUsd') != null ||
+      prior !== storedLedgerUsdToMicros(reservation.get('estimatedUsd'))
+    )
+      throw new Error('Model estimate does not match its reservation');
+    const amount = ledgerUsdToMicros(actual.usd);
+    const usd = microsToUsd(amount).toFixed(6);
+    const accountedAt = decodeRecord<Date>(event.get('accountedAt') ?? event.get('createdAt'));
+    if (!(accountedAt instanceof Date) || !Number.isFinite(accountedAt.getTime()))
+      throw new Error('Invalid model estimate settlement period');
+    const refs = this.refs(accountedAt, reservation.get('taskId'));
+    const [holds, daily, monthly] = await tx.getAll(refs.holds, refs.daily, refs.monthly);
+    if (!holds?.exists || !daily?.exists || !monthly?.exists)
+      throw new Error('Missing model estimate counters');
+    const task = refs.task ? await tx.get(refs.task) : null;
+    if (task && !task.exists) throw new Error('Ledger task does not exist');
+    const dailySpent = addMicros(integer(daily, 'spentMicros') - prior, amount);
+    const monthlySpent = addMicros(integer(monthly, 'spentMicros') - prior, amount);
+    const taskSpend = task
+      ? addLedgerMicros(storedLedgerUsdToMicros(task.get('spentUsd')) - prior, amount)
+      : null;
+    tx.set(refs.holds, { heldMicros: integer(holds, 'heldMicros') });
+    tx.set(refs.daily, { spentMicros: dailySpent });
+    tx.set(refs.monthly, { spentMicros: monthlySpent });
+    if (task && taskSpend !== null)
+      tx.update(task.ref, {
+        spentUsd: microsToUsd(taskSpend).toFixed(6),
+        updatedAt: this.store.now(),
+      });
+    tx.update(reservation.ref, { actualUsd: usd });
+    tx.update(
+      eventRef,
+      encodeRecord({
+        usd,
+        evidence: actual.evidence,
+        quantity: actual.quantity?.toFixed(4) ?? null,
+        unit: actual.unit ?? null,
+        unitPriceUsd: actual.unitPriceUsd?.toFixed(8) ?? null,
+        toolCallId: actual.toolCallId ?? null,
+        description: actual.description ?? reservation.get('description') ?? '',
+      }),
+    );
+    return true;
+  }
+
   private async settle(
     tx: Transaction,
     reservationId: string | null,
@@ -897,12 +1077,33 @@ export class FirestoreCostRepository implements CostRepository {
     direct?: CostEventInput,
     eventId = randomUUID(),
     staleBefore?: Date,
+    estimateBefore?: Date,
   ): Promise<boolean> {
     const now = this.store.now();
     const reservationRef = reservationId ? this.store.doc('costReservations', reservationId) : null;
     const reservation = reservationRef ? await tx.get(reservationRef) : null;
     const reservationStatus = reservation?.get('status');
     const reservationKind = reservation?.get('reservationKind');
+    if (
+      reservation &&
+      reservationId &&
+      reservationStatus === 'reconciled' &&
+      actual &&
+      !estimateBefore
+    )
+      return this.correctModelAttemptEstimate(tx, reservation, reservationId, actual);
+    const estimateKey =
+      reservationId && estimateBefore ? modelAttemptEstimateKey(reservationId) : null;
+    if (estimateBefore && reservation && estimateKey) {
+      const startedAt = this.accountableUnknownAttempt(reservation, now);
+      const evidence = staleModelAttemptEstimate(reservation.get('attemptMetadata'));
+      if (!startedAt || startedAt > estimateBefore || !evidence) return false;
+      actual = {
+        usd: microsToUsd(storedLedgerUsdToMicros(reservation.get('estimatedUsd'))),
+        evidence,
+      };
+      eventId = costEventId(estimateKey);
+    }
     if (
       reservationRef &&
       (!reservation?.exists ||
@@ -917,7 +1118,11 @@ export class FirestoreCostRepository implements CostRepository {
       if (!(created instanceof Date) || created >= staleBefore) return false;
     }
     const taskId: string | null = reservation?.get('taskId') ?? direct?.taskId ?? null;
-    const refs = this.refs(now, taskId);
+    const accountedAt =
+      actual && reservation && !estimateKey
+        ? (this.accountableUnknownAttempt(reservation, now) ?? now)
+        : now;
+    const refs = this.refs(accountedAt, taskId);
     // Reservation status and event creation commit together, so the status guard
     // provides deduplication while the event retains its public UUID as its document ID.
     const eventRef = this.store.doc('costEvents', eventId);
@@ -1008,7 +1213,7 @@ export class FirestoreCostRepository implements CostRepository {
     if (reservationRef) {
       tx.update(reservationRef, {
         status: writesEvent ? 'reconciled' : 'released',
-        actualUsd: writesEvent ? microsToUsd(amount).toFixed(6) : null,
+        actualUsd: writesEvent && !estimateKey ? microsToUsd(amount).toFixed(6) : null,
         reconciledAt: now,
       });
       tx.set(refs.holds, { heldMicros: held - estimated - poolExtra });
@@ -1041,8 +1246,11 @@ export class FirestoreCostRepository implements CostRepository {
           unit: details?.unit ?? null,
           unitPriceUsd: details?.unitPriceUsd?.toFixed(8) ?? null,
           description: details?.description ?? reservation?.get('description') ?? '',
-          ...(direct?.idempotencyKey ? { idempotencyKey: direct.idempotencyKey } : {}),
+          ...((estimateKey ?? direct?.idempotencyKey)
+            ? { idempotencyKey: estimateKey ?? direct?.idempotencyKey }
+            : {}),
           createdAt: now,
+          ...(accountedAt !== now ? { accountedAt } : {}),
         }),
       );
     }
@@ -1051,14 +1259,7 @@ export class FirestoreCostRepository implements CostRepository {
 
   async record(input: CostEventInput): Promise<void> {
     if (input.reservationId) throw new Error('Use reconcile to settle a reservation');
-    const digest = input.idempotencyKey
-      ? createHash('sha256').update(input.idempotencyKey).digest('hex').slice(0, 32)
-      : null;
-    const id = (
-      digest
-        ? `${digest.slice(0, 8)}-${digest.slice(8, 12)}-4${digest.slice(13, 16)}-a${digest.slice(17, 20)}-${digest.slice(20)}`
-        : randomUUID()
-    ) as ReturnType<typeof randomUUID>;
+    const id = input.idempotencyKey ? costEventId(input.idempotencyKey) : randomUUID();
     await this.store.db.runTransaction((tx) => this.settle(tx, null, null, input, id));
   }
 
@@ -1077,7 +1278,11 @@ export class FirestoreCostRepository implements CostRepository {
     );
   }
 
-  async releaseStale(olderThanMinutes = 120, batch = 500): Promise<number> {
+  async releaseStale(
+    olderThanMinutes = 120,
+    batch = 500,
+    unknownModelTtlMinutes = 30,
+  ): Promise<CostReservationSweep> {
     if (
       !Number.isFinite(olderThanMinutes) ||
       olderThanMinutes <= 0 ||
@@ -1087,6 +1292,88 @@ export class FirestoreCostRepository implements CostRepository {
     ) {
       throw new Error('Invalid reservation cleanup bounds');
     }
+    assertUnknownModelSettlementTtl(unknownModelTtlMinutes);
+    const now = this.store.now();
+    const estimateBefore = new Date(now.getTime() - unknownModelTtlMinutes * 60_000);
+    const unknown = this.store
+      .collection('costReservations')
+      .where('status', '==', 'unknown')
+      .where('attemptStartedAt', '<=', estimateBefore)
+      .orderBy('attemptStartedAt')
+      .orderBy(FieldPath.documentId())
+      .select(
+        'id',
+        'status',
+        'source',
+        'reservationKind',
+        'costGrantId',
+        'createdAt',
+        'attemptStartedAt',
+        'attemptMetadata',
+        'unknownReason',
+      );
+    const samples: { provider?: string; model?: string; outcome: string; ageMinutes: number }[] =
+      [];
+    let settledAtEstimate = 0;
+    let cursor: QueryDocumentSnapshot | undefined;
+    // Preserve progress across ticks even when protected attempts fill every page.
+    const name = 'unknown-model-estimate-scan';
+    const checkpoint = this.store.doc('maintenanceCursors', name);
+    const previous = await checkpoint.get();
+    const saved = previous.get('cursor') as string | undefined;
+    const position: [number, number, string] | undefined = saved ? JSON.parse(saved) : undefined;
+    let next: string | null = null;
+    for (let pages = 0; pages < 4 && settledAtEstimate < batch; pages++) {
+      const query = cursor
+        ? unknown.startAfter(cursor)
+        : position
+          ? unknown.startAfter(new Timestamp(position[0], position[1]), position[2])
+          : unknown;
+      const page = await query.limit(batch).get();
+      for (const doc of page.docs) {
+        cursor = doc;
+        const id: unknown = doc.get('id');
+        if (typeof id !== 'string' || !id || doc.id !== documentKey(id)) continue;
+        const startedAt = this.accountableUnknownAttempt(doc, now);
+        const estimate = staleModelAttemptEstimate(doc.get('attemptMetadata'));
+        if (!startedAt || !estimate) continue;
+        if (
+          await withEmulatorTransactionRetry(() =>
+            this.store.db.runTransaction((tx) =>
+              this.settle(tx, id, null, undefined, undefined, undefined, estimateBefore),
+            ),
+          )
+        ) {
+          settledAtEstimate++;
+          if (samples.length < 5)
+            samples.push({
+              provider: estimate.provider,
+              model: estimate.model,
+              outcome: modelAttemptSampleOutcome(doc.get('unknownReason')),
+              ageMinutes: Math.floor((now.getTime() - startedAt.getTime()) / 60_000),
+            });
+          if (settledAtEstimate >= batch) break;
+        }
+      }
+      if (!page.size || !cursor || (page.size < batch && cursor.id === page.docs.at(-1)?.id)) {
+        next = null;
+        break;
+      }
+      const stamp = cursor.get('attemptStartedAt') as Timestamp;
+      next = JSON.stringify([stamp.seconds, stamp.nanoseconds, cursor.id]);
+    }
+    if ((saved ?? null) !== next) {
+      await this.store.db.runTransaction(async (tx) => {
+        const current = await tx.get(checkpoint);
+        if (current.get('cursor') !== saved) return;
+        tx.set(checkpoint, { name, cursor: next, updatedAt: now });
+      });
+    }
+    if (settledAtEstimate)
+      console.info('Settled unknown model attempts at their internal estimates', {
+        settledAtEstimate,
+        samples,
+      });
     const cutoff = new Date(this.store.now().getTime() - olderThanMinutes * 60_000);
     const stale = await this.store
       .collection('costReservations')
@@ -1125,6 +1412,7 @@ export class FirestoreCostRepository implements CostRepository {
       .orderBy('attemptStartedAt')
       .limit(batch)
       .get();
+    let markedUnknown = 0;
     for (const doc of staleDispatches.docs) {
       const id = String(doc.get('id') ?? doc.id);
       const ref = this.store.doc('costReservations', id);
@@ -1153,9 +1441,9 @@ export class FirestoreCostRepository implements CostRepository {
           return true;
         }),
       );
-      if (transitioned) released++;
+      if (transitioned) markedUnknown++;
     }
-    return released;
+    return { released, markedUnknown, ...(settledAtEstimate ? { settledAtEstimate } : {}) };
   }
 }
 

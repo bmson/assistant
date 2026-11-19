@@ -8,7 +8,9 @@ import {
 import type {
   CostAttemptMetadata,
   CostEventInput,
+  CostProviderReceipt,
   CostRepository,
+  CostReservationSweep,
   CostTotals,
   MaintenanceRepository,
   ReservationActual,
@@ -64,7 +66,7 @@ export function markCostAttemptUnknown(
   store: CostStore,
   id: string,
   reason: string,
-  providerReceipt?: { requestId?: string; endpoint?: string },
+  providerReceipt?: CostProviderReceipt,
 ): Promise<void> {
   return costs(store).markAttemptUnknown(id, reason, providerReceipt);
 }
@@ -82,8 +84,9 @@ export function releaseStaleReservations(
   store: CostStore,
   age = 120,
   batch = 500,
-): Promise<number> {
-  return costs(store).releaseStale(age, batch);
+  unknownModelTtlMinutes?: number,
+): Promise<CostReservationSweep> {
+  return costs(store).releaseStale(age, batch, unknownModelTtlMinutes);
 }
 
 // ── Threshold notifications (sweep hook) ─────────────────────────────────────

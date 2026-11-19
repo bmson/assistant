@@ -593,7 +593,7 @@ describe('injected model providers', () => {
         expect.anything(),
         'reservation-1',
         'provider returned without complete usage or authoritative cost',
-        {},
+        { outcome: 'unpriced_result' },
       );
       expect(stubs.reconcileReservation).not.toHaveBeenCalled();
     },
@@ -632,7 +632,7 @@ describe('injected model providers', () => {
       expect.anything(),
       'reservation-1',
       'provider returned without complete usage or authoritative cost',
-      {},
+      { outcome: 'unpriced_result' },
     );
     expect(stubs.reconcileReservation).not.toHaveBeenCalled();
   });
@@ -1045,7 +1045,7 @@ describe('injected model providers', () => {
       expect.anything(),
       'reservation-1',
       'provider returned without complete usage or authoritative cost',
-      {},
+      { outcome: 'unpriced_result' },
     );
     expect(stubs.reconcileReservation).not.toHaveBeenCalled();
   });
@@ -1083,7 +1083,7 @@ describe('injected model providers', () => {
       expect.anything(),
       'reservation-1',
       'provider returned without complete usage or authoritative cost',
-      {},
+      { outcome: 'unpriced_result' },
     );
     expect(stubs.reconcileReservation).not.toHaveBeenCalled();
   });

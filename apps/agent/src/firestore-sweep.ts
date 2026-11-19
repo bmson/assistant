@@ -87,6 +87,7 @@ export async function runFirestoreSweep(
     }
   };
   let releasedReservations = 0;
+  let reservationsMarkedUnknown = 0;
   const report: Record<string, number> = {
     expiredApprovalsWoke: await step(
       'expireStaleApprovals',
@@ -124,7 +125,10 @@ export async function runFirestoreSweep(
           deps.config.FIRESTORE_AGENT_ID,
           deps.config.SELF_REPAIR_DAILY_LIMIT,
         );
-      const fired = await runDueSchedules(new FirestoreScheduleRepository(store), timezone, {
+      const scheduleRepository = new FirestoreScheduleRepository(store);
+      if (isCodeJobEnabled('briefing.compose') && !firestoreCodeJobUnavailable('briefing.compose'))
+        await scheduleRepository.retireDefaultMorningBrief(deps.config.FIRESTORE_AGENT_ID);
+      const fired = await runDueSchedules(scheduleRepository, timezone, {
         // SQL-only jobs advance their schedule without creating a task.
         isJobEnabled: (job) => isCodeJobEnabled(job) && !firestoreCodeJobUnavailable(job),
         // Goal sessions pass the same gate as PostgreSQL. A goal whose state
@@ -173,12 +177,17 @@ export async function runFirestoreSweep(
     // Expiry includes releasing held reservations whose task died before
     // settling, which would otherwise count against the budget forever.
     purgedExpired: await step('purgeExpired', async () => {
-      const { reservations, ...rest } = await purgeExpired({
+      const {
+        reservations,
+        reservationsMarkedUnknown: markedUnknown,
+        ...rest
+      } = await purgeExpired({
         maintenance,
         costs: persistence.costs,
         recallMetrics: persistence.recallMetrics,
       });
       releasedReservations = reservations;
+      reservationsMarkedUnknown = markedUnknown;
       return Object.values(rest).reduce((sum, count) => sum + count, 0);
     }),
     agedHistory: await step('purgeAgedHistory', async () =>
@@ -186,6 +195,7 @@ export async function runFirestoreSweep(
     ),
   };
   report.releasedReservations = releasedReservations;
+  report.reservationsMarkedUnknown = reservationsMarkedUnknown;
   for (const sweepStep of deps.modules.sweepSteps) {
     if (!sweepStep.portable) continue;
     report[sweepStep.reportKey ?? sweepStep.name] = await step(sweepStep.name, () =>

@@ -2411,6 +2411,36 @@ final class APIModelsTests: XCTestCase {
         XCTAssertEqual(items[0].meetingLink?.url, "http://meet.example/meeting")
     }
 
+    func testBriefingAgendaFormatsInstantsInCardTimeZoneAndPreservesLegacyLabels() throws {
+        let json = #"""
+        {
+          "kind":"briefing","id":"zoned-agenda","presentation":"calendar-agenda",
+          "timeZone":"America/Los_Angeles","sections":[{"type":"agenda","title":"Today","items":[
+            {"day":"Timed","title":"Winter event","time":"18:30–19:45 UTC",
+             "start":"2026-11-18T18:30:00.000Z","end":"2026-11-18T19:45:00Z"},
+            {"day":"Timed","title":"Summer event","start":"2026-07-18T18:30:00Z"},
+            {"day":"Timed","title":"Legacy event","time":"9:00 AM"},
+            {"day":"All day","title":"Holiday","time":"All day · through November 19",
+             "start":"2026-11-18T18:30:00Z"}
+          ]}]
+        }
+        """#
+        let part = MessagePart(type: "data-card", data: try JSONDecoder().decode(JSONValue.self, from: Data(json.utf8)))
+        guard case let .briefing(card)? = MessageResponseCard(part: part),
+              case let .agenda(_, _, _, items)? = card.sections.first else {
+            return XCTFail("Expected a briefing with agenda rows")
+        }
+        XCTAssertEqual(card.timeZone?.identifier, "America/Los_Angeles")
+        let locale = Locale(identifier: "en_US_POSIX")
+        let labels = items.map {
+            $0.localTimeLabel(timeZone: card.timeZone, locale: locale)
+                .replacingOccurrences(of: "\u{202F}", with: " ")
+        }
+        XCTAssertEqual(labels, ["10:30 AM – 11:45 AM", "11:30 AM", "9:00 AM", "All day · through November 19"])
+        XCTAssertEqual(items.map(\.timeCategory), [.timed, .timed, .timed, .allDay])
+        XCTAssertEqual(items[0].localTimeLabel(timeZone: nil), "18:30–19:45 UTC")
+    }
+
     func testCalendarAgendaUnknownDayMarkerNeverMasqueradesAsTimed() throws {
         let json = #"{"kind":"briefing","id":"unknown-time","presentation":"calendar-agenda","lead":"Two events","sections":[{"type":"agenda","title":"Today","items":[{"day":"Mystery provider value","time":"9:00 AM","title":"Unknown source event"},{"day":"Timed","time":"","title":"Missing time event"}]}]}"#
         let part = MessagePart(type: "data-card", data: try JSONDecoder().decode(JSONValue.self, from: Data(json.utf8)))
@@ -2782,6 +2812,21 @@ final class APIModelsTests: XCTestCase {
         XCTAssertEqual(message.text, "full diagnostic text")
     }
 
+    func testCalendarEventCardKeepsOwnerTimeAndDayAcrossMidnightUTC() {
+        let card = MessagePart(type: "data-card", data: .object([
+            "kind": .string("calendar-event"), "title": .string("Late meeting"),
+            "start": .string("2026-11-19T01:00:00Z"), "end": .string("2026-11-19T02:00:00Z"),
+            "timeZone": .string("America/Los_Angeles"), "time": .string("5:00 PM–6:00 PM"),
+        ]))
+        guard case let .event(_, start, time, _, _, _, _, _, _, timeZone)? = MessageResponseCard(part: card),
+              let timeZone else { return XCTFail("Expected a zoned calendar event") }
+        XCTAssertEqual(time, "5:00 PM–6:00 PM")
+        XCTAssertEqual(
+            CalendarEventPresentation.dateCaption(start, timeZone: timeZone, locale: Locale(identifier: "en_US_POSIX")),
+            "Wed, Nov 18, 2026"
+        )
+    }
+
     func testCalendarEventCardCarriesOnlyStructuredDetails() {
         let card = MessagePart(
             type: "data-card",
@@ -2795,7 +2840,7 @@ final class APIModelsTests: XCTestCase {
                 "meetingLink": .object(["url": .string("https://zoom.us/j/12345")]),
             ])
         )
-        guard case let .event(id, start, time, title, location, attendees, calendars, calendarLink, meetingLink)? = MessageResponseCard(part: card) else {
+        guard case let .event(id, start, time, title, location, attendees, calendars, calendarLink, meetingLink, _)? = MessageResponseCard(part: card) else {
             return XCTFail("Expected a structured event card")
         }
         XCTAssertEqual(id, "event-1")
@@ -2830,7 +2875,7 @@ final class APIModelsTests: XCTestCase {
             "start": .string("2026-09-19T00:00:00.000Z"), "allDay": .bool(true),
             "time": .string("All day")
         ]))
-        guard case let .event(_, start, time, _, _, _, _, _, _)? = MessageResponseCard(part: declaredAllDay) else {
+        guard case let .event(_, start, time, _, _, _, _, _, _, _)? = MessageResponseCard(part: declaredAllDay) else {
             return XCTFail("Expected all-day calendar card")
         }
         XCTAssertEqual(start, "2026-09-19")
@@ -3081,6 +3126,7 @@ final class APIModelsTests: XCTestCase {
             type: "data-card",
             data: .object([
                 "kind": .string("availability"), "id": .string("availability-1"),
+                "timeZone": .string("America/Los_Angeles"),
                 "timeMin": .string("2026-08-24T09:00:00-07:00"),
                 "timeMax": .string("2026-08-24T17:00:00-07:00"),
                 "busy": .array([
@@ -3096,10 +3142,11 @@ final class APIModelsTests: XCTestCase {
                 "note": .string("Some calendars did not return free/busy data."),
             ])
         )
-        guard case let .availability(_, timeMin, timeMax, busy, calendarsChecked, complete, note)? =
+        guard case let .availability(_, timeMin, timeMax, busy, calendarsChecked, complete, note, timeZone)? =
                 MessageResponseCard(part: availability) else {
             return XCTFail("Expected an availability card")
         }
+        XCTAssertEqual(timeZone?.identifier, "America/Los_Angeles")
         XCTAssertEqual(timeMin, "2026-08-24T09:00:00-07:00")
         XCTAssertEqual(timeMax, "2026-08-24T17:00:00-07:00")
         XCTAssertEqual(busy.count, 1)
@@ -3289,6 +3336,18 @@ final class APIModelsTests: XCTestCase {
             WeatherUnits.localized("overcast, wind 18 km/h", preferFahrenheit: true),
             "overcast, wind 18 km/h"
         )
+    }
+
+    func testWeatherDayKeepsPrecipitationUncertaintyWithClearCurrentSky() throws {
+        let data = #"{"days":[{"weekday":"Today","lowC":10,"highC":15,"precipPct":90,"description":"clear","symbol":"clear","precipitationType":"unspecified"}]}"#.data(using: .utf8)!
+        let payload = try JSONDecoder().decode([String: JSONValue].self, from: data)
+        let forecast = MessageResponseCard.WeatherForecast(data: payload)
+        let day = try XCTUnwrap(forecast.days.first)
+        XCTAssertEqual(day.description, "clear")
+        XCTAssertEqual(day.precipitationType, "unspecified")
+        XCTAssertEqual(WeatherPresentation.precipitationName(for: day), "precipitation")
+        let legacyRain = MessageResponseCard.WeatherForecast.Day(weekday: "Sat", lowC: 9, highC: 13, precipPct: 80, description: "light rain", symbol: "rain")
+        XCTAssertEqual(WeatherPresentation.precipitationName(for: legacyRain), "rain")
     }
 
     func testWeatherCaptionNamesTheDayOnPerDayForecastCards() {
@@ -5117,7 +5176,7 @@ extension APIModelsTests {
             if let complete { fields["complete"] = complete }
             if let busy { fields["busy"] = busy }
             let part = MessagePart(type: "data-card", data: .object(fields))
-            guard case let .availability(_, _, _, _, checked, isComplete, _)? = MessageResponseCard(part: part) else {
+            guard case let .availability(_, _, _, _, checked, isComplete, _, _)? = MessageResponseCard(part: part) else {
                 return nil
             }
             return (isComplete, checked)
@@ -5150,7 +5209,7 @@ extension APIModelsTests {
                 "complete": .bool(true),
                 "busy": busy,
             ]))
-            guard case let .availability(_, _, _, rows, _, complete, _)? = MessageResponseCard(part: part) else {
+            guard case let .availability(_, _, _, rows, _, complete, _, _)? = MessageResponseCard(part: part) else {
                 return nil
             }
             return (rows.count, complete)

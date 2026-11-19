@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
+  answerReadyPingId,
   curiosityNudgePingId,
   insideQuietHours,
   type NudgePolicyRepository,
@@ -41,9 +42,13 @@ export class FirestoreNudgePolicyRepository implements NudgePolicyRepository {
     const now = opts.now ?? this.store.now();
     if (!Number.isFinite(now.getTime())) throw new Error('Invalid nudge policy time');
     const channel = opts.channel ?? 'out-of-band';
-    const id = channel.startsWith('curiosity-nudge:')
-      ? curiosityNudgePingId(agent.id, channel)
-      : randomUUID();
+    const answerReady = channel.startsWith('answer-ready:');
+    const stable = answerReady || channel.startsWith('curiosity-nudge:');
+    const id = answerReady
+      ? answerReadyPingId(agent.id, channel)
+      : stable
+        ? curiosityNudgePingId(agent.id, channel)
+        : randomUUID();
     for (let attempt = 0; ; attempt++) {
       try {
         return await this.store.db.runTransaction(async (tx) => {
@@ -57,18 +62,22 @@ export class FirestoreNudgePolicyRepository implements NudgePolicyRepository {
             // Read before any ledger count so a concurrent ambient evaluation
             // for this owner contends here and reruns against the committed slot.
             await tx.get(this.store.doc('coordination', `ambient-pings:${agent.id}`));
-            if (channel.startsWith('curiosity-nudge:')) {
+            let reservedAnswer = false;
+            if (stable) {
               const prior = await tx.get(this.store.doc('proactivePings', id));
               if (prior.exists) {
                 const row = decodeRecord<Records['proactivePings']>(prior.data());
                 if (row.agentId !== agent.id || row.channel !== channel)
-                  throw new Error('Curiosity nudge reservation ownership mismatch');
-                return {
-                  deliver: row.delivered,
-                  ...(!row.delivered && (row.reason === 'quiet-hours' || row.reason === 'daily-cap')
-                    ? { reason: row.reason }
-                    : {}),
-                };
+                  throw new Error('Nudge reservation ownership mismatch');
+                if (answerReady && row.delivered) reservedAnswer = true;
+                else
+                  return {
+                    deliver: row.delivered,
+                    ...(!row.delivered &&
+                    (row.reason === 'quiet-hours' || row.reason === 'daily-cap')
+                      ? { reason: row.reason }
+                      : {}),
+                  };
               }
             }
             const prefsSnapshot = await tx.get(this.store.doc('notificationPrefs', agent.id));
@@ -86,7 +95,13 @@ export class FirestoreNudgePolicyRepository implements NudgePolicyRepository {
               : null;
             if (prefs && insideQuietHours(prefs, ownerLocalMinutes(agent.timezone, now))) {
               decision = { deliver: false, reason: 'quiet-hours' };
-            } else if (prefs?.ambientDailyCap != null) {
+            }
+            if (reservedAnswer) {
+              return decision.deliver && prefs?.ambientDailyCap === 0
+                ? { deliver: false, reason: 'daily-cap' }
+                : decision;
+            }
+            if (decision.deliver && prefs?.ambientDailyCap != null) {
               const cap = prefs.ambientDailyCap;
               // Counting stops at the cap: only "reached or not" matters here.
               const used =
