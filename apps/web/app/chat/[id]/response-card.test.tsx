@@ -1208,6 +1208,32 @@ describe('ResponseCards', () => {
     expect(html).toContain('18 km/h');
   });
 
+  it('renders a conflicting weather reading with precipitation wording', () => {
+    const html = render({
+      kind: 'weather',
+      id: 'weather-uncertain',
+      location: 'San Francisco',
+      condition: 'precipitation type uncertain',
+      symbol: 'uncertain',
+      temperature: '13°C',
+      current: { tempC: 13, precipPct: 90 },
+      days: [
+        {
+          weekday: 'Wed',
+          lowC: 12,
+          highC: 18,
+          precipPct: 95,
+          description: 'precipitation type uncertain',
+          symbol: 'uncertain',
+        },
+      ],
+      details: [{ label: 'Precipitation chance', value: '90%' }],
+    });
+    expect(html).toContain('95% chance of precipitation');
+    expect(html).toContain('Precipitation chance');
+    expect(html).not.toContain('chance of rain');
+  });
+
   it('renders the briefing as a lead and labelled sections, not a wall of text', () => {
     const card = {
       kind: 'briefing',
