@@ -65,7 +65,7 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | A12 | Isolate QA from production; purge QA data                              | 1     | M    | —          | open                                                          |
 | A13 | Owner time zone in every card                                          | 0     | S    | —          | open                                                          |
 | A14 | Brief calendar answers                                                 | 1     | M    | —          | open                                                          |
-| A15 | Each turn answers its own message                                      | 0     | M    | —          | open                                                          |
+| A15 | Each turn answers its own message                                      | 0     | M    | —          | in review (task-bound chat and approval resume)               |
 | A16 | Weather plausibility                                                   | 0     | S    | —          | open                                                          |
 | A17 | Texts only for urgent items                                            | 0     | S    | —          | open                                                          |
 | B1  | Calendar connection health and warning                                 | 1     | S    | —          | open                                                          |
