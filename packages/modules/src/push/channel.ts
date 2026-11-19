@@ -6,6 +6,7 @@ import type {
   NotificationOutboxLeg,
   NotificationOutboxRepository,
   NotificationOutboxSendResult,
+  OwnerNoticePurpose,
   PingDecision,
 } from '@assistant/persistence';
 import {
@@ -208,7 +209,7 @@ export async function drainPushNotificationOutbox(
 export async function notifyOwnerByPush(
   deps: PushChannelDeps,
   input: {
-    purpose?: 'answer-ready';
+    purpose?: OwnerNoticePurpose;
     taskId?: string;
     conversationId?: string | null;
     text: string;

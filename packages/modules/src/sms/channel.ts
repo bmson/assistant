@@ -24,6 +24,8 @@ import {
   notificationDeliveryKey,
   notificationLeg,
   notificationLegEntry,
+  type OwnerNoticePurpose,
+  type ProactiveSmsAttemptDecision,
   type Records,
   type SmsChannelRepository,
   type SmsDeliveryAccounting,
@@ -56,6 +58,7 @@ export interface SmsChannelDeps {
   owner: () => Promise<{ id: string }>;
 }
 
+const PROACTIVE_SMS_TTL_MS = 15 * 60_000;
 const SMS_USAGE_RECONCILIATION_BATCH = 20;
 const SMS_USAGE_RECONCILIATION_MAX_ATTEMPTS = 24;
 const SMS_USAGE_RECONCILIATION_MAX_AGE_MS = 14 * 24 * 60 * 60_000;
@@ -132,6 +135,12 @@ function underSmsChannelLimit(deps: SmsChannelDeps): Promise<boolean> {
   return deps.persistence.smsChannel.underChannelLimit(new Date());
 }
 
+class ProactiveSmsHeldError extends Error {
+  constructor(readonly reason: Exclude<ProactiveSmsAttemptDecision, 'reserved'>) {
+    super(reason);
+  }
+}
+
 class SmsChannelRateLimitError extends Error {
   constructor() {
     super('SMS channel rate limit exceeded');
@@ -147,6 +156,7 @@ async function sendMeteredSms(
     taskId?: string;
     description: string;
     critical?: boolean;
+    proactiveAttempt?: { agentId: string; attemptKey: string; now: Date };
   },
 ): Promise<{
   deliveryStatus: 'accepted' | 'unknown';
@@ -194,7 +204,24 @@ async function sendMeteredSms(
   let result: { sid: string };
   let sent: Awaited<ReturnType<typeof submitSms>>;
   try {
-    sent = await submitSms(deps.twilio, input.to, input.text);
+    if (input.proactiveAttempt) {
+      const { agentId, attemptKey, now } = input.proactiveAttempt;
+      const decision = await deps.persistence.smsChannel.reserveProactiveAttempt(
+        agentId,
+        attemptKey,
+        new Date(Math.max(now.getTime(), Date.now())),
+      );
+      if (decision !== 'reserved') throw new ProactiveSmsHeldError(decision);
+    }
+    const sender = input.proactiveAttempt
+      ? {
+          // The outbox owns retries so every provider POST takes a quota slot.
+          send: (to: string, body: string) =>
+            deps.twilio.send(to, body, undefined, { retryRejected: false }),
+          getMessageUsage: deps.twilio.getMessageUsage?.bind(deps.twilio),
+        }
+      : deps.twilio;
+    sent = await submitSms(sender, input.to, input.text);
     result = { sid: sent.sid };
   } catch (error) {
     if (isAmbiguousTwilioDeliveryError(error)) {
@@ -269,7 +296,9 @@ export async function handleInboundSms(deps: SmsChannelDeps, sms: InboundSms): P
       approvalReply.shortCode,
     );
     if (pendingTool && !deps.registry.smsApprovable(pendingTool)) {
-      await notifyOwnerBySms(deps, {
+      await enqueueOwnerSms(deps, {
+        category: 'approval-reply',
+        deliveryKey: notificationDeliveryKey('sms-approval-reply', sms.messageSid),
         text: `Approval ${approvalReply.shortCode} can only be confirmed on the dashboard — it sends, spends, or stores something, so I need you to review the exact details on the Approvals page.`,
       }).catch((err) => console.error('sms restricted-approval notice failed', err));
       return {
@@ -368,25 +397,42 @@ export async function deliverSmsFinal(
   }
 }
 
-/**
- * Executor/mission hook: push a one-off owner update to OWNER_PHONE for async
- * events the owner would otherwise only see on the dashboard (a task that
- * permanently failed, a budget stall, a mission escalation/deadline, or a
- * completed application-confirmation follow-up). Mirrors notifyApprovalsBySms:
- * always to the owner's own number, metered, and best-effort at the call site.
- */
+type OwnerSmsCategory = 'approval' | 'approval-reply' | 'task-attention' | 'leave-now';
+
+/** Only explicitly categorized owner notices are eligible for unsolicited SMS. */
 export async function notifyOwnerBySms(
   deps: SmsChannelDeps,
   input: {
-    purpose?: 'answer-ready';
+    purpose?: OwnerNoticePurpose;
     taskId?: string;
     text: string;
     deliveryKey?: string;
-    applicationConfirmationNoticeFence?: import('@assistant/persistence').ApplicationConfirmationNoticeFence;
   },
 ): Promise<NotificationDeliveryResult> {
   if (input.purpose === 'answer-ready')
     return notificationLeg('sms', 'skipped', 'push-only-notice');
+  if (input.purpose !== 'task-attention' && input.purpose !== 'leave-now')
+    return notificationLeg('sms', 'skipped', 'unsolicited-sms-category-not-allowed');
+  return enqueueOwnerSms(deps, {
+    category: input.purpose,
+    taskId: input.taskId,
+    deliveryKey: input.deliveryKey,
+    text:
+      input.purpose === 'task-attention'
+        ? 'A task needs your attention. Open Assistant to review it.'
+        : 'It is time to leave. Open Assistant for details.',
+  });
+}
+
+async function enqueueOwnerSms(
+  deps: SmsChannelDeps,
+  input: {
+    category: Exclude<OwnerSmsCategory, 'approval'>;
+    taskId?: string;
+    text: string;
+    deliveryKey?: string;
+  },
+): Promise<NotificationDeliveryResult> {
   // Optional chaining: some internal/test call paths build a partial deps
   // without a Twilio client or config. A missing notifier is a silent no-op,
   // never an error — owner pings are best-effort.
@@ -405,7 +451,7 @@ export async function notifyOwnerBySms(
           agentId: owner.id,
           deliveryKey:
             input.deliveryKey ??
-            notificationDeliveryKey('sms-owner-notice', input.taskId ?? owner.id, text),
+            notificationDeliveryKey('sms-owner-notice', input.category, input.taskId ?? owner.id),
           legKey: `sms:${recipientHash}`,
           adapter: 'sms',
           destination: { recipientHash },
@@ -413,14 +459,12 @@ export async function notifyOwnerBySms(
             text,
             ...(input.taskId ? { taskId: input.taskId } : {}),
             description: 'owner async update',
+            category: input.category,
             critical: true,
           },
-          ...(input.applicationConfirmationNoticeFence
-            ? { applicationConfirmationNoticeFence: input.applicationConfirmationNoticeFence }
-            : {}),
           now: new Date(),
         },
-        (leg) => sendSmsOutboxLeg(deps, leg),
+        (leg) => sendSmsOutboxLeg(deps, leg, new Date()),
       ),
     ],
   };
@@ -437,6 +481,7 @@ function retryDelay(attempts: number): number {
 async function sendSmsOutboxLeg(
   deps: SmsChannelDeps,
   leg: NotificationOutboxLeg,
+  now: Date,
 ): Promise<NotificationOutboxSendResult> {
   const destination = leg.destination as { recipientHash?: unknown } | null;
   const payload = leg.payload as {
@@ -444,6 +489,7 @@ async function sendSmsOutboxLeg(
     taskId?: unknown;
     description?: unknown;
     critical?: unknown;
+    category?: unknown;
   } | null;
   if (
     !payload ||
@@ -454,6 +500,24 @@ async function sendSmsOutboxLeg(
     return { status: 'skipped', reason: 'owner-sms-destination-changed-or-erased' };
   if (!deps.twilio?.configured() || !deps.config.OWNER_PHONE)
     return { status: 'skipped', reason: 'sms-provider-unavailable' };
+  // Old explicit approval rows are recognizable. Other legacy payloads do
+  // not prove that they were permitted to send an unsolicited SMS.
+  const category =
+    payload.category ??
+    (typeof payload.description === 'string' &&
+    /^approval notification [A-Z0-9]+$/.test(payload.description)
+      ? 'approval'
+      : undefined);
+  if (
+    category !== 'approval-reply' &&
+    category !== 'approval' &&
+    category !== 'task-attention' &&
+    category !== 'leave-now'
+  )
+    return { status: 'skipped', reason: 'unsolicited-sms-category-not-allowed' };
+  const proactive = category !== 'approval-reply';
+  if (proactive && now.getTime() - leg.createdAt.getTime() >= PROACTIVE_SMS_TTL_MS)
+    return { status: 'skipped', reason: 'proactive-sms-expired' };
   try {
     const result = await sendMeteredSms(deps, {
       to: deps.config.OWNER_PHONE,
@@ -461,6 +525,15 @@ async function sendSmsOutboxLeg(
       ...(typeof payload.taskId === 'string' ? { taskId: payload.taskId } : {}),
       description: typeof payload.description === 'string' ? payload.description : 'owner notice',
       critical: payload.critical === true,
+      ...(proactive
+        ? {
+            proactiveAttempt: {
+              agentId: leg.agentId,
+              attemptKey: notificationDeliveryKey('sms-attempt', leg.id, String(leg.attempts)),
+              now,
+            },
+          }
+        : {}),
     });
     return result.deliveryStatus === 'accepted'
       ? {
@@ -474,6 +547,7 @@ async function sendSmsOutboxLeg(
           smsAccounting: result.smsAccounting,
         };
   } catch (error) {
+    if (error instanceof ProactiveSmsHeldError) return { status: 'skipped', reason: error.reason };
     const retryAt =
       error instanceof BudgetReservationError
         ? error.resumeAt
@@ -505,7 +579,7 @@ export async function drainSmsNotificationOutbox(
     loadTask: (agentId, taskId) =>
       deps.persistence.executionContext?.getTask(agentId, taskId) ?? Promise.resolve(null),
     limit: 100,
-    send: (leg) => sendSmsOutboxLeg(deps, leg),
+    send: (leg) => sendSmsOutboxLeg(deps, leg, new Date(Math.max(now.getTime(), Date.now()))),
   });
 }
 
@@ -560,11 +634,12 @@ export async function notifyApprovalsBySms(
               text,
               taskId: approval.taskId,
               description: `approval notification ${approval.shortCode}`,
+              category: 'approval',
               critical: true,
             },
             now: new Date(),
           },
-          (leg) => sendSmsOutboxLeg(deps, leg),
+          (leg) => sendSmsOutboxLeg(deps, leg, new Date()),
         ),
       );
     } catch {
