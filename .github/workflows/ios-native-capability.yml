@@ -36,7 +36,7 @@ jobs:
           EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           python3 - <<'PY'
-          import os, sys, json, re, time, signal, selectors, subprocess, hashlib
+          import os, sys, json, re, time, signal, selectors, subprocess, hashlib, plistlib
           from pathlib import Path
           root = Path(os.environ['RUNNER_TEMP']) / 'native-controls-evidence'
           root.mkdir(mode=0o700, exist_ok=False)
@@ -201,6 +201,16 @@ jobs:
               products = build / 'Build/Products'
               runs = list(products.glob('*.xctestrun'))
               if len(runs) != 1: raise RuntimeError('Expected exactly one built xctestrun')
+              specification = plistlib.loads(runs[0].read_bytes())
+              if specification.get('__xctestrun_metadata__', {}).get('FormatVersion') != 1 or specification.get('AssistantUITests', {}).get('IsUITestBundle') is not True:
+                  raise RuntimeError('Unsupported native test specification')
+              # Automatic video/screenshots are not the bounded custom evidence.
+              # xcodebuild.xctestrun documents keepNever for system attachments;
+              # explicit screenshots/native trees remain keepAlways in the tests.
+              specification['AssistantUITests']['SystemAttachmentLifetime'] = 'keepNever'
+              specification['AssistantUITests']['UserAttachmentLifetime'] = 'keepAlways'
+              runs[0].write_bytes(plistlib.dumps(specification))
+              save('attachment-policy.json', {'system':'keepNever','custom':'keepAlways','verboseDiagnostics':'never','customPNGLimitBytes':64*1024*1024})
               binaries = {}
               for bundle in ['AssistantUITestHost.app','AssistantUITests-Runner.app']:
                   folder = products / 'Debug-iphonesimulator' / bundle
@@ -209,7 +219,7 @@ jobs:
               save('binary-pins.json', {'xctestrunSHA':hashlib.sha256(runs[0].read_bytes()).hexdigest(),'bundles':binaries})
               if any(hashlib.sha256(Path(p).read_bytes()).hexdigest()!=h for p,h in pins.items()): raise RuntimeError('Source drift')
               result = root / 'capability.xcresult'
-              output = run('test', ['xcodebuild','test-without-building','-xctestrun',str(runs[0]),'-destination','id='+udid,'-destination-timeout','30','-parallel-testing-enabled','NO','-maximum-concurrent-test-simulator-destinations','1','-test-timeouts-enabled','YES','-default-test-execution-time-allowance','900','-maximum-test-execution-time-allowance','900','-only-testing:AssistantUITests/MobileControlsUITests','-resultBundlePath',str(result)], 1020)
+              output = run('test', ['xcodebuild','test-without-building','-xctestrun',str(runs[0]),'-destination','id='+udid,'-destination-timeout','30','-collect-test-diagnostics','never','-parallel-testing-enabled','NO','-maximum-concurrent-test-simulator-destinations','1','-test-timeouts-enabled','YES','-default-test-execution-time-allowance','900','-maximum-test-execution-time-allowance','900','-only-testing:AssistantUITests/MobileControlsUITests','-resultBundlePath',str(result)], 1020)
               summary = json.loads(run('summary', ['xcrun','xcresulttool','get','test-results','summary','--path',str(result)], 10))
               tests = json.loads(run('named-tests', ['xcrun','xcresulttool','get','test-results','tests','--path',str(result)], 10))
               named = re.search(r'MobileControlsUITests[^\n]{0,160}testNativeControlsCapability[^\n]{0,80}\bpassed\b', output, re.I)
@@ -233,7 +243,7 @@ jobs:
         timeout-minutes: 3
         run: |
           python3 - <<'PY'
-          import os, json, subprocess, signal, time
+          import os, json, subprocess, signal, time, hashlib
           from pathlib import Path
           root = Path(os.environ['RUNNER_TEMP']) / 'native-controls-evidence'
           root.mkdir(mode=0o700, exist_ok=True)
@@ -353,7 +363,19 @@ jobs:
               if total>128*1024*1024:
                   errors.append('Total evidence exceeds128MiB including automatic XCTest attachments')
                   upload=Path(os.environ['RUNNER_TEMP'])/'native-controls-oversize';upload.mkdir(exist_ok=True)
-                  (upload/'failure-manifest.json').write_text(json.dumps({'result':'HOLD','totalBytes':total,'errors':errors,'boundary':'Oversize evidence omitted; never accepted as PASS'},indent=2)+'\n')
+                  retained=[]; remaining=8*1024*1024
+                  # Preserve failure causes and canonical closure receipts even
+                  # when the raw result bundle exceeds the evidence bound.
+                  for path in sorted(root.iterdir()):
+                      if not path.is_file() or path.suffix not in {'.json','.log'}: continue
+                      size=path.stat().st_size; count=min(size,256*1024,remaining)
+                      if count<=0: break
+                      with path.open('rb') as stream:
+                          stream.seek(max(0,size-count)); data=stream.read(count)
+                      name=path.name if size==count else path.name+'.tail.txt'
+                      (upload/name).write_bytes(data); remaining-=len(data)
+                      retained.append({'name':name,'originalBytes':size,'retainedBytes':len(data),'complete':size==count,'retainedSHA256':hashlib.sha256(data).hexdigest()})
+                  (upload/'failure-manifest.json').write_text(json.dumps({'result':'HOLD','totalBytes':total,'errors':errors,'retainedDiagnostics':retained,'boundary':'Oversize raw result omitted; bounded diagnostics retained; never accepted as PASS'},indent=2)+'\n')
               with open(os.environ['GITHUB_OUTPUT'],'a') as out: out.write('upload='+str(upload)+'\n')
           if errors or receipt['deadlineExceeded']: raise SystemExit('Owned closure/evidence bound failed: '+str(errors))
           PY
