@@ -38,7 +38,7 @@ const pages: Array<{ name: string; path: string; wait?: number }> = [
   { name: 'profile-about', path: '/profile/about' },
   { name: 'profile-voice', path: '/profile/voice' },
   { name: 'profile-data', path: '/profile/data' },
-  { name: 'profile-memories', path: '/profile/memories' },
+  { name: 'profile-memories', path: '/profile/knowledge?view=library' },
   { name: 'people', path: '/people' },
   // The person page needs a real id. `pnpm tsx scripts/demo-people.ts` prints
   // the ids it creates; pass one to shoot the card itself.

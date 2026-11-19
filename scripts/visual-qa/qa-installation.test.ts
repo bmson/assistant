@@ -1,7 +1,13 @@
 import { resetConfigForTest } from '@assistant/config';
+import type { BrowserContext, Route } from 'playwright';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GET } from '../../apps/web/app/api/health/route.js';
-import { assertQaWebInstallation, openQaInstallation, requireQaOrigin } from './qa-installation.js';
+import {
+  assertQaWebInstallation,
+  openQaInstallation,
+  requireQaOrigin,
+  restrictQaBrowserContext,
+} from './qa-installation.js';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -80,3 +86,30 @@ it.each(['host=localhost', 'port=5432', 'options=fixture'])(
     ).rejects.toThrow(/cannot override/);
   },
 );
+
+it('blocks even a same-origin redirect before a browser can follow the chain', async () => {
+  const base = 'http://127.0.0.1:3107';
+  const registerRoute =
+    vi.fn<(pattern: string, handler: (route: Route) => Promise<void>) => void>();
+  await restrictQaBrowserContext(
+    { route: registerRoute, routeWebSocket: vi.fn() } as unknown as BrowserContext,
+    base,
+  );
+  const handler = registerRoute.mock.calls[0][1];
+  const response = {
+    status: () => 302,
+    headers: () => ({ location: '/second-hop' }),
+    dispose: vi.fn(),
+  };
+  const route = {
+    request: () => ({ url: () => `${base}/first-hop`, method: () => 'GET' }),
+    fetch: vi.fn(async () => response),
+    abort: vi.fn(),
+    fulfill: vi.fn(),
+  };
+  await handler(route as unknown as Route);
+  expect(route.fetch).toHaveBeenCalledWith({ maxRedirects: 0 });
+  expect(route.abort).toHaveBeenCalledOnce();
+  expect(route.fulfill).not.toHaveBeenCalled();
+  expect(response.dispose).toHaveBeenCalledOnce();
+});

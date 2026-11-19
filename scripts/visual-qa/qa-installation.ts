@@ -88,24 +88,24 @@ export async function verifyQaBrowserInstallation(origin: string) {
 }
 
 export async function restrictQaBrowserContext(context: BrowserContext, base: string) {
+  await context.routeWebSocket('**/*', (socket) => socket.close());
   await context.route('**/*', async (route) => {
     const request = route.request();
     if (new URL(request.url()).origin !== base || !['GET', 'HEAD'].includes(request.method())) {
       await route.abort();
       return;
     }
-    if (!request.isNavigationRequest()) {
-      await route.continue();
-      return;
-    }
     const response = await route.fetch({ maxRedirects: 0 });
-    const location = response.headers().location;
-    if (location && new URL(location, request.url()).origin !== base) {
+    try {
+      // Playwright only routes the first hop. Allowing any redirect to reach the browser
+      // would let later hops leave the verified origin without another route check.
+      if (response.status() >= 300 && response.status() < 400 && response.headers().location) {
+        await route.abort();
+        return;
+      }
+      await route.fulfill({ response });
+    } finally {
       await response.dispose();
-      await route.abort();
-      return;
     }
-    await route.fulfill({ response });
-    await response.dispose();
   });
 }
