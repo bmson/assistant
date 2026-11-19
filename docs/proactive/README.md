@@ -63,7 +63,7 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | A10 | Retire `morning-brief` in Firestore                                    | 0     | S    | —          | in review                                                     |
 | A11 | Email pipeline: verify #910, census, stall alert                       | 0     | M    | —          | in review (forwarded extraction, census and stall alerts)     |
 | A12 | Isolate QA from production; purge QA data                              | 1     | M    | —          | open                                                          |
-| A13 | Owner time zone in every card                                          | 0     | S    | —          | in review (time zones in calendar and briefing cards)         |
+| A13 | Owner time zone in every card                                          | 0     | S    | —          | in review (owner time in calendar, briefing and Pulse cards)  |
 | A14 | Brief calendar answers                                                 | 1     | M    | —          | open                                                          |
 | A15 | Each turn answers its own message                                      | 0     | M    | —          | in review (task-bound chat and approval resume)               |
 | A16 | Weather plausibility                                                   | 0     | S    | —          | in review (hourly snow corroboration)                         |

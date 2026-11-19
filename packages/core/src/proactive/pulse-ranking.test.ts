@@ -448,6 +448,7 @@ describe('pulse ranking and duplicate suppression', () => {
       { admitNotice, momentKeys: vi.fn(async () => ['event-lead:old']) },
       {
         agentId: 'owner',
+        timeZone: 'UTC',
         now,
         observationFence: null,
         dailyCap: 6,
@@ -476,6 +477,7 @@ describe('pulse ranking and duplicate suppression', () => {
       { admitNotice },
       {
         agentId: 'owner',
+        timeZone: 'UTC',
         now,
         observationFence: null,
         dailyCap: 6,
