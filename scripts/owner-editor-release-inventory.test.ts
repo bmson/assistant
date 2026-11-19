@@ -32,6 +32,9 @@ import { registerImageResolution } from './owner-release-image-resolution.js';
 const manifest = readFileSync(
   new URL('./fixtures/owner-editor-release-indexes.json', import.meta.url),
 );
+const releaseManifest = readFileSync(
+  new URL('../infra/gcp/firestore/firestore.indexes.json', import.meta.url),
+);
 const now = Date.parse('2026-10-26T17:00:00Z');
 const db = {
   name: DATABASE,
@@ -460,6 +463,51 @@ describe('protected read-only release inventory', () => {
   it('pins manifest bytes and rejects pre-auth source drift', () => {
     expect(verifyManifest(manifest).groups).toContain('ownerEditorOperations');
     expect(() => verifyManifest(Buffer.concat([manifest, Buffer.from(' ')]))).toThrow();
+    expect(verifyManifest(releaseManifest, 'release-candidate').groups).toContain(
+      'ownerEditorOperations',
+    );
+    expect(() => verifyManifest(releaseManifest)).toThrow('manifest mismatch');
+    expect(() => verifyManifest(manifest, 'release-candidate')).toThrow('manifest mismatch');
+  });
+  it.each([
+    ['current source manifest', releaseManifest, 'credential_file'],
+    [
+      'mutated candidate manifest',
+      Buffer.concat([releaseManifest, Buffer.from(' ')]),
+      'source_manifest',
+    ],
+    ['historical observer manifest', manifest, 'source_manifest'],
+  ] as const)('runs the protected release preflight CLI against %s', (_name, bytes, stage) => {
+    const dir = mkdtempSync(join(tmpdir(), 'release-index-preflight-'));
+    try {
+      mkdirSync(join(dir, 'infra/gcp/firestore'), { recursive: true });
+      mkdirSync(join(dir, 'apps/web/lib'), { recursive: true });
+      writeFileSync(join(dir, 'infra/gcp/firestore/firestore.indexes.json'), bytes);
+      writeFileSync(join(dir, 'apps/web/lib/owner-editor-runtime.ts'), '');
+      writeFileSync(
+        join(dir, 'infra/gcp/release-contracts.json'),
+        readFileSync(new URL('../infra/gcp/release-contracts.json', import.meta.url)),
+      );
+      const result = spawnSync(
+        process.execPath,
+        [
+          fileURLToPath(new URL('../node_modules/tsx/dist/cli.mjs', import.meta.url)),
+          fileURLToPath(new URL('./owner-editor-release-inventory.ts', import.meta.url)),
+          '--release-preflight',
+        ],
+        {
+          cwd: dir,
+          env: { ...env, RELEASE_SHA: 'b'.repeat(40), GITHUB_WORKSPACE: dir },
+          encoding: 'utf8',
+          timeout: 5_000,
+        },
+      );
+      expect(result.status).toBe(1);
+      expect(JSON.parse(result.stderr)).toMatchObject({ stage, mutationAuthorized: false });
+      expect(existsSync(join(dir, 'owner-editor-release-inventory.json'))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
   it.each([
     `http://firestore.googleapis.com/v1/${DATABASE}`,
