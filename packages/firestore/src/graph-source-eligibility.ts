@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { type EmbeddingSpace, type Records, validateEmbedding } from '@assistant/persistence';
 import { embeddingSpaceKey } from './memory.js';
+import { ownerFamilySourceIsRejected } from './owner-family-source-rejection.js';
 
 /** Shared by actual traversal and workspace projections; eligibility is not selection. */
 export function graphSourceEligible(input: {
@@ -13,6 +14,7 @@ export function graphSourceEligible(input: {
     | 'supersededById'
     | 'expiresAt'
     | 'contentHash'
+    | 'ownerFamilyRejectedContentHash'
     | 'content'
     | 'embedding'
   >;
@@ -32,6 +34,7 @@ export function graphSourceEligible(input: {
     memory.agentId !== agentId ||
     memory.category !== 'knowledge' ||
     memory.quarantined !== false ||
+    ownerFamilySourceIsRejected(memory) ||
     memory.supersededById ||
     (memory.expiresAt != null &&
       (!(memory.expiresAt instanceof Date) ||

@@ -6,6 +6,32 @@ import { createPostgresLocationPingRepository } from './location-ping-repository
 import { agents, conversations, missionReports, tasks } from './schema.js';
 import { createPostgresTaskRepository } from './task-lifecycle-repository.js';
 
+it('does not claim, wake, or sweep a task awaiting estimated-cost consent', async () => {
+  const url = process.env.DATABASE_URL;
+  if (!url || !new URL(url).pathname.endsWith('_test'))
+    throw new Error('Requires isolated _test database');
+  const db = createDb(url);
+  const id = randomUUID();
+  try {
+    const [agent] = await db.select().from(agents).limit(1);
+    if (!agent) throw new Error('Seed the test database');
+    await db.insert(tasks).values({
+      id,
+      agentId: agent.id,
+      type: 'chat_turn',
+      status: 'waiting_estimated_cost',
+      runAfter: new Date(0),
+    });
+    const repo = createPostgresTaskRepository(db);
+    expect(await repo.claim(id)).toBeNull();
+    expect(await repo.wakeTask(id)).toBeNull();
+    expect((await repo.findDueTasks()).some((row) => row.id === id)).toBe(false);
+  } finally {
+    await db.delete(tasks).where(eq(tasks.id, id));
+    await db.$client.end();
+  }
+});
+
 it('does not reclaim a PostgreSQL lease renewed after the expired-task scan', async () => {
   const url = process.env.DATABASE_URL;
   if (!url || !new URL(url).pathname.endsWith('_test'))

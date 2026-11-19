@@ -1,17 +1,38 @@
 import SwiftUI
 
+struct TalkCostReviewChoice: Identifiable, Equatable {
+    let id: String
+    let request: String
+}
+
 /// Voice can capture a request, but only an explicit on-screen decision can
 /// release a pending approval or budget gate. Suggestions do not stop a chat.
 enum TalkInteractionPolicy {
-    static func requiresManualDecision(messages: [ChatMessage], pendingApprovals: Int) -> Bool {
-        pendingApprovals > 0 || messages.contains(where: \.hasPendingDecision)
+    static func hasPendingToolApproval(_ message: ChatMessage) -> Bool {
+        (message.approvalSummary?.pendingCount ?? 0) > 0 || message.decisionParts.contains { part in
+            part.type == "approval" && (part.status == nil || part.status == "pending" || part.status == "snoozed")
+        }
     }
 
-    static func decisionRoute(messages: [ChatMessage]) -> AssistantRoute {
-        let latest = messages.last(where: \.hasPendingDecision)
-        return latest?.decisionParts.contains(where: { $0.type == "budget-request" }) == true
-            && latest?.decisionParts.contains(where: { $0.type == "approval" }) != true
-            ? .activity : .approvals
+    static func requiresManualDecision(messages: [ChatMessage], pendingApprovals: Int) -> Bool {
+        pendingApprovals > 0 || messages.contains(where: hasPendingToolApproval)
+    }
+
+    static func decisionRoute(messages: [ChatMessage]) -> AssistantRoute { .approvals }
+
+    static func costReviews(messages: [ChatMessage]) -> [TalkCostReviewChoice] {
+        var seen = Set<String>()
+        return messages.flatMap(\.parts).compactMap { part in
+            guard part.type == "estimated-cost-approval", let id = part.operationId,
+                  !id.isEmpty, seen.insert(id).inserted else { return nil }
+            let title = part.requestText?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return .init(id: id, request: title?.isEmpty == false ? title! : "Request \(id.suffix(8))")
+        }
+    }
+
+    static func canAttemptHeldUtterance(waiting: Bool, ready: Bool, attemptInProgress: Bool,
+                                        manualDecision: Bool, sameScope: Bool) -> Bool {
+        waiting && ready && !attemptInProgress && !manualDecision && sameScope
     }
 }
 
@@ -40,6 +61,10 @@ struct TalkView: View {
     @State private var phase: TalkPhase = .idle
     @State private var settleTask: Task<Void, Never>?
     @State private var lastSent = ""
+    @State private var pendingUtterance: HeldTalkUtterance?
+    @State private var pendingAttemptInProgress = false
+    @State private var pendingAttemptFailed = false
+    @State private var choosingCostRequest = false
 
     /// How long a pause means "your turn". Long enough to think mid-sentence,
     /// short enough that the assistant does not feel deaf.
@@ -48,6 +73,7 @@ struct TalkView: View {
     enum TalkPhase: Equatable {
         case idle
         case listening
+        case waitingToSend
         case thinking
         case speaking
         case needsDecision
@@ -56,6 +82,7 @@ struct TalkView: View {
     private var requiresManualDecision: Bool {
         TalkInteractionPolicy.requiresManualDecision(messages: model.messages, pendingApprovals: model.pendingApprovalCount)
     }
+    private var costReviews: [TalkCostReviewChoice] { TalkInteractionPolicy.costReviews(messages: model.messages) }
 
     var body: some View {
         ZStack {
@@ -88,6 +115,28 @@ struct TalkView: View {
 
                 Spacer(minLength: 0)
 
+                if phase == .waitingToSend && pendingAttemptFailed {
+                    Button("Try sending again", systemImage: "arrow.clockwise") { attemptPendingUtterance() }
+                        .buttonStyle(AssistantActionButtonStyle(kind: .secondary))
+                }
+                if phase == .waitingToSend, let held = pendingUtterance, !pendingAttemptInProgress,
+                   !model.isPreparingCalendarContext, model.composerDraftScope == held.scope {
+                    Button("Discard unsent voice message") {
+                        model.discardHeldTalkUtterance(held)
+                        pendingUtterance = nil
+                        pendingAttemptFailed = false
+                        listener.reset()
+                        Task { await enter() }
+                    }
+                    .buttonStyle(AssistantActionButtonStyle(kind: .secondary))
+                }
+                if !costReviews.isEmpty {
+                    Button("Review spending requests", systemImage: "dollarsign.circle") {
+                        choosingCostRequest = true
+                    }
+                    .buttonStyle(AssistantActionButtonStyle(kind: .secondary))
+                    .accessibilityIdentifier("assistant.talk.review-spending")
+                }
                 if phase == .needsDecision {
                     if requiresManualDecision {
                         Button("Review decision", systemImage: "hand.raised") {
@@ -121,6 +170,16 @@ struct TalkView: View {
             }
         }
         .task { await enter() }
+        .confirmationDialog("Review spending request", isPresented: $choosingCostRequest, titleVisibility: .visible) {
+            ForEach(costReviews) { choice in
+                Button("\(choice.request) · \(choice.id.suffix(8))") {
+                    Task {
+                        await leave()
+                        model.navigationPath.append(.estimatedCostApproval(operationID: choice.id))
+                    }
+                }
+            }
+        }
         .onDisappear {
             phase = .idle
             settleTask?.cancel()
@@ -150,6 +209,7 @@ struct TalkView: View {
             Task { await leave() }
         }
         .onChange(of: model.isSending) { wasSending, isSending in
+            if isSending, acknowledgePendingUtterance() { return }
             // The turn is answered. Whatever it had to say is already queued
             // with the player; talk mode's job is to wait for it to finish.
             guard wasSending, !isSending, phase == .thinking else { return }
@@ -166,6 +226,16 @@ struct TalkView: View {
             // talking over the answer. Let it interrupt as usual.
             heardSomething(listener.transcript)
         }
+        .onChange(of: model.canAdmitOrdinarySend) { _, ready in
+            if ready, phase == .waitingToSend, !pendingAttemptInProgress { attemptPendingUtterance() }
+        }
+        .onChange(of: model.isPreparingCalendarContext) { _, preparing in
+            guard !preparing, pendingAttemptInProgress, pendingUtterance != nil else { return }
+            if !acknowledgePendingUtterance() {
+                pendingAttemptInProgress = false
+                pendingAttemptFailed = true
+            }
+        }
         .onChange(of: player.speakingMessageID) { _, speaking in
             guard speaking == nil, phase == .speaking else { return }
             Task { await listen() }
@@ -179,6 +249,13 @@ struct TalkView: View {
         guard scenePhase != .background else { return }
         guard !requiresManualDecision else {
             await waitForDecision()
+            return
+        }
+        if let scope = model.composerDraftScope, let text = model.heldTalkUtterance(in: scope) {
+            pendingUtterance = .init(scope: scope, text: text)
+            phase = .waitingToSend
+            pendingAttemptInProgress = model.isPreparingCalendarContext
+            if !pendingAttemptInProgress { attemptPendingUtterance() }
             return
         }
         // Talk mode speaks every reply whether or not the setting is on: it is
@@ -258,12 +335,48 @@ struct TalkView: View {
     @MainActor
     private func submit() async {
         let text = listener.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, phase == .listening, !model.isSending, !requiresManualDecision else { return }
+        guard !text.isEmpty, phase == .listening, !requiresManualDecision,
+              let scope = model.composerDraftScope, model.holdTalkUtterance(text, in: scope) else { return }
+        pendingUtterance = .init(scope: scope, text: text)
+        phase = .waitingToSend
+        pendingAttemptFailed = false
+        // Stop collecting a second utterance while this one is held; its text
+        // remains visible until the matching send has actually started.
+        await listener.stop()
+        attemptPendingUtterance()
+    }
 
-        lastSent = text
-        phase = .thinking
+    @MainActor
+    private func attemptPendingUtterance() {
+        guard let held = pendingUtterance,
+              TalkInteractionPolicy.canAttemptHeldUtterance(waiting: phase == .waitingToSend,
+                ready: model.canAdmitOrdinarySend, attemptInProgress: pendingAttemptInProgress,
+                manualDecision: requiresManualDecision, sameScope: model.composerDraftScope == held.scope) else { return }
+        guard let origin = model.composerDraftSnapshot(in: held.scope) else {
+            pendingAttemptFailed = true
+            return
+        }
+        pendingAttemptInProgress = true
+        pendingAttemptFailed = false
+        model.send(held.text, spoken: true,
+                   composerDraftContext: .init(origin: origin, localDraft: origin.text))
+        if acknowledgePendingUtterance() { return }
+        if !model.isPreparingCalendarContext {
+            pendingAttemptInProgress = false
+            pendingAttemptFailed = true
+        }
+    }
+
+    @MainActor @discardableResult
+    private func acknowledgePendingUtterance() -> Bool {
+        guard let held = pendingUtterance, model.talkTurnWasAdmitted(held.text, in: held.scope) else { return false }
+        lastSent = held.text
+        pendingUtterance = nil
+        pendingAttemptInProgress = false
+        pendingAttemptFailed = false
         listener.reset()
-        model.send(text, spoken: true)
+        phase = .thinking
+        return true
     }
 
     // MARK: - Words on screen
@@ -272,6 +385,7 @@ struct TalkView: View {
         switch phase {
         case .idle: "Talk"
         case .listening: listener.isListening ? "Listening" : "Starting"
+        case .waitingToSend: pendingAttemptFailed ? "Message not sent" : "Waiting to send"
         case .thinking: "Thinking"
         case .speaking: "Speaking"
         case .needsDecision: requiresManualDecision ? "Your decision is needed" : "Ready to talk"
@@ -287,15 +401,17 @@ struct TalkView: View {
         case .listening:
             let heard = listener.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
             return heard.isEmpty ? "Say something." : heard
+        case .waitingToSend:
+            return pendingUtterance?.text ?? ""
         case .thinking:
             return lastSent
         case .speaking:
             return model.messages.last { $0.role == .assistant }?.text ?? ""
         case .needsDecision:
             guard requiresManualDecision else { return "The decision is resolved. Resume when you’re ready." }
-            let decision = model.messages.last(where: \.hasPendingDecision)
+            let decision = model.messages.last(where: TalkInteractionPolicy.hasPendingToolApproval)
             return decision?.approvalSummary?.purpose
-                ?? decision?.decisionParts.first(where: { $0.status == nil || $0.status == "pending" })?.summary
+                ?? decision?.decisionParts.first(where: { $0.type == "approval" && ($0.status == nil || $0.status == "pending" || $0.status == "snoozed") })?.summary
                 ?? model.overview?.approvals.pending.first?.approval.summary
                 ?? "Review the next step on screen before the assistant continues."
         }
@@ -348,6 +464,7 @@ private struct CompanionFaceView: View {
         switch phase {
         case .idle: 0.2
         case .listening: 0.75
+        case .waitingToSend: 0.4
         case .thinking: 0.4
         case .speaking: 0.9
         case .needsDecision: 0.4

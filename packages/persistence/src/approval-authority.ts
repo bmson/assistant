@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { parseMcpOAuthState } from './mcp-oauth.js';
 import type { Records } from './records.js';
 
 export const MAX_APPROVAL_POLICY_SNAPSHOT_ROWS = 200;
@@ -23,6 +24,7 @@ export interface McpApprovalConnection {
   id: string;
   endpoint: string;
   bearerTokenEncrypted: string | null;
+  oauthGeneration?: string;
   enabled: boolean;
   status: string;
   tools: unknown;
@@ -123,6 +125,34 @@ function sanitizedTool(value: unknown): Record<string, unknown> | null {
   };
 }
 
+/** Project exactly one authentication mode for approval and execution. */
+export function projectMcpOAuthApproval<
+  T extends McpApprovalConnection & { serverName?: string | null },
+>(
+  connection: T,
+  ownerId: string,
+  rawState: unknown,
+  enabled: boolean,
+): T & { oauthGeneration?: string } {
+  if (!connection.enabled || rawState == null) return connection;
+  const { grant } = parseMcpOAuthState(
+    rawState,
+    {
+      ownerId,
+      connectionId: connection.id,
+    },
+    connection.endpoint,
+  );
+  if (!grant) return connection;
+  return {
+    ...connection,
+    status: !enabled || grant.reconnectRequired ? 'authorization_required' : 'ready',
+    oauthGeneration: grant.generation,
+    serverName: grant.discovery.serverName,
+    tools: grant.discovery.tools,
+  };
+}
+
 /** Stable approval binding shared by the dispatcher and transactional adapters. */
 export function mcpApprovalBindingFingerprint(
   connection: McpApprovalConnection,
@@ -143,7 +173,9 @@ export function mcpApprovalBindingFingerprint(
       {
         connectionId: connection.id,
         endpoint: connection.endpoint,
-        credentials: connection.bearerTokenEncrypted,
+        credentials: connection.oauthGeneration
+          ? { oauthGeneration: connection.oauthGeneration }
+          : connection.bearerTokenEncrypted,
         tool: selected,
       },
       0,

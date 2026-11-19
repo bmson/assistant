@@ -1,0 +1,40 @@
+{
+  "synthetic": true,
+  "network": "loopback only",
+  "providerCalls": false,
+  "liveSpendingDecisions": false,
+  "clientCommit": "93a15a6574f5c32ec89e45d2a78fb74c647bd25e",
+  "scope": "Current web client and shared CSS only. Backend renewal work was in progress; these captures do not qualify the full feature tree or production.",
+  "sourceSha256": {
+    "apps/web/app/chat/[id]/inline-estimated-cost-request.tsx": "2788a75b6f1dd08492250208e68b71a471bde94f6e594765d2104f10fe738d7b",
+    "apps/web/app/chat/[id]/estimated-cost-decision.ts": "a08295693e7888873e5e4f41193a6378469e8839420e3d0197b3519c2ef4d7d6",
+    "apps/web/app/chat/[id]/estimated-cost-transport.ts": "717aa9492f370c6a2a90902d5d52b6b000fd21d9ce9820886b751eeda2eaf9eb",
+    "apps/web/app/chat/[id]/chat-log.tsx": "4d9885ac510f3e08a0c7494f53ac89e64206efb1b73f3d378b0b1e7ab216f5d6",
+    "apps/web/app/chat/[id]/decision-card.tsx": "9ab241cfc4d0b5045125a2fd4d249d0e37feebb2ae5f92bc0c218abb7f3ee77e",
+    "apps/web/lib/ui.tsx": "a64a0cb631e8e1a173a657a310e2c55efe97714f209b09195c88bc2d8b3885ed",
+    "apps/web/lib/ui-client.tsx": "bda938cb92b29c1865bb71676baa71ac8422a4938903c1ec3452afa1a04d6861",
+    "apps/web/app/globals.css": "ddf7bf8e6254c9475fdb3959e230353804ba6ab80163f7bec76aa8bd1fc39e75",
+    "apps/web/app/conversation.css": "586340b591a37cfe7f51e902db33da14fb9be8f92552b51b7ea5e7d2b3d0f665"
+  },
+  "fixtureBundleSha256": "5c61c59f15e6714bbd5fcf77fcdf843dc387f55e5f2395d02f590e28e65289c2",
+  "assetsSha256": {
+    "1280-dark.png": "1df500d77d73d3e4eb92cded69b6424f87ab28825e2913ad8d367f753946251f",
+    "1280-light.png": "dc760685f281b744b65c1095a4c1b25fefc9c0a836c5695884c3012bb885158a",
+    "320-dark.png": "e31643fed3d24b1230caf4ad538e2923339b4cc24a3bda64d6518e2f26d4a776",
+    "320-light.png": "e394b823ec87247f6a43ecb31171303be3b1b0aa6a3812739a452d419b0abd1a",
+    "390-dark.png": "f3e3a75bd46f2092f81d6b9e6689207344c6c010a3bd852f84526d90fe729b67",
+    "390-light.png": "0cb12b886cf51b67a888437f1da3bb487a2d9547aa1680102c3d9f869c594af0",
+    "390-recovery-b-completed.png": "ec06fcfe367f41114459474011f8749737b34e054ccd3dcbd69467cf49ce56b3",
+    "browser-results-json.txt": "7a008e8bad1e2b7e8397f37240d80a1f56f657b99110b6ca8d88712ffcc975b3",
+    "browser.txt": "d748fc0cb93074165f88ce5b4e9b9e464e618edcd3fd4aa559fa8769f574fda8",
+    "tests.txt": "7385dceed202d4f7f53c981de2dee6bd85d395bb72101e89e8c2b098597d023f",
+    "typecheck.txt": "f901b55f0f6c4f285ed84e0eb05dcb8d23b66507763ecaafdf7f16e11d7923bc"
+  },
+  "checks": [
+    "54 focused tests across seven client/config/HTTP/source-parser test files",
+    "web typecheck",
+    "six viewport/appearance captures",
+    "ambiguous A decision readback with independent synthetic B and preserved newer draft",
+    "no observed page errors or viewport overflow"
+  ]
+}

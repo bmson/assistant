@@ -1,0 +1,5 @@
+
+> assistant@ check:migrations /Users/baldvinsmarason/.codex/worktrees/ai-calendar-server-release/assistant
+> tsx scripts/check-migrations.ts
+
+Migration journal validated; historical inversion requires forward correction 0084.

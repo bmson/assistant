@@ -1,3 +1,4 @@
+import { addMicros, storedLedgerUsdToMicros } from '@assistant/persistence';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   dispatchingAttemptSummary,
@@ -246,8 +247,8 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore mobile cost das
     await seedBudget(store);
     await Promise.all([
       store.doc('coordination', 'budget-holds').set({ heldMicros: 60_000 }),
-      store.doc('budgetPeriods', 'day:2026-09-22').set({ spentMicros: 50_200 }),
-      store.doc('budgetPeriods', 'month:2026-09').set({ spentMicros: 50_200 }),
+      store.doc('budgetPeriods', 'day:2026-09-22').set({ spentMicros: 100_200 }),
+      store.doc('budgetPeriods', 'month:2026-09').set({ spentMicros: 100_200 }),
       store.doc('budgets', 'task_default').set({ scope: 'task_default', limitUsd: '0.50' }),
       store.doc('agents', 'owner').set({
         id: 'owner',
@@ -313,22 +314,132 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore mobile cost das
     await disposeStore(store);
   });
 
+  async function replaceStoreAt(now: Date): Promise<void> {
+    await disposeStore(store);
+    store = emulatorStore(() => now);
+    await seedBudget(store);
+    await Promise.all([
+      store.doc('coordination', 'budget-holds').set({ heldMicros: 0 }),
+      store.doc('budgetPeriods', `day:${now.toISOString().slice(0, 10)}`).set({ spentMicros: 0 }),
+      store.doc('budgetPeriods', `month:${now.toISOString().slice(0, 7)}`).set({ spentMicros: 0 }),
+      store.doc('agents', 'owner').set({
+        id: 'owner',
+        name: 'Owner',
+        timezone: 'America/Los_Angeles',
+        locale: 'en-US',
+        signature: '',
+        createdAt: new Date('2026-01-01T00:00:00Z'),
+        updatedAt: new Date('2026-01-01T00:00:00Z'),
+      }),
+    ]);
+  }
+
+  async function seedUtcBoundaryEvents(
+    model: string,
+    start: string,
+    priorMonth: string,
+    end: string,
+  ) {
+    await Promise.all(
+      [
+        { id: 'before-start', createdAt: priorMonth, usd: '0.000020' },
+        { id: 'at-start', createdAt: start, usd: '0.000001' },
+        { id: 'before-end', createdAt: end, usd: '0.000002' },
+        { id: 'at-end', createdAt: end, usd: '0.000020' },
+      ].map(({ id, createdAt, usd }) =>
+        store.doc('costEvents', `${model}-${id}`).set({
+          id: `${model}-${id}`,
+          source: 'model',
+          description: 'UTC month boundary fixture',
+          evidence: { basis: 'provider_reported', provider: 'boundary-test', model },
+          usd,
+          createdAt: new Date(createdAt),
+        }),
+      ),
+    );
+  }
+
+  it('matches PostgreSQL UTC month boundaries in March across the Los Angeles DST change', async () => {
+    const model = 'fixed-utc-march-boundary';
+    await replaceStoreAt(new Date('2026-03-01T00:30:00Z'));
+    await seedUtcBoundaryEvents(
+      model,
+      '2026-03-01T00:00:00Z',
+      '2026-02-28T23:59:59.999Z',
+      '2026-03-31T23:59:59.999Z',
+    );
+    await store.doc('costEvents', `${model}-at-end`).set({
+      id: `${model}-at-end`,
+      source: 'model',
+      description: 'At April UTC end',
+      evidence: { basis: 'provider_reported', provider: 'boundary-test', model },
+      usd: '0.000020',
+      createdAt: new Date('2026-04-01T00:00:00Z'),
+    });
+
+    const dashboard = await getFirestoreMobileCosts(store, 'owner');
+    expect(dashboard.byModelEvidence.filter((row) => row.model === model)).toEqual([
+      {
+        provider: 'boundary-test',
+        model,
+        basis: 'provider_reported',
+        usd: '0.000003',
+        count: 2,
+      },
+    ]);
+  });
+
+  it('matches PostgreSQL UTC month boundaries in November at the LA-local October date', async () => {
+    const model = 'fixed-utc-november-boundary';
+    await replaceStoreAt(new Date('2026-11-01T00:30:00Z'));
+    await seedUtcBoundaryEvents(
+      model,
+      '2026-11-01T00:00:00Z',
+      '2026-10-31T23:59:59.999Z',
+      '2026-11-30T23:59:59.999Z',
+    );
+    await store.doc('costEvents', `${model}-at-end`).set({
+      id: `${model}-at-end`,
+      source: 'model',
+      description: 'At December UTC end',
+      evidence: { basis: 'provider_reported', provider: 'boundary-test', model },
+      usd: '0.000020',
+      createdAt: new Date('2026-12-01T00:00:00Z'),
+    });
+
+    const dashboard = await getFirestoreMobileCosts(store, 'owner');
+    expect(dashboard.byModelEvidence.filter((row) => row.model === model)).toEqual([
+      {
+        provider: 'boundary-test',
+        model,
+        basis: 'provider_reported',
+        usd: '0.000003',
+        count: 2,
+      },
+    ]);
+  });
+
   it('reads every page and preserves owner-scoped dashboard totals', async () => {
     const batchOne = store.db.batch();
     const batchTwo = store.db.batch();
-    for (let index = 0; index < 501; index++) {
-      (index < 450 ? batchOne : batchTwo).set(store.doc('costEvents', `event-${index}`), {
-        id: `event-${index}`,
-        taskId: 'task-a',
-        source: 'model',
-        description: 'Model call',
-        evidence: {
-          basis: index === 0 ? 'token_rate' : 'provider_reported',
-          provider: 'openrouter',
+    const batchThree = store.db.batch();
+    for (let index = 0; index < 1001; index++) {
+      (index < 450 ? batchOne : index < 900 ? batchTwo : batchThree).set(
+        store.doc('costEvents', `event-${index}`),
+        {
+          id: `event-${index}`,
+          taskId: 'task-a',
+          source: 'model',
+          description: 'Model call',
+          evidence: {
+            basis: index === 0 ? 'token_rate' : 'provider_reported',
+            provider: 'openrouter',
+            model: index === 0 ? 'model-alpha' : index < 3 ? 'model-bravo' : 'model-large',
+          },
+          usd: '0.000100',
+          createdAt: new Date(Date.UTC(2026, 8, 22, 0, 0, index)),
         },
-        usd: '0.000100',
-        createdAt: new Date(Date.UTC(2026, 8, 22, 0, 0, index)),
-      });
+      );
     }
     batchTwo.set(store.doc('costEvents', 'other'), {
       id: 'other',
@@ -346,30 +457,103 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore mobile cost das
       usd: '99.000000',
       createdAt: new Date('2026-08-31T23:59:59Z'),
     });
+    batchTwo.set(store.doc('costEvents', 'legacy-unknown'), {
+      id: 'legacy-unknown',
+      taskId: null,
+      source: 'model',
+      description: 'Legacy model cost without evidence',
+      usd: '0.000000',
+      createdAt: new Date('2026-09-22T11:05:00Z'),
+    });
+    batchTwo.set(store.doc('costEvents', 'malformed-unknown'), {
+      id: 'malformed-unknown',
+      taskId: null,
+      source: 'model',
+      description: 'Malformed evidence dimensions and basis',
+      evidence: { basis: 'unexpected_basis', provider: ' ', model: '' },
+      usd: '0.000000',
+      createdAt: new Date('2026-09-22T11:06:00Z'),
+    });
+    for (const [id, evidence] of [
+      ['number-boolean-dimensions', { basis: 'provider_reported', provider: 17, model: true }],
+      ['object-array-dimensions', { basis: 'provider_reported', provider: {}, model: ['bad'] }],
+      ['null-dimensions', { basis: 'provider_reported', provider: null, model: null }],
+      ['blank-dimensions', { basis: 'provider_reported', provider: ' ', model: '' }],
+    ] as const) {
+      batchTwo.set(store.doc('costEvents', id), {
+        id,
+        taskId: null,
+        source: 'model',
+        description: 'Malformed typed model evidence dimension',
+        evidence,
+        usd: '0.000000',
+        createdAt: new Date('2026-09-22T11:06:30Z'),
+      });
+    }
+    batchTwo.set(store.doc('costEvents', 'next-month'), {
+      id: 'next-month',
+      taskId: null,
+      source: 'model',
+      description: 'Next UTC month',
+      evidence: { basis: 'provider_reported', provider: 'openrouter', model: 'future-model' },
+      usd: '99.000000',
+      createdAt: new Date('2026-10-01T00:00:00Z'),
+    });
     batchTwo.set(store.doc('modelCalls', 'model-one'), {
       id: 'model-one',
       model: 'gemini-2.5-flash',
       costUsd: '0.004000',
       createdAt: new Date('2026-09-22T09:00:00Z'),
     });
-    await batchOne.commit();
-    await batchTwo.commit();
+    await Promise.all([batchOne.commit(), batchTwo.commit(), batchThree.commit()]);
 
     const dashboard = await getFirestoreMobileCosts(store, 'owner');
     expect(dashboard.timezone).toBe('America/Los_Angeles');
-    expect(dashboard.totals).toMatchObject({ monthlySpentUsd: 0.0502, heldUsd: 0.06 });
+    expect(dashboard.totals).toMatchObject({ monthlySpentUsd: 0.1002, heldUsd: 0.06 });
     expect(dashboard.bySource).toEqual([
-      { source: 'model', usd: '0.050100', count: 501 },
+      { source: 'model', usd: '99.100100', count: 1008 },
       { source: 'external_api', usd: '0.000100', count: 1 },
     ]);
     expect(dashboard.byEvidence).toEqual([
-      { basis: 'provider_reported', usd: '0.050000', count: 500 },
+      { basis: 'provider_reported', usd: '99.100000', count: 1005 },
       { basis: 'token_rate', usd: '0.000100', count: 1 },
-      { basis: 'unknown', usd: '0.000100', count: 1 },
+      { basis: 'unknown', usd: '0.000100', count: 3 },
     ]);
     expect(dashboard.byModel).toEqual([{ model: 'gemini-2.5-flash', usd: '0.004000', count: 1 }]);
+    expect(dashboard.byModelEvidence).toEqual([
+      {
+        provider: 'openrouter',
+        model: 'model-large',
+        basis: 'provider_reported',
+        usd: '0.099800',
+        count: 998,
+      },
+      {
+        provider: 'openrouter',
+        model: 'model-bravo',
+        basis: 'provider_reported',
+        usd: '0.000200',
+        count: 2,
+      },
+      {
+        provider: 'openrouter',
+        model: 'model-alpha',
+        basis: 'token_rate',
+        usd: '0.000100',
+        count: 1,
+      },
+      { provider: null, model: null, basis: 'provider_reported', usd: '0.000000', count: 4 },
+      { provider: null, model: null, basis: 'unknown', usd: '0.000000', count: 2 },
+    ]);
+    expect(
+      dashboard.byModelEvidence.reduce(
+        (sum, row) => addMicros(sum, storedLedgerUsdToMicros(row.usd)),
+        0,
+      ),
+    ).toBe(100_100);
+    expect(dashboard.byModelEvidence.reduce((sum, row) => sum + row.count, 0)).toBe(1007);
     expect(dashboard.topTasks).toEqual([
-      { taskId: 'task-a', usd: '0.050100', type: 'chat', progress: 'Running' },
+      { taskId: 'task-a', usd: '0.100100', type: 'chat', progress: 'Running' },
     ]);
     expect(dashboard.held).toEqual([
       { id: 'hold', source: 'model', description: 'Next call', estimatedUsd: '0.010000' },
@@ -386,7 +570,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore mobile cost das
       estimatedUsd: '0.030000',
       estimateComplete: true,
     });
-    expect(dashboard.recent[0]?.id).toBe('other');
+    expect(dashboard.recent[0]?.id).toBe('next-month');
     expect(dashboard.parkedTasks).toBe(1);
     expect(dashboard.taskDefaultLimit).toBe('0.50');
   }, 30_000);

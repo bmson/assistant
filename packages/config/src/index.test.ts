@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  estimatedCostApprovalEnabled,
   isModuleEnabled,
   loadConfig,
   parseAssistantModules,
@@ -42,6 +43,8 @@ describe('config', () => {
     expect(config.WEB_APP_PREVIEW_ENABLED).toBe(false);
     expect(config.MOBILE_API_TOKEN).toBe('');
     expect(config.CANARY_ENABLED).toBe(false);
+    expect(config.ESTIMATED_COST_APPROVAL_ENABLED).toBe(false);
+    expect(config.ESTIMATED_COST_PROVIDER_SOURCE_JSON).toBe('');
     expect(config.VERTEX_MODEL_PROBE_ENABLED).toBe(false);
     expect(config.CANARY_MAX_COST_USD).toBe(0.03);
     expect(config.GRAPH_RAG_ENABLED).toBe(false);
@@ -62,6 +65,37 @@ describe('config', () => {
     expect(config.QUEUE_DRIVER).toBe('cloudtasks');
     expect(config.AGENT_PORT).toBe(9000);
     expect(config.POSTGRES_SOURCE_WRITES_FENCED).toBe(true);
+  });
+
+  it('requires an explicit opt-in for estimated cost approvals and refuses it in restore rehearsals', () => {
+    const enabled = loadConfig({ ESTIMATED_COST_APPROVAL_ENABLED: 'true' });
+    expect(enabled.ESTIMATED_COST_APPROVAL_ENABLED).toBe(true);
+    expect(estimatedCostApprovalEnabled(enabled)).toBe(true);
+    expect(estimatedCostApprovalEnabled({ ...enabled, RESTORE_REHEARSAL: true })).toBe(false);
+    expect(
+      estimatedCostApprovalEnabled({
+        ...enabled,
+        PERSISTENCE_DRIVER: 'postgres',
+        POSTGRES_SOURCE_WRITES_FENCED: true,
+      }),
+    ).toBe(false);
+    expect(
+      estimatedCostApprovalEnabled({
+        ...enabled,
+        PERSISTENCE_DRIVER: 'firestore',
+        POSTGRES_SOURCE_WRITES_FENCED: true,
+      }),
+    ).toBe(true);
+    resetConfigForTest();
+    expect(() => loadConfig({ ESTIMATED_COST_APPROVAL_ENABLED: '1' })).toThrow();
+    resetConfigForTest();
+    const restore = loadConfig({
+      RESTORE_REHEARSAL: 'true',
+      ESTIMATED_COST_APPROVAL_ENABLED: 'true',
+    });
+    expect(validateRestoreRehearsalConfig(restore, {})).toContain(
+      'ESTIMATED_COST_APPROVAL_ENABLED must be false in RESTORE_REHEARSAL',
+    );
   });
 
   it('supports minimal and explicit module installations', () => {

@@ -1,3 +1,4 @@
+import { nativeServiceDefaults } from './owner-release-native-service-defaults.js';
 /** Offline journal/fence simulation ONLY. No token, signature verification, transport or runtime authority. */
 
 import { planLifecycleAction, verifyLifecycleState } from './owner-web-release-lifecycle-model.js';
@@ -324,7 +325,9 @@ export function journalPreservedDigest(raw: Obj) {
   const a = { ...annotations(raw) };
   delete a[JOURNAL_KEY];
   return digest({
-    ...Object.fromEntries(Object.entries(raw).filter(([k]) => !VOLATILE.has(k))),
+    ...nativeServiceDefaults(
+      Object.fromEntries(Object.entries(raw).filter(([k]) => !VOLATILE.has(k))),
+    ),
     annotations: a,
   });
 }
@@ -726,7 +729,10 @@ function validateResolution(h: Head, r: SimulatedResolution) {
             !(field === 'template' && ['latestReadyRevision', 'latestCreatedRevision'].includes(k)),
         ),
       );
-  check(equal(omit(r.before), omit(r.after)) && equal(r.after[field], r.request.body[field]));
+  check(
+    equal(nativeServiceDefaults(omit(r.before)), nativeServiceDefaults(omit(r.after))) &&
+      equal(r.after[field], r.request.body[field]),
+  );
   if (h.intent.kind === 'reconcileKnown') {
     const k = r.knownEvidence;
     check(
@@ -1215,12 +1221,14 @@ export function rebaseLifecycleJournalSimulation(
       rebased,
       mode as import('./owner-web-release-lifecycle-model.js').Mode,
     ),
-    { etag: _etag, ...requestBody } = plan.request.body,
-    request: LogicalAction = {
-      method: 'PATCH',
-      updateMask: plan.request.updateMask,
-      body: requestBody,
-    };
+    { etag: _etag, ...requestBody } = plan.request.body;
+  // Historical offline journal simulation has no combined-create operation authority.
+  check(plan.request.updateMask !== 'template,traffic');
+  const request: LogicalAction = {
+    method: 'PATCH',
+    updateMask: plan.request.updateMask,
+    body: requestBody,
+  };
   check(
     digest(request) === s.head.intent.logicalDigest &&
       plan.expectedTraffic.every((row) => !s.head.retiredTags.includes(row.tag)),

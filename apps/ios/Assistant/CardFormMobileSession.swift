@@ -2,6 +2,12 @@ import CryptoKit
 import Foundation
 import Security
 
+@MainActor
+protocol CardFormSessionIdentityStore {
+    func readOrCreate(serverIdentity: String, ownerId: String) throws -> String
+    func rotate(serverIdentity: String, ownerId: String, expected: String) throws
+}
+
 /// A stable local session partition. The server and owner are identity inputs,
 /// never values supplied by a card or copied into the request body.
 @MainActor
@@ -10,8 +16,14 @@ final class CardFormMobileSession {
     let ownerId: String
     let sessionId: String
     let coordinator: CardFormDraftCoordinator
+    private let identityStore: any CardFormSessionIdentityStore
 
-    init(serverIdentity: String, ownerId: String) throws {
+    init(
+        serverIdentity: String,
+        ownerId: String,
+        identityStore suppliedIdentityStore: (any CardFormSessionIdentityStore)? = nil,
+        draftStorage suppliedDraftStorage: (any CardFormDraftStorage)? = nil
+    ) throws {
         let canonicalServer = serverIdentity.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard let url = URL(string: canonicalServer),
               let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme),
@@ -23,11 +35,15 @@ final class CardFormMobileSession {
         }
         self.serverIdentity = canonicalServer
         self.ownerId = ownerId
-        self.sessionId = try CardFormSessionIdentity.readOrCreate(
-            serverIdentity: canonicalServer,
-            ownerId: ownerId
-        )
-        let storage = try EncryptedCardFormDraftStorage(serverIdentity: canonicalServer)
+        let identityStore = suppliedIdentityStore ?? KeychainCardFormSessionIdentityStore()
+        self.identityStore = identityStore
+        self.sessionId = try identityStore.readOrCreate(serverIdentity: canonicalServer, ownerId: ownerId)
+        let storage: any CardFormDraftStorage
+        if let suppliedDraftStorage {
+            storage = suppliedDraftStorage
+        } else {
+            storage = try EncryptedCardFormDraftStorage(serverIdentity: canonicalServer)
+        }
         self.coordinator = CardFormDraftCoordinator(storage: storage)
     }
 
@@ -91,7 +107,7 @@ final class CardFormMobileSession {
 
     func closeAndRotate() async throws {
         try await coordinator.clearOwnerSession(ownerId: ownerId, sessionId: sessionId)
-        try CardFormSessionIdentity.rotate(serverIdentity: serverIdentity, ownerId: ownerId, expected: sessionId)
+        try identityStore.rotate(serverIdentity: serverIdentity, ownerId: ownerId, expected: sessionId)
     }
 }
 
@@ -175,5 +191,15 @@ private enum CardFormSessionIdentity {
             kSecAttrService as String: service,
             kSecAttrAccount as String: account
         ]
+    }
+}
+
+private struct KeychainCardFormSessionIdentityStore: CardFormSessionIdentityStore {
+    func readOrCreate(serverIdentity: String, ownerId: String) throws -> String {
+        try CardFormSessionIdentity.readOrCreate(serverIdentity: serverIdentity, ownerId: ownerId)
+    }
+
+    func rotate(serverIdentity: String, ownerId: String, expected: String) throws {
+        try CardFormSessionIdentity.rotate(serverIdentity: serverIdentity, ownerId: ownerId, expected: expected)
     }
 }

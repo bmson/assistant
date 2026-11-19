@@ -1,10 +1,12 @@
-import { type Query, Timestamp } from '@google-cloud/firestore';
+import { profileContactIdentityRevision } from '@assistant/persistence';
+import { type Query, type QueryDocumentSnapshot, Timestamp } from '@google-cloud/firestore';
 import { describe, expect, it } from 'vitest';
 import { FirestoreProfileLibraryRepository } from './profile-library.js';
 import { FirestoreProfilePeopleReadRepository } from './profile-people-read.js';
 import {
   collectProfileDocuments,
   FirestoreProfileReadLimitError,
+  iterateProfileDocuments,
   ProfileReadBudget,
   ProfileReadWave,
 } from './profile-read-budget.js';
@@ -43,6 +45,7 @@ function fixture(tables: Record<string, Row[]>) {
     error: null as Error | null,
     getAllErrorOnce: null as Error | null,
     memoryErrorOnce: null as Error | null,
+    memoryPageObserver: null as ((decodedCount: number) => void) | null,
     fence: 0,
     changed: false,
     holdFenceAt: 0,
@@ -84,6 +87,7 @@ function fixture(tables: Record<string, Row[]>) {
     }
     async get() {
       calls.push({ table: this.table, limit: this.cap, filters: this.filters });
+      if (this.table === 'memories') control.memoryPageObserver?.(decodedDocuments.memories ?? 0);
       if (control.error) throw control.error;
       if (this.table === 'memories' && control.memoryErrorOnce) {
         const error = control.memoryErrorOnce;
@@ -223,6 +227,42 @@ describe('bounded actual profile repository reads (offline)', () => {
       new FirestoreProfilePeopleReadRepository(f.store, 'owner').listContacts(),
     ).rejects.toThrow('Contact identity revision is unavailable');
     expect(f.calls).toHaveLength(1);
+  });
+
+  it('normalizes only absent legacy relationship fields in list and point contact reads', async () => {
+    const f = fixture({
+      contacts: [
+        { id: 'legacy-target', name: 'Legacy target', trust: 'known' },
+        { id: 'unrelated-legacy', name: 'Unrelated legacy', trust: 'known' },
+      ],
+    });
+    const repository = new FirestoreProfilePeopleReadRepository(f.store, 'owner');
+    const listed = await repository.listContacts();
+    expect(listed.map((contact) => [contact.id, contact.relationship])).toEqual([
+      ['legacy-target', ''],
+      ['unrelated-legacy', ''],
+    ]);
+    expect(listed[0]?.identityRevision).toBe(
+      profileContactIdentityRevision({
+        driver: 'firestore',
+        ownerId: 'owner',
+        id: documentKey('legacy-target'),
+        updateTime: { seconds: 1_798_000_000, nanoseconds: 123_456_789 },
+      }),
+    );
+    const point = await repository.getContact('legacy-target');
+    expect(point?.relationship).toBe('');
+    expect(point?.identityRevision).toBe(listed[0]?.identityRevision);
+    expect(f.pointDocuments.contacts).toBe(1);
+  });
+
+  it('keeps explicit null relationship metadata malformed', async () => {
+    const f = fixture({
+      contacts: [{ id: 'null-relationship', name: 'Invalid', relationship: null }],
+    });
+    await expect(
+      new FirestoreProfilePeopleReadRepository(f.store, 'owner').listContacts(),
+    ).rejects.toThrow('Contact relationship is malformed');
   });
 
   it.each([199, 200, 9999, 10000])(
@@ -738,5 +778,43 @@ describe('shared raw budget enforcement', () => {
     await expect(collectProfileDocuments(q, 200, new ProfileReadBudget())).rejects.toThrow(
       'Invalid profile read page',
     );
+  });
+
+  it('validates a fetched page completely before yielding any snapshot', async () => {
+    const docs = [{ id: 'b' }, { id: 'a' }] as QueryDocumentSnapshot[];
+    const q = {
+      orderBy() {
+        return this;
+      },
+      limit() {
+        return this;
+      },
+      get: async () => ({ size: docs.length, docs }),
+    } as unknown as Query;
+    let yielded = 0;
+    await expect(async () => {
+      for await (const _doc of iterateProfileDocuments(q, 2, new ProfileReadBudget())) yielded++;
+    }).rejects.toThrow('Profile read cursor did not advance');
+    expect(yielded).toBe(0);
+  });
+
+  it('does not publish a partial library result when a later streamed page fails cursor validation', async () => {
+    const f = fixture({ memories: rows(401, memory()) });
+    f.control.repeat = true;
+    const repository = new FirestoreProfileLibraryRepository(f.store);
+    await expect(repository.listFilters('owner')).rejects.toThrow('cursor did not advance');
+    expect(f.queryDocuments.memories).toBe(800);
+    expect(f.decodedDocuments.memories).toBe(400);
+  });
+
+  it('decodes each library memory page before fetching the next page', async () => {
+    const f = fixture({ memories: rows(401, memory()) });
+    const decodedBeforePage: number[] = [];
+    f.control.memoryPageObserver = (decodedCount) => decodedBeforePage.push(decodedCount);
+    const result = await new FirestoreProfileLibraryRepository(f.store).listFilters('owner');
+    expect(result).toEqual({ subjects: [], sources: [] });
+    expect(decodedBeforePage).toEqual([0, 400]);
+    expect(f.queryDocuments.memories).toBe(401);
+    expect(f.decodedDocuments.memories).toBe(401);
   });
 });

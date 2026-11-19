@@ -26,6 +26,7 @@ import {
 import { FieldValue, Timestamp } from '@google-cloud/firestore';
 import { describe, expect, it, vi } from 'vitest';
 import { FirestoreCardFormAdmissionRepository } from './card-form-admission.js';
+import { createFirestoreGoogleCalendarConnectionRepository } from './google-calendar-connections.js';
 import { FirestoreMemoryEmbeddingRefreshRepository } from './memory-embedding-refresh.js';
 import {
   discoverOwnerCallGrantOperation,
@@ -3102,3 +3103,98 @@ describe('Firestore card-form migration preview', () => {
     ).rejects.toThrow(/duplicate destination: taskEventKeys:/);
   });
 });
+
+it.skipIf(!enabled)(
+  'imports readable owner-bound Calendar consent while invalidating callback and refresh execution state',
+  async () => {
+    const store = emulatorStore();
+    const target = {
+      projectId: 'demo-assistant-test',
+      databaseId: '(default)',
+      installationId: store.installationId,
+    };
+    try {
+      const source = completeV3Bundle(target);
+      const ownerId = source.manifest.source.agentId;
+      const flowId = randomUUID();
+      const connectionId = randomUUID();
+      const state = {
+        version: 1,
+        adopted: true,
+        ownerId,
+        revision: 3,
+        connection: {
+          id: connectionId,
+          credentialVersion: 2,
+          account: { subject: 'google-subject', email: 'owner@example.com' },
+          refreshTokenEncrypted: 'sealed-refresh',
+          accessTokenEncrypted: 'sealed-access',
+          accessTokenExpiresAt: '2026-11-14T14:00:00Z',
+          refreshLease: { id: randomUUID(), expiresAt: '2026-11-14T13:00:00Z' },
+          scopes: ['openid', 'email', 'https://www.googleapis.com/auth/calendar.readonly'],
+          status: 'connected',
+          connectedAt: '2026-11-14T12:00:00Z',
+        },
+        flow: {
+          id: flowId,
+          stateHash: 'a'.repeat(64),
+          verifierEncrypted: 'sealed-verifier',
+          nonce: 'nonce',
+          expiresAt: '2026-11-14T13:00:00Z',
+          outcome: 'processing',
+        },
+      };
+      addRecord(source, {
+        table: 'google_calendar_connections',
+        collection: 'googleCalendarConnections',
+        id: ownerId,
+        data: serializeMigrationValue({
+          agentId: ownerId,
+          state,
+          updatedAt: new Date('2026-11-14T12:00:00Z'),
+        }) as Record<string, SerializedValue>,
+        checksum: '',
+      });
+      const result = await importWorkspaceBundle(store, source, {
+        sourceAgentId: ownerId,
+        target,
+        mode: 'write',
+      });
+      expect(result.verified).toBe(true);
+      const repo = createFirestoreGoogleCalendarConnectionRepository(store);
+      const restored = await repo.get(ownerId);
+      expect(restored).toMatchObject({
+        adopted: true,
+        revision: 4,
+        connection: {
+          id: connectionId,
+          credentialVersion: 3,
+          refreshTokenEncrypted: 'sealed-refresh',
+          accessTokenEncrypted: null,
+          accessTokenExpiresAt: null,
+          refreshLease: null,
+        },
+        flow: { outcome: 'superseded', verifierEncrypted: null },
+      });
+      expect(await repo.get(randomUUID())).toBeNull();
+      expect(
+        await repo.finish(ownerId, flowId, 3, 'connected', null, new Date('2026-11-14T12:01:00Z')),
+      ).toBe(false);
+      expect(JSON.stringify(result)).not.toMatch(/sealed-refresh|sealed-access|sealed-verifier/);
+      const bad = { ...state, ownerId: randomUUID() };
+      const record = source.records.find((item) => item.table === 'google_calendar_connections');
+      if (!record) throw new Error('Expected Calendar migration record');
+      record.data.state = bad;
+      refreshRecord(source, record);
+      await expect(
+        importWorkspaceBundle({} as InstallationStore, source, {
+          sourceAgentId: ownerId,
+          target,
+          mode: 'preview',
+        }),
+      ).rejects.toThrow(/Google Calendar/);
+    } finally {
+      await disposeStore(store);
+    }
+  },
+);

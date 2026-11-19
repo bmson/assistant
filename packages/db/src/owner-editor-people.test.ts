@@ -130,6 +130,7 @@ function fixture(command: 'create_person' | 'update_person_identity' = 'update_p
                   name: contact.name,
                   aliases: contact.aliases,
                   trust: contact.trust,
+                  relationship: contact.relationship,
                   updated_at: `2026-10-25 00:00:00${state.nativeSuffix}`,
                 },
               }));
@@ -211,6 +212,7 @@ function fixture(command: 'create_person' | 'update_person_identity' = 'update_p
 describe('actual PG named-person writer + actual claim/receipt fence (offline single-lease fake)', () => {
   it('uses exact native precision, preserves unknown trust, old alias and commits receipt in same transaction', async () => {
     const f = fixture();
+    f.person.relationship = 'daughter';
     const snapshot = await postgresOwnerEditorContact(f.db, f.claim.scope.ownerId, f.person.id);
     f.state.nativeSuffix = '.000002+00';
     const changed = await postgresOwnerEditorContact(f.db, f.claim.scope.ownerId, f.person.id);
@@ -241,11 +243,40 @@ describe('actual PG named-person writer + actual claim/receipt fence (offline si
     });
     expect(f.state.people[0]?.trust).toBe('unknown');
     expect(f.state.people[0]?.aliases).toEqual(['Alex']);
+    expect(f.state.people[0]?.relationship).toBe('daughter'); // Omitted legacy field is preserved.
     expect(f.state.events.indexOf('operation-read')).toBeLessThan(
       f.state.events.indexOf('person-write'),
     );
     expect(f.state.events.slice(-2)).toEqual(['person-write', 'receipt-write']);
     expect(f.state.leased).toBe(false);
+  });
+  it('updates only the owner relationship label under the same native CAS and receipt', async () => {
+    const f = fixture();
+    f.person.relationship = 'daughter';
+    const snapshot = await postgresOwnerEditorContact(f.db, f.claim.scope.ownerId, f.person.id);
+    const result = await commitPostgresOwnerEditorPerson(
+      f.db,
+      f.claim,
+      {
+        request: {
+          version: 1,
+          intent: 'apply',
+          command: 'update_person_identity',
+          operationId: f.claim.scope.operationId,
+          contactId: f.person.id,
+          expectedContactRevision: snapshot!.revision,
+          name: 'Alex',
+          aliases: [],
+          relationship: 'friend',
+        },
+        name: 'Alex',
+        aliases: [],
+      },
+      f.now,
+    );
+    expect(result).toMatchObject({ authority: 'operation_receipt', outcome: 'saved' });
+    expect(f.state.people[0]).toMatchObject({ name: 'Alex', relationship: 'friend' });
+    expect(f.state.events.slice(-2)).toEqual(['person-write', 'receipt-write']);
   });
   it('rejects stale browser revision without person writes and records authoritative conflict', async () => {
     const f = fixture();

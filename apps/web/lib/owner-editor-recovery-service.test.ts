@@ -478,16 +478,23 @@ describe('owner-editor recovery service', () => {
     expect(f.getTransactionCalls()).toBe(1);
     expect(f.abandonExpiredOriginal).not.toHaveBeenCalled();
     if (command === 'create_owner_memory') {
-      expect(() =>
-        issueOwnerEditorFormGrant({
-          context: { ownerId: owner, epoch, privacyGeneration: 'privacy-generation-a' },
+      const grant = issueOwnerEditorFormGrant({
+        context: { ownerId: owner, epoch, privacyGeneration: 'privacy-generation-a' },
+        session: f.session,
+        command,
+        targetId: subject,
+        secret: SECRET,
+        now: NOW,
+      });
+      expect(grant.command).toBe(command);
+      expect(
+        verifyOwnerEditorHandle({
+          token: grant.issuedOperationHandle,
           session: f.session,
-          command,
-          targetId: subject,
           secret: SECRET,
           now: NOW,
         }),
-      ).toThrow();
+      ).toMatchObject({ kind: 'verified', scope: { ownerId: owner, command, targetId: subject } });
     }
   });
 

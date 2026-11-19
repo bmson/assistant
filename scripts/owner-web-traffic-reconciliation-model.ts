@@ -1,5 +1,6 @@
 /** Fixed known-topology reconciliation model; a separate protected command owns CLI authority. */
 import { createHash } from 'node:crypto';
+import { nativeServiceDefaults } from './owner-release-native-service-defaults.js';
 import { operationName } from './owner-web-tag-native.js';
 import {
   HISTORICAL_WEB_TAGS,
@@ -185,7 +186,7 @@ function service(raw: unknown) {
     rootUriSha256: uriHash(s.uri),
     latestRevisionIdentitySha256,
     urlsSha256: reconciliationDigest(urls),
-    configurationSha256: reconciliationDigest(config),
+    configurationSha256: reconciliationDigest(nativeServiceDefaults(config)),
     templateSha256: reconciliationDigest(object(s.template)),
     desired: rows(s.traffic, false),
     observed: rows(s.trafficStatuses, true),

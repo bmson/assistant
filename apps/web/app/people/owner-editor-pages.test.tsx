@@ -11,7 +11,9 @@ const ports = vi.hoisted(() => ({
   people: vi.fn(),
   person: vi.fn(),
   pgRead: vi.fn(),
+  pgOwner: vi.fn(),
   pgEditor: vi.fn(),
+  recoveryPartition: vi.fn(),
   fsPeople: vi.fn(),
   fsPerson: vi.fn(),
   fsContext: vi.fn(),
@@ -37,6 +39,7 @@ vi.mock('@assistant/config', async (original) => ({
     GCP_PROJECT: 'offline-fixture',
     ASSISTANT_WORKSPACE_ID: 'offline-fixture',
     FIRESTORE_DATABASE_ID: 'offline-fixture',
+    DATABASE_URL: 'postgres://offline:offline@db.example.test:5432/assistant',
     AUTH_SECRET: 'offline-page-signing-secret',
     ASSISTANT_RELEASE_WRITES_PAUSED: !ports.enabled,
     RESTORE_REHEARSAL: false,
@@ -50,9 +53,13 @@ vi.mock('@assistant/application/people', async (original) => ({
   getPersonDossier: ports.person,
 }));
 vi.mock('@/lib/server', () => ({
+  assertPostgresInstallationOwner: ports.pgOwner,
   getFirestoreInstallationStore: ports.getStore,
   withPostgresMemoryBrowseRead: ports.pgRead,
   readPostgresOwnerEditorViewInputs: ports.pgEditor,
+}));
+vi.mock('@/app/people/person-note-recovery-scope', () => ({
+  personNoteRecoveryPartition: ports.recoveryPartition,
 }));
 vi.mock('@/lib/firestore-people', () => ({
   listFirestorePeopleDirectory: ports.fsPeople,
@@ -102,6 +109,7 @@ const snapshot = {
     name: contact.name,
     aliases: contact.aliases,
     trust: contact.trust,
+    relationship: contact.relationship,
     revision: displayedRevision,
   },
   people: [{ contactId: contact.id, name: contact.name, revision: displayedRevision }],
@@ -112,6 +120,25 @@ const dossier = () =>
   Person({
     params: Promise.resolve({ id: contact.id }),
     searchParams: Promise.resolve({ q: 'retained search' }),
+  });
+const noteReturnContext =
+  '/profile/knowledge?view=library&q=family&state=review&filter=verified&page=3&source=email';
+const noteIntentDirectory = () =>
+  People({
+    searchParams: Promise.resolve({
+      q: 'Sam Rivera',
+      addNote: '1',
+      returnTo: noteReturnContext,
+    }),
+  });
+const noteIntentDossier = () =>
+  Person({
+    params: Promise.resolve({ id: contact.id }),
+    searchParams: Promise.resolve({
+      q: 'retained search',
+      addNote: '1',
+      returnTo: noteReturnContext,
+    }),
   });
 beforeEach(() => {
   vi.resetAllMocks();
@@ -129,6 +156,8 @@ beforeEach(() => {
     ports.trace.push('pg-after');
     return value;
   });
+  ports.pgOwner.mockResolvedValue(ownerId);
+  ports.recoveryPartition.mockReturnValue('offline-recovery-partition');
   ports.people.mockImplementation(async (db) => {
     expect(db).toBe(leased);
     ports.trace.push('browse');
@@ -143,6 +172,7 @@ beforeEach(() => {
     expect(db).toBe(leased);
     ports.trace.push('editor');
     return {
+      ownerId,
       context,
       snapshot: input.contactId
         ? snapshot
@@ -280,7 +310,7 @@ describe('actual page + real issuance builder composition, named reader/fence po
       expect(html).toContain('A note with no recorded validity bounds.');
       expect(html.match(/date unavailable–/g)).toHaveLength(1);
       expect(html).toContain('Edit details');
-      expect(html).toContain('Add person');
+      expect(html).toContain('Add connection');
       expect(html).not.toContain('NaN');
       expect(Number.isNaN(createdAt.getTime())).toBe(true);
       expect(Number.isNaN(validFrom.getTime())).toBe(true);
@@ -311,6 +341,77 @@ describe('actual page + real issuance builder composition, named reader/fence po
     expect(html).not.toContain('Edit details');
     expect(html).not.toContain('method="post"');
   });
+  it('Saved-notes entry carries person-note intent through People search and the exact person dossier', async () => {
+    const directoryHtml = renderToStaticMarkup(await noteIntentDirectory());
+    expect(directoryHtml).toContain(
+      'Choose an existing person. The note will be saved about that person.',
+    );
+    expect(directoryHtml).toContain(
+      `href="/people/${contact.id}?q=Sam%20Rivera&amp;addNote=1&amp;returnTo=${encodeURIComponent(noteReturnContext)}"`,
+    );
+    ports.owner.mockResolvedValueOnce({
+      user: { email: 'offline-owner@example.test' },
+      formSessionScope: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    });
+    const personHtml = renderToStaticMarkup(await noteIntentDossier());
+    expect(personHtml).toContain(`Add a saved note about ${contact.name}`);
+    expect(personHtml).not.toContain('Adding a note is unavailable');
+    expect(personHtml).toContain(
+      `href="/people?q=retained%20search&amp;addNote=1&amp;returnTo=${encodeURIComponent(noteReturnContext)}"`,
+    );
+  });
+  it('shows an explicit choose-another-person outcome when the owner is not note-eligible', async () => {
+    ports.person.mockResolvedValueOnce({
+      ...data.dossier,
+      profile: {
+        ...data.dossier.profile,
+        contact: { ...contact, trust: 'owner' },
+      },
+    });
+    ports.pgEditor.mockResolvedValueOnce({
+      ownerId,
+      context,
+      snapshot: { ...snapshot, identity: { ...snapshot.identity, trust: 'owner' } },
+    });
+    ports.owner.mockResolvedValueOnce({
+      user: { email: 'offline-owner@example.test' },
+      formSessionScope: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    });
+    const html = renderToStaticMarkup(await noteIntentDossier());
+    expect(html).toContain('Adding a note is unavailable for this person view.');
+    expect(html).toContain('Choose another existing person');
+    expect(html).toContain(
+      `href="/people?q=retained%20search&amp;addNote=1&amp;returnTo=${encodeURIComponent(noteReturnContext)}"`,
+    );
+  });
+  it('keeps the person-note host visible with a choose-another outcome when issuance is missing', async () => {
+    ports.pgEditor.mockResolvedValueOnce({
+      ownerId,
+      context: null,
+      snapshot: { ownerId, identity: null, people: [], corrections: [] },
+    });
+    ports.owner.mockResolvedValueOnce({
+      user: { email: 'offline-owner@example.test' },
+      formSessionScope: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    });
+    const html = renderToStaticMarkup(await noteIntentDossier());
+    expect(html).toContain(`Add a saved note about ${contact.name}`);
+    expect(html).toContain('Adding a note is unavailable for this person view.');
+    expect(html).toContain('Choose another existing person');
+    expect(html).not.toContain('Your sign-in changed');
+  });
+  it('retains only the independently verified owner partition when optional issuance read throws', async () => {
+    ports.pgEditor.mockRejectedValueOnce(Error('bounded editor snapshot read failed'));
+    const html = renderToStaticMarkup(await noteIntentDossier());
+    expect(ports.pgOwner).toHaveBeenCalledExactlyOnceWith(leased);
+    expect(ports.recoveryPartition).toHaveBeenCalledWith(
+      expect.objectContaining({ ownerId, formSessionScope: 'offline_page_form_session' }),
+    );
+    expect(ports.trace.at(-1)).toBe('pg-after');
+    expect(html).toContain(`Add a saved note about ${contact.name}`);
+    expect(html).toContain('Adding a note is unavailable for this person view.');
+    expect(html).not.toContain('Could not load this view');
+  });
   it('PG dossier binds same displayed/native identity/options and preserves q back/map context', async () => {
     const node = data.map.nodes.find((node) => node.contactId === contact.id);
     if (!node) throw Error('Expected existing synthetic person map node');
@@ -336,8 +437,8 @@ describe('actual page + real issuance builder composition, named reader/fence po
     expect(ports.trace).toEqual(['pg-before', 'browse', 'editor', 'pg-after']);
     expect(ports.pgEditor.mock.calls[0]?.[1]).toMatchObject({ contactId: contact.id });
     expect(html).toContain('Edit details');
-    expect(html).toContain('Add person');
-    expect(html).toContain('Add family relationship');
+    expect(html).not.toContain('Add person');
+    expect(html).toContain('Add connection');
     expect(html).toContain('/people?q=retained%20search');
     expect(html).toContain(contact.name);
     expect(html).toContain('view=map');
@@ -376,7 +477,7 @@ describe('actual page + real issuance builder composition, named reader/fence po
       expect(html).toContain(contact.name);
       expect(html).toContain('Add person');
       expect(html).not.toContain('Edit details');
-      expect(html).not.toContain('Add family relationship');
+      expect(html).not.toContain('Add connection');
       expect(html).toContain(
         'Editing is temporarily unavailable. You can still browse this saved information.',
       );
@@ -395,7 +496,7 @@ describe('actual page + real issuance builder composition, named reader/fence po
       ports.fsSnapshot.mockResolvedValue(newerSnapshot);
       const html = renderToStaticMarkup(await dossier());
       expect(html).toContain(contact.name);
-      expect(html).not.toContain('Edit name and aliases');
+      expect(html).not.toContain('Edit details');
       expect(contact.identityRevision).toBe(displayedRevision);
       if (driver === 'firestore') expect(ports.pgRead).not.toHaveBeenCalled();
     },
@@ -582,8 +683,11 @@ it('selects only the exact loaded connection without adding an edit or removal g
   expect(html).toContain(`id="person-connection-${relationId}"`);
   expect(html).toContain('aria-current="location"');
   expect(html).toContain('Sam Rivera is Alex’s friend.');
+  expect(html).toContain(
+    `href="/people/${ownerId}?returnTo=${encodeURIComponent('/profile/knowledge?view=connections&q=Alex')}&amp;connectionId=${relationId}#person-connection-${relationId}"`,
+  );
   expect(html).not.toContain('Remove connection');
-  expect(html).not.toContain('Edit relationship');
+  expect(html).not.toContain('Edit connection');
   expect(ports.pgEditor.mock.calls[0]?.[1]).toMatchObject({
     contactId: contact.id,
     relationIds: [relationId],
@@ -621,7 +725,7 @@ it('selects a loaded non-person connection without adding it to family editor au
   expect(html).toContain('Sam Rivera worked at Praça Studio.');
   expect(html).toContain('not a relationship between people');
   expect(html).toContain(`/profile/knowledge/notes/${sourceMemoryId}`);
-  expect(html).not.toContain('Edit relationship');
+  expect(html).not.toContain('Edit connection');
   expect(html).not.toContain('Remove connection');
   expect(ports.pgEditor.mock.calls[0]?.[1]).toMatchObject({
     contactId: contact.id,
@@ -666,6 +770,6 @@ it('retains a validated selected connection and return context when a dossier re
   expect(html).toContain('Could not load this view');
   expect(html).toContain(`connectionId=${selected}#person-connection-${selected}`);
   expect(html).toContain(`returnTo=${encodeURIComponent(returnTo)}`);
-  expect(html).not.toContain('Edit relationship');
+  expect(html).not.toContain('Edit connection');
   expect(ports.pgEditor).not.toHaveBeenCalled();
 });

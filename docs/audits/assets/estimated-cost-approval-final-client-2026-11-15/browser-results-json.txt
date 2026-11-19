@@ -1,0 +1,186 @@
+{
+  "synthetic": true,
+  "network": "loopback only",
+  "evidence": [
+    {
+      "width": 320,
+      "dark": false,
+      "filename": "/tmp/estimated-cost-web-render/320-light.png",
+      "measurements": {
+        "viewport": 320,
+        "scroll": 320,
+        "card": {
+          "x": 16,
+          "y": 80,
+          "width": 288,
+          "height": 1166,
+          "top": 80,
+          "right": 304,
+          "bottom": 1246,
+          "left": 16
+        },
+        "table": {
+          "x": 46,
+          "y": 572,
+          "width": 228,
+          "height": 260,
+          "top": 572,
+          "right": 274,
+          "bottom": 832,
+          "left": 46
+        }
+      },
+      "pageErrors": []
+    },
+    {
+      "width": 320,
+      "dark": true,
+      "filename": "/tmp/estimated-cost-web-render/320-dark.png",
+      "measurements": {
+        "viewport": 320,
+        "scroll": 320,
+        "card": {
+          "x": 16,
+          "y": 80,
+          "width": 288,
+          "height": 1166,
+          "top": 80,
+          "right": 304,
+          "bottom": 1246,
+          "left": 16
+        },
+        "table": {
+          "x": 46,
+          "y": 572,
+          "width": 228,
+          "height": 260,
+          "top": 572,
+          "right": 274,
+          "bottom": 832,
+          "left": 46
+        }
+      },
+      "pageErrors": []
+    },
+    {
+      "width": 390,
+      "dark": false,
+      "filename": "/tmp/estimated-cost-web-render/390-light.png",
+      "measurements": {
+        "viewport": 390,
+        "scroll": 390,
+        "card": {
+          "x": 16,
+          "y": 80,
+          "width": 358,
+          "height": 950,
+          "top": 80,
+          "right": 374,
+          "bottom": 1030,
+          "left": 16
+        },
+        "table": {
+          "x": 46,
+          "y": 504,
+          "width": 298,
+          "height": 180,
+          "top": 504,
+          "right": 344,
+          "bottom": 684,
+          "left": 46
+        }
+      },
+      "pageErrors": []
+    },
+    {
+      "width": 390,
+      "dark": true,
+      "filename": "/tmp/estimated-cost-web-render/390-dark.png",
+      "measurements": {
+        "viewport": 390,
+        "scroll": 390,
+        "card": {
+          "x": 16,
+          "y": 80,
+          "width": 358,
+          "height": 950,
+          "top": 80,
+          "right": 374,
+          "bottom": 1030,
+          "left": 16
+        },
+        "table": {
+          "x": 46,
+          "y": 504,
+          "width": 298,
+          "height": 180,
+          "top": 504,
+          "right": 344,
+          "bottom": 684,
+          "left": 46
+        }
+      },
+      "pageErrors": []
+    },
+    {
+      "width": 1280,
+      "dark": false,
+      "filename": "/tmp/estimated-cost-web-render/1280-light.png",
+      "measurements": {
+        "viewport": 1280,
+        "scroll": 1280,
+        "card": {
+          "x": 336,
+          "y": 56,
+          "width": 608,
+          "height": 722,
+          "top": 56,
+          "right": 944,
+          "bottom": 778,
+          "left": 336
+        },
+        "table": {
+          "x": 370,
+          "y": 384,
+          "width": 540,
+          "height": 180,
+          "top": 384,
+          "right": 910,
+          "bottom": 564,
+          "left": 370
+        }
+      },
+      "pageErrors": []
+    },
+    {
+      "width": 1280,
+      "dark": true,
+      "filename": "/tmp/estimated-cost-web-render/1280-dark.png",
+      "measurements": {
+        "viewport": 1280,
+        "scroll": 1280,
+        "card": {
+          "x": 336,
+          "y": 56,
+          "width": 608,
+          "height": 722,
+          "top": 56,
+          "right": 944,
+          "bottom": 778,
+          "left": 336
+        },
+        "table": {
+          "x": 370,
+          "y": 384,
+          "width": 540,
+          "height": 180,
+          "top": 384,
+          "right": 910,
+          "bottom": 564,
+          "left": 370
+        }
+      },
+      "pageErrors": []
+    }
+  ]
+}

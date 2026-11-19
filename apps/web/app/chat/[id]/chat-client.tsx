@@ -71,6 +71,7 @@ import { ChatErrorBanner } from './chat-error-banner';
 import { ChatLog } from './chat-log';
 import {
   cancelledRequestNote,
+  ownsEstimatedCostAdmission,
   readUnconfirmedStop,
   requestRecoveryHref,
   requestStatusNote,
@@ -496,6 +497,7 @@ export function ChatClient({
           const isCardFormOperation =
             !!cardFormOperation && cardFormOperation.submission.operationId === operationId;
           const headers = new Headers(init?.headers);
+          headers.set('X-Assistant-Estimated-Cost-Approval', 'v1');
           if (isCardFormOperation) headers.set('x-chat-card-form', 'card-form-v1');
           const response = await fetch(info, { ...init, headers });
           if (
@@ -973,6 +975,24 @@ export function ChatClient({
     setLiveRecall,
     setPollTrouble,
     onTaskTerminal: handleFormTaskTerminal,
+    onEstimatedCostParked: (taskId) => {
+      const current = activeOrdinaryOperationRef.current;
+      if (
+        !ownsEstimatedCostAdmission({
+          taskId,
+          conversationId,
+          current,
+          scopeGeneration: mountedGenerationRef.current,
+          pendingOperationId: pendingOperationIdRef.current?.id,
+          cancellingOperationId: operationCancellationRef.current?.turn.clientOperationId,
+        })
+      )
+        return;
+      // Only release this admitted send. A newer draft and any unresolved
+      // cancellation retain their own state and protections.
+      pendingOperationIdRef.current = null;
+      activeOrdinaryOperationRef.current = null;
+    },
   });
 
   const previousRecoveryTaskRef = useRef<string | null>(null);

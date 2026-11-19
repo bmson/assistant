@@ -1,12 +1,12 @@
 # Read-only basic editor release prerequisites
 
-This source supports the five-command web release: create a person, update identity, add a family relationship, correct a family relationship, and correct owner memory. Person removal and family removal remain excluded. It observes production metadata through the existing protected GitHub WIF identity; it does not initialize, rotate, enable, or edit anything. Permission denial means UNKNOWN. No new credentials, IAM changes, or local credential fallback are permitted.
+This source supports the bounded person-note web release: create a person, update identity, add a family relationship, correct a family relationship, correct owner memory, and create a plain-text note about an existing person. `create_owner_memory` is person-scoped and does not enable standalone memories. Person removal and family removal remain excluded. It observes production metadata through the existing protected GitHub WIF identity; it does not initialize, rotate, enable, or edit anything. Permission denial means UNKNOWN. No new credentials, IAM changes, or local credential fallback are permitted.
 
 ## Automatic release gate
 
 Merging any successful main push still triggers the existing automatic deployment. There is no path exemption, trigger change, or skipped CI in this patch. Therefore this source should be bundled into the web feature candidate for one main merge. An inspection dispatched after merging is not a reliable prerequisite: concurrent job ordering does not guarantee inspection runs first.
 
-The deploy job runs `--release-preflight` before invoking the Firestore delivery guard. The candidate's `infra/gcp/release-contracts.json` must declare `components.web.ownerEditorV1` as exactly these five strings:
+The deploy job runs `--release-preflight` before invoking the Firestore delivery guard. The candidate's `infra/gcp/release-contracts.json` must declare `components.web.ownerEditorV1` as exactly these six strings:
 
 ```json
 [
@@ -14,7 +14,8 @@ The deploy job runs `--release-preflight` before invoking the Firestore delivery
   "update_person_identity",
   "add_family_relationship",
   "correct_owner_family_relationship",
-  "correct_owner_memory"
+  "correct_owner_memory",
+  "create_owner_memory"
 ]
 ```
 

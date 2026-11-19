@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import {
   type Db,
   emailIngest,
+  emailIngestReadableSql,
+  emailObserverSources,
   isTombstoned,
   memories,
   memoryTombstones,
@@ -35,7 +37,7 @@ import { saveOccasion } from './occasions.js';
  * for the rule that replaces it.
  */
 
-/** Only mail that cleared this bar is worth an extraction call. */
+/** A score alone must not discard personal correspondence or dated logistics. */
 const MIN_IMPORTANCE = 3;
 /** Model calls per run. The scheduler re-fires; a backlog drains over hours. */
 const MAX_EXTRACTIONS_PER_RUN = 25;
@@ -57,6 +59,14 @@ const LOGISTICS_CATEGORIES: ReadonlySet<string> = new Set([
   'transactional',
   'security',
 ]);
+
+export function shouldExtractEmailMemory(input: { importance: number; category: string }): boolean {
+  return (
+    input.importance >= MIN_IMPORTANCE ||
+    LOGISTICS_CATEGORIES.has(input.category) ||
+    input.category === 'personal'
+  );
+}
 
 /**
  * Should a fact extracted from ingested mail be held for review?
@@ -150,7 +160,7 @@ function postgresEmailExtraction(db: Db): EmailExtractionRepository {
           preparedExtraction: emailIngest.preparedExtraction,
         })
         .from(emailIngest)
-        .where(and(isNull(emailIngest.extractedAt), eq(emailIngest.pipelineStage, 'complete')))
+        .where(and(isNull(emailIngest.extractedAt), emailIngestReadableSql()))
         .orderBy(asc(emailIngest.createdAt))
         .limit(limit)
         .then((rows) =>
@@ -165,7 +175,27 @@ function postgresEmailExtraction(db: Db): EmailExtractionRepository {
         .from(messages)
         .where(eq(messages.channelMessageId, channelMessageId))
         .limit(1);
-      return message?.text ?? null;
+      if (message) return message.text;
+      const [source] = await db
+        .select({ body: emailObserverSources.body })
+        .from(emailIngest)
+        .innerJoin(
+          emailObserverSources,
+          and(
+            sql`${emailObserverSources.id}::text = ${emailIngest.admittedSourceId}`,
+            eq(emailObserverSources.agentId, emailIngest.agentId),
+            eq(emailObserverSources.channelMessageId, emailIngest.channelMessageId),
+          ),
+        )
+        .where(
+          and(
+            eq(emailIngest.channelMessageId, channelMessageId),
+            eq(emailIngest.admittedSourceKind, 'automated_source'),
+            emailIngestReadableSql(),
+          ),
+        )
+        .limit(1);
+      return source?.body ?? null;
     },
     async savePrepared(id, agentId, payload) {
       const [saved] = await db
@@ -282,7 +312,7 @@ function postgresEmailExtraction(db: Db): EmailExtractionRepository {
       const [row] = await db
         .select({ n: sql<number>`count(*)` })
         .from(emailIngest)
-        .where(and(isNull(emailIngest.extractedAt), eq(emailIngest.pipelineStage, 'complete')));
+        .where(and(isNull(emailIngest.extractedAt), emailIngestReadableSql()));
       return Number(row?.n ?? 0);
     },
   };
@@ -332,7 +362,7 @@ export async function runEmailIngestExtraction(
       // Routine mail is kept and stays searchable, but it is not worth an
       // extraction call. Stamp it so the ledger drains instead of re-reading
       // the same backlog every night.
-      if (row.importance < MIN_IMPORTANCE) {
+      if (!shouldExtractEmailMemory(row)) {
         result.skippedLowImportance += 1;
         await stamp();
         continue;

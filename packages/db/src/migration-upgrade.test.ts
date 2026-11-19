@@ -1,10 +1,11 @@
 import { execFile } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { chmod, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { validateMigrationBundle } from '@assistant/persistence';
 import { readMigrationFiles } from 'drizzle-orm/migrator';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
@@ -13,10 +14,15 @@ import { expect, it } from 'vitest';
 import { resolveApproval } from './approval-repository.js';
 import { createDb } from './client.js';
 import {
+  type FixturePrimaryOutcome,
+  finishMigrationUpgradeFixture,
+} from './migration-upgrade-fixture.js';
+import {
   allocateTestTarget,
   assertAllocatedTestTarget,
   isolatedTestEnvironment,
 } from './test-target.js';
+import { exportWorkspaceSnapshot } from './workspace-migration.js';
 
 const exec = promisify(execFile);
 const folder = fileURLToPath(new URL('../drizzle/', import.meta.url));
@@ -28,6 +34,133 @@ const journal = JSON.parse(await readFile(join(folder, 'meta/_journal.json'), 'u
 const expectedOwnerTail = readMigrationFiles({ migrationsFolder: folder })
   .slice(130)
   .map(({ hash, folderMillis }) => ({ hash, createdAt: String(folderMillis) }));
+const expectedOwnerTailStart = expectedOwnerTail[0]?.createdAt;
+if (!expectedOwnerTailStart) throw new Error('Missing owner-editor migration tail');
+const portableInstallationIdPattern =
+  /^memory-witness-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const portableHandoffEnvironmentKeys = [
+  'ASSISTANT_MEMORY_WITNESS_COMPAT_INSTALLATION_ID',
+  'ASSISTANT_MEMORY_WITNESS_COMPAT_BUNDLE_PATH',
+  'ASSISTANT_MEMORY_WITNESS_COMPAT_HANDOFF_DIR',
+] as const;
+type PortableExportMode =
+  | {
+      kind: 'export-only';
+      target: { projectId: string; databaseId: string; installationId: string };
+    }
+  | {
+      kind: 'handoff';
+      target: { projectId: string; databaseId: string; installationId: string };
+      bundlePath: string;
+      handoffDirectory: string;
+    };
+
+function selectPortableExportMode(
+  environment: Readonly<Record<string, string | undefined>>,
+): PortableExportMode {
+  const [installationKey, bundlePathKey, directoryKey] = portableHandoffEnvironmentKeys;
+  const installationId = environment[installationKey];
+  const bundlePath = environment[bundlePathKey];
+  const handoffDirectory = environment[directoryKey];
+  const configured = Object.entries(environment).some(
+    ([name, value]) => name.startsWith('ASSISTANT_MEMORY_WITNESS_COMPAT_') && value !== undefined,
+  );
+  const targetBase = { projectId: 'demo-assistant-test', databaseId: '(default)' };
+
+  if (!configured) {
+    return {
+      kind: 'export-only',
+      target: { ...targetBase, installationId: `memory-witness-${randomUUID()}` },
+    };
+  }
+
+  if (
+    !installationId ||
+    !portableInstallationIdPattern.test(installationId) ||
+    !bundlePath?.trim() ||
+    !handoffDirectory?.trim()
+  )
+    throw new Error(
+      'Portable Firestore handoff requires a valid installation ID, bundle path, and private directory.',
+    );
+
+  return {
+    kind: 'handoff',
+    target: { ...targetBase, installationId },
+    bundlePath,
+    handoffDirectory,
+  };
+}
+
+it('selects portable export mode without external handoff configuration', () => {
+  const first = selectPortableExportMode({});
+  const second = selectPortableExportMode({});
+  expect(first.kind).toBe('export-only');
+  expect(second.kind).toBe('export-only');
+  if (first.kind !== 'export-only' || second.kind !== 'export-only')
+    throw new Error('Expected export-only mode.');
+  expect(first.target.projectId).toBe('demo-assistant-test');
+  expect(first.target.databaseId).toBe('(default)');
+  expect(first.target.installationId).toMatch(portableInstallationIdPattern);
+  expect(second.target.installationId).toMatch(portableInstallationIdPattern);
+  expect(first.target.installationId).not.toBe(second.target.installationId);
+});
+
+it('selects portable export mode with a complete caller handoff unchanged', () => {
+  const environment = {
+    ASSISTANT_MEMORY_WITNESS_COMPAT_INSTALLATION_ID:
+      'memory-witness-7f8bc5ce-8806-4e03-936c-30eedc5d3228',
+    ASSISTANT_MEMORY_WITNESS_COMPAT_BUNDLE_PATH: '/private handoff/postgres-export.bundle.json',
+    ASSISTANT_MEMORY_WITNESS_COMPAT_HANDOFF_DIR: '/private handoff',
+  };
+  const mode = selectPortableExportMode(environment);
+  expect(mode.kind).toBe('handoff');
+  if (mode.kind !== 'handoff') throw new Error('Expected handoff mode.');
+  expect(mode.target.installationId).toBe(
+    environment.ASSISTANT_MEMORY_WITNESS_COMPAT_INSTALLATION_ID,
+  );
+  expect(mode.bundlePath).toBe(environment.ASSISTANT_MEMORY_WITNESS_COMPAT_BUNDLE_PATH);
+  expect(mode.handoffDirectory).toBe(environment.ASSISTANT_MEMORY_WITNESS_COMPAT_HANDOFF_DIR);
+});
+
+it('rejects incomplete, blank, or invalid portable export mode configuration', () => {
+  const validId = 'memory-witness-7f8bc5ce-8806-4e03-936c-30eedc5d3228';
+  const validPath = '/tmp/postgres-export.bundle.json';
+  const validDirectory = '/tmp';
+  const invalidConfigurations = [
+    { ASSISTANT_MEMORY_WITNESS_COMPAT_INSTALLATION_ID: validId },
+    { ASSISTANT_MEMORY_WITNESS_COMPAT_BUNDLE_PATH: validPath },
+    { ASSISTANT_MEMORY_WITNESS_COMPAT_HANDOFF_DIR: validDirectory },
+    { ASSISTANT_MEMORY_WITNESS_COMPAT_NONCE: 'fixture-nonce' },
+    { ASSISTANT_MEMORY_WITNESS_COMPAT_SOURCE: 'postgres' },
+    { ASSISTANT_MEMORY_WITNESS_COMPAT_UNUSED: '' },
+    {
+      ASSISTANT_MEMORY_WITNESS_COMPAT_INSTALLATION_ID: '',
+      ASSISTANT_MEMORY_WITNESS_COMPAT_BUNDLE_PATH: validPath,
+      ASSISTANT_MEMORY_WITNESS_COMPAT_HANDOFF_DIR: validDirectory,
+    },
+    {
+      ASSISTANT_MEMORY_WITNESS_COMPAT_INSTALLATION_ID: validId,
+      ASSISTANT_MEMORY_WITNESS_COMPAT_BUNDLE_PATH: '  ',
+      ASSISTANT_MEMORY_WITNESS_COMPAT_HANDOFF_DIR: validDirectory,
+    },
+    {
+      ASSISTANT_MEMORY_WITNESS_COMPAT_INSTALLATION_ID: validId,
+      ASSISTANT_MEMORY_WITNESS_COMPAT_BUNDLE_PATH: validPath,
+      ASSISTANT_MEMORY_WITNESS_COMPAT_HANDOFF_DIR: '',
+    },
+    {
+      ASSISTANT_MEMORY_WITNESS_COMPAT_INSTALLATION_ID: 'memory-witness-not-a-uuid',
+      ASSISTANT_MEMORY_WITNESS_COMPAT_BUNDLE_PATH: validPath,
+      ASSISTANT_MEMORY_WITNESS_COMPAT_HANDOFF_DIR: validDirectory,
+    },
+  ];
+  for (const environment of invalidConfigurations)
+    expect(() => selectPortableExportMode(environment)).toThrow(
+      'Portable Firestore handoff requires a valid installation ID, bundle path, and private directory.',
+    );
+});
+
 // Snapshot at import prevents an actively authored migration being mistaken for a
 // reviewed historical prefix. The full endpoint is the current immutable journal.
 // Every shipped historical prefix is an upgrade target, including the 0020
@@ -50,6 +183,7 @@ it.each(historicalPrefixes)(
     const prefixDir = await mkdtemp(join(tmpdir(), 'assistant-upgrade-'));
     let created = false;
     let client: ReturnType<typeof postgres> | undefined;
+    let primary: FixturePrimaryOutcome = { thrown: false };
     try {
       await admin.unsafe(`CREATE DATABASE "${target.databaseName}"`);
       created = true;
@@ -218,10 +352,11 @@ it.each(historicalPrefixes)(
         SELECT table_name,column_name,is_nullable FROM information_schema.columns
         WHERE table_schema='public' AND (
           (table_name='contacts' AND column_name='identity_authority') OR
-          (table_name='memories' AND column_name='owner_correction')
+          (table_name='memories' AND column_name IN ('owner_correction','memory_write_witness'))
         ) ORDER BY table_name,column_name`;
       expect(ownerEditorColumns).toEqual([
         { table_name: 'contacts', column_name: 'identity_authority', is_nullable: 'YES' },
+        { table_name: 'memories', column_name: 'memory_write_witness', is_nullable: 'YES' },
         { table_name: 'memories', column_name: 'owner_correction', is_nullable: 'YES' },
       ]);
       const ownerEditorCommand = await client`
@@ -279,7 +414,7 @@ it.each(historicalPrefixes)(
       // Lower-history compatibility is exercised by each actual prefix above.
       const installedOwnerTail = await client`
         SELECT hash,created_at::text AS "createdAt" FROM drizzle.__drizzle_migrations
-        WHERE created_at >= ${expectedOwnerTail[0]!.createdAt}
+        WHERE created_at >= ${expectedOwnerTailStart}
         ORDER BY created_at ASC,id ASC`;
       expect(installedOwnerTail).toEqual(expectedOwnerTail);
       // The identity migration must leave legacy vectors explicitly unknown,
@@ -329,15 +464,284 @@ it.each(historicalPrefixes)(
           await client`SELECT max(created_at)::text AS watermark FROM drizzle.__drizzle_migrations`
         )[0]?.watermark,
       ).toBe(String(journal.entries.at(-1).when));
-    } finally {
-      if (client) await client.end({ timeout: 5 });
-      if (created) await dropOwnedUpgradeDatabase(admin, target);
-      await admin.end({ timeout: 5 });
-      await rm(prefixDir, { recursive: true, force: true });
+    } catch (error) {
+      primary = { thrown: true, error };
     }
+    const fixtureClient = client;
+    await finishMigrationUpgradeFixture({
+      primary,
+      created,
+      closeClient: fixtureClient ? () => fixtureClient.end({ timeout: 5 }) : undefined,
+      dropOwnedDatabase: () => dropOwnedUpgradeDatabase(admin, target),
+      databaseIsAbsent: async () =>
+        (await admin`SELECT datname FROM pg_database WHERE datname=${target.databaseName}`)
+          .length === 0,
+      closeAdmin: () => admin.end({ timeout: 5 }),
+      removePrefixDirectory: () => rm(prefixDir, { recursive: true, force: true }),
+    });
   },
   120000,
 );
+
+// Keep the historical selector used by the portable-handoff script; assert the full current tail.
+it('upgrades a populated 0134 memory through the standard 0135 migration and portable export (forward tail through 0136)', async () => {
+  const portableMode = selectPortableExportMode(process.env);
+  const outerDatabaseName = assertAllocatedTestTarget({
+    databaseUrl: process.env.DATABASE_URL,
+    testDatabaseUrl: process.env.TEST_DATABASE_URL,
+    token: process.env.ASSISTANT_TEST_TARGET_TOKEN,
+  });
+  const target = allocateTestTarget(process.env.DATABASE_URL);
+  expect(target.databaseName).not.toBe(outerDatabaseName);
+  const adminUrl = new URL(target.databaseUrl);
+  adminUrl.pathname = '/postgres';
+  const admin = postgres(adminUrl.toString(), { max: 1, onnotice: () => {} });
+  let prefixDir: string | undefined;
+  let created = false;
+  let client: ReturnType<typeof postgres> | undefined;
+  let primary: FixturePrimaryOutcome = { thrown: false };
+  try {
+    prefixDir = await mkdtemp(join(tmpdir(), 'assistant-memory-witness-134-'));
+    await admin.unsafe(`CREATE DATABASE "${target.databaseName}"`);
+    created = true;
+    await admin.unsafe(
+      `COMMENT ON DATABASE "${target.databaseName}" IS 'assistant-test-target:${target.token}'`,
+    );
+    client = postgres(target.databaseUrl, { max: 1, onnotice: () => {} });
+
+    const prefixEntries = journal.entries.slice(0, 135);
+    expect(prefixEntries).toHaveLength(135);
+    expect(prefixEntries.at(-1)?.tag).toBe('0134_owner_memory_creation');
+    expect(journal.entries[135]?.tag).toBe('0135_memory_write_witness');
+    expect(journal.entries[136]?.tag).toBe('0136_google_calendar_connections');
+    await mkdir(join(prefixDir, 'meta'));
+    await writeFile(
+      join(prefixDir, 'meta/_journal.json'),
+      JSON.stringify({ ...journal, entries: prefixEntries }),
+    );
+    for (const entry of prefixEntries)
+      await writeFile(
+        join(prefixDir, `${entry.tag}.sql`),
+        await readFile(join(folder, `${entry.tag}.sql`)),
+      );
+    await migrate(drizzle(client), { migrationsFolder: prefixDir });
+
+    const [server] = await client`SHOW server_version_num`;
+    const serverVersion = Number(server?.server_version_num);
+    expect(serverVersion).toBeGreaterThanOrEqual(170000);
+    expect(serverVersion).toBeLessThan(180000);
+
+    const owner = randomUUID();
+    const legacyMemoryId = randomUUID();
+    const legacyContent = 'Legacy owner corrected note at migration 0134';
+    const legacyContentHash = createHash('sha256').update(legacyContent).digest('hex');
+    const priorContentHash = createHash('sha256').update('Prior legacy owner note').digest('hex');
+    const ownerCorrection = {
+      version: 1,
+      correctedByOwner: true,
+      priorContentHash,
+      currentContentHash: legacyContentHash,
+      correctedAt: '2026-11-01T00:00:00.000Z',
+    };
+    await client`INSERT INTO agents (id,name,email,workspace_prefix,timezone,locale,signature) VALUES (${owner},'Synthetic 0134 owner',${`${owner}@memory-witness.invalid`},${`workspace/${owner}`},'America/Los_Angeles','is','Synthetic owner signature')`;
+    await client`
+      INSERT INTO memories
+        (id,agent_id,category,kind,content,content_hash,source,owner_confirmed,pinned,origin_trust,owner_correction)
+      VALUES
+        (${legacyMemoryId},${owner},'knowledge','fact',${legacyContent},${legacyContentHash},'manual',true,true,'owner',${JSON.stringify(ownerCorrection)}::jsonb)
+    `;
+    expect(
+      await client`SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='memories' AND column_name='memory_write_witness'`,
+    ).toEqual([]);
+    const [legacyBefore] = await client`
+      SELECT id,content,content_hash AS "contentHash",category,kind,source,owner_confirmed AS "ownerConfirmed",
+        pinned,origin_trust AS "originTrust",owner_correction AS "ownerCorrection"
+      FROM memories WHERE id=${legacyMemoryId} AND agent_id=${owner}
+    `;
+    expect(legacyBefore).toMatchObject({
+      id: legacyMemoryId,
+      content: legacyContent,
+      contentHash: legacyContentHash,
+      source: 'manual',
+      ownerConfirmed: true,
+      pinned: true,
+      originTrust: 'owner',
+      ownerCorrection,
+    });
+
+    const beforeTail = await client`
+      SELECT hash,created_at::text AS "createdAt" FROM drizzle.__drizzle_migrations
+      WHERE created_at >= ${expectedOwnerTailStart}
+      ORDER BY created_at ASC,id ASC
+    `;
+    // This historical prefix ends at 0134 even as the shipped forward tail advances.
+    expect(beforeTail).toEqual(expectedOwnerTail.slice(0, prefixEntries.length - 130));
+    expect(
+      (await client`SELECT to_regclass('public.google_calendar_connections') AS relation`)[0]
+        ?.relation,
+    ).toBeNull();
+    await client.end();
+    client = undefined;
+
+    const env = {
+      ...isolatedTestEnvironment(process.env),
+      DATABASE_URL: target.databaseUrl,
+      TEST_DATABASE_URL: target.databaseUrl,
+      ASSISTANT_TEST_TARGET_TOKEN: target.token,
+    };
+    await exec('pnpm', ['migrate'], {
+      cwd,
+      env,
+      timeout: 45_000,
+      maxBuffer: 2 * 1024 * 1024,
+    });
+
+    client = postgres(target.databaseUrl, { max: 1, onnotice: () => {} });
+    const installedTail = await client`
+      SELECT hash,created_at::text AS "createdAt" FROM drizzle.__drizzle_migrations
+      WHERE created_at >= ${expectedOwnerTailStart}
+      ORDER BY created_at ASC,id ASC
+    `;
+    expect(installedTail).toEqual(expectedOwnerTail);
+    // 0136 adds optional credentials without creating grants or changing existing owner data.
+    expect(await client`SELECT agent_id,state FROM google_calendar_connections`).toEqual([]);
+    expect(
+      await client`SELECT convalidated FROM pg_constraint WHERE conrelid='public.google_calendar_connections'::regclass AND conname='google_calendar_connections_agent_id_agents_id_fk'`,
+    ).toEqual([{ convalidated: true }]);
+    const witnessColumn = await client`
+      SELECT column_name,is_nullable,column_default FROM information_schema.columns
+      WHERE table_schema='public' AND table_name='memories' AND column_name='memory_write_witness'
+    `;
+    expect(witnessColumn).toEqual([
+      { column_name: 'memory_write_witness', is_nullable: 'YES', column_default: null },
+    ]);
+    const [witnessConstraint] = await client`
+      SELECT convalidated,pg_get_constraintdef(oid) AS definition FROM pg_constraint
+      WHERE conrelid='public.memories'::regclass AND conname='memories_memory_write_witness_check'
+    `;
+    expect(witnessConstraint?.convalidated).toBe(true);
+    expect(witnessConstraint?.definition).toContain('memory_write_witness');
+
+    const [legacyAfter] = await client`
+      SELECT id,content,content_hash AS "contentHash",category,kind,source,owner_confirmed AS "ownerConfirmed",
+        pinned,origin_trust AS "originTrust",owner_correction AS "ownerCorrection",
+        memory_write_witness IS NULL AS "witnessIsSqlNull"
+      FROM memories WHERE id=${legacyMemoryId} AND agent_id=${owner}
+    `;
+    expect(legacyAfter).toEqual({ ...legacyBefore, witnessIsSqlNull: true });
+
+    const createdMemoryId = randomUUID();
+    const successorMemoryId = randomUUID();
+    const createdContent = 'Post-0135 memory created without a witness';
+    const successorContent = 'Post-0135 successor memory';
+    const createdHash = createHash('sha256').update(createdContent).digest('hex');
+    const successorHash = createHash('sha256').update(successorContent).digest('hex');
+    const postMigrationMemories: Array<{ id: string; content: string; contentHash: string }> = [
+      { id: createdMemoryId, content: createdContent, contentHash: createdHash },
+      { id: successorMemoryId, content: successorContent, contentHash: successorHash },
+    ];
+    for (const { id, content, contentHash } of postMigrationMemories)
+      await client`
+        INSERT INTO memories (id,agent_id,category,kind,content,content_hash,source)
+        VALUES (${id},${owner},'knowledge','fact',${content},${contentHash},'manual')
+      `;
+    const [createdBefore] = await client`
+      SELECT memory_write_witness IS NULL AS "witnessIsSqlNull" FROM memories WHERE id=${createdMemoryId}
+    `;
+    expect(createdBefore?.witnessIsSqlNull).toBe(true);
+    await client`
+      UPDATE memories SET pinned=true,owner_confirmed=true
+      WHERE id=${createdMemoryId} AND agent_id=${owner}
+    `;
+    await client`
+      UPDATE memories SET superseded_by_id=${successorMemoryId}
+      WHERE id=${createdMemoryId} AND agent_id=${owner}
+    `;
+    const [createdAfter] = await client`
+      SELECT pinned,owner_confirmed AS "ownerConfirmed",superseded_by_id AS "supersededById",
+        memory_write_witness IS NULL AS "witnessIsSqlNull"
+      FROM memories WHERE id=${createdMemoryId} AND agent_id=${owner}
+    `;
+    expect(createdAfter).toEqual({
+      pinned: true,
+      ownerConfirmed: true,
+      supersededById: successorMemoryId,
+      witnessIsSqlNull: true,
+    });
+
+    const portableTarget = portableMode.target;
+    const bundle = await exportWorkspaceSnapshot({
+      databaseUrl: target.databaseUrl,
+      agentId: owner,
+      target: portableTarget,
+      tables: ['agents', 'memories'],
+    });
+    validateMigrationBundle(bundle, { sourceAgentId: owner, target: portableTarget });
+    const exportedLegacy = bundle.records.find(
+      (record) => record.table === 'memories' && record.id === legacyMemoryId,
+    );
+    expect(exportedLegacy?.data).toMatchObject({
+      content: legacyContent,
+      contentHash: legacyContentHash,
+      ownerConfirmed: true,
+      pinned: true,
+      originTrust: 'owner',
+      ownerCorrection,
+    });
+    for (const record of bundle.records.filter((candidate) => candidate.table === 'memories')) {
+      expect(Object.hasOwn(record.data, 'memoryWriteWitness')).toBe(false);
+      expect(Object.hasOwn(record.data, 'memory_write_witness')).toBe(false);
+    }
+
+    if (portableMode.kind === 'handoff') {
+      const privateDirectory = resolve(portableMode.handoffDirectory);
+      const resolvedHandoffPath = resolve(portableMode.bundlePath);
+      const directoryStat = await lstat(privateDirectory);
+      if (
+        !directoryStat.isDirectory() ||
+        directoryStat.isSymbolicLink() ||
+        (directoryStat.mode & 0o777) !== 0o700 ||
+        dirname(resolvedHandoffPath) !== privateDirectory ||
+        !resolvedHandoffPath.endsWith('/postgres-export.bundle.json')
+      )
+        throw new Error('Portable Firestore handoff path is outside its private directory.');
+      const bundleBytes = Buffer.from(JSON.stringify(bundle), 'utf8');
+      if (bundleBytes.byteLength > 8 * 1024 * 1024)
+        throw new Error('Portable Firestore handoff bundle exceeds the bounded test size.');
+      await writeFile(resolvedHandoffPath, bundleBytes, { flag: 'wx', mode: 0o600 });
+      await chmod(resolvedHandoffPath, 0o600);
+      const handoffStat = await lstat(resolvedHandoffPath);
+      if (
+        !handoffStat.isFile() ||
+        handoffStat.isSymbolicLink() ||
+        (handoffStat.mode & 0o777) !== 0o600
+      )
+        throw new Error('Portable Firestore handoff file is not a private regular file.');
+      const persistedBytes = await readFile(resolvedHandoffPath);
+      expect(persistedBytes).toEqual(bundleBytes);
+      expect(createHash('sha256').update(persistedBytes).digest('hex')).toBe(
+        createHash('sha256').update(bundleBytes).digest('hex'),
+      );
+    }
+  } catch (error) {
+    primary = { thrown: true, error };
+  }
+  const fixtureClient = client;
+  const temporaryPrefixDir = prefixDir;
+  await finishMigrationUpgradeFixture({
+    primary,
+    created,
+    closeClient: fixtureClient ? () => fixtureClient.end({ timeout: 5 }) : undefined,
+    dropOwnedDatabase: () => dropOwnedUpgradeDatabase(admin, target),
+    databaseIsAbsent: async () =>
+      (await admin`SELECT datname FROM pg_database WHERE datname=${target.databaseName}`).length ===
+      0,
+    closeAdmin: () => admin.end({ timeout: 5 }),
+    removePrefixDirectory: temporaryPrefixDir
+      ? () => rm(temporaryPrefixDir, { recursive: true, force: true })
+      : undefined,
+  });
+}, 120_000);
 
 it('rejects the historical contact-only 0131 ledger before any shipped migration write', async () => {
   assertAllocatedTestTarget({
@@ -352,6 +756,7 @@ it('rejects the historical contact-only 0131 ledger before any shipped migration
   const prefixDir = await mkdtemp(join(tmpdir(), 'assistant-contact-131-'));
   let created = false;
   let client: ReturnType<typeof postgres> | undefined;
+  let primary: FixturePrimaryOutcome = { thrown: false };
   try {
     await admin.unsafe(`CREATE DATABASE "${target.databaseName}"`);
     created = true;
@@ -428,12 +833,21 @@ it('rejects the historical contact-only 0131 ledger before any shipped migration
     expect(afterLedger).toEqual(beforeLedger);
     expect(afterMemory).toEqual([]);
     expect(afterCommand[0]?.definition).not.toContain('correct_owner_memory');
-  } finally {
-    if (client) await client.end({ timeout: 5 });
-    if (created) await dropOwnedUpgradeDatabase(admin, target);
-    await admin.end({ timeout: 5 });
-    await rm(prefixDir, { recursive: true, force: true });
+  } catch (error) {
+    primary = { thrown: true, error };
   }
+  const fixtureClient = client;
+  await finishMigrationUpgradeFixture({
+    primary,
+    created,
+    closeClient: fixtureClient ? () => fixtureClient.end({ timeout: 5 }) : undefined,
+    dropOwnedDatabase: () => dropOwnedUpgradeDatabase(admin, target),
+    databaseIsAbsent: async () =>
+      (await admin`SELECT datname FROM pg_database WHERE datname=${target.databaseName}`).length ===
+      0,
+    closeAdmin: () => admin.end({ timeout: 5 }),
+    removePrefixDirectory: () => rm(prefixDir, { recursive: true, force: true }),
+  });
 }, 120_000);
 
 async function dropOwnedUpgradeDatabase(

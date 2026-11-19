@@ -9,9 +9,11 @@ import type {
 } from './owner-call-operation-receipt.js';
 import type { OwnerEditorOperationRecord } from './owner-editor.js';
 import type { OwnerCorrection } from './owner-memory-correction.js';
+import type { OwnerMemoryWriteWitness } from './owner-memory-write-witness.js';
 import type { OwnerCallActionGrantUsage } from './phone-call-owner-action-grant.js';
 
 export interface Records {
+  googleCalendarConnections: { agentId: string; state: unknown; updatedAt: Date };
   ownerEditorOperations: OwnerEditorOperationRecord;
   ownerCallGrantOperations: OwnerCallGrantOperation;
   ownerCallGrantOperationSlots: OwnerCallGrantOperationSlot;
@@ -135,6 +137,7 @@ export interface Records {
     status: string;
     endpoint: string;
     bearerTokenEncrypted: string | null;
+    oauthState?: unknown;
     enabled: boolean;
     serverName: string | null;
     serverVersion: string | null;
@@ -485,6 +488,10 @@ export interface Records {
     confidence: string;
     contentHash: string;
     ownerCorrection?: OwnerCorrection | null;
+    /** Unchanged retained family evidence rejected by the owner; Firestore only. */
+    ownerFamilyRejectedContentHash?: string | null;
+    /** Durable identity of one memory write; absent/null is legacy unknown. */
+    memoryWriteWitness?: OwnerMemoryWriteWitness | null;
     goalId: string | null;
     originTrust: string;
     category: string;
@@ -788,7 +795,55 @@ export interface Records {
     reconciledAt: Date | null;
     attemptStartedAt: Date | null;
     attemptMetadata: unknown | null;
+    reservationKind: string;
+    costGrantId: string | null;
     unknownReason: string | null;
+  };
+  estimatedCostRequests: {
+    operationId: string;
+    installationId: string;
+    ownerId: string;
+    taskId: string;
+    requestFingerprint: string;
+    bindingDigest: string;
+    sourceBinding: unknown;
+    state: string;
+    quote: unknown;
+    baseline: unknown;
+    createdAt: Date;
+    updatedAt: Date;
+  };
+  estimatedCostBaselines: {
+    installationId: string;
+    ownerId: string;
+    digest: string;
+    rows: unknown;
+    createdAt: Date;
+  };
+  estimatedCostQuoteRequests: {
+    quoteRequestId: string;
+    operationId: string;
+    requestDigest: string;
+    quoteId: string;
+    quoteVersion: string;
+    createdAt: Date;
+  };
+  estimatedCostDecisions: {
+    decisionId: string;
+    operationId: string;
+    bodyDigest: string;
+    receipt: unknown;
+    createdAt: Date;
+  };
+  estimatedCostGrants: {
+    id: string;
+    operationId: string;
+    quoteId: string;
+    escrowReservationId: string;
+    allowanceMicros: number;
+    consumedMicros: number;
+    expiresAt: Date;
+    createdAt: Date;
   };
   rateTable: { updatedAt: Date; unit: string; unitPriceUsd: string; key: string };
   budgets: {

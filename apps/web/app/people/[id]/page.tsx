@@ -11,6 +11,7 @@ import {
   assertPrivacyErasureFenceUnchanged,
   firestoreOwnerEditorViewSnapshot,
   readFirestoreOwnerEditorIssuanceContext,
+  readOwnerFamilyRejectionReview,
   readPrivacyErasureFence,
 } from '@assistant/firestore';
 import { Handshake, MapPin, Sparkles } from 'lucide-react';
@@ -22,24 +23,29 @@ import {
   type OwnerEditorControlsProps,
 } from '@/app/people/owner-editor-controls';
 import { PersonAvatar } from '@/app/people/person-avatar';
+import { PersonNoteCreator } from '@/app/people/person-note-creator';
+import { personNoteRecoveryPartition } from '@/app/people/person-note-recovery-scope';
 import { ConnectionList, RelationshipList } from '@/app/people/relationship-list';
 import { BrowseFact } from '@/app/profile/browse-fact';
 import type { FactView } from '@/app/profile/fact-row';
 import { MemoryNavigation } from '@/app/profile/memory-navigation';
 import { requireOwner } from '@/auth';
 import { getFirestorePersonDossier } from '@/lib/firestore-people';
-import { memoryMapReturnTo } from '@/lib/memory-editor-context';
-import { memoryNoteHref } from '@/lib/memory-note-context';
+import { memoryMapReturnTo, memoryPersonConnectionHref } from '@/lib/memory-editor-context';
+import { memoryNoteHref, memoryNoteReturnTo } from '@/lib/memory-note-context';
 import { ownerEditorAvailability } from '@/lib/owner-editor-availability';
+import { bindSelectedFamilyRemoval } from '@/lib/owner-editor-removal-view';
 import { buildOwnerEditorView } from '@/lib/owner-editor-view';
 import { savedNoteCreatedLabel, savedNoteValidityLabel } from '@/lib/saved-note-date-display';
 import {
+  assertPostgresInstallationOwner,
   getFirestoreInstallationStore,
   readPostgresOwnerEditorViewInputs,
   withPostgresMemoryBrowseRead,
 } from '@/lib/server';
 import {
   Badge,
+  btnSm,
   EmptyState,
   InfoGrid,
   InfoItem,
@@ -95,9 +101,11 @@ async function loadPersonDossier(
   id: string,
   now: Date,
   formSessionScope: string | undefined,
+  selectedRelationId: string | null,
 ): Promise<{
   data: PersonDossier | null;
   editor: OwnerEditorControlsProps | null;
+  ownerId: string | null;
 }> {
   const config = loadConfig();
   const enabled =
@@ -126,10 +134,18 @@ async function loadPersonDossier(
         includeEditingSuggestions: false,
       });
       let editor: OwnerEditorControlsProps | null = null;
-      if (data && enabled && formSessionScope && config.AUTH_SECRET) {
+      let ownerId: string | null = null;
+      if (data && formSessionScope) {
+        // Establish the installation owner before the optional issuance/snapshot
+        // read. If that bounded read fails, same-owner recovery can remain
+        // visible without deriving identity from the dossier or a cached grant.
+        ownerId = await assertPostgresInstallationOwner(db);
         try {
           const inputs = await readPostgresOwnerEditorViewInputs(db, editorInput(data));
-          if (inputs)
+          if (inputs) {
+            ownerId = inputs.ownerId;
+          }
+          if (inputs && enabled && config.AUTH_SECRET && inputs.context)
             editor = buildOwnerEditorView({
               ...inputs,
               enabled,
@@ -142,12 +158,13 @@ async function loadPersonDossier(
           /* Bounded editor read failure does not erase a valid dossier. */
         }
       }
-      return { data, editor };
+      return { data, editor, ownerId };
     });
   const problems = validateAgentPersistenceConfig(config);
   if (problems.length) throw new Error(problems.join('; '));
   const store = getFirestoreInstallationStore();
   await assertFirestoreInstallationOwner(store, config.FIRESTORE_AGENT_ID);
+  const ownerId = config.FIRESTORE_AGENT_ID;
   const fence = await readPrivacyErasureFence(store, config.FIRESTORE_AGENT_ID);
   const data = await getFirestorePersonDossier(store, config.FIRESTORE_AGENT_ID, id, {
     factLimit: FACT_LIMIT,
@@ -169,12 +186,27 @@ async function loadPersonDossier(
         );
         editor = buildOwnerEditorView({
           enabled,
+          removalEnabled: true,
           context,
           snapshot,
           formSessionScope,
           secret: config.AUTH_SECRET,
           displayedContact: data.profile.contact,
           displayedRelationships: data.relations,
+        });
+        editor = await bindSelectedFamilyRemoval({
+          editor,
+          selectedRelationId,
+          secret: config.AUTH_SECRET,
+          review: (scope, eligibility) =>
+            readOwnerFamilyRejectionReview({
+              store,
+              ownerId,
+              relationId: eligibility.relationId,
+              scope,
+              expectedFamilyScopeRevision: eligibility.revision,
+              familyFields: eligibility.original,
+            }),
         });
       }
     } catch {
@@ -183,7 +215,7 @@ async function loadPersonDossier(
   }
   await assertFirestoreInstallationOwner(store, config.FIRESTORE_AGENT_ID);
   await assertPrivacyErasureFenceUnchanged(store, config.FIRESTORE_AGENT_ID, fence);
-  return { data, editor };
+  return { data, editor, ownerId };
 }
 
 export default async function PersonPage({
@@ -191,7 +223,12 @@ export default async function PersonPage({
   searchParams,
 }: {
   params: Promise<{ id: string }>;
-  searchParams?: Promise<{ q?: string; returnTo?: string; connectionId?: string }>;
+  searchParams?: Promise<{
+    q?: string;
+    returnTo?: string;
+    connectionId?: string;
+    addNote?: string;
+  }>;
 }) {
   const session = await requireOwner();
   const { id } = await params;
@@ -200,24 +237,40 @@ export default async function PersonPage({
   const search = await searchParams;
   const rawQuery = search?.q;
   const mapReturnTo = memoryMapReturnTo(search?.returnTo);
+  const noteReturnTo = search?.addNote === '1' ? memoryNoteReturnTo(search?.returnTo) : null;
   const query = (typeof rawQuery === 'string' ? rawQuery : '').trim().slice(0, 120);
   const rawConnectionId = search?.connectionId;
   const requestedConnectionId =
     typeof rawConnectionId === 'string' && CONNECTION_UUID_RE.test(rawConnectionId)
       ? rawConnectionId.toLowerCase()
       : null;
-  const backHref = mapReturnTo ?? `/people${query ? `?q=${encodeURIComponent(query)}` : ''}`;
-  const retryBase = `/people/${id}${mapReturnTo ? `?returnTo=${encodeURIComponent(mapReturnTo)}` : query ? `?q=${encodeURIComponent(query)}` : ''}`;
+  const notePickerParams = [
+    query ? `q=${encodeURIComponent(query)}` : '',
+    search?.addNote === '1' ? 'addNote=1' : '',
+    noteReturnTo ? `returnTo=${encodeURIComponent(noteReturnTo)}` : '',
+  ]
+    .filter(Boolean)
+    .join('&');
+  const peopleBack = `/people${notePickerParams ? `?${notePickerParams}` : ''}`;
+  const backHref = mapReturnTo ?? peopleBack;
+  const retryBase = `/people/${id}${mapReturnTo ? `?returnTo=${encodeURIComponent(mapReturnTo)}` : notePickerParams ? `?${notePickerParams}` : ''}`;
   const retryHref = requestedConnectionId
     ? `${retryBase}${retryBase.includes('?') ? '&' : '?'}connectionId=${requestedConnectionId}#person-connection-${requestedConnectionId}`
     : retryBase;
   const now = new Date();
   let dossier: PersonDossier | null;
   let editor: OwnerEditorControlsProps | null = null;
+  let ownerId: string | null = null;
   try {
-    const loaded = await loadPersonDossier(id, now, session.formSessionScope);
+    const loaded = await loadPersonDossier(
+      id,
+      now,
+      session.formSessionScope,
+      requestedConnectionId,
+    );
     dossier = loaded.data;
     editor = loaded.editor;
+    ownerId = loaded.ownerId;
   } catch {
     return (
       <PageShell size="reading">
@@ -250,7 +303,7 @@ export default async function PersonPage({
           confirmed, open People to check that same request.
         </p>
         <Link
-          href={`/people${query ? `?q=${encodeURIComponent(query)}` : ''}`}
+          href={peopleBack}
           className="mt-4 inline-flex min-h-11 items-center text-accent underline"
         >
           Open People
@@ -281,61 +334,94 @@ export default async function PersonPage({
   const lastContact = lastContactLabel(dossier.lastContactAt, now);
   const groupLabel = dossier.group === 'other' ? null : PERSON_GROUP_LABELS[dossier.group];
 
-  return (
-    <OwnerEditorContextualHost editor={editor ? { ...editor, personReturnTo: backHref } : null}>
-      <PageShell size="reading">
-        <PageHeader
-          back={{
-            href: backHref,
-            label: mapReturnTo
-              ? mapReturnTo.includes('view=connections')
-                ? 'Connections'
-                : 'Memory map'
-              : 'People',
-          }}
-          title={contact.name}
-        />
-        <MemoryNavigation current="people" />
+  const currentPersonNoteSnapshot = {
+    contactId: contact.id,
+    name: contact.name,
+    trust: contact.trust,
+    revision: contact.identityRevision ?? '',
+  };
+  const recoveryPartition = personNoteRecoveryPartition({
+    authSecret: loadConfig().AUTH_SECRET,
+    ownerEmail: session.user.email,
+    ownerId,
+    formSessionScope: session.formSessionScope,
+    persistenceDriver: loadConfig().PERSISTENCE_DRIVER,
+    workspaceId: loadConfig().ASSISTANT_WORKSPACE_ID,
+    databaseUrl: loadConfig().DATABASE_URL,
+    firestoreProject: loadConfig().GCP_PROJECT,
+    firestoreDatabaseId: loadConfig().FIRESTORE_DATABASE_ID,
+  });
+  const recoverySession =
+    recoveryPartition && ownerId && session.formSessionScope
+      ? { ownerId, formSessionScope: session.formSessionScope }
+      : null;
 
-        {/* The identity line: who they are to you, where they are, when you last
+  return (
+    <PageShell size="reading">
+      <PageHeader
+        back={{
+          href: backHref,
+          label: mapReturnTo
+            ? mapReturnTo.includes('view=connections')
+              ? 'Connections'
+              : 'Memory map'
+            : 'People',
+        }}
+        title={contact.name}
+      />
+      <MemoryNavigation current="people" />
+
+      {/* The identity line: who they are to you, where they are, when you last
             spoke. Every segment is dropped when its source is empty, so this
             never renders a dangling separator or an empty claim. */}
-        <div className="mt-4 flex min-w-0 items-start gap-4">
-          <PersonAvatar name={contact.name} size="lg" />
-          <div className="min-w-0 flex-1">
-            <MetaLine
-              segments={[
-                contact.relationship
-                  ? `Relationship to you: ${contact.relationship}`
-                  : 'Relationship to you: not recorded',
-                location ? (
-                  <>
-                    <MapPin className="size-3.5" aria-hidden="true" />
-                    {location}
-                  </>
-                ) : null,
-                lastContact,
-              ]}
-              className="text-sm"
-            />
-            <div className="mt-2 flex flex-wrap items-center gap-2">
-              {groupLabel ? <Badge tone="muted">{groupLabel}</Badge> : null}
-              {contact.trust === 'unknown' ? (
-                <Badge
-                  tone="amber"
-                  size="xs"
-                  title="Content from this person is treated as untrusted."
-                >
-                  Unverified
-                </Badge>
-              ) : null}
-            </div>
+      <div className="mt-4 flex min-w-0 items-start gap-4">
+        <PersonAvatar name={contact.name} size="lg" />
+        <div className="min-w-0 flex-1">
+          <MetaLine
+            segments={[
+              contact.relationship
+                ? `Relationship to you: ${contact.relationship}`
+                : 'Relationship to you: not recorded',
+              location ? (
+                <>
+                  <MapPin className="size-3.5" aria-hidden="true" />
+                  {location}
+                </>
+              ) : null,
+              lastContact,
+            ]}
+            className="text-sm"
+          />
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            {groupLabel ? <Badge tone="muted">{groupLabel}</Badge> : null}
+            {contact.trust === 'unknown' ? (
+              <Badge
+                tone="amber"
+                size="xs"
+                title="Content from this person is treated as untrusted."
+              >
+                Unverified
+              </Badge>
+            ) : null}
           </div>
         </div>
+      </div>
 
+      {search?.addNote === '1' ? (
+        <PersonNoteCreator
+          key={recoveryPartition ?? 'unverified-person-note-scope'}
+          session={recoverySession}
+          snapshot={editor?.personNoteCreate?.snapshot ?? currentPersonNoteSnapshot}
+          grant={recoverySession ? (editor?.personNoteCreate?.grant ?? null) : null}
+          unavailableHref={peopleBack}
+          returnTo={noteReturnTo}
+          recoveryPartition={recoveryPartition}
+        />
+      ) : null}
+      <OwnerEditorContextualHost editor={editor ? { ...editor, personReturnTo: backHref } : null}>
         <div className="mt-4 flex flex-wrap gap-2">
           <OwnerEditorContextTrigger entry="identity" />
-          <OwnerEditorContextTrigger entry="create" />
+          <OwnerEditorContextTrigger entry={editor?.family ? 'family' : 'create'} />
         </div>
         {!detailEditingAvailable && contact.trust !== 'owner' ? (
           <p className="mt-3 text-sm text-muted">
@@ -355,12 +441,12 @@ export default async function PersonPage({
             look this person up again. */}
         <section id="person-connections" tabIndex={-1} className="mt-8">
           <div className="flex flex-wrap items-end justify-between gap-3">
-            <SectionHeading title="Connections between people" count={relations.length} />
-            <OwnerEditorContextTrigger entry="family" />
+            <SectionHeading title="Connections" count={relations.length} />
           </div>
           <p className="mt-2 text-sm text-muted">
-            Removing connections is not available in this release. Eligible family relationships can
-            still be edited.
+            {editor?.family && loadConfig().PERSISTENCE_DRIVER === 'firestore'
+              ? 'Edit a connection below, or review it before removing it. Both people and the saved source note stay saved.'
+              : 'Connections supported by saved notes are shown below.'}
           </p>
           {unavailableConnectionSelection ? (
             <p role="status" className="mt-2 text-sm text-muted">
@@ -371,7 +457,7 @@ export default async function PersonPage({
           {relations.length === 0 ? (
             <EmptyState>
               {editor?.family
-                ? 'No connections are recorded yet. Add a family relationship to connect this person with someone else.'
+                ? 'No connections are recorded yet. Choose Add connection to connect this person with someone else.'
                 : 'No connections to other people are recorded yet.'}
             </EmptyState>
           ) : (
@@ -379,6 +465,7 @@ export default async function PersonPage({
               relations={relations}
               now={now}
               peopleQuery={query}
+              returnTo={mapReturnTo ?? ''}
               selectedRelationId={selectedRelation?.id.toLowerCase()}
               editControls={
                 editor
@@ -392,6 +479,34 @@ export default async function PersonPage({
                           <OwnerEditorContextTrigger
                             entry={{ correction: correction.eligibility.relationId }}
                           />
+                          {(editor.removals ?? []).some(
+                            (entry) =>
+                              entry.eligibility.relationId === correction.eligibility.relationId,
+                          ) ? (
+                            <OwnerEditorContextTrigger
+                              entry={{ removal: correction.eligibility.relationId }}
+                            />
+                          ) : loadConfig().PERSISTENCE_DRIVER === 'firestore' ? (
+                            requestedConnectionId === correction.eligibility.relationId ? (
+                              <span className="text-xs text-muted">
+                                Removal could not be reviewed. Refresh the saved details to try
+                                again.
+                              </span>
+                            ) : (
+                              <Link
+                                className={btnSm.outline}
+                                href={
+                                  memoryPersonConnectionHref(
+                                    id,
+                                    correction.eligibility.relationId,
+                                    mapReturnTo ?? '',
+                                  ) ?? `/people/${id}`
+                                }
+                              >
+                                Review removal…
+                              </Link>
+                            )
+                          ) : null}
                         </div>,
                       ]),
                     )
@@ -568,11 +683,12 @@ export default async function PersonPage({
             <p className="text-sm text-muted">
               {contact.trust === 'owner'
                 ? 'Your own profile cannot be deleted here.'
-                : 'Deleting people is not available in this release. You can still edit their saved details and eligible connections.'}
+                : (editor?.personRemovalUnavailableReason ??
+                  'Deletion is unavailable in this view. Refresh the saved details before trying again.')}
             </p>
           ) : null}
         </section>
-      </PageShell>
-    </OwnerEditorContextualHost>
+      </OwnerEditorContextualHost>
+    </PageShell>
   );
 }

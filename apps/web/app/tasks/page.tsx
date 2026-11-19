@@ -31,6 +31,7 @@ import { SubmitButton } from '@/lib/ui-client';
 import { displayTaskStatus, StatusChip, taskTypeLabel, trustLabel } from '@/lib/views';
 import { archiveOldTasks, archiveTask, restoreTask } from './actions';
 import { SecurityNoticeReview } from './security-notice-review';
+import { SpendingActivityReview } from './spending-activity-review';
 
 export const metadata = { title: 'Activity' };
 
@@ -67,6 +68,7 @@ const taskIcon = {
   running: Loader2,
   waiting_approval: Hand,
   waiting_budget: Hand,
+  waiting_estimated_cost: Hand,
   needs_attention: Hand,
   sleeping: CalendarClock,
   waiting_event: CalendarClock,
@@ -218,6 +220,12 @@ export default async function TasksPage({
                     task.status as (typeof terminalTaskStatuses)[number],
                   );
                   const shownStatus = displayTaskStatus(task.status, task.hasPendingApproval);
+                  const spendingOperationId =
+                    'estimatedCostOperationId' in task &&
+                    typeof task.estimatedCostOperationId === 'string' &&
+                    task.estimatedCostOperationId
+                      ? task.estimatedCostOperationId
+                      : null;
                   return (
                     // Each row leads somewhere, so it lights up under the
                     // pointer — scanning a long day of activity should feel
@@ -251,6 +259,10 @@ export default async function TasksPage({
                         <p className="mt-1 line-clamp-2 text-sm leading-5 text-muted">
                           {truncate(stripMarkdown(task.progress), 180) || 'No update recorded yet.'}
                         </p>
+                        <SpendingActivityReview
+                          status={task.status}
+                          operationId={spendingOperationId}
+                        />
                         <MetaLine
                           className="mt-1.5"
                           segments={[

@@ -1,4 +1,8 @@
-import { listPeopleDirectory, type PersonSummary } from '@assistant/application/people';
+import {
+  listPeopleDirectory,
+  matchesPersonSearch,
+  type PersonSummary,
+} from '@assistant/application/people';
 import {
   birthdayLabel,
   lastContactLabel,
@@ -23,6 +27,7 @@ import { PersonAvatar } from '@/app/people/person-avatar';
 import { MemoryNavigation } from '@/app/profile/memory-navigation';
 import { requireOwner } from '@/auth';
 import { listFirestorePeopleDirectory } from '@/lib/firestore-people';
+import { memoryNoteReturnTo } from '@/lib/memory-note-context';
 import { ownerEditorAvailability } from '@/lib/owner-editor-availability';
 import { buildOwnerEditorView } from '@/lib/owner-editor-view';
 import {
@@ -46,16 +51,6 @@ export const dynamic = 'force-dynamic';
 
 /** Soonest-first, so an upcoming birthday is visible without opening anyone. */
 const BIRTHDAY_HORIZON_DAYS = 30;
-
-function matches(person: PersonSummary, query: string): boolean {
-  if (!query) return true;
-  const needle = query.toLocaleLowerCase();
-  return (
-    person.name.toLocaleLowerCase().includes(needle) ||
-    person.relationship.toLocaleLowerCase().includes(needle) ||
-    (person.location?.toLocaleLowerCase().includes(needle) ?? false)
-  );
-}
 
 async function loadPeopleDirectory(
   now: Date,
@@ -124,10 +119,20 @@ export default async function PeoplePage({
   searchParams: Promise<Record<string, string | undefined>>;
 }) {
   const session = await requireOwner();
-  const { q } = await searchParams;
+  const { q, addNote, returnTo: rawNoteReturnTo } = await searchParams;
+  const addingPersonNote = addNote === '1';
+  const noteReturnTo = addingPersonNote ? memoryNoteReturnTo(rawNoteReturnTo) : null;
   const query = (typeof q === 'string' ? q : '').trim().slice(0, 120);
-  const personHref = (id: string) =>
-    `/people/${id}${query ? `?q=${encodeURIComponent(query)}` : ''}`;
+  const personHref = (id: string) => {
+    const params = [
+      query ? `q=${encodeURIComponent(query)}` : '',
+      addingPersonNote ? 'addNote=1' : '',
+      noteReturnTo ? `returnTo=${encodeURIComponent(noteReturnTo)}` : '',
+    ]
+      .filter(Boolean)
+      .join('&');
+    return `/people/${id}${params ? `?${params}` : ''}`;
+  };
 
   const now = new Date();
   let everyone: PersonSummary[];
@@ -152,7 +157,7 @@ export default async function PeoplePage({
       </PageShell>
     );
   }
-  const people = everyone.filter((person) => matches(person, query));
+  const people = everyone.filter((person) => matchesPersonSearch(person, query));
 
   const byGroup = PERSON_GROUPS.map((group) => ({
     group,
@@ -173,9 +178,18 @@ export default async function PeoplePage({
       <PageHeader
         back={{ href: '/profile', label: 'Memory' }}
         title="People"
-        intro="Open a person to view their details and family connections."
+        intro="Find a person to edit their details and manage their connections."
       />
       <MemoryNavigation current="people" />
+
+      {addingPersonNote ? (
+        <p
+          role="status"
+          className="mt-4 rounded-xl border border-edge bg-raised p-4 text-sm text-muted"
+        >
+          Choose an existing person. The note will be saved about that person.
+        </p>
+      ) : null}
 
       <section className="mt-8">
         <div className="flex flex-wrap items-end justify-between gap-3">
@@ -204,6 +218,8 @@ export default async function PeoplePage({
         {/* A GET form, so a search is a URL the owner can bookmark or share
             with themselves, and the page stays a server component. */}
         <form method="get" className="mt-4 flex min-w-0 flex-wrap items-center gap-2">
+          {addingPersonNote ? <input type="hidden" name="addNote" value="1" /> : null}
+          {noteReturnTo ? <input type="hidden" name="returnTo" value={noteReturnTo} /> : null}
           <label htmlFor="people-search" className="sr-only">
             Search people
           </label>
@@ -225,7 +241,14 @@ export default async function PeoplePage({
             Search
           </button>
           {query ? (
-            <Link href="/people" className={btn.outline}>
+            <Link
+              href={
+                addingPersonNote
+                  ? `/people?addNote=1${noteReturnTo ? `&returnTo=${encodeURIComponent(noteReturnTo)}` : ''}`
+                  : '/people'
+              }
+              className={btn.outline}
+            >
               Clear
             </Link>
           ) : null}

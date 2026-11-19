@@ -5,10 +5,10 @@ import { createManifest, validateManifest } from './release-manifest.mjs';
 import { deriveSchemaVersion } from './release-schema-version.mjs';
 
 const sourceContract = JSON.parse(
-  await readFile(new URL('./release-contracts.json', import.meta.url)),
+  await readFile(new URL('./fixtures/release-contracts.schema134.json', import.meta.url)),
 );
 const journal = JSON.parse(
-  await readFile(new URL('../../packages/db/drizzle/meta/_journal.json', import.meta.url)),
+  await readFile(new URL('./fixtures/postgres-journal.schema134.json', import.meta.url)),
 );
 const selected = ['agent', 'web', 'browser', 'code', 'processor'];
 // Keep the previous bridge/target contract as a historical regression fixture.

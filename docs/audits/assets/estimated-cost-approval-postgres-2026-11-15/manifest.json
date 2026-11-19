@@ -1,0 +1,19 @@
+{
+  "sourceSha256": {
+    "packages/db/src/estimated-cost-approval-transactions.ts": "8d5e9f092620ad47bf9788d321be24bd9e3627412cb4c5d46894f33b6c128862",
+    "packages/db/src/estimated-cost-approval-transactions.test.ts": "c5a9c71c489ba27068a13991abe4ef38714c706dfd16c2d581d333471b159c5f",
+    "packages/persistence/src/estimated-cost-approval.ts": "0e31605e6a3f3079f86613f2766f136d88b15f108c4822ca8df8c3448e8c297d",
+    "packages/db/src/schema.ts": "87a4658510be54b2c5522780aa9beb80fb47d322a65edffdbe51663319720f69",
+    "packages/db/drizzle/0137_estimated_cost_approval.sql": "6b319e02cd34458a4fdd6137f11d8a4d0bded4a955e904657d66f0cbe72797f4"
+  },
+  "assetsSha256": {
+    "tests.txt": "f5f91d2378dff7cf02e7b87c58ea381b3f68520ac368b455bc8ceaad1594323e",
+    "typecheck.txt": "1174fab9a131eac6dfcf27b59b7c1ecba6e37e116afc8fa0077b9970b6f106a2"
+  },
+  "testTarget": "uniquely allocated loopback database, cleaned by canonical runner",
+  "productionOrProviderActions": false,
+  "testsPassed": 10,
+  "formatOnlyFollowupSha256": {
+    "packages/db/src/estimated-cost-approval-transactions.ts": "a287b0ef8f59e849887c78db614779fe1698b7ae22043cc9cc73ff60f0b4f6e4"
+  }
+}

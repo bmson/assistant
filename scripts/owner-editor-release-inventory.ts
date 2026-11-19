@@ -1,4 +1,9 @@
+import {
+  createImageResolutionReader,
+  verifyRevisionImage,
+} from './owner-release-image-resolution.js';
 /** Protected, GET-only observations. Never authorizes traffic or maintenance. */
+
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, readFileSync, writeFileSync } from 'node:fs';
@@ -25,6 +30,13 @@ import {
   observeEditorReadiness,
 } from './owner-editor-release-readiness.js';
 import { InventoryServiceFactsError } from './owner-editor-service-facts-diagnostics.js';
+import {
+  type BootstrapReceipt,
+  bootstrapDigest,
+  disabled,
+  reviewedCurrentEnvironment,
+  verifyCurrentSnapshot,
+} from './owner-release-current-snapshot.js';
 
 export const PROJECT = 'bmson-assistant';
 export const DATABASE = `projects/${PROJECT}/databases/assistant-production`;
@@ -274,8 +286,13 @@ const allowedEnv = new Set([
   'PERSISTENCE_DRIVER',
   'FIRESTORE_DATABASE_ID',
   'ASSISTANT_RELEASE_SHA',
+  'ASSISTANT_RELEASE_SOURCE_SHA',
   'RELEASE_SHA',
   'ASSISTANT_RELEASE_API_CONTRACT',
+  'ASSISTANT_RELEASE_AGENT_API_MIN',
+  'ASSISTANT_RELEASE_AGENT_API_MAX',
+  'ASSISTANT_RELEASE_WEB_API_MIN',
+  'ASSISTANT_RELEASE_WEB_API_MAX',
   'ASSISTANT_RELEASE_SCHEMA_DRIVER',
   'ASSISTANT_RELEASE_SCHEMA_MIN',
   'ASSISTANT_RELEASE_SCHEMA_MAX',
@@ -332,9 +349,20 @@ function strictServiceFacts(raw: unknown, service: 'agent' | 'web') {
     env.ASSISTANT_RELEASE_SCHEMA_DRIVER !== 'firestore' ||
     env.ASSISTANT_RELEASE_SCHEMA_MIN !== '1' ||
     env.ASSISTANT_RELEASE_SCHEMA_MAX !== '1' ||
-    env.ASSISTANT_RELEASE_API_CONTRACT !== '1'
+    !['1', '3'].includes(env.ASSISTANT_RELEASE_API_CONTRACT ?? '')
   )
     throw new Error('wrong persistence');
+  if (env.ASSISTANT_RELEASE_API_CONTRACT === '3') {
+    const peer = service === 'web' ? 'AGENT' : 'WEB';
+    if (
+      env[`ASSISTANT_RELEASE_${peer}_API_MIN`] !== '3' ||
+      env[`ASSISTANT_RELEASE_${peer}_API_MAX`] !== '3' ||
+      env.ASSISTANT_RELEASE_SCHEMA_VERSION !== '1' ||
+      !/^[a-f0-9]{64}$/.test(env.ASSISTANT_RELEASE_MANIFEST ?? '') ||
+      !/^[a-f0-9]{40}$/.test(env.ASSISTANT_RELEASE_SOURCE_SHA ?? '')
+    )
+      throw new Error('wrong API 3 peer contract');
+  }
   if (!Array.isArray(value.trafficStatuses) || value.trafficStatuses.length !== 1)
     throw new Error('ambiguous traffic');
   const traffic = record(value.trafficStatuses[0]);
@@ -356,7 +384,7 @@ function strictServiceFacts(raw: unknown, service: 'agent' | 'web') {
 export interface GlobalIndexLists {
   composites: unknown[];
   fields: unknown[];
-  evidence: 'pinned-gcloud-576-complete-lists';
+  evidence: 'pinned-gcloud-576-complete-lists' | 'reviewed-local-gcloud-586-complete-lists';
 }
 export async function collectInventory(
   read: ReadJson,
@@ -365,6 +393,8 @@ export async function collectInventory(
   global?: GlobalIndexLists,
   observeEditor?: (target: EditorMetadataTarget) => Promise<unknown>,
   mark: InventoryStageMarker = () => undefined,
+  current?: BootstrapReceipt,
+  resolveImage?: (image: string) => Promise<void>,
 ) {
   mark('source_manifest');
   const { groups } = verifyManifest(manifest);
@@ -387,8 +417,10 @@ export async function collectInventory(
         )),
       );
   // REST scope cannot prove global coverage. The production path uses the audited,
-  // version-pinned CLI global commands with no filters/limit added by this script.
-  const complete = global?.evidence === 'pinned-gcloud-576-complete-lists';
+  // version-pinned CLI global commands with no filters/limit added by these entrypoints.
+  const complete =
+    global?.evidence === 'pinned-gcloud-576-complete-lists' ||
+    global?.evidence === 'reviewed-local-gcloud-586-complete-lists';
   mark('index_comparison');
   const indexes = await compareIndexInventory(manifest, composites, fields, {
     compositesComplete: true,
@@ -410,10 +442,10 @@ export async function collectInventory(
   const editorTargets: (EditorMetadataTarget | null)[] = [];
   for (const service of ['agent', 'web'] as const) {
     mark(service === 'agent' ? 'agent_service' : 'web_service');
-    const facts = serviceFacts(
-      await read(`https://run.googleapis.com/v2/${RUN_ROOT}/services/assistant-${service}`),
-      service,
+    const currentService = await read(
+      `https://run.googleapis.com/v2/${RUN_ROOT}/services/assistant-${service}`,
     );
+    const facts = serviceFacts(currentService, service);
     mark(service === 'agent' ? 'agent_revision' : 'web_revision');
     const revision = record(
       await read(
@@ -424,10 +456,19 @@ export async function collectInventory(
       revision.name !== `${RUN_ROOT}/services/assistant-${service}/revisions/${facts.revision}` ||
       !Array.isArray(revision.containers) ||
       revision.containers.length !== 1 ||
-      record(revision.containers[0]).image !== facts.image ||
       revision.serviceAccount !== facts.account
     )
       throw new Error('serving revision mismatch');
+    if (record(revision.containers[0]).image !== facts.image) await resolveImage?.(facts.image);
+    verifyRevisionImage(revision, facts.image);
+    if (current)
+      verifyCurrentSnapshot(
+        current.services[service],
+        currentService,
+        revision,
+        current.kind === 'disabled-bootstrap',
+      );
+    const admissionDisabled = disabled(record(currentService));
     const revisionFacts = serviceFacts(
       {
         name: `${RUN_ROOT}/services/assistant-${service}`,
@@ -449,10 +490,30 @@ export async function collectInventory(
     const { editorMetadataTarget: _privateTarget, ...publicFacts } = facts;
     services.push({
       ...publicFacts,
-      servingRevisionVerified: true,
+      servingRevisionVerified: !admissionDisabled,
+      currentRevisionConfigurationVerified: true,
+      admissionDisabled,
+      runtimeReadinessVerified: false,
       observedRevisionHash: hash(JSON.stringify(revision)),
     });
   }
+  if (
+    services[0]?.nonsecretReleaseConfig.ASSISTANT_RELEASE_API_CONTRACT !==
+    services[1]?.nonsecretReleaseConfig.ASSISTANT_RELEASE_API_CONTRACT
+  )
+    throw new Error('mixed Firestore API contracts');
+  if (
+    services[0]?.nonsecretReleaseConfig.ASSISTANT_RELEASE_API_CONTRACT === '3' &&
+    services[0]?.nonsecretReleaseConfig.ASSISTANT_RELEASE_MANIFEST !==
+      services[1]?.nonsecretReleaseConfig.ASSISTANT_RELEASE_MANIFEST
+  )
+    throw new Error('mixed Firestore release manifests');
+  if (
+    services[0]?.nonsecretReleaseConfig.ASSISTANT_RELEASE_API_CONTRACT === '3' &&
+    services[0]?.nonsecretReleaseConfig.ASSISTANT_RELEASE_SOURCE_SHA !==
+      services[1]?.nonsecretReleaseConfig.ASSISTANT_RELEASE_SOURCE_SHA
+  )
+    throw new Error('mixed Firestore release sources');
   mark('editor_metadata');
   const firstTarget = editorTargets[0];
   const editorReadiness =
@@ -472,6 +533,7 @@ export async function collectInventory(
     recoveryPoint: point,
     services,
     editorReadiness,
+    ...(current ? { reviewedCurrentSnapshotSha256: bootstrapDigest(current) } : {}),
     mutationAuthorized: false,
     trafficAuthorized: false,
     maintenanceAuthorized: false,
@@ -506,6 +568,43 @@ export function verifyPreAuthEnvironment(env: NodeJS.ProcessEnv) {
   );
   text(env.GITHUB_SHA, /^[a-f0-9]{40}$/);
   text(env.GITHUB_RUN_ID, /^[1-9][0-9]{0,19}$/);
+}
+/** Prerequisites dispatch data binds source/configuration, not human approval provenance. */
+export function verifyPrerequisitesBinding(env: NodeJS.ProcessEnv): void {
+  try {
+    verifyPreAuthEnvironment(env);
+    const approved = env.OWNER_EDITOR_APPROVED_SOURCE_SHA;
+    if (
+      env.GITHUB_EVENT_NAME !== 'workflow_dispatch' ||
+      env.GITHUB_WORKFLOW_REF !==
+        'bmson/assistant/.github/workflows/owner-editor-release-inventory.yml@refs/heads/main' ||
+      typeof approved !== 'string' ||
+      approved.length !== 40 ||
+      !/^[a-f0-9]{40}$/.test(approved) ||
+      [env.GITHUB_SHA, env.GITHUB_WORKFLOW_SHA, env.OWNER_EDITOR_CHECKOUT_SHA].some(
+        (source) => source !== approved,
+      )
+    )
+      throw new Error('prerequisites binding mismatch');
+    for (const [actual, expected] of [
+      [env.GCP_PROJECT, env.OWNER_EDITOR_APPROVED_PROJECT_SHA256],
+      [env.GCP_DEPLOY_SERVICE_ACCOUNT, env.OWNER_EDITOR_APPROVED_SERVICE_ACCOUNT_SHA256],
+      [env.GCP_WORKLOAD_IDENTITY_PROVIDER, env.OWNER_EDITOR_APPROVED_WIF_PROVIDER_SHA256],
+    ]) {
+      if (
+        typeof actual !== 'string' ||
+        !actual ||
+        typeof expected !== 'string' ||
+        expected.length !== 64 ||
+        !/^[a-f0-9]{64}$/.test(expected) ||
+        hash(actual) !== expected
+      )
+        throw new Error('prerequisites binding mismatch');
+    }
+  } catch {
+    // Do not expose configured values, fingerprints or caller-supplied input in errors.
+    throw new Error('prerequisites binding mismatch');
+  }
 }
 /** Reject local/default credentials. Only the explicit protected WIF action file is accepted. */
 export function verifyWifEnvironment(env: NodeJS.ProcessEnv, load: (path: string) => unknown) {
@@ -551,6 +650,10 @@ export const BASIC_EDITOR_COMMANDS = [
   'add_family_relationship',
   'correct_owner_family_relationship',
   'correct_owner_memory',
+  'remove_owner_memory',
+  'create_owner_memory',
+  'remove_person',
+  'remove_owner_family_relationship',
 ] as const;
 /** Source declaration, not an operator flag. A present runtime cannot omit its gate. */
 export function requiresBasicEditorPreflight(contract: unknown, runtimePresent: boolean): boolean {
@@ -566,7 +669,7 @@ export function requiresBasicEditorPreflight(contract: unknown, runtimePresent: 
   return true;
 }
 /** A positive observation is only one release prerequisite, never mutation authority. */
-export function requireBasicEditorReadiness(receipt: unknown): void {
+export function requireBasicEditorReadiness(receipt: unknown, current?: BootstrapReceipt): void {
   const value = record(receipt),
     indexes = record(value.indexes),
     editor = record(value.editorReadiness);
@@ -580,7 +683,14 @@ export function requireBasicEditorReadiness(receipt: unknown): void {
     editor.consistentSnapshot !== false ||
     !Array.isArray(value.services) ||
     value.services.length !== 2 ||
-    !value.services.every((service) => record(service).servingRevisionVerified === true) ||
+    !value.services.every((service) =>
+      current?.kind === 'disabled-bootstrap'
+        ? value.reviewedCurrentSnapshotSha256 === bootstrapDigest(current) &&
+          record(service).admissionDisabled === true &&
+          record(service).currentRevisionConfigurationVerified === true &&
+          record(service).runtimeReadinessVerified === false
+        : record(service).servingRevisionVerified === true,
+    ) ||
     !['pitr', 'backup'].includes(String(record(value.recoveryPoint).kind))
   )
     throw new Error('basic editor release prerequisites unproven');
@@ -613,7 +723,11 @@ async function main(mark: InventoryStageMarker) {
   mark('protected_context');
   verifyPreAuthEnvironment(process.env);
   const diagnosticRecipient = verifyFailureRecipient(process.env);
-  if (mode === '--verify-source') return;
+  if (mode === '--verify-source') {
+    verifyPrerequisitesBinding(process.env);
+    return;
+  }
+  const current = reviewedCurrentEnvironment(process.env, process.env.GITHUB_SHA ?? '');
   const started = Date.now();
   mark('credential_file');
   const identity = verifyWifEnvironment(process.env, (file) => {
@@ -702,6 +816,8 @@ async function main(mark: InventoryStageMarker) {
         target,
       ),
     mark,
+    current,
+    createImageResolutionReader(token.trim(), fetch, started + 60000),
   );
   mark('receipt_serialization');
   const output = JSON.stringify({
@@ -719,7 +835,7 @@ async function main(mark: InventoryStageMarker) {
   writeFileSync('owner-editor-release-inventory.json', `${output}\n`, { flag: 'wx', mode: 0o600 });
   if (releasePreflight) {
     mark('release_readiness');
-    requireBasicEditorReadiness(receipt);
+    requireBasicEditorReadiness(receipt, current);
   }
 }
 if (process.argv[1]?.endsWith('/owner-editor-release-inventory.ts')) {

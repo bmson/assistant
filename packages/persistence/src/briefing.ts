@@ -1,3 +1,4 @@
+import type { OccasionToolRow } from './builtin-tools.js';
 import type { Records } from './records.js';
 
 export type BriefingBookingOccurrence = Pick<
@@ -24,6 +25,10 @@ export interface BriefingMail {
 }
 
 export interface BriefingInputs {
+  /** Stored personal dates, including their trust and recurrence metadata. */
+  occasions?: OccasionToolRow[];
+  /** Source-eligible unresolved obligations, including those with no deadline. */
+  commitments?: Records['commitments'][];
   /** Mail ingested inside the window, most important first. */
   mail: BriefingMail[];
   /** Latest authenticated, explicitly identified booking lifecycles. */

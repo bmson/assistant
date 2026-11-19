@@ -4,6 +4,7 @@ RUN npm install --global corepack@0.36.0 && corepack enable
 
 # Manifests first: dependency layers survive source edits.
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json tsconfig.base.json ./
+COPY patches ./patches
 COPY packages/config/package.json ./packages/config/
 COPY packages/persistence/package.json ./packages/persistence/
 COPY packages/db/package.json ./packages/db/
@@ -34,6 +35,7 @@ ENV HOSTNAME=0.0.0.0
 ENV PORT=8080
 ENV ASSISTANT_REPO_ROOT=/app
 WORKDIR /app
+COPY infra/gcp/release-contracts.json /app/infra/gcp/release-contracts.json
 
 COPY --from=build --chown=node:node /src/apps/web/.next/standalone ./
 COPY --from=build --chown=node:node /src/apps/web/.next/static ./apps/web/.next/static

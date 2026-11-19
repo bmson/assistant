@@ -178,10 +178,11 @@ export type FirestorePathResult = {
   postgresOnly: Array<{ path: string; reason: string; proven: boolean }>;
 };
 
-/** Static proof that the Firestore release path has no PostgreSQL dependency. */
-export function verifyFirestorePath(
-  files: Array<{ path: string; text: string }>,
-): FirestorePathResult {
+/** Prove the release path and classify the same repository snapshot in one scan. */
+export function analyzeRepository(files: Array<{ path: string; text: string }>): {
+  firestorePath: FirestorePathResult;
+  findings: RepoFinding[];
+} {
   const problems: string[] = [];
   const byPath = new Map(files.map((file) => [file.path, file]));
   const selector = byPath.get(RELEASE_SELECTOR);
@@ -202,13 +203,24 @@ export function verifyFirestorePath(
     return { path: entry.path, reason: entry.reason, proven: pathExists && !reachable && guarded };
   });
   const unproven = new Set(postgresOnly.filter((item) => !item.proven).map((item) => item.path));
-  for (const finding of scanRepository(files, { unproven }))
+  const findings = scanRepository(files, { unproven });
+  for (const finding of findings)
     if (
       (closure.includes(finding.path) || finding.path === RELEASE_SELECTOR) &&
       finding.class !== 'guard'
     )
       problems.push(`${finding.path} (Firestore release path) references the database`);
-  return { ok: problems.length === 0, closure, problems, postgresOnly };
+  return {
+    firestorePath: { ok: problems.length === 0, closure, problems, postgresOnly },
+    findings,
+  };
+}
+
+/** Static proof that the Firestore release path has no PostgreSQL dependency. */
+export function verifyFirestorePath(
+  files: Array<{ path: string; text: string }>,
+): FirestorePathResult {
+  return analyzeRepository(files).firestorePath;
 }
 
 const PATTERN =
@@ -253,13 +265,8 @@ export function scanRepository(
   options: { unproven?: ReadonlySet<string> } = {},
 ): RepoFinding[] {
   // PostgreSQL-only status needs proof; without a caller-supplied result, prove it here.
-  const unproven =
-    options.unproven ??
-    new Set(
-      verifyFirestorePath(files)
-        .postgresOnly.filter((item) => !item.proven)
-        .map((item) => item.path),
-    );
+  if (!options.unproven) return analyzeRepository(files).findings;
+  const unproven = options.unproven;
   const postgresOnly = new Set(POSTGRES_ONLY_FILES.map((entry) => entry.path));
   const findings: RepoFinding[] = [];
   for (const file of files) {
@@ -708,10 +715,9 @@ async function main() {
     strict: true,
   });
   const files = await repositoryFiles(values.repo);
-  const firestorePath = verifyFirestorePath(files);
+  const { firestorePath, findings } = analyzeRepository(files);
   if (values['static-only']) {
     // Repository-only proof, used by CI: needs no evidence, config, or cloud access.
-    const findings = scanRepository(files);
     const blocking = findings.filter((item) => BLOCKING_CLASSES.has(item.class));
     const counts = findings.reduce<Record<string, number>>((result, item) => {
       result[item.class] = (result[item.class] ?? 0) + 1;
@@ -754,7 +760,7 @@ async function main() {
   const report = buildRetirementReport({
     config,
     store,
-    findings: scanRepository(files),
+    findings,
     decisions,
     now: new Date(),
     minObservationHours: Number(values['min-observation-hours']),

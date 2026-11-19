@@ -22,7 +22,11 @@ import {
   loadFirestoreMemoryLibrary,
 } from '@/lib/firestore-knowledge';
 import { entityKindLabel } from '@/lib/knowledge';
-import { memoryNoteHref } from '@/lib/memory-note-context';
+import {
+  createMemoryLibraryDiagnosticContext,
+  withMemoryLibraryPhase,
+} from '@/lib/memory-library-diagnostics';
+import { memoryNoteHref, memoryNoteReturnTo } from '@/lib/memory-note-context';
 import { savedNoteCreatedLabel, savedNoteValidityLabel } from '@/lib/saved-note-date-display';
 import { withPostgresMemoryBrowseRead } from '@/lib/server';
 import {
@@ -86,10 +90,11 @@ async function loadWorkspace(
   view: 'library' | 'map' | 'connections',
   libraryInput: LibraryInput,
   mapInput: MapInput,
+  diagnostics?: ReturnType<typeof createMemoryLibraryDiagnosticContext>,
 ) {
   if (loadConfig().PERSISTENCE_DRIVER === 'firestore') {
     if (view === 'library') {
-      const [library, filters] = await loadFirestoreMemoryLibrary(libraryInput);
+      const [library, filters] = await loadFirestoreMemoryLibrary(libraryInput, diagnostics);
       return { library, filters, map: null, missingEntity: false };
     }
     // The existing fenced Firestore shared snapshot includes overview/findings.
@@ -166,6 +171,7 @@ export default async function KnowledgePage({
       ? raw.connectivity
       : 'all';
   const source = bounded(raw.source);
+  const diagnostics = view === 'library' ? createMemoryLibraryDiagnosticContext() : undefined;
   const activeLibraryFilters =
     Number(state !== 'in-use') +
     Number(filter !== 'all') +
@@ -212,7 +218,11 @@ export default async function KnowledgePage({
   };
   let data: Awaited<ReturnType<typeof loadWorkspace>>;
   try {
-    data = await loadWorkspace(view, libraryInput, mapInput);
+    data = diagnostics
+      ? await withMemoryLibraryPhase(diagnostics, 'overall', () =>
+          loadWorkspace(view, libraryInput, mapInput, diagnostics),
+        )
+      : await loadWorkspace(view, libraryInput, mapInput);
   } catch {
     return (
       <PageShell size="reading">
@@ -239,6 +249,10 @@ export default async function KnowledgePage({
   }
   const { library, filters, map, missingEntity } = data;
   const now = new Date();
+  const addPersonNoteReturnTo = memoryNoteReturnTo(href({ ...retained, view: 'library', page }));
+  const addPersonNoteHref = addPersonNoteReturnTo
+    ? `/people?addNote=1&returnTo=${encodeURIComponent(addPersonNoteReturnTo)}`
+    : '/people?addNote=1';
   return (
     <PageShell size="wide">
       <PageHeader
@@ -257,6 +271,16 @@ export default async function KnowledgePage({
           Open a saved note or person to review available edits. Editing availability is checked
           with its source.
         </p>
+      ) : null}
+      {view === 'library' ? (
+        <div className="mt-4 flex flex-wrap items-center gap-3 rounded-xl border border-edge bg-raised p-4">
+          <p className="min-w-0 flex-1 text-sm text-muted">
+            You can add a plain-text note about an existing person.
+          </p>
+          <Link href={addPersonNoteHref} className={btn.outline}>
+            Add a note about someone
+          </Link>
+        </div>
       ) : null}
       {view === 'connections' ? (
         <ConnectionsFilters

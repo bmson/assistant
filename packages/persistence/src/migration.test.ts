@@ -7,6 +7,7 @@ import {
   checksumV3,
   compositeMigrationId,
   deserializeMigrationValue,
+  INSTALLATION_RUNTIME_EXCLUSIONS_V2,
   isOwnerEditorRuntimeCursorName,
   MIGRATION_TABLES,
   type MigrationBundle,
@@ -182,8 +183,8 @@ describe('workspace migration format', () => {
 
   it('enumerates the complete PostgreSQL schema without duplicate tables', async () => {
     const { MIGRATION_TABLES } = await import('./migration.js');
-    expect(MIGRATION_TABLES).toHaveLength(96);
-    expect(new Set(MIGRATION_TABLES.map(({ table }) => table))).toHaveProperty('size', 96);
+    expect(MIGRATION_TABLES).toHaveLength(97);
+    expect(new Set(MIGRATION_TABLES.map(({ table }) => table))).toHaveProperty('size', 97);
     expect(MIGRATION_TABLES.some(({ table }) => table === 'recall_surfaces')).toBe(true);
     expect(MIGRATION_TABLES.map(({ table }) => table)).toEqual(
       expect.arrayContaining([
@@ -196,6 +197,7 @@ describe('workspace migration format', () => {
         'mission_reports',
         'notification_outbox',
         'phone_calendar_sharing',
+        'google_calendar_connections',
         'memory_embedding_refreshes',
         'email_attachment_custodies',
         'email_observer_budgets',
@@ -627,6 +629,14 @@ describe('migration format integrity', () => {
     } as unknown as typeof OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1;
     expect(() => validate(input)).toThrow('runtime exclusions');
 
+    input.manifest.coverage.runtimeExclusions = INSTALLATION_RUNTIME_EXCLUSIONS_V2;
+    input.manifest.bundleChecksum = migrationBundleChecksum(
+      input.records,
+      input.manifest.formatVersion,
+      INSTALLATION_RUNTIME_EXCLUSIONS_V2,
+    );
+    expect(() => validate(input)).not.toThrow();
+
     const wrongTable = bundle();
     wrongTable.manifest.coverage.runtimeExclusions = {
       ...OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1,
@@ -682,6 +692,41 @@ describe('migration format integrity', () => {
     input.manifest.recordCount = input.records.length;
     input.manifest.bundleChecksum = checksum(input.records);
     expect(() => validate(input)).toThrow('Owner editor runtime metadata cannot be imported');
+  });
+  it('rejects incoming memory witnesses before accepting recomputed portable checksums', () => {
+    for (const field of ['memoryWriteWitness', 'memory_write_witness']) {
+      const input = bundle();
+      const data = {
+        id: 'memory-1',
+        contentHash: 'a'.repeat(64),
+        [field]: {
+          version: 1,
+          writeVersion: '11111111-1111-4111-8111-111111111111',
+          contentHash: 'a'.repeat(64),
+          attribution: null,
+        },
+      } as MigrationRecord['data'];
+      const record: MigrationRecord = {
+        table: 'memories',
+        collection: 'memories',
+        id: 'memory-1',
+        data,
+        checksum: checksum(data),
+      };
+      input.records.push(record);
+      input.manifest.tables.memories = {
+        collection: 'memories',
+        count: 1,
+        checksum: checksum([record]),
+      };
+      input.manifest.coverage.supportedTables = ['agents', 'memories'];
+      input.manifest.recordCount = input.records.length;
+      input.manifest.bundleChecksum = checksum(input.records);
+
+      expect(() => validate(input)).toThrow(
+        'Installation-local memory write witness cannot appear in a portable migration bundle',
+      );
+    }
   });
   it('rejects duplicate records even with newly recomputed bundle and table checksums', () => {
     const input = bundle();

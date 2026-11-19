@@ -3,6 +3,8 @@ import {
   checksumV3,
   compositeMigrationId,
   deterministicMigrationCompare,
+  ESTIMATED_COST_AUTHORITY_TABLES,
+  INSTALLATION_RUNTIME_EXCLUSIONS_V2,
   isOwnerEditorRuntimeCursorName,
   MIGRATION_TABLES,
   type MigrationBundle,
@@ -42,6 +44,20 @@ export function filterPortableMaintenanceCursorRows(
   rows: Record<string, unknown>[],
 ): Record<string, unknown>[] {
   return rows.filter((row) => !isOwnerEditorRuntimeCursorName(row.name));
+}
+
+/** Memory write witnesses are installation-local and must never enter a portable bundle. */
+export function omitInstallationLocalMemoryWitnessColumns(
+  table: string,
+  row: Record<string, unknown>,
+): Record<string, unknown> {
+  if (table !== 'memories') return row;
+  const {
+    memory_write_witness: _snakeCaseWitness,
+    memoryWriteWitness: _camelCaseWitness,
+    ...portable
+  } = row;
+  return portable;
 }
 
 // PostgreSQL column names do not always encode the TypeScript field's acronym
@@ -175,6 +191,23 @@ export async function exportWorkspaceSnapshot(
       const sourceTables = await connection<
         { table_name: string }[]
       >`select table_name from information_schema.tables where table_schema = 'public' and table_type = 'BASE TABLE' order by table_name`;
+      const sourceTableNames = new Set(sourceTables.map((row) => row.table_name));
+      for (const table of ESTIMATED_COST_AUTHORITY_TABLES) {
+        if (!sourceTableNames.has(table)) continue;
+        const [row] = await connection.unsafe<{ present: boolean }[]>(
+          `select exists (select 1 from ${quoteIdentifier(table)}) as present`,
+        );
+        if (row?.present) {
+          throw new Error(
+            `Unsupported portability: estimated-cost authority table ${table} is not empty`,
+          );
+        }
+      }
+      const runtimeExclusions = ESTIMATED_COST_AUTHORITY_TABLES.every((table) =>
+        sourceTableNames.has(table),
+      )
+        ? INSTALLATION_RUNTIME_EXCLUSIONS_V2
+        : OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1;
       const timestampRows = await connection<
         { table_name: MigrationTable; column_name: string }[]
       >`select table_name, column_name from information_schema.columns where table_schema = 'public' and data_type in ('timestamp with time zone', 'timestamp without time zone') order by table_name, ordinal_position`;
@@ -247,15 +280,16 @@ export async function exportWorkspaceSnapshot(
         }
         if (table === 'maintenance_cursors') rows = filterPortableMaintenanceCursorRows(rows);
         for (const row of rows) {
-          const rawId = row[definition.id];
+          const portableRow = omitInstallationLocalMemoryWitnessColumns(table, row);
+          const rawId = portableRow[definition.id];
           if (rawId === undefined || rawId === null)
             throw new Error(`Missing ${table}.${definition.id}`);
           const data = Object.fromEntries(
-            Object.entries(row)
+            Object.entries(portableRow)
               .filter(([key]) => !key.startsWith(TIMESTAMP_PREFIX))
               .sort(([a], [b]) => deterministicMigrationCompare(a, b))
               .map(([key, value]) => {
-                const timestamp = row[`${TIMESTAMP_PREFIX}${key}`];
+                const timestamp = portableRow[`${TIMESTAMP_PREFIX}${key}`];
                 if (typeof timestamp === 'string')
                   return [
                     migrationColumnFieldName(table, key),
@@ -288,6 +322,8 @@ export async function exportWorkspaceSnapshot(
                 ];
               }),
           );
+          // Reconnect OAuth after a cross-store move. Never export callback state or tokens.
+          if (table === 'mcp_connections') delete data.oauthState;
           const singletonByAgent = table === 'owner_card' || table === 'ambient_snapshots';
           const migratedId =
             (singletonByAgent ? options.agentId : null) ??
@@ -374,18 +410,18 @@ export async function exportWorkspaceSnapshot(
           complete: migrationCoverageIsComplete(
             sourceTables.map((row) => row.table_name),
             tables,
-            OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1,
+            runtimeExclusions,
           ),
           supportedTables: tables,
           omittedTables: migrationCoverageOmittedTables(
             sourceTables.map((row) => row.table_name),
             tables,
-            OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1,
+            runtimeExclusions,
           ),
-          runtimeExclusions: OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1,
+          runtimeExclusions,
         },
         recordCount: records.length,
-        bundleChecksum: migrationBundleChecksum(records, 3, OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1),
+        bundleChecksum: migrationBundleChecksum(records, 3, runtimeExclusions),
         unsupportedTables: [],
       };
       return { manifest, records };

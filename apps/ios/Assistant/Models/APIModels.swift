@@ -1,6 +1,168 @@
 import Foundation
 import CryptoKit
 
+/// The cost API accepts ISO-8601 timestamps with or without fractional seconds.
+private func estimatedCostWireDate(_ value: String) -> Date? {
+    value.assistantDate ?? ISO8601DateFormatter().date(from: value)
+}
+
+/// The cost permission contract uses integer microdollars, never rounded
+/// display strings, as the authority for an owner's decision.
+struct EstimatedCostQuote: Codable, Equatable, Sendable {
+    let type: String
+    let operationId: String
+    let taskId: String
+    let requestText: String
+    let quoteId: String
+    let quoteVersion: String
+    let expiresAt: String
+    let nextAttemptMicros: Int64
+    let allowanceMicros: Int64
+    let recordedDailyMicros: Int64
+    let recordedMonthlyMicros: Int64
+    let totalHeldMicros: Int64
+    let eligibleHistoricalUnknownMicros: Int64
+    let pendingApprovalMicros: Int64
+    let dailyCeilingMicros: Int64
+    let monthlyCeilingMicros: Int64
+    let dailyProjectedGrossMicros: Int64
+    let monthlyProjectedGrossMicros: Int64
+    let complete: Bool
+    let canApprove: Bool
+    let unavailableReason: String?
+
+    var expiry: Date? {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return fractional.date(from: expiresAt) ?? ISO8601DateFormatter().date(from: expiresAt)
+    }
+
+    var isValid: Bool {
+        let identifiers = [operationId, taskId, quoteId, quoteVersion]
+        let amounts = [nextAttemptMicros, allowanceMicros, recordedDailyMicros, recordedMonthlyMicros,
+                       totalHeldMicros, eligibleHistoricalUnknownMicros, pendingApprovalMicros, dailyCeilingMicros,
+                       monthlyCeilingMicros, dailyProjectedGrossMicros, monthlyProjectedGrossMicros]
+        return type == "estimated-cost-approval" && identifiers.allSatisfy { !$0.isEmpty && $0.utf8.count <= 200 }
+            && !requestText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && requestText.utf8.count <= 16_000
+            && expiry != nil && amounts.allSatisfy { (0...9_007_199_254_740_991).contains($0) }
+            && eligibleHistoricalUnknownMicros <= totalHeldMicros
+            && (!complete || (dailyProjectedGrossMicros == recordedDailyMicros + totalHeldMicros + pendingApprovalMicros
+                && monthlyProjectedGrossMicros == recordedMonthlyMicros + totalHeldMicros + pendingApprovalMicros))
+            && (!canApprove || (complete && nextAttemptMicros > 0 && allowanceMicros >= nextAttemptMicros))
+    }
+}
+
+struct EstimatedCostRequestProjection: Codable, Equatable, Sendable {
+    let status: String
+    let operationId: String
+    let quote: EstimatedCostQuote?
+    let grantExpiresAt: String?
+    let reason: String?
+
+    func isValid(for operation: String) -> Bool {
+        guard operationId == operation else { return false }
+        if let quote, (!quote.isValid || quote.operationId != operation) { return false }
+        switch status {
+        case "pending", "declined", "expired_or_needs_refresh": return quote != nil
+        case "approved": return quote != nil && grantExpiresAt.flatMap(estimatedCostWireDate) != nil
+        case "cancelled": return true
+        case "unavailable": return !(reason ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        default: return false
+        }
+    }
+}
+
+struct EstimatedCostBudgetTracking: Codable, Equatable, Sendable {
+    let observedAt: String
+    let complete: Bool
+    let recordedDailyMicros: Int64?
+    let recordedMonthlyMicros: Int64?
+    let totalHeldMicros: Int64?
+    let historicalUnknownMicros: Int64?
+    let pendingApprovalMicros: Int64?
+    let dailyPlannedExposureMicros: Int64?
+    let monthlyPlannedExposureMicros: Int64?
+
+    var isValid: Bool {
+        let amounts = [recordedDailyMicros, recordedMonthlyMicros, totalHeldMicros, historicalUnknownMicros,
+                       pendingApprovalMicros, dailyPlannedExposureMicros, monthlyPlannedExposureMicros]
+        guard estimatedCostWireDate(observedAt) != nil,
+              amounts.allSatisfy({ $0.map { (0...9_007_199_254_740_991).contains($0) } ?? true }) else { return false }
+        if let historicalUnknownMicros, let totalHeldMicros, historicalUnknownMicros > totalHeldMicros { return false }
+        if let recordedDailyMicros, let totalHeldMicros, let pendingApprovalMicros, let dailyPlannedExposureMicros,
+           recordedDailyMicros + totalHeldMicros + pendingApprovalMicros != dailyPlannedExposureMicros { return false }
+        if let recordedMonthlyMicros, let totalHeldMicros, let pendingApprovalMicros, let monthlyPlannedExposureMicros,
+           recordedMonthlyMicros + totalHeldMicros + pendingApprovalMicros != monthlyPlannedExposureMicros { return false }
+        return true
+    }
+
+    func matches(_ quote: EstimatedCostQuote) -> Bool {
+        isValid && complete && dailyPlannedExposureMicros != nil && monthlyPlannedExposureMicros != nil
+            && recordedDailyMicros == quote.recordedDailyMicros
+            && recordedMonthlyMicros == quote.recordedMonthlyMicros
+            && totalHeldMicros == quote.totalHeldMicros
+            && historicalUnknownMicros == quote.eligibleHistoricalUnknownMicros
+            && pendingApprovalMicros == quote.pendingApprovalMicros
+    }
+}
+
+struct EstimatedCostOverviewResponse: Codable, Sendable {
+    let ok: Bool
+    let requests: [EstimatedCostRequestProjection]?
+    let tracking: EstimatedCostBudgetTracking?
+
+    var isValid: Bool {
+        guard ok, let tracking, tracking.isValid else { return false }
+        guard let requests else { return true } // Missing inventory is not an empty inventory.
+        let ids = requests.map(\.operationId)
+        return ids.allSatisfy { !$0.isEmpty } && Set(ids).count == ids.count
+            && requests.allSatisfy { $0.isValid(for: $0.operationId) }
+    }
+}
+
+struct EstimatedCostQuoteResponse: Codable, Sendable {
+    let ok: Bool
+    let request: EstimatedCostRequestProjection?
+    let tracking: EstimatedCostBudgetTracking?
+}
+struct EstimatedCostDecisionResponse: Codable, Sendable {
+    let ok: Bool
+    let receipt: EstimatedCostDecisionReceipt?
+}
+
+struct EstimatedCostDecision: Codable, Equatable, Sendable {
+    let operationId: String
+    let quoteId: String
+    let quoteVersion: String
+    let decisionId: String
+    let decision: String
+}
+
+struct EstimatedCostDecisionReceipt: Codable, Equatable, Sendable {
+    let decisionId: String
+    let operationId: String
+    let quoteId: String
+    let status: String
+    let allowanceMicros: Int64?
+    let expiresAt: String?
+
+    func confirms(_ decision: EstimatedCostDecision, quote: EstimatedCostQuote) -> Bool {
+        guard decision.operationId == quote.operationId, decision.quoteId == quote.quoteId,
+              decision.quoteVersion == quote.quoteVersion, decisionId == decision.decisionId,
+              operationId == decision.operationId, quoteId == decision.quoteId else { return false }
+        switch status {
+        case "approved":
+            guard decision.decision == "approve", allowanceMicros == quote.allowanceMicros,
+                  let expiresAt else { return false }
+            let fractional = ISO8601DateFormatter(); fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            return fractional.date(from: expiresAt) != nil || ISO8601DateFormatter().date(from: expiresAt) != nil
+        case "declined": return decision.decision == "decline" && allowanceMicros == nil && expiresAt == nil
+        case "stale": return allowanceMicros == nil && expiresAt == nil
+        default: return false
+        }
+    }
+}
+
 struct SituationSource: Codable, Hashable {
     var kind: String
     var id: String
@@ -139,6 +301,8 @@ enum ChatRole: String, Codable, Sendable {
 
 struct MessagePart: Codable, Hashable, Sendable {
     let type: String
+    var operationId: String? = nil
+    var requestText: String? = nil
     var text: String?
     var data: JSONValue?
     var notice: String?
@@ -643,6 +807,7 @@ struct ChatMessage: Codable, Identifiable, Hashable, Sendable {
     func outputFallback(isStreaming: Bool, hasRenderableCards: Bool) -> AssistantOutputFallback? {
         guard role == .assistant, !isStreaming, visibleTextBubbles.isEmpty,
               decisionParts.isEmpty, approvalSummary == nil, suggestionParts.isEmpty,
+              !parts.contains(where: { $0.type == "estimated-cost-approval" }),
               !hasRenderableCards, noticeKind == nil, !isOffCourse else { return nil }
         if parts.contains(where: { $0.type == "data-card" }) {
             return .init(title: "Card unavailable in this app",
@@ -1034,6 +1199,7 @@ struct ActivityItem: Codable, Identifiable, Sendable {
     let conversationId: String?
     let source: String?
     let externalEventId: String?
+    let estimatedCostOperationId: String?
 
     init(
         id: String,
@@ -1052,7 +1218,8 @@ struct ActivityItem: Codable, Identifiable, Sendable {
         createdAt: String? = nil,
         conversationId: String? = nil,
         source: String? = nil,
-        externalEventId: String? = nil
+        externalEventId: String? = nil,
+        estimatedCostOperationId: String? = nil
     ) {
         self.id = id
         self.type = type
@@ -1071,6 +1238,7 @@ struct ActivityItem: Codable, Identifiable, Sendable {
         self.conversationId = conversationId
         self.source = source
         self.externalEventId = externalEventId
+        self.estimatedCostOperationId = estimatedCostOperationId
     }
 
     var displayTitle: String {
@@ -1800,6 +1968,7 @@ struct ActivityStatusResponse: Codable, Sendable {
     let hasPendingApproval: Bool
     let hasActiveAutonomy: Bool
     let stuckWaiting: Bool
+    var estimatedCostOperationId: String? = nil
 }
 
 enum ActivityStatusReadOutcome: Sendable {
@@ -1866,8 +2035,15 @@ extension ActivityItem {
             createdAt: createdAt,
             conversationId: conversationId,
             source: source,
-            externalEventId: externalEventId
+            externalEventId: externalEventId,
+            estimatedCostOperationId: status.status == "waiting_estimated_cost" ? Self.validCostOperationID(status.estimatedCostOperationId) : nil
         )
+    }
+
+    private static func validCostOperationID(_ value: String?) -> String? {
+        guard let value, !value.isEmpty, value.utf8.count <= 128,
+              value.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 45 || $0 == 95 }) else { return nil }
+        return value
     }
 
     private static func activityDate(_ value: String) -> Date? {
@@ -3198,8 +3374,20 @@ struct ImprovementActionPresentation: Equatable, Sendable {
     }
 }
 
+struct McpConnectionUpdateResponse: Decodable, Sendable {
+    let status: String?
+
+    var requiresOAuthReconnectForRefresh: Bool { status == "oauth_reconnect_to_refresh" }
+}
+
 struct McpConnectionsResponse: Codable, Sendable {
     let connections: [McpConnection]
+    let oauthConfigured: Bool?
+
+    init(connections: [McpConnection], oauthConfigured: Bool? = nil) {
+        self.connections = connections
+        self.oauthConfigured = oauthConfigured
+    }
 }
 
 struct McpConnection: Codable, Identifiable, Sendable {

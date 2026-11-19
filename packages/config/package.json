@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./google-calendar": "./src/google-calendar.ts",
     "./modules": "./src/modules.ts"
   },
   "scripts": {

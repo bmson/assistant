@@ -4,6 +4,7 @@ import { eq, inArray } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { getAgent } from '../../chat.js';
+import { calendarAgendaSummary } from '../calendar-agenda.js';
 import { type GoldenFixture, runGoldenTask } from '../golden/harness.js';
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -157,15 +158,39 @@ describe('executor calendar overview presentation', () => {
 
       expect(result.toolNames).toEqual(['calendar.list_events']);
       expect(gmailSearches).toBe(0);
-      expect(result.finalText).toBe('2 calendar entries from Work.');
+      expect(result.finalText).toContain('Display time zone: UTC');
+      expect(result.finalText).toContain('2 calendar entries from Work.');
+      expect(result.finalText).toContain('Your RSVP: accepted.');
+      expect(result.finalText).toContain('Your RSVP: needs a response.');
+      expect(result.finalText).toContain('Calendar read coverage');
+      expect(result.finalText).toContain('Calendars checked in this read — Work');
+      expect(result.finalText).toContain('Possible overlap');
+      expect(result.finalText).toContain(
+        'You accepted Project review (Work). Your attendance at Planning hold (Work) isn’t confirmed.',
+      );
+      if (modelText) expect(result.finalText).not.toContain(modelText);
       const persisted = await db.select().from(messages).where(eq(messages.taskId, result.taskId));
       const assistant = persisted.filter((message) => message.role === 'assistant').at(-1);
+      const persistedCards =
+        (assistant?.parts as Array<{ type?: unknown; data?: unknown }> | undefined)?.flatMap(
+          (part) => {
+            if (
+              part.type !== 'data-card' ||
+              !part.data ||
+              typeof part.data !== 'object' ||
+              (part.data as { presentation?: unknown }).presentation !== 'calendar-agenda'
+            )
+              return [];
+            return [part.data as Record<string, unknown>];
+          },
+        ) ?? [];
+      expect(persistedCards).toHaveLength(1);
+      expect(result.finalText).toBe(calendarAgendaSummary(persistedCards));
       const payload = JSON.stringify(assistant?.parts);
       expect(payload).toContain('calendar-agenda');
       expect(payload).toContain('briefing');
       expect(payload).toContain('Project review');
       expect(payload).toContain('Planning hold');
-      expect(payload).toContain('Needs response');
       expect(payload).toContain('Possible overlap');
       expect(payload).toContain(
         'You accepted Project review (Work). Your attendance at Planning hold (Work) isn’t confirmed.',
@@ -181,8 +206,9 @@ describe('executor calendar overview presentation', () => {
         .flatMap((section) => section.items ?? [])
         .map((item) => item.note ?? '')
         .join(' ');
-      expect(visibleNotes).toContain('Needs response');
-      expect(visibleNotes).not.toMatch(/needsAction|accepted/);
+      expect(visibleNotes).toContain('Your RSVP: accepted.');
+      expect(visibleNotes).toContain('Your RSVP: needs a response.');
+      expect(visibleNotes).not.toMatch(/needsAction|ownerResponse|responseStatus/);
       expect(result.finalText).not.toContain('Next step:');
     });
   }

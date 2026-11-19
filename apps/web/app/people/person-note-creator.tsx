@@ -14,6 +14,7 @@ import { memoryNoteHref } from '@/lib/memory-note-context';
 import { OwnerEditorOperation } from '@/lib/owner-editor-operation';
 import { OwnerEditorDialogStatus, type OwnerEditorDisplayScope } from '@/lib/owner-editor-status';
 import { btn, labelClass, selectClass, textareaClass } from '@/lib/ui';
+import { personNoteRecoveryStorage } from './person-note-recovery-storage';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const REVISION = /^[a-f0-9]{64}$/;
@@ -42,6 +43,12 @@ export interface PersonNoteCreatorProps {
   snapshot: PersonNoteCreateSnapshot | null;
   /** Opaque signed grant; the browser does not decode its target binding. */
   grant: OwnerEditorFormGrant | null;
+  /** Internal chooser path shown when current issuance does not allow this person. */
+  unavailableHref?: string | null;
+  /** Strictly validated Saved-notes return context for the new note's review link. */
+  returnTo?: string | null;
+  /** Opaque same-owner/server/session local-state partition; not an authorization value. */
+  recoveryPartition?: string | null;
 }
 
 export function PersonNoteResultStatus({
@@ -87,18 +94,35 @@ export function PersonNoteResultStatus({
 export function PersonNoteRecovery({
   state,
   checkResult,
+  draftPresent,
 }: {
   state: ReturnType<OwnerEditorOperation['getSnapshot']>;
   checkResult: () => void;
+  draftPresent: boolean;
 }) {
   if (state.phase !== 'pending') return null;
+  const busyCopy = state.busy
+    ? state.message === 'Saving…'
+      ? 'Saving…'
+      : 'Checking save result…'
+    : null;
+  const pendingCopy =
+    !state.busy && state.reply?.authority === 'unresolved' && state.reply.reason === 'preparing';
+  const statusCopy =
+    busyCopy ??
+    (pendingCopy
+      ? 'Save pending. Its result is not confirmed yet.'
+      : draftPresent
+        ? 'Save result unknown. Check result before adding another note.'
+        : 'The result of an earlier save is still unknown. Check result before adding another note.');
   return (
     <div className="grid gap-2">
       <button type="button" className={btn.primary} disabled={state.busy} onClick={checkResult}>
         Check result
       </button>
       <p className="text-sm text-muted">
-        Check the same save before trying again. Reloading loses the note text.
+        {statusCopy}{' '}
+        {draftPresent ? 'Your draft is kept on this page. Reloading loses the note text.' : ''}
       </p>
     </div>
   );
@@ -301,11 +325,15 @@ const EMPTY_STATE = Object.freeze({
 });
 const noSnapshot = () => EMPTY_STATE;
 
-/**
- * Dormant person-note form. Do not mount it until its command has separate
- * release authorization, grant issuance and capability coverage.
- */
-export function PersonNoteCreator({ session, snapshot, grant }: PersonNoteCreatorProps) {
+/** Creates a plain-text note about one currently verified, non-owner person. */
+export function PersonNoteCreator({
+  session,
+  snapshot,
+  grant,
+  unavailableHref,
+  returnTo,
+  recoveryPartition,
+}: PersonNoteCreatorProps) {
   const router = useRouter();
   const [operationSession, setOperationSession] = useState(session);
   useEffect(() => {
@@ -314,9 +342,13 @@ export function PersonNoteCreator({ session, snapshot, grant }: PersonNoteCreato
   const controller = useMemo(
     () =>
       operationSession
-        ? new OwnerEditorOperation(operationSession, () => window.sessionStorage)
+        ? new OwnerEditorOperation(operationSession, () =>
+            recoveryPartition
+              ? personNoteRecoveryStorage(window.sessionStorage, recoveryPartition)
+              : window.sessionStorage,
+          )
         : null,
-    [operationSession],
+    [operationSession, recoveryPartition],
   );
   const state = useSyncExternalStore(
     controller?.subscribe ?? noSubscribe,
@@ -359,7 +391,7 @@ export function PersonNoteCreator({ session, snapshot, grant }: PersonNoteCreato
   const noteHref = createdMemoryId
     ? memoryNoteHref(
         createdMemoryId,
-        `/people/${state.reviewTargetId ?? snapshot?.contactId ?? ''}`,
+        returnTo ?? `/people/${state.reviewTargetId ?? snapshot?.contactId ?? ''}`,
       )
     : null;
   const displayed: OwnerEditorDisplayScope | null = capture
@@ -464,10 +496,15 @@ export function PersonNoteCreator({ session, snapshot, grant }: PersonNoteCreato
       ) : null}
       {!currentEligible ? (
         <p role="status" className="mt-2 text-sm text-muted">
-          Adding a note is unavailable for this person view.
+          Adding a note is unavailable for this person view.{' '}
+          {unavailableHref ? (
+            <Link href={unavailableHref} className="text-accent underline">
+              Choose another existing person
+            </Link>
+          ) : null}
         </p>
       ) : null}
-      {!sessionMatches ? (
+      {operationSession && !sessionMatches ? (
         <p role="status" className="mt-2 text-sm text-muted">
           Your sign-in changed. Check any earlier save before starting another.
         </p>
@@ -603,6 +640,7 @@ export function PersonNoteCreator({ session, snapshot, grant }: PersonNoteCreato
         <PersonNoteRecovery
           state={state}
           checkResult={() => void controller?.checkPendingResult()}
+          draftPresent={draft.length > 0}
         />
         {state.phase === 'resolved' && !state.reviewRequired && hasNewGrant ? (
           <button type="button" className={btn.outline} onClick={reviewFreshPerson}>

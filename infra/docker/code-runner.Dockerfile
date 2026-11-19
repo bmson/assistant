@@ -11,6 +11,7 @@ FROM mirror.gcr.io/library/node:26-slim AS build
 WORKDIR /workspace
 RUN npm install --global corepack@0.36.0 && corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
+COPY patches ./patches
 COPY workers/code-runner ./workers/code-runner
 # Legacy deploy resolves root workspace links even for a filtered worker.
 # These build-only packages are excluded from the production runtime copy.
@@ -20,6 +21,7 @@ RUN pnpm install --frozen-lockfile --filter @assistant/code-runner... \
 
 FROM mirror.gcr.io/library/node:26-slim
 WORKDIR /app
+COPY infra/gcp/release-contracts.json /app/infra/gcp/release-contracts.json
 RUN apt-get update \
   && apt-get upgrade -y --no-install-recommends \
   && apt-get install -y --no-install-recommends python3 python3-pip \

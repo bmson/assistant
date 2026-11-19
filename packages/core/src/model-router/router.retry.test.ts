@@ -39,6 +39,7 @@ vi.mock('../cost.js', async (importOriginal) => ({
 }));
 
 import {
+  type CallOptions,
   getProviderAttemptEvidence,
   isProviderCapabilityError,
   ModelCallFallbackAttemptError,
@@ -554,6 +555,166 @@ describe('ModelRouter.object provider-capability fallback', () => {
     expect(outcome.attempts ?? []).toEqual([]);
     expect(stubs.generateObject).not.toHaveBeenCalled();
     expect(stubs.beginCostAttempt).not.toHaveBeenCalled();
+  });
+
+  it('hands the exact denied first call to durable parking before provider work', async () => {
+    const { router } = makeRouter();
+    stubs.reserveCost.mockResolvedValue({
+      ok: false,
+      reason: 'monthly budget exceeded',
+      resumeAt: new Date(),
+    });
+    const candidate = {
+      role: 'extract' as const,
+      critical: false,
+      modelId: 'test/fallback',
+      nextAttemptMicros: 10,
+      routingDigest: 'a'.repeat(64),
+      requestDigest: 'b'.repeat(64),
+    };
+    vi.spyOn(router, 'prepareEstimatedCostCandidate').mockResolvedValue(candidate);
+    const parkEstimatedCost = vi.fn<NonNullable<CallOptions['parkEstimatedCost']>>(
+      async () => 'parked',
+    );
+    await expect(
+      router.object('extract', { system: 'instructions', prompt: 'go', schema, parkEstimatedCost }),
+    ).rejects.toMatchObject({ name: 'EstimatedCostParkedError', outcome: 'parked' });
+    expect(parkEstimatedCost).toHaveBeenCalledOnce();
+    expect(parkEstimatedCost.mock.calls[0]?.[0]).toMatchObject({
+      candidate,
+      providerAttempts: 0,
+      options: { system: 'instructions', prompt: 'go', requestProfile: { output: 'json_schema' } },
+    });
+    expect(stubs.generateObject).not.toHaveBeenCalled();
+    expect(stubs.beginCostAttempt).not.toHaveBeenCalled();
+  });
+
+  it('stops provider work when durable parking has an ambiguous outcome', async () => {
+    const { router } = makeRouter();
+    stubs.reserveCost.mockResolvedValue({
+      ok: false,
+      reason: 'monthly budget exceeded',
+      resumeAt: new Date(),
+    });
+    vi.spyOn(router, 'prepareEstimatedCostCandidate').mockResolvedValue({
+      role: 'extract',
+      critical: false,
+      modelId: 'test/fallback',
+      nextAttemptMicros: 10,
+      routingDigest: 'a'.repeat(64),
+      requestDigest: 'b'.repeat(64),
+    });
+    await expect(
+      router.object('extract', {
+        prompt: 'go',
+        schema,
+        parkEstimatedCost: async () => {
+          throw new Error('write outcome unknown');
+        },
+      }),
+    ).rejects.toMatchObject({ name: 'EstimatedCostParkedError', outcome: 'unknown' });
+    expect(stubs.generateObject).not.toHaveBeenCalled();
+  });
+
+  it('never parks a later denial after a provider attempt', async () => {
+    const { router } = makeRouter();
+    stubs.generateObject.mockRejectedValueOnce(removedModelError());
+    stubs.reserveCost
+      .mockResolvedValueOnce({ ok: true, reservationId: 'first' })
+      .mockResolvedValue({ ok: false, reason: 'monthly budget exceeded', resumeAt: new Date() });
+    const parkEstimatedCost = vi.fn(async () => 'parked' as const);
+    await router.object('extract', { prompt: 'go', schema, parkEstimatedCost });
+    expect(stubs.generateObject).toHaveBeenCalledOnce();
+    expect(parkEstimatedCost).not.toHaveBeenCalled();
+  });
+
+  it('draws and fences each call against the scoped original task grant', async () => {
+    const { router, route } = makeRouter();
+    const fallback = await route.getMockImplementation()?.('reason', { forceFallback: true });
+    if (!fallback?.ok) throw new Error('missing route');
+    vi.spyOn(router as any, 'resolveRoute').mockResolvedValue(fallback);
+    vi.spyOn(router, 'prepareEstimatedCostCandidate').mockResolvedValue({
+      role: 'reason',
+      critical: true,
+      modelId: fallback.modelId,
+      nextAttemptMicros: 50,
+      routingDigest: 'a'.repeat(64),
+      requestDigest: 'b'.repeat(64),
+    });
+    const draw = vi.fn(async (input: { attemptId: string }) => ({
+      ok: true as const,
+      reservationId: input.attemptId,
+    }));
+    const begin = vi.fn(async () => true);
+    const persistence = (router as any).persistence;
+    persistence.costs.drawEstimatedCostGrant = draw;
+    persistence.costs.beginEstimatedCostGrantAttempt = begin;
+    stubs.generateText.mockResolvedValue(stepResult());
+    const grant = {
+      actor: { installationId: 'install', ownerId: 'owner' },
+      operationId: 'operation',
+      taskId: 'task-a',
+      grantId: 'grant',
+      bindingDigest: 'binding',
+      leaseToken: 'lease',
+    };
+    await router.withEstimatedCostGrant(grant, async () => {
+      expect(
+        (
+          await router.step('reason', {
+            taskId: 'task-a',
+            prompt: 'one',
+            critical: true,
+            tools: {},
+          })
+        ).ok,
+      ).toBe(true);
+      expect(
+        (
+          await router.step('reason', {
+            taskId: 'task-a',
+            prompt: 'two',
+            critical: true,
+            tools: {},
+          })
+        ).ok,
+      ).toBe(true);
+      await expect(
+        router.step('reason', { taskId: 'task-b', prompt: 'wrong task', tools: {} }),
+      ).rejects.toThrow('grant context');
+    });
+    expect(draw).toHaveBeenCalledTimes(2);
+    expect(begin).toHaveBeenCalledTimes(2);
+    expect(draw.mock.calls[0]?.[0].attemptId).not.toBe(draw.mock.calls[1]?.[0].attemptId);
+    expect(stubs.reserveCost).not.toHaveBeenCalled();
+    expect(stubs.beginCostAttempt).not.toHaveBeenCalled();
+  });
+
+  it('binds equal-sized structured schemas to different quote digests', async () => {
+    const { router, route } = makeRouter();
+    const selected = await route.getMockImplementation()?.('extract', {});
+    if (!selected?.ok) throw new Error('missing route');
+    vi.spyOn(router as any, 'budgetSnapshot').mockResolvedValue({
+      dailyLimitUsd: 1,
+      monthlyLimitUsd: 1,
+      dailySpentUsd: 0,
+      monthlySpentUsd: 0,
+      heldUsd: 0,
+      softPct: 80,
+    });
+    vi.spyOn(router as any, 'resolveRoute').mockResolvedValue(selected);
+    const first = await router.prepareEstimatedCostCandidate('extract', {
+      prompt: 'same',
+      additionalInputTokens: 12,
+      schema: z.object({ one: z.string() }),
+    } as CallOptions);
+    const second = await router.prepareEstimatedCostCandidate('extract', {
+      prompt: 'same',
+      additionalInputTokens: 12,
+      schema: z.object({ two: z.string() }),
+    } as CallOptions);
+    expect(first.nextAttemptMicros).toBe(second.nextAttemptMicros);
+    expect(first.routingDigest).not.toBe(second.routingDigest);
   });
 
   it('object() still surfaces transient errors without a model switch', async () => {

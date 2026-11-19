@@ -1,10 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import {
+  INSTALLATION_RUNTIME_EXCLUSIONS_V2,
   idempotencyIdentityDigest,
   MIGRATION_TABLES,
   modelToolCallIdentityDigest,
-  OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1,
   toolCallReceiptKeyId,
 } from '@assistant/persistence';
 import { drizzle } from 'drizzle-orm/postgres-js';
@@ -15,6 +15,7 @@ import { allocateTestTarget, assertAllocatedTestTarget } from './test-target.js'
 import {
   exportWorkspaceSnapshot,
   filterPortableMaintenanceCursorRows,
+  omitInstallationLocalMemoryWitnessColumns,
 } from './workspace-migration.js';
 
 describe('portable owner editor cursor filtering', () => {
@@ -25,6 +26,22 @@ describe('portable owner editor cursor filtering', () => {
       { name: 'approval-recovery', cursor: 'task-1' },
     ];
     expect(filterPortableMaintenanceCursorRows(rows)).toEqual(rows.slice(1));
+  });
+});
+
+describe('portable memory witness filtering', () => {
+  it('omits installation-local witness fields from memory exports only', () => {
+    const memoryRow = {
+      id: 'memory-1',
+      content_hash: 'a'.repeat(64),
+      memory_write_witness: { version: 1, attribution: null },
+      memoryWriteWitness: { spoofed: true },
+    };
+    expect(omitInstallationLocalMemoryWitnessColumns('memories', memoryRow)).toEqual({
+      id: 'memory-1',
+      content_hash: 'a'.repeat(64),
+    });
+    expect(omitInstallationLocalMemoryWitnessColumns('tasks', memoryRow)).toBe(memoryRow);
   });
 });
 
@@ -279,12 +296,27 @@ describe.skipIf(!enabled)('PostgreSQL workspace migration export', () => {
           revision: '1',
         },
       });
+      await client`insert into estimated_cost_baselines (installation_id, owner_id, digest, rows) values ('test', ${owner.id}, 'digest', '[]'::jsonb)`;
+      await expect(
+        exportWorkspaceSnapshot({
+          databaseUrl: isolatedUrl,
+          agentId: owner.id,
+          target: {
+            projectId: 'demo-assistant-test',
+            databaseId: '(default)',
+            installationId: 'migration-test',
+          },
+        }),
+      ).rejects.toThrow(
+        'Unsupported portability: estimated-cost authority table estimated_cost_baselines is not empty',
+      );
+      await client`delete from estimated_cost_baselines where installation_id = 'test'`;
       const physicalTables = await client<{ table_name: string }[]>`
         select table_name from information_schema.tables
         where table_schema = 'public' and table_type = 'BASE TABLE'
         order by table_name
       `;
-      const runtimeExclusions = new Set<string>(OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1.tables);
+      const runtimeExclusions = new Set<string>(INSTALLATION_RUNTIME_EXCLUSIONS_V2.tables);
       expect(
         physicalTables.map((row) => row.table_name).filter((name) => !runtimeExclusions.has(name)),
       ).toEqual(MIGRATION_TABLES.map(({ table }) => table).sort());
@@ -313,7 +345,7 @@ describe.skipIf(!enabled)('PostgreSQL workspace migration export', () => {
           'owner_call_grant_usage',
         ]),
         omittedTables: [],
-        runtimeExclusions: OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1,
+        runtimeExclusions: INSTALLATION_RUNTIME_EXCLUSIONS_V2,
       });
       const tupleDocumentId = (parts: string[]) =>
         createHash('sha256').update(JSON.stringify(parts), 'utf8').digest('hex');

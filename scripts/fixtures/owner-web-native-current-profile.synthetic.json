@@ -1,0 +1,293 @@
+{
+  "fixtureKind": "SYNTHETIC_SANITIZED_NATIVE_PROFILE_SHAPE_ONLY",
+  "fixtureBoundary": "Synthetic controls derived from two retained profile shapes. Not raw provider evidence, release evidence, or bootstrap authorization.",
+  "sourceCaptureMetadata": {
+    "canonicalServiceObjectSha256": "121fd1ae1a09bef6e393f218f7b43dd6767810268a09f638f57a8d633d00b32e",
+    "canonicalRevisionObjectSha256": "5ce25868a9cbd1952e5cfe7fd19e8454918a45e395f24d99dda191a82847abbb",
+    "sourceUrlsSha256InResponseOrder": [
+      "6655d0b247155dc70e2a6139a09573bef9ab9acd750d0fe3f566a1397c3bdc0c",
+      "34377609673417651f17a0fdac39e319152a779332e99fe439d7bf6e2662e86c"
+    ],
+    "sourceRevisionTemplateSha256": "ad61125b1a655e9fd0458d2ba7beeac8a86d1b8833170e791e45edc6901b20f6",
+    "note": "These digests identify the source captures only. Fixture service/revision objects below are synthetic and have different bytes."
+  },
+  "service": {
+    "name": "projects/bmson-assistant/locations/us-west1/services/assistant-web",
+    "uid": "synthetic-service-uid",
+    "generation": "410",
+    "createTime": "2026-11-06T00:00:00Z",
+    "updateTime": "2026-11-06T00:01:00Z",
+    "creator": "redacted@synthetic.invalid",
+    "lastModifier": "redacted@synthetic.invalid",
+    "client": "synthetic-client",
+    "clientVersion": "1",
+    "ingress": "INGRESS_TRAFFIC_ALL",
+    "launchStage": "GA",
+    "template": {
+      "revision": "assistant-web-oomrelief-20261106a",
+      "scaling": {
+        "maxInstanceCount": 12
+      },
+      "timeout": "300s",
+      "serviceAccount": "runtime@synthetic.invalid",
+      "containers": [
+        {
+          "image": "us-west1-docker.pkg.dev/bmson-assistant/assistant/web@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "env": [
+            {
+              "name": "ASSISTANT_RELEASE_API_CONTRACT",
+              "value": "1"
+            },
+            {
+              "name": "ASSISTANT_RELEASE_AGENT_API_MIN",
+              "value": "1"
+            },
+            {
+              "name": "ASSISTANT_RELEASE_AGENT_API_MAX",
+              "value": "1"
+            },
+            {
+              "name": "ASSISTANT_RELEASE_SCHEMA_DRIVER",
+              "value": "firestore"
+            },
+            {
+              "name": "ASSISTANT_RELEASE_SCHEMA_MIN",
+              "value": "133"
+            },
+            {
+              "name": "ASSISTANT_RELEASE_SCHEMA_MAX",
+              "value": "133"
+            },
+            {
+              "name": "ASSISTANT_RELEASE_SCHEMA_VERSION",
+              "value": "133"
+            },
+            {
+              "name": "ASSISTANT_RELEASE_MANIFEST",
+              "value": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            },
+            {
+              "name": "ASSISTANT_RELEASE_WRITES_PAUSED",
+              "value": "false"
+            },
+            {
+              "name": "SYNTHETIC_SETTING",
+              "value": "SYNTHETIC_SANITIZED_VALUE"
+            },
+            {
+              "name": "SYNTHETIC_SECRET_REF",
+              "valueSource": {
+                "secretKeyRef": {
+                  "secret": "synthetic-secret-ref-1",
+                  "version": "1"
+                }
+              }
+            }
+          ],
+          "resources": {
+            "limits": {
+              "cpu": "1",
+              "memory": "512Mi"
+            }
+          },
+          "ports": [
+            {
+              "name": "http1",
+              "containerPort": 8080
+            }
+          ],
+          "startupProbe": {
+            "timeoutSeconds": 1,
+            "periodSeconds": 10,
+            "failureThreshold": 3,
+            "tcpSocket": {
+              "port": 8080
+            }
+          }
+        }
+      ],
+      "maxInstanceRequestConcurrency": 80,
+      "client": "synthetic-client",
+      "clientVersion": "1"
+    },
+    "traffic": [
+      {
+        "type": "TRAFFIC_TARGET_ALLOCATION_TYPE_REVISION",
+        "revision": "assistant-web-oomrelief-20261106a",
+        "percent": 100
+      }
+    ],
+    "scaling": {
+      "scalingMode": "MANUAL",
+      "manualInstanceCount": 0
+    },
+    "urls": [
+      "https://assistant-web-83709630368.us-west1.run.app",
+      "https://assistant-web-1234567890-uw.a.run.app"
+    ],
+    "sshEnabled": false,
+    "observedGeneration": "410",
+    "terminalCondition": {
+      "type": "Ready",
+      "state": "CONDITION_SUCCEEDED",
+      "lastTransitionTime": "2026-11-06T00:01:00Z"
+    },
+    "conditions": [
+      {
+        "type": "RoutesReady",
+        "state": "CONDITION_SUCCEEDED",
+        "lastTransitionTime": "2026-11-06T00:01:00Z"
+      },
+      {
+        "type": "ConfigurationsReady",
+        "state": "CONDITION_SUCCEEDED",
+        "lastTransitionTime": "2026-11-06T00:01:00Z"
+      }
+    ],
+    "latestReadyRevision": "projects/bmson-assistant/locations/us-west1/services/assistant-web/revisions/assistant-web-oomrelief-20261106a",
+    "latestCreatedRevision": "projects/bmson-assistant/locations/us-west1/services/assistant-web/revisions/assistant-web-oomrelief-20261106a",
+    "trafficStatuses": [
+      {
+        "type": "TRAFFIC_TARGET_ALLOCATION_TYPE_REVISION",
+        "revision": "assistant-web-oomrelief-20261106a",
+        "percent": 100,
+        "uri": "https://assistant-web-1234567890-uw.a.run.app"
+      }
+    ],
+    "uri": "https://assistant-web-1234567890-uw.a.run.app",
+    "etag": "synthetic-etag-1"
+  },
+  "revision": {
+    "name": "projects/bmson-assistant/locations/us-west1/services/assistant-web/revisions/assistant-web-oomrelief-20261106a",
+    "uid": "synthetic-revision-uid",
+    "generation": "1",
+    "createTime": "2026-11-06T00:00:00Z",
+    "updateTime": "2026-11-06T00:01:00Z",
+    "launchStage": "GA",
+    "service": "assistant-web",
+    "scaling": {
+      "maxInstanceCount": 12
+    },
+    "timeout": "300s",
+    "serviceAccount": "runtime@synthetic.invalid",
+    "containers": [
+      {
+        "name": "web-1",
+        "image": "us-west1-docker.pkg.dev/bmson-assistant/assistant/web@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "env": [
+          {
+            "name": "ASSISTANT_RELEASE_API_CONTRACT",
+            "value": "1"
+          },
+          {
+            "name": "ASSISTANT_RELEASE_AGENT_API_MIN",
+            "value": "1"
+          },
+          {
+            "name": "ASSISTANT_RELEASE_AGENT_API_MAX",
+            "value": "1"
+          },
+          {
+            "name": "ASSISTANT_RELEASE_SCHEMA_DRIVER",
+            "value": "firestore"
+          },
+          {
+            "name": "ASSISTANT_RELEASE_SCHEMA_MIN",
+            "value": "133"
+          },
+          {
+            "name": "ASSISTANT_RELEASE_SCHEMA_MAX",
+            "value": "133"
+          },
+          {
+            "name": "ASSISTANT_RELEASE_SCHEMA_VERSION",
+            "value": "133"
+          },
+          {
+            "name": "ASSISTANT_RELEASE_MANIFEST",
+            "value": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+          },
+          {
+            "name": "ASSISTANT_RELEASE_WRITES_PAUSED",
+            "value": "false"
+          },
+          {
+            "name": "SYNTHETIC_SETTING",
+            "value": "SYNTHETIC_SANITIZED_VALUE"
+          },
+          {
+            "name": "SYNTHETIC_SECRET_REF",
+            "valueSource": {
+              "secretKeyRef": {
+                "secret": "synthetic-secret-ref-1",
+                "version": "1"
+              }
+            }
+          }
+        ],
+        "resources": {
+          "limits": {
+            "cpu": "1",
+            "memory": "512Mi"
+          }
+        },
+        "ports": [
+          {
+            "name": "http1",
+            "containerPort": 8080
+          }
+        ],
+        "startupProbe": {
+          "timeoutSeconds": 1,
+          "periodSeconds": 10,
+          "failureThreshold": 3,
+          "tcpSocket": {
+            "port": 8080
+          }
+        }
+      }
+    ],
+    "conditions": [
+      {
+        "type": "Ready",
+        "state": "CONDITION_SUCCEEDED",
+        "message": "Synthetic condition"
+      },
+      {
+        "type": "Active",
+        "state": "CONDITION_SUCCEEDED"
+      },
+      {
+        "type": "ResourcesAvailable",
+        "state": "CONDITION_SUCCEEDED",
+        "message": "Synthetic condition"
+      },
+      {
+        "type": "TrafficShutDown",
+        "state": "CONDITION_SUCCEEDED"
+      },
+      {
+        "type": "ContainerReady",
+        "state": "CONDITION_SUCCEEDED"
+      },
+      {
+        "type": "ContainerHealthy",
+        "state": "CONDITION_SUCCEEDED",
+        "message": "Synthetic condition"
+      }
+    ],
+    "observedGeneration": "1",
+    "logUri": "https://logs.synthetic.invalid/revision",
+    "maxInstanceRequestConcurrency": 80,
+    "containerStatuses": [
+      {
+        "name": "web-1",
+        "imageDigest": "us-west1-docker.pkg.dev/bmson-assistant/assistant/web@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      }
+    ],
+    "creator": "redacted@synthetic.invalid",
+    "client": "synthetic-client",
+    "clientVersion": "1",
+    "etag": "synthetic-revision-etag"
+  }
+}

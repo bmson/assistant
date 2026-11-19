@@ -9,6 +9,21 @@ it('keeps portable record types compatible with all PostgreSQL tables', () => {
       : never;
   }[keyof typeof schema];
   expectTypeOf<keyof Records>().toEqualTypeOf<SchemaTables>();
+  expectTypeOf<Records['estimatedCostRequests']>().toEqualTypeOf<
+    typeof schema.estimatedCostRequests.$inferSelect
+  >();
+  expectTypeOf<Records['estimatedCostBaselines']>().toEqualTypeOf<
+    typeof schema.estimatedCostBaselines.$inferSelect
+  >();
+  expectTypeOf<Records['estimatedCostQuoteRequests']>().toEqualTypeOf<
+    typeof schema.estimatedCostQuoteRequests.$inferSelect
+  >();
+  expectTypeOf<Records['estimatedCostDecisions']>().toEqualTypeOf<
+    typeof schema.estimatedCostDecisions.$inferSelect
+  >();
+  expectTypeOf<Records['estimatedCostGrants']>().toEqualTypeOf<
+    typeof schema.estimatedCostGrants.$inferSelect
+  >();
 
   expectTypeOf<Records['calendarAccounts']>().toEqualTypeOf<
     typeof schema.calendarAccounts.$inferSelect
@@ -23,8 +38,9 @@ it('keeps portable record types compatible with all PostgreSQL tables', () => {
     typeof schema.situationPreviews.$inferSelect
   >();
   expectTypeOf<Records['agents']>().toEqualTypeOf<typeof schema.agents.$inferSelect>();
-  expectTypeOf<Records['mcpConnections']>().toEqualTypeOf<
-    typeof schema.mcpConnections.$inferSelect
+  // Existing Firestore documents omit this field; PostgreSQL materializes NULL.
+  expectTypeOf<Omit<Records['mcpConnections'], 'oauthState'>>().toEqualTypeOf<
+    Omit<typeof schema.mcpConnections.$inferSelect, 'oauthState'>
   >();
   expectTypeOf<Records['goals']>().toEqualTypeOf<typeof schema.goals.$inferSelect>();
   expectTypeOf<Records['conversations']>().toEqualTypeOf<
@@ -75,11 +91,25 @@ it('keeps portable record types compatible with all PostgreSQL tables', () => {
   >();
   // Historical portable rows may omit the additive marker; native SQL rows
   // always expose its nullable column after schema 131.
-  expectTypeOf<Omit<Records['memories'], 'ownerCorrection'>>().toEqualTypeOf<
-    Omit<typeof schema.memories.$inferSelect, 'ownerCorrection'>
+  // Firestore keeps the source rejection fence as additive portable metadata;
+  // it is not a PostgreSQL column. All actual SQL fields still match exactly.
+  expectTypeOf<
+    Omit<
+      Records['memories'],
+      'ownerCorrection' | 'memoryWriteWitness' | 'ownerFamilyRejectedContentHash'
+    >
+  >().toEqualTypeOf<
+    Omit<typeof schema.memories.$inferSelect, 'ownerCorrection' | 'memoryWriteWitness'>
   >();
   expectTypeOf<NonNullable<Records['memories']['ownerCorrection']> | null>().toEqualTypeOf<
     typeof schema.memories.$inferSelect.ownerCorrection
+  >();
+  // Portable legacy rows may omit the additive witness; SQL materializes null.
+  expectTypeOf<Records['memories']['memoryWriteWitness']>().toEqualTypeOf<
+    typeof schema.memories.$inferSelect.memoryWriteWitness | undefined
+  >();
+  expectTypeOf<NonNullable<Records['memories']['memoryWriteWitness']> | null>().toEqualTypeOf<
+    typeof schema.memories.$inferSelect.memoryWriteWitness
   >();
   expectTypeOf<Records['memoryEmbeddingRefreshes']>().toEqualTypeOf<
     typeof schema.memoryEmbeddingRefreshes.$inferSelect

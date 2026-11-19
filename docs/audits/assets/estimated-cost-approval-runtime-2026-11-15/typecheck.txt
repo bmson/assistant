@@ -1,0 +1,85 @@
+
+> assistant@ typecheck /Users/baldvinsmarason/.codex/worktrees/ai-calendar-server-release/assistant
+> turbo typecheck && tsc --noEmit -p scripts/tsconfig.json
+
+
+   • turbo 2.11.10
+   • Packages in scope: @assistant/agent, @assistant/agent-runtime-dependencies, @assistant/application, @assistant/browser-job, @assistant/code-runner, @assistant/config, @assistant/core, @assistant/db, @assistant/document-processor, @assistant/firestore, @assistant/modules, @assistant/persistence, @assistant/setup, @assistant/tools, @assistant/web
+   • Running typecheck in 15 packages
+   • Remote caching disabled, using shared worktree cache
+
+@assistant/persistence:typecheck: cache miss, executing daa246c875027f35
+@assistant/document-processor:typecheck: cache miss, executing bad5881ffdd44998
+@assistant/config:typecheck: cache miss, executing a5b5832c055ebeba
+@assistant/code-runner:typecheck: cache miss, executing c4c407b0d9f59afc
+@assistant/db:typecheck: cache miss, executing 2c7481974d20b46c
+@assistant/browser-job:typecheck: cache miss, executing 27517868651e7c61
+@assistant/application:typecheck: cache miss, executing 15eb6225e430eed9
+@assistant/modules:typecheck: cache miss, executing 8286905af4232dc9
+@assistant/core:typecheck: cache miss, executing 847721a5ae9af016
+@assistant/tools:typecheck: cache miss, executing 58686ce3fee30caf
+@assistant/document-processor:typecheck: 
+@assistant/document-processor:typecheck: > @assistant/document-processor@0.0.1 typecheck /Users/baldvinsmarason/.codex/worktrees/ai-calendar-server-release/assistant/workers/document-processor
+@assistant/document-processor:typecheck: > tsc --noEmit
+@assistant/document-processor:typecheck: 
+@assistant/core:typecheck: 
+@assistant/core:typecheck: > @assistant/core@0.0.1 typecheck /Users/baldvinsmarason/.codex/worktrees/ai-calendar-server-release/assistant/packages/core
+@assistant/core:typecheck: > tsc --noEmit
+@assistant/core:typecheck: 
+@assistant/code-runner:typecheck: 
+@assistant/code-runner:typecheck: > @assistant/code-runner@0.0.1 typecheck /Users/baldvinsmarason/.codex/worktrees/ai-calendar-server-release/assistant/workers/code-runner
+@assistant/code-runner:typecheck: > tsc --noEmit
+@assistant/code-runner:typecheck: 
+@assistant/config:typecheck: 
+@assistant/config:typecheck: > @assistant/config@0.0.1 typecheck /Users/baldvinsmarason/.codex/worktrees/ai-calendar-server-release/assistant/packages/config
+@assistant/config:typecheck: > tsc --noEmit
+@assistant/config:typecheck: 
+@assistant/tools:typecheck: 
+@assistant/tools:typecheck: > @assistant/tools@0.0.1 typecheck /Users/baldvinsmarason/.codex/worktrees/ai-calendar-server-release/assistant/packages/tools
+@assistant/tools:typecheck: > tsc --noEmit
+@assistant/tools:typecheck: 
+@assistant/modules:typecheck: 
+@assistant/modules:typecheck: > @assistant/modules@0.0.1 typecheck /Users/baldvinsmarason/.codex/worktrees/ai-calendar-server-release/assistant/packages/modules
+@assistant/modules:typecheck: > tsc --noEmit
+@assistant/modules:typecheck: 
+@assistant/browser-job:typecheck: 
+@assistant/browser-job:typecheck: > @assistant/browser-job@0.0.1 typecheck /Users/baldvinsmarason/.codex/worktrees/ai-calendar-server-release/assistant/workers/browser-job
+@assistant/browser-job:typecheck: > tsc --noEmit
+@assistant/browser-job:typecheck: 
+@assistant/db:typecheck: 
+@assistant/db:typecheck: > @assistant/db@0.0.1 typecheck /Users/baldvinsmarason/.codex/worktrees/ai-calendar-server-release/assistant/packages/db
+@assistant/db:typecheck: > tsc --noEmit
+@assistant/db:typecheck: 
+@assistant/persistence:typecheck: 
+@assistant/persistence:typecheck: > @assistant/persistence@0.0.1 typecheck /Users/baldvinsmarason/.codex/worktrees/ai-calendar-server-release/assistant/packages/persistence
+@assistant/persistence:typecheck: > tsc --noEmit
+@assistant/persistence:typecheck: 
+@assistant/application:typecheck: 
+@assistant/application:typecheck: > @assistant/application@0.0.1 typecheck /Users/baldvinsmarason/.codex/worktrees/ai-calendar-server-release/assistant/packages/application
+@assistant/application:typecheck: > tsc --noEmit
+@assistant/application:typecheck: 
+@assistant/firestore:typecheck: cache miss, executing 06fc56ecbf28395c
+@assistant/setup:typecheck: cache miss, executing 2565d7067ebf8c10
+@assistant/web:typecheck: cache miss, executing 2682888a285e9d98
+@assistant/agent:typecheck: cache miss, executing ae101d595306fe2e
+@assistant/setup:typecheck: 
+@assistant/setup:typecheck: > @assistant/setup@0.0.1 typecheck /Users/baldvinsmarason/.codex/worktrees/ai-calendar-server-release/assistant/packages/setup
+@assistant/setup:typecheck: > tsc --noEmit
+@assistant/setup:typecheck: 
+@assistant/web:typecheck: 
+@assistant/web:typecheck: > @assistant/web@0.0.1 typecheck /Users/baldvinsmarason/.codex/worktrees/ai-calendar-server-release/assistant/apps/web
+@assistant/web:typecheck: > tsc --noEmit
+@assistant/web:typecheck: 
+@assistant/firestore:typecheck: 
+@assistant/firestore:typecheck: > @assistant/firestore@0.0.1 typecheck /Users/baldvinsmarason/.codex/worktrees/ai-calendar-server-release/assistant/packages/firestore
+@assistant/firestore:typecheck: > tsc --noEmit
+@assistant/firestore:typecheck: 
+@assistant/agent:typecheck: 
+@assistant/agent:typecheck: > @assistant/agent@0.0.1 typecheck /Users/baldvinsmarason/.codex/worktrees/ai-calendar-server-release/assistant/apps/agent
+@assistant/agent:typecheck: > tsc --noEmit
+@assistant/agent:typecheck: 
+
+ Tasks:    14 successful, 14 total
+Cached:    0 cached, 14 total
+  Time:    28.532s 
+

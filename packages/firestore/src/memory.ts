@@ -8,6 +8,8 @@ import {
 } from '@assistant/persistence';
 import { FieldValue } from '@google-cloud/firestore';
 import { decodeMemoryRecord } from './memory-record.js';
+import { createFirestoreGenericMemoryWriteWitness } from './memory-write-witness.js';
+import { ownerFamilySourceIsRejected } from './owner-family-source-rejection.js';
 import { privacyErasureGeneration, privacyErasureIsActive } from './privacy-erasure.js';
 import { encodeRecord, type InstallationStore } from './store.js';
 
@@ -29,11 +31,17 @@ export function memoryDocument(
   if (memory.embeddingSpaceKey && memory.embeddingSpaceKey !== embeddingSpaceKey(space))
     throw new Error('Memory embedding space changed');
   if (!memory.contentHash) throw new Error('Memory requires a content hash');
-  return encodeRecord({
+  const document = {
     ...memory,
     embedding: FieldValue.vector(memory.embedding),
     embeddingSpace: embeddingSpaceKey(space),
     retrievalRevision: randomUUID(),
+  };
+  return encodeRecord({
+    ...document,
+    // The caller's witness may describe an earlier write (including an import).
+    // Always replace it after the final stored body fields have been assembled.
+    memoryWriteWitness: createFirestoreGenericMemoryWriteWitness(document.contentHash),
   });
 }
 
@@ -157,6 +165,7 @@ export class FirestoreMemoryRepository {
           if (
             row.agentId !== input.agentId ||
             row.quarantined ||
+            ownerFamilySourceIsRejected(row) ||
             row.supersededById ||
             (row.expiresAt && row.expiresAt <= now) ||
             snapshot.get('embeddingSpace') !== embeddingSpaceKey(this.space)

@@ -1,7 +1,13 @@
 import { createHash } from 'node:crypto';
 import { loadConfig, resetConfigForTest } from '@assistant/config';
 import { TRIAGED_ACTIONABLE } from '@assistant/core/events';
-import type { ModelRouter } from '@assistant/core/model-router';
+import {
+  type BudgetSnapshot,
+  type CallOptions,
+  EstimatedCostParkedError,
+  evaluateBudget,
+  type ModelRouter,
+} from '@assistant/core/model-router';
 import type { ActionEvidence } from '@assistant/core/workflow/response-contract';
 import type { ApplicationChatPersistence } from '@assistant/persistence';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -217,6 +223,7 @@ type RouterScript = {
   routeError?: Error;
   budgetBlocked?: boolean;
   triageUnavailable?: boolean;
+  triageBudget?: BudgetSnapshot;
   streamError?: Error;
   reviewedReply?: string;
   reviewUnavailable?: boolean;
@@ -236,7 +243,7 @@ function scriptedRouter(script: RouterScript) {
     if (script.routeError) throw script.routeError;
     return { ok: true as const, modelId: 'test/model' };
   });
-  const object = vi.fn(async (role: string) => {
+  const object = vi.fn(async (role: string, options?: { critical?: boolean }) => {
     if ((role === 'rewrite' || role === 'reason') && script.reviewUnavailable)
       return { ok: false, decision: { mode: 'park', reason: 'budget' } };
     if (role === 'rewrite' || role === 'reason')
@@ -264,6 +271,10 @@ function scriptedRouter(script: RouterScript) {
                 reasons: ['clarity_or_format'],
               },
       };
+    if (script.triageBudget) {
+      const decision = evaluateBudget(script.triageBudget, { critical: options?.critical });
+      if (decision.mode === 'block' || decision.mode === 'park') return { ok: false, decision };
+    }
     if (script.triage instanceof Error) throw script.triage;
     if (script.triageUnavailable) return { ok: false, decision: { mode: 'park', reason: 'cap' } };
     return { ok: true, object: script.triage ?? { needsAction: false } };
@@ -319,9 +330,10 @@ function scriptedRouter(script: RouterScript) {
   };
 }
 
-function send(text: string, extra: Record<string, unknown> = {}) {
+function send(text: string, extra: Record<string, unknown> = {}, capable = false) {
   return new Request('https://assistant.example/api/chat', {
     method: 'POST',
+    ...(capable ? { headers: { 'X-Assistant-Estimated-Cost-Approval': 'v1' } } : {}),
     body: JSON.stringify({
       conversationId: CONVERSATION,
       messages: [{ id: 'u1', role: 'user', parts: [{ type: 'text', text }] }],
@@ -442,6 +454,273 @@ function queuedPayload() {
 }
 
 describe('chat needs-action triage', () => {
+  it.each([false, true])(
+    'does not install parking for a legacy client (spoken=%s)',
+    async (spoken) => {
+      const store = chatStore();
+      const router = scriptedRouter({ budgetBlocked: true });
+      const park = vi.fn();
+      const response = await handleChatTurn(send('Explain this request.', { spoken }), {
+        config: config(),
+        router: router.router,
+        chat: store.chat,
+        persistence: { tasks: {}, ownerContext: {} } as never,
+        estimatedCostTurnParking: { park },
+      });
+      expect(response.status).toBe(402);
+      expect(router.object.mock.calls[0]?.[1]).toMatchObject({ parkEstimatedCost: undefined });
+      expect(router.stream.mock.calls[0]?.[1]).toMatchObject({ parkEstimatedCost: undefined });
+      expect(park).not.toHaveBeenCalled();
+    },
+  );
+  it.each([
+    ['classify', false],
+    ['classify', true],
+    ['stream', false],
+    ['stream', true],
+  ] as const)(
+    'parks only the exact denied %s call and resumes the original request after B (spoken=%s)',
+    async (phase, spoken) => {
+      const operationId = '00000000-0000-4000-8000-0000000000a1';
+      const otherId = '00000000-0000-4000-8000-0000000000b1';
+      const original = 'Explain the original topic A.';
+      const later = 'Explain the separate topic B.';
+      const store = chatStore();
+      const router = scriptedRouter({ draft: 'Synthetic answer.' });
+      let actualOptions: CallOptions | undefined;
+      const invokeDenied = async (role: string, options: CallOptions) => {
+        actualOptions = options;
+        const requestDigest = createHash('sha256')
+          .update(
+            JSON.stringify({
+              system: options.system,
+              prompt: options.prompt,
+              messages: options.messages,
+            }),
+          )
+          .digest('hex');
+        const outcome = await options.parkEstimatedCost!({
+          candidate: {
+            role: role as 'classify' | 'draft',
+            critical: options.critical === true,
+            modelId: 'synthetic/model',
+            nextAttemptMicros: 1234,
+            routingDigest: 'd'.repeat(64),
+            requestDigest,
+          },
+          options,
+          decision: { mode: 'block', reason: 'synthetic' },
+          providerAttempts: 0,
+        });
+        if (outcome === 'parked') throw new EstimatedCostParkedError('parked');
+        return { ok: false as const, decision: { mode: 'block' as const, reason: 'synthetic' } };
+      };
+      if (phase === 'classify') router.object.mockImplementationOnce(invokeDenied as never);
+      else router.stream.mockImplementationOnce(invokeDenied as never);
+      let parked:
+        | Parameters<import('@assistant/persistence').EstimatedCostTurnParking['park']>[0]
+        | undefined;
+      const park = vi.fn(async (input: NonNullable<typeof parked>) => {
+        parked = input;
+        return {
+          ok: true as const,
+          status: 'pending' as const,
+          operationId: input.operationId,
+          taskId: input.taskId,
+          quoteId: 'quote-a',
+          quoteVersion: 'v1',
+        };
+      });
+      const deps = {
+        config: config(),
+        router: router.router,
+        chat: store.chat,
+        persistence: { tasks: {}, ownerContext: {} } as never,
+        estimatedCostTurnParking: { park },
+      };
+      const result = await handleChatTurn(
+        send(original, { clientOperationId: operationId, spoken }, true),
+        deps,
+      );
+      expect(result.status).toBe(200);
+      expect(result.headers.get('x-estimated-cost-operation-id')).toBe(operationId);
+      expect(park).toHaveBeenCalledOnce();
+      expect(parked).toMatchObject({
+        operationId,
+        taskId: 'task-1',
+        conversationId: CONVERSATION,
+        leaseToken: 'lease-task-1',
+        quoteRequestId: operationId,
+        candidate: { role: phase === 'classify' ? 'classify' : 'draft', critical: true },
+      });
+      expect(parked?.requestFingerprint).toBe(
+        createHash('sha256')
+          .update(JSON.stringify([original, false, false, spoken]))
+          .digest('hex'),
+      );
+      expect(actualOptions?.system).toBeTruthy();
+      expect(JSON.stringify(actualOptions?.messages ?? actualOptions?.prompt)).toContain(original);
+      expect(parked?.candidate.requestDigest).toBe(
+        createHash('sha256')
+          .update(
+            JSON.stringify({
+              system: actualOptions?.system,
+              prompt: actualOptions?.prompt,
+              messages: actualOptions?.messages,
+            }),
+          )
+          .digest('hex'),
+      );
+      expect(store.completions).toHaveLength(0);
+      expect(stubs.queueAdmission).not.toHaveBeenCalled();
+
+      expect((await handleChatTurn(send(later, { clientOperationId: otherId }), deps)).status).toBe(
+        200,
+      );
+      const messageA = store.messages.find((m) => m.taskId === 'task-1')!;
+      const task = {
+        id: 'task-1',
+        agentId: AGENT,
+        conversationId: CONVERSATION,
+        type: 'chat_turn',
+        trust: 'owner',
+        status: 'running',
+        lockedUntil: new Date(Date.now() + 60_000),
+        leaseToken: 'resumed-a',
+        maxSteps: 12,
+        createdAt: messageA.createdAt,
+        trigger: {
+          source: 'chat',
+          payload: {
+            text: original,
+            spoken,
+            chatAdmission: {
+              protocol: 'owner-chat-v1',
+              clientOperationId: operationId,
+              requestHash: parked!.requestFingerprint,
+              triggerMessageId: messageA.id,
+              phase: phase === 'stream' ? 'streaming' : 'classifying',
+              ...(phase === 'stream' ? { triageOutcome: 'conversational' } : {}),
+            },
+          },
+        },
+      } as never;
+      await expect(resumeAdmittedChatTask(task, deps)).resolves.toBe(200);
+      expect(park).toHaveBeenCalledOnce();
+      const resumedOptions = router.stream.mock.calls.at(-1)![1] as unknown as {
+        taskId: string;
+        messages: unknown;
+      };
+      expect(resumedOptions.taskId).toBe('task-1');
+      expect(JSON.stringify(resumedOptions.messages)).toContain(original);
+      expect(JSON.stringify(resumedOptions.messages)).not.toContain(later);
+    },
+  );
+  it.each(['classify', 'stream'] as const)(
+    'preserves an unconfirmed %s parking write without completing or queueing the task',
+    async (phase) => {
+      const store = chatStore();
+      const router = scriptedRouter({ draft: 'Must not be used.' });
+      const blocked = async (role: string, options: CallOptions) => {
+        try {
+          await options.parkEstimatedCost!({
+            candidate: {
+              role: role as 'classify' | 'draft',
+              critical: true,
+              modelId: 'synthetic/model',
+              nextAttemptMicros: 1,
+              routingDigest: 'd'.repeat(64),
+              requestDigest: 'e'.repeat(64),
+            },
+            options,
+            decision: { mode: 'block', reason: 'synthetic' },
+            providerAttempts: 0,
+          });
+        } catch (cause) {
+          throw new EstimatedCostParkedError('unknown', { cause });
+        }
+        throw new Error('Unexpected fallback');
+      };
+      if (phase === 'classify') router.object.mockImplementationOnce(blocked as never);
+      else router.stream.mockImplementationOnce(blocked as never);
+      const response = await handleChatTurn(send('Explain the original topic.', {}, true), {
+        config: config(),
+        router: router.router,
+        chat: store.chat,
+        persistence: { tasks: {}, ownerContext: {} } as never,
+        estimatedCostTurnParking: {
+          park: async () => {
+            throw new Error('uncertain transaction');
+          },
+        },
+      });
+      expect(response.status).toBe(503);
+      expect(await response.json()).toMatchObject({
+        code: 'estimated_cost_unconfirmed',
+        taskId: 'task-1',
+      });
+      expect(store.completions).toHaveLength(0);
+      expect(stubs.queueAdmission).not.toHaveBeenCalled();
+    },
+  );
+  it('retains the existing route when the optional parking service is unavailable', async () => {
+    const store = chatStore();
+    const router = scriptedRouter({ draft: 'Synthetic reply.' });
+    router.object.mockImplementationOnce((async (_role: string, options: CallOptions) => {
+      expect(
+        await options.parkEstimatedCost!({
+          candidate: {
+            role: 'classify',
+            critical: true,
+            modelId: 'synthetic/model',
+            nextAttemptMicros: 1,
+            routingDigest: 'd'.repeat(64),
+            requestDigest: 'e'.repeat(64),
+          },
+          options,
+          decision: { mode: 'block', reason: 'synthetic' },
+          providerAttempts: 0,
+        }),
+      ).toBe('not_parked');
+      return { ok: true, object: { needsAction: false } };
+    }) as never);
+    const response = await handleChatTurn(send('Explain the topic.', {}, true), {
+      config: config(),
+      router: router.router,
+      chat: store.chat,
+      persistence: { tasks: {}, ownerContext: {} } as never,
+      estimatedCostTurnParking: {
+        park: async () => ({ ok: false, outcome: 'unavailable', message: 'off' }),
+      },
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get('x-estimated-cost-operation-id')).toBeNull();
+    expect(router.stream).toHaveBeenCalledOnce();
+  });
+  it.each([false, true])(
+    'never parks from a prompt-only preflight, including spoken requests (spoken=%s)',
+    async (spoken) => {
+      const store = chatStore();
+      const scripted = scriptedRouter({ budgetBlocked: true });
+      scripted.route.mockResolvedValueOnce({
+        ok: false,
+        decision: { mode: 'block', reason: 'synthetic' },
+      } as never);
+      const candidate = vi.fn();
+      Object.assign(scripted.router, { prepareEstimatedCostCandidate: candidate });
+      const park = vi.fn();
+      const response = await handleChatTurn(send('Explain this request.', { spoken }), {
+        config: config(),
+        router: scripted.router,
+        chat: store.chat,
+        persistence: { tasks: {}, ownerContext: {} } as never,
+        estimatedCostTurnParking: { park },
+      });
+      expect(response.status).toBe(402);
+      expect(candidate).not.toHaveBeenCalled();
+      expect(park).not.toHaveBeenCalled();
+    },
+  );
   it.each([false, true])(
     'revalidates direct-stream recovery against the current task lease (postgres=%s)',
     async (postgres) => {
@@ -1674,7 +1953,10 @@ describe('chat needs-action triage', () => {
       .update(JSON.stringify([text, false, false, false]))
       .digest('hex');
     const store = chatStore({
-      history: [{ id: messageId, taskId, role: 'user', text }],
+      history: [
+        { id: messageId, taskId, role: 'user', text },
+        { role: 'user', text: 'A newer independent request B.' },
+      ],
     });
     const router = scriptedRouter({ draft: 'Hello again.' });
     const task = {
@@ -1721,7 +2003,14 @@ describe('chat needs-action triage', () => {
     ).resolves.toBe(200);
     expect(router.object).not.toHaveBeenCalled();
     expect(router.stream).toHaveBeenCalledOnce();
-    expect(store.messages.filter((message) => message.role === 'user')).toHaveLength(1);
+    expect(store.messages.filter((message) => message.role === 'user')).toHaveLength(2);
+    const options = router.stream.mock.calls[0]![1] as unknown as {
+      taskId: string;
+      messages: unknown;
+    };
+    expect(options.taskId).toBe(taskId);
+    expect(JSON.stringify(options.messages)).toContain(text);
+    expect(JSON.stringify(options.messages)).not.toContain('A newer independent request B.');
   });
 
   it('replays the same client operation receipt without classifying or streaming again', async () => {
@@ -1829,6 +2118,46 @@ describe('chat needs-action triage', () => {
     expect(result.object).toHaveBeenCalledOnce();
     expect(result.stream).toHaveBeenCalledOnce();
     expect(stubs.enqueueTask).not.toHaveBeenCalled();
+  });
+
+  it('binds owner chat classification to its admitted task and critical budget context', async () => {
+    const result = await turn('Help with the thing from earlier.', {
+      triage: { needsAction: false },
+      draft: 'Here is an answer.',
+    });
+    expect(result.object).toHaveBeenCalledWith(
+      'classify',
+      expect.objectContaining({ taskId: 'task-1', critical: true }),
+    );
+    expect(result.object.mock.calls.filter(([role]) => role === 'classify')).toHaveLength(1);
+    expect(result.stream).toHaveBeenCalledOnce();
+    expect(stubs.admission).toHaveBeenCalledOnce();
+  });
+
+  it('classifies an owner message within the existing carve-out and still blocks beyond it', async () => {
+    const triageBudget = {
+      dailyLimitUsd: 6,
+      dailySpentUsd: 0.27,
+      monthlyLimitUsd: 50,
+      monthlySpentUsd: 2,
+      heldUsd: 5.76,
+      softPct: 80,
+    };
+    const allowed = await turn('Help with the thing from earlier.', {
+      triageBudget,
+      triage: { needsAction: false },
+      draft: 'Here is an answer.',
+    });
+    expect(allowed.stream).toHaveBeenCalledOnce();
+    expect(allowed.object).toHaveBeenCalledWith(
+      'classify',
+      expect.objectContaining({ taskId: 'task-1', critical: true }),
+    );
+    const blocked = await turn('Help with the thing from earlier.', {
+      triageBudget: { ...triageBudget, heldUsd: 6.34 },
+    });
+    expect(blocked.response.headers.get('x-async-task')).toBe('task-1');
+    expect(blocked.stream).not.toHaveBeenCalled();
   });
 
   it('defaults to the executor when triage is budget-blocked', async () => {

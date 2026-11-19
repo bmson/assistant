@@ -10,6 +10,14 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import type { OwnerEditorSavedIds } from '@assistant/persistence';
 import {
+  BASIC5_AUTHENTICATED_NAVIGATION_COUNT,
+  BASIC5_BROWSER_CONTROL_REQUEST_LIMIT,
+  BASIC5_BROWSER_PRESENTATION_REQUEST_LIMIT,
+  BASIC5_BROWSER_TOTAL_REQUEST_LIMIT,
+  BASIC5_LOGICAL_NAVIGATION_STAGES,
+  type Basic5LogicalNavigationStage,
+} from './basic5-browser-acceptance-support.js';
+import {
   type Basic5CiVitestDiagnostic,
   basic5CiVitestCaptureLimit,
   contentFreeBasic5CiVitestDiagnostic,
@@ -23,10 +31,11 @@ const CLEANUP_END_SECONDS = 400;
 const PREPARE_END_SECONDS = 130;
 const CAPTURE_BYTES = 64 * 1024;
 const PHASE_SETTLEMENT_GRACE_MS = 5_000;
-const ACCEPTANCE_CONTRACT = 'basic5-ci-user-flow-control-presentation-v5';
+const ACCEPTANCE_CONTRACT = 'basic5-ci-user-flow-control-presentation-v7';
 const CLAIM_SCOPE = {
   runtimeIdentity: 'bounded standalone artifact observed in CI checkout',
-  behavior: 'four BASIC5 saves: scoped UI success and same-operation durable receipts',
+  behavior:
+    'four BASIC5 saves: exact search links, same-operation durable receipts, and leave/reopen/reload readbacks',
   ancestorWorkspaceDependencies: 'unqualified',
   unexercisedRoutes: 'unqualified',
   containerIndependence: 'unqualified',
@@ -56,8 +65,21 @@ export type Basic5CiTarget = {
   token: string;
 };
 
+export type Basic5CiJourneyFacts = {
+  navigationStages: Basic5LogicalNavigationStage[];
+  findResultCounts: { people: number; connections: number; savedNotes: number };
+  exactTargetHrefMatches: { people: number; connections: number; savedNotes: number };
+  reloadCount: number;
+  reopenedPageReadbacks: {
+    identity: boolean;
+    familyAdd: boolean;
+    familyCorrection: boolean;
+    noteCorrection: boolean;
+  };
+};
+
 export type Basic5CiEvidence = {
-  schemaVersion: 1;
+  schemaVersion: 2;
   label: typeof BASIC5_CI_EVIDENCE_LABEL;
   result: 'passed' | 'failed';
   standalone: { sourceCommit: string | null; buildId: string | null; serverSha256: string | null };
@@ -86,6 +108,7 @@ export type Basic5CiEvidence = {
     ids: OwnerEditorSavedIds | null;
   }>;
   durableReadbacks: Record<string, boolean>;
+  journeyFacts: Basic5CiJourneyFacts;
   counts: Record<string, unknown>;
   cleanup: Record<string, boolean>;
   externalCleanupSupervisorRequired: boolean;
@@ -98,7 +121,7 @@ export type Basic5CiEvidencePayload = Omit<Basic5CiEvidence, 'schemaVersion' | '
 
 /** Add the controller's exact inner-evidence identity to a typed producer payload. */
 export function buildBasic5CiEvidence(payload: Basic5CiEvidencePayload): Basic5CiEvidence {
-  return { ...payload, schemaVersion: 1, label: BASIC5_CI_EVIDENCE_LABEL };
+  return { ...payload, schemaVersion: 2, label: BASIC5_CI_EVIDENCE_LABEL };
 }
 
 export type Basic5CiQuiescence = {
@@ -982,6 +1005,22 @@ function contentFreeCaseEntryDiagnostic(value: unknown): Basic5CiCaseEntryDiagno
   return { stage: diagnostic.stage, category: diagnostic.category };
 }
 
+function contentFreeCleanupCensusDiagnostic(value: unknown): Basic5CiCensusDiagnostic {
+  if (
+    !value ||
+    typeof value !== 'object' ||
+    Array.isArray(value) ||
+    Object.keys(value).length !== 2 ||
+    !Object.hasOwn(value, 'stage') ||
+    !Object.hasOwn(value, 'reason') ||
+    !CENSUS_STAGES.includes((value as Basic5CiCensusDiagnostic).stage) ||
+    !CENSUS_REASONS.includes((value as Basic5CiCensusDiagnostic).reason)
+  )
+    throw new Basic5CiHold('cleanup_census_diagnostic_invalid');
+  const diagnostic = value as Basic5CiCensusDiagnostic;
+  return { stage: diagnostic.stage, reason: diagnostic.reason };
+}
+
 /** Parse only the bounded version banner; output bytes themselves are never retained. */
 export function observeBasic5CiChromeVersion(result: {
   exitCode: number;
@@ -1719,6 +1758,7 @@ function validateCiEvidence(
       'fixture',
       'receipts',
       'durableReadbacks',
+      'journeyFacts',
       'counts',
       'cleanup',
       'externalCleanupSupervisorRequired',
@@ -1728,7 +1768,7 @@ function validateCiEvidence(
     ],
     'acceptance_evidence',
   );
-  if (evidence.schemaVersion !== 1 || evidence.label !== BASIC5_CI_EVIDENCE_LABEL)
+  if (evidence.schemaVersion !== 2 || evidence.label !== BASIC5_CI_EVIDENCE_LABEL)
     throw new Basic5CiHold('acceptance_evidence_schema_or_label_mismatch');
   requireExactKeys(
     evidence.standalone,
@@ -1760,6 +1800,32 @@ function validateCiEvidence(
     evidence.durableReadbacks,
     ['identity', 'familyAdd', 'familyCorrection', 'noteCorrection'],
     'durable_readbacks',
+  );
+  requireExactKeys(
+    evidence.journeyFacts,
+    [
+      'navigationStages',
+      'findResultCounts',
+      'exactTargetHrefMatches',
+      'reloadCount',
+      'reopenedPageReadbacks',
+    ],
+    'journey_facts',
+  );
+  requireExactKeys(
+    evidence.journeyFacts.findResultCounts,
+    ['people', 'connections', 'savedNotes'],
+    'journey_find_result_counts',
+  );
+  requireExactKeys(
+    evidence.journeyFacts.exactTargetHrefMatches,
+    ['people', 'connections', 'savedNotes'],
+    'journey_target_href_counts',
+  );
+  requireExactKeys(
+    evidence.journeyFacts.reopenedPageReadbacks,
+    ['identity', 'familyAdd', 'familyCorrection', 'noteCorrection'],
+    'journey_reopened_page_readbacks',
   );
   requireExactKeys(
     evidence.counts,
@@ -1917,23 +1983,46 @@ function validateCiEvidence(
     )
   )
     throw new Basic5CiHold('durable_readbacks_incomplete');
+  const journeyFacts = evidence.journeyFacts;
+  const reopenedReadbackKeys: readonly (keyof typeof journeyFacts.reopenedPageReadbacks)[] = [
+    'identity',
+    'familyAdd',
+    'familyCorrection',
+    'noteCorrection',
+  ];
+  if (
+    !Array.isArray(journeyFacts.navigationStages) ||
+    journeyFacts.navigationStages.length !== BASIC5_LOGICAL_NAVIGATION_STAGES.length ||
+    journeyFacts.navigationStages.some(
+      (stage, index) => stage !== BASIC5_LOGICAL_NAVIGATION_STAGES[index],
+    ) ||
+    journeyFacts.findResultCounts.people !== 2 ||
+    journeyFacts.findResultCounts.connections !== 2 ||
+    journeyFacts.findResultCounts.savedNotes !== 2 ||
+    journeyFacts.exactTargetHrefMatches.people !== 2 ||
+    journeyFacts.exactTargetHrefMatches.connections !== 2 ||
+    journeyFacts.exactTargetHrefMatches.savedNotes !== 2 ||
+    journeyFacts.reloadCount !== 4 ||
+    !reopenedReadbackKeys.every((key) => journeyFacts.reopenedPageReadbacks[key] === true)
+  )
+    throw new Basic5CiHold('user_journey_find_reopen_readback_incomplete');
   const counts = evidence.counts;
   const providers = counts.providerRequests as Record<string, unknown> | undefined;
   if (
     !Number.isSafeInteger(counts.readinessAttempts) ||
     Number(counts.readinessAttempts) < 1 ||
     Number(counts.readinessAttempts) > 451 ||
-    counts.pageNavigations !== 6 ||
+    counts.pageNavigations !== BASIC5_AUTHENTICATED_NAVIGATION_COUNT ||
     counts.authenticatedPageNavigations !== counts.pageNavigations ||
     !Number.isSafeInteger(counts.browserHttpRequests) ||
     Number(counts.browserHttpRequests) < 1 ||
-    Number(counts.browserHttpRequests) > 320 ||
+    Number(counts.browserHttpRequests) > BASIC5_BROWSER_TOTAL_REQUEST_LIMIT ||
     !Number.isSafeInteger(counts.browserControlHttpRequests) ||
     Number(counts.browserControlHttpRequests) < 1 ||
-    Number(counts.browserControlHttpRequests) > 64 ||
+    Number(counts.browserControlHttpRequests) > BASIC5_BROWSER_CONTROL_REQUEST_LIMIT ||
     !Number.isSafeInteger(counts.browserPresentationHttpRequests) ||
     Number(counts.browserPresentationHttpRequests) < 0 ||
-    Number(counts.browserPresentationHttpRequests) > 256 ||
+    Number(counts.browserPresentationHttpRequests) > BASIC5_BROWSER_PRESENTATION_REQUEST_LIMIT ||
     counts.browserHttpRequests !==
       Number(counts.browserControlHttpRequests) + Number(counts.browserPresentationHttpRequests) ||
     counts.browserPageHttpRequests !== Number(counts.browserHttpRequests) - 1 ||
@@ -1943,8 +2032,7 @@ function validateCiEvidence(
     counts.ownerEditorPostCount !== 4 ||
     counts.ownerApplyRequests !== 4 ||
     !Number.isSafeInteger(counts.recoveryGets) ||
-    Number(counts.recoveryGets) < 0 ||
-    Number(counts.recoveryGets) > 64 ||
+    Number(counts.recoveryGets) !== 0 ||
     counts.recoveryRequests !== 0 ||
     counts.embeddingRequests !== 3 ||
     counts.fixtureModelCalls !== 3 ||
@@ -1965,6 +2053,54 @@ function validateCiEvidence(
     ].every((key) => cleanup[key] === true)
   )
     throw new Basic5CiHold('fixture_cleanup_receipt_incomplete');
+}
+
+function contentFreeJourneyFacts(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const source = value as Record<string, unknown>;
+  const count = (candidate: unknown) =>
+    typeof candidate === 'number' &&
+    Number.isSafeInteger(candidate) &&
+    candidate >= 0 &&
+    candidate <= BASIC5_AUTHENTICATED_NAVIGATION_COUNT
+      ? candidate
+      : null;
+  const matches = (candidate: unknown) =>
+    candidate && typeof candidate === 'object' && !Array.isArray(candidate)
+      ? (candidate as Record<string, unknown>)
+      : {};
+  const findResultCounts = matches(source.findResultCounts);
+  const exactTargetHrefMatches = matches(source.exactTargetHrefMatches);
+  const reopenedPageReadbacks = matches(source.reopenedPageReadbacks);
+  const knownStages = new Set<string>(BASIC5_LOGICAL_NAVIGATION_STAGES);
+  const navigationStages = Array.isArray(source.navigationStages)
+    ? source.navigationStages
+        .filter(
+          (stage): stage is Basic5LogicalNavigationStage =>
+            typeof stage === 'string' && knownStages.has(stage),
+        )
+        .slice(0, BASIC5_AUTHENTICATED_NAVIGATION_COUNT)
+    : [];
+  return {
+    navigationStages,
+    findResultCounts: {
+      people: count(findResultCounts.people),
+      connections: count(findResultCounts.connections),
+      savedNotes: count(findResultCounts.savedNotes),
+    },
+    exactTargetHrefMatches: {
+      people: count(exactTargetHrefMatches.people),
+      connections: count(exactTargetHrefMatches.connections),
+      savedNotes: count(exactTargetHrefMatches.savedNotes),
+    },
+    reloadCount: count(source.reloadCount),
+    reopenedPageReadbacks: {
+      identity: reopenedPageReadbacks.identity === true,
+      familyAdd: reopenedPageReadbacks.familyAdd === true,
+      familyCorrection: reopenedPageReadbacks.familyCorrection === true,
+      noteCorrection: reopenedPageReadbacks.noteCorrection === true,
+    },
+  };
 }
 
 function contentFreeReceipt(record: Record<string, unknown>): Record<string, unknown> {
@@ -1995,6 +2131,7 @@ function contentFreeReceipt(record: Record<string, unknown>): Record<string, unk
     'executionEnvironment',
     'receipts',
     'durableReadbacks',
+    'journeyFacts',
     'counts',
     'quiescence',
     'cleanupComplete',
@@ -2008,6 +2145,7 @@ function contentFreeReceipt(record: Record<string, unknown>): Record<string, unk
     'preparationDiagnostic',
     'utilityChildDiagnostic',
     'caseEntryDiagnostic',
+    'cleanupCensusDiagnostic',
     'vitestDiagnostic',
     'elapsedSeconds',
   ]);
@@ -2022,6 +2160,7 @@ function contentFreeReceipt(record: Record<string, unknown>): Record<string, unk
     ];
   if ('workflowContext' in clean)
     clean.workflowContext = contentFreeWorkflowContext(clean.workflowContext);
+  if ('journeyFacts' in clean) clean.journeyFacts = contentFreeJourneyFacts(clean.journeyFacts);
   if ('requiredArtifactIdentity' in clean)
     clean.requiredArtifactIdentity = contentFreeRequiredArtifactIdentity(
       clean.requiredArtifactIdentity,
@@ -2046,6 +2185,10 @@ function contentFreeReceipt(record: Record<string, unknown>): Record<string, unk
     );
   if ('caseEntryDiagnostic' in clean)
     clean.caseEntryDiagnostic = contentFreeCaseEntryDiagnostic(clean.caseEntryDiagnostic);
+  if ('cleanupCensusDiagnostic' in clean)
+    clean.cleanupCensusDiagnostic = contentFreeCleanupCensusDiagnostic(
+      clean.cleanupCensusDiagnostic,
+    );
   if ('vitestDiagnostic' in clean)
     clean.vitestDiagnostic = contentFreeBasic5CiVitestDiagnostic(clean.vitestDiagnostic);
   if ('standaloneBuildDiagnostic' in clean)
@@ -2063,10 +2206,10 @@ export async function runBasic5CiAcceptance(
   const started = ops.now();
   const deadline = started + OUTER_SECONDS * 1000;
   const receipt: Record<string, unknown> = {
-    schemaVersion: 5,
+    schemaVersion: 6,
     acceptanceContract: ACCEPTANCE_CONTRACT,
     claimScope: CLAIM_SCOPE,
-    scope: 'one BASIC5 CI browser acceptance case',
+    scope: 'one four-save, 16-navigation BASIC5 CI browser acceptance case',
     result: 'hold',
     cleanupComplete: false,
     targetRetained: false,
@@ -2153,6 +2296,7 @@ export async function runBasic5CiAcceptance(
           result.evidence.durableReadbacks[key],
         ]),
       ),
+      journeyFacts: contentFreeJourneyFacts(result.evidence.journeyFacts),
       counts: Object.fromEntries([
         ...[
           'readinessAttempts',
@@ -2323,6 +2467,15 @@ export async function runBasic5CiAcceptance(
       } catch (error) {
         receipt.errorCode =
           error instanceof Basic5CiHold ? error.code : 'target_cleanup_unverified';
+        if (error instanceof Basic5CiHold && error.censusDiagnostic !== undefined) {
+          try {
+            receipt.cleanupCensusDiagnostic = contentFreeCleanupCensusDiagnostic(
+              error.censusDiagnostic,
+            );
+          } catch {
+            receipt.errorCode = 'cleanup_census_diagnostic_invalid';
+          }
+        }
         if (error instanceof Basic5CiHold && !error.operationSettled) {
           phaseOperationUnsettled = true;
           receipt.operationSettled = false;
@@ -2479,22 +2632,14 @@ export class RealBasic5CiOps implements Basic5CiOps {
       }
     };
     const snapshot = confirmedSnapshot ?? (await readSnapshot('snapshot'));
-    const confirmAbsence = async (pid: number, expected: LinuxSnapshot): Promise<Set<number>> => {
+    const missing = new Map<number, LinuxSnapshot>();
+    const recordAbsence = (expected: LinuxSnapshot) => {
       if (confirmedSnapshot)
         throw new Basic5CiCensusHold({
           stage: 'absence_confirmation',
           reason: 'convergence_exhausted',
         });
-      const fresh = await readSnapshot('absence_confirmation');
-      const present = fresh.get(pid);
-      if (present)
-        throw new Basic5CiCensusHold({
-          stage: 'absence_confirmation',
-          reason: changedProcessFact(expected, present) ?? 'absence_not_confirmed',
-        });
-      // Exactly one restart from positive absence. Retain all enrolled identities;
-      // a missing unverified parent never becomes ancestry for a new descendant.
-      return this.captureSession(root, deadline, fresh);
+      missing.set(expected.pid, expected);
     };
     const liveSession = new Set(
       [...snapshot.values()].filter((row) => row.sid === root.sid).map((row) => row.pid),
@@ -2520,6 +2665,27 @@ export class RealBasic5CiOps implements Basic5CiOps {
     } catch {
       throw new Basic5CiCensusHold({ stage: 'enrollment', reason: 'ancestry_unproven' });
     }
+    const recheckIdentity = async (expected: LinuxIdentity) => {
+      let current: LinuxIdentity | undefined;
+      try {
+        current = await proof.readBasic5LinuxProcessIdentity(expected.pid, expected);
+      } catch (error) {
+        // The helper attests a positive Z-state reread matching this full
+        // enrolled tuple. It supplies no replacement identity or signal authority.
+        if ((error as { code?: unknown } | null)?.code === 'known_process_terminal') return;
+        throw censusFailure('known_identity_read', error);
+      }
+      if (!current) return recordAbsence(expected);
+      const reason =
+        changedProcessFact(expected, current) ??
+        (current.exe !== expected.exe ? 'executable_changed' : undefined);
+      if (reason) throw new Basic5CiCensusHold({ stage: 'known_identity_compare', reason });
+    };
+    for (const pid of liveSession) {
+      const expected = this.ownedProcesses.get(pid);
+      if (expected) await recheckIdentity(expected);
+    }
+    const newlyEnrolled: LinuxIdentity[] = [];
     for (const pid of enrollmentOrder) {
       const row = snapshot.get(pid);
       if (!row)
@@ -2527,13 +2693,19 @@ export class RealBasic5CiOps implements Basic5CiOps {
           stage: 'new_identity_read',
           reason: 'snapshot_row_missing',
         });
+      // The order is based on candidate ancestry. Enroll only after the parent
+      // is verified, and defer its subtree if that proof is unavailable.
+      if (!this.ownedProcesses.has(row.ppid) || missing.has(row.ppid)) continue;
       let identity: LinuxIdentity | undefined;
       try {
         identity = await proof.readBasic5LinuxProcessIdentity(pid);
       } catch (error) {
         throw censusFailure('new_identity_read', error);
       }
-      if (!identity) return confirmAbsence(pid, row);
+      if (!identity) {
+        recordAbsence(row);
+        continue;
+      }
       const reason = changedProcessFact(row, identity);
       if (reason) throw new Basic5CiCensusHold({ stage: 'new_identity_compare', reason });
       if (identity.pgid <= 0 || identity.sid <= 0)
@@ -2542,25 +2714,22 @@ export class RealBasic5CiOps implements Basic5CiOps {
           reason: 'owned_process_identity_ineligible',
         });
       this.ownedProcesses.set(pid, identity);
+      newlyEnrolled.push(identity);
     }
-    for (const pid of liveSession) {
-      const expected = this.ownedProcesses.get(pid);
-      if (!expected)
-        throw new Basic5CiCensusHold({ stage: 'known_identity_read', reason: 'ancestry_unproven' });
-      let current: LinuxIdentity | undefined;
-      try {
-        current = await proof.readBasic5LinuxProcessIdentity(pid, expected);
-      } catch (error) {
-        // The helper attests a positive Z-state reread matching this full
-        // enrolled tuple. It supplies no replacement identity or signal authority.
-        if ((error as { code?: unknown } | null)?.code === 'known_process_terminal') continue;
-        throw censusFailure('known_identity_read', error);
+    for (const identity of newlyEnrolled) await recheckIdentity(identity);
+    if (missing.size) {
+      const fresh = await readSnapshot('absence_confirmation');
+      for (const [pid, expected] of missing) {
+        const present = fresh.get(pid);
+        if (present)
+          throw new Basic5CiCensusHold({
+            stage: 'absence_confirmation',
+            reason: changedProcessFact(expected, present) ?? 'absence_not_confirmed',
+          });
       }
-      if (!current) return confirmAbsence(pid, expected);
-      const reason =
-        changedProcessFact(expected, current) ??
-        (current.exe !== expected.exe ? 'executable_changed' : undefined);
-      if (reason) throw new Basic5CiCensusHold({ stage: 'known_identity_compare', reason });
+      // Exactly one restart. Keep enrolled identities and recheck ancestry for
+      // every surviving candidate, including any deferred descendants.
+      return this.captureSession(root, deadline, fresh);
     }
     return liveSession;
   }

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  retirementProfile,
   verifyRetirementContext,
   verifyReviewedPacketTime,
 } from './owner-web-tag-retirement-command.js';
@@ -24,6 +25,19 @@ const env = {
 describe('protected retirement command binding', () => {
   it('accepts only exact protected reviewed workflow source', () =>
     expect(() => verifyRetirementContext(env)).not.toThrow());
+  it('keeps the old fixed profile default and opts into only the exact newly proven alias', () => {
+    expect(retirementProfile(env)).toBe('legacy-01080');
+    expect(() =>
+      verifyRetirementContext({
+        ...env,
+        OWNER_TAG_RETIREMENT_PROFILE: 'known-resume-40403696377-1',
+      }),
+    ).not.toThrow();
+    for (const bad of ['', 'canonical', 'all', 'operator', 'known-resume-123-1'])
+      expect(() =>
+        verifyRetirementContext({ ...env, OWNER_TAG_RETIREMENT_PROFILE: bad }),
+      ).toThrow();
+  });
   it.each([
     ['GITHUB_ACTIONS', 'false'],
     ['GITHUB_REPOSITORY', 'other/assistant'],

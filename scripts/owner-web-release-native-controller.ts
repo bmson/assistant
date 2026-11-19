@@ -1,3 +1,11 @@
+import {
+  type EstimatedCostReleaseProfile,
+  estimatedCostReleaseEnvironment,
+  validateEstimatedCostReleaseProfile,
+} from '../infra/gcp/estimated-cost-release-config.mjs';
+import { googleCalendarReleaseCallback } from '../infra/gcp/google-calendar-release-config.mjs';
+import { createImageResolutionReader } from './owner-release-image-resolution.js';
+import { matchesNativeServiceDigest } from './owner-release-native-service-defaults.js';
 /** Fixed BASIC5 paired web lifecycle controller; caller supplies protected transport and operator hold verifier. */
 
 import { nativeWebCreationFixtureClient } from './owner-web-release-creation-client.js';
@@ -41,6 +49,19 @@ export async function protectedNativeReleaseDependencies(
   receipts: Receipts,
 ): Promise<FixtureDependencies> {
   const token = await protectedWebTagCredential();
+  const resolveImage = createImageResolutionReader(token);
+  // Bootstrap capture has no lifecycle yet; its current bindings are checked by
+  // the admission entrypoint. Every later phase must preload its own old parent.
+  let context: Context | undefined;
+  try {
+    context = receipts.readCurrent().context;
+  } catch {
+    /* Capture precedes initialization. */
+  }
+  if (context) {
+    await resolveImage(context.image);
+    if (context.currentBinding) await resolveImage(context.currentBinding.proof.image);
+  }
   return {
     request: async (url, options) => {
       if (!url.startsWith(NATIVE_ROOT) || !/^[A-Za-z0-9._~-]{1,16384}$/.test(token))
@@ -86,6 +107,9 @@ export function pairedWebContext(input: {
   attempt: string;
   manifestDigest: string;
   manifest: Record<string, unknown>;
+  googleCalendarOAuthCallbackUrl?: string;
+  estimatedCostProfile?: EstimatedCostReleaseProfile;
+  current?: { revision: string; binding: NonNullable<Context['currentBinding']> };
 }): Context {
   const component = input.manifest.components as Record<string, Record<string, unknown>>;
   const web = component?.web;
@@ -95,7 +119,19 @@ export function pairedWebContext(input: {
   const schema = web.schema as Record<string, unknown>;
   const image = web.image;
   if (typeof image !== 'string') throw new Error('Invalid web image identity');
+  const callback = googleCalendarReleaseCallback(input.googleCalendarOAuthCallbackUrl);
+  const estimatedCost = input.estimatedCostProfile
+    ? validateEstimatedCostReleaseProfile(input.estimatedCostProfile, {
+        source: input.source,
+        projectId: 'bmson-assistant',
+      })
+    : undefined;
   const releaseEnv = {
+    ...(callback ? { GOOGLE_CALENDAR_OAUTH_CALLBACK_URL: callback } : {}),
+    ...(input.current?.binding.preclosed && web.apiContract === 3
+      ? { MCP_OAUTH_ENABLED: 'false' }
+      : {}),
+    ...(estimatedCost ? estimatedCostReleaseEnvironment(estimatedCost) : {}),
     ASSISTANT_RELEASE_API_CONTRACT: String(web.apiContract),
     ASSISTANT_RELEASE_AGENT_API_MIN: String(peer?.min),
     ASSISTANT_RELEASE_AGENT_API_MAX: String(peer?.max),
@@ -117,8 +153,10 @@ export function pairedWebContext(input: {
     attempt: input.attempt,
     manifest: input.manifestDigest,
     image,
-    canonical: current.revision,
+    canonical: input.current?.revision ?? current.revision,
+    ...(input.current ? { currentBinding: input.current.binding } : {}),
     releaseEnv,
+    ...(estimatedCost ? { estimatedCost } : {}),
     // The one-off historical 01080 retirement is a prerequisite to this fixed
     // initial inventory; any remaining unsupported alias makes projection fail.
     retiredTags: [retired.tag],
@@ -136,7 +174,21 @@ export function initializePairedWebLifecycle(
   if (!Array.isArray(traffic) || traffic.length < 1 || traffic.length > 8)
     throw new Error('Initial native traffic inventory is unsupported');
   const rows = traffic as Array<Record<string, unknown>>;
-  if (
+  if (context.currentBinding) {
+    if (
+      !matchesNativeServiceDigest(
+        rawService,
+        context.currentBinding.serviceSha256,
+        reconciliationDigest,
+      ) ||
+      reconciliationDigest(nativeRevisions[context.canonical]) !==
+        context.currentBinding.revisionSha256 ||
+      rows.some((row) => row.revision !== context.canonical) ||
+      rows.filter((row) => row.percent === 100).length !== 1 ||
+      (context.currentBinding.preclosed && (rows.length !== 1 || rows[0]?.tag))
+    )
+      throw new Error('Reviewed current snapshot changed');
+  } else if (
     rows.some(
       (row) => row.tag !== HISTORICAL_WEB_TAGS[1]?.tag || row.revision !== context.canonical,
     ) ||
@@ -160,6 +212,15 @@ export async function runPairedWebLifecyclePhase(
   if (!PHASES.includes(mode)) throw new Error('Invalid paired lifecycle phase');
   const state = receipts.readCurrent();
   await verifyOperatorHold(state);
+  if (
+    state.context.estimatedCost &&
+    ['createP', 'attachP', 'promoteP', 'createR', 'attachR', 'promoteR'].includes(mode)
+  )
+    validateEstimatedCostReleaseProfile(state.context.estimatedCost, {
+      source: state.context.source,
+      projectId: 'bmson-assistant',
+      now: deps.now(),
+    });
   if (mode === 'createP' || mode === 'createR')
     return nativeWebCreationFixtureClient(deps).execute(state, mode, reviewedAt);
   return nativeWebTrafficFixtureClient(deps).execute(state, mode, reviewedAt);
