@@ -135,6 +135,7 @@ export async function purgeExpired(
   cache: number;
   memories: number;
   reservations: number;
+  reservationsMarkedUnknown: number;
   locations: number;
   dreamNotes: number;
   recallMetrics: number;
@@ -154,7 +155,12 @@ export async function purgeExpired(
       releaseStaleReservations(store.costs, 120, batch),
       purgeStaleRecallMetrics(store.recallMetrics, 90, batch),
     ]);
-    return { ...purged, reservations, recallMetrics };
+    return {
+      ...purged,
+      reservations: reservations.released,
+      reservationsMarkedUnknown: reservations.markedUnknown,
+      recallMetrics,
+    };
   }
   const db = store as Db;
   // One bounded page per existing sweep. Replay expiry never means a write
@@ -205,7 +211,8 @@ export async function purgeExpired(
   return {
     cache: cacheRows.length,
     memories: memoryRows.length,
-    reservations,
+    reservations: reservations.released,
+    reservationsMarkedUnknown: reservations.markedUnknown,
     locations,
     dreamNotes,
     recallMetrics,

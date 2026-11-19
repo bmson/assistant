@@ -48,6 +48,10 @@ const expected: MigrationTailMetadata[] = [
     folderMillis: 1795053032784,
     hash: 'b5009dc3e813daad969187df0e759ca6a196ae56691b1afa5819f862be916da0',
   },
+  {
+    folderMillis: 1795054997248,
+    hash: '01b3fe3fb8dff09c1f28a170ceb7fb24fca9448b9613e6c0ef58830738c86172',
+  },
 ];
 const applied = (count: number): AppliedMigrationTailRow[] =>
   expected.slice(0, count).map((migration) => ({
@@ -65,7 +69,7 @@ describe('owner-editor migration tail guard', () => {
     expect(shipped).toEqual(expected);
   });
 
-  it.each([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10])(
+  it.each([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])(
     'accepts canonical strict prefix length %i',
     (count) => {
       expect(() =>
@@ -99,29 +103,13 @@ describe('owner-editor migration tail guard', () => {
   });
 
   it('requires all shipped tail entries for post-migration readback', () => {
-    expect(() => assertCompatibleOwnerEditorMigrationTail(expected, applied(2), true)).toThrow(
-      'Incompatible owner-editor migration ledger.',
-    );
-    expect(() => assertCompatibleOwnerEditorMigrationTail(expected, applied(3), true)).toThrow(
-      'Incompatible owner-editor migration ledger.',
-    );
-    expect(() => assertCompatibleOwnerEditorMigrationTail(expected, applied(5), true)).toThrow(
-      'Incompatible owner-editor migration ledger.',
-    );
-    expect(() => assertCompatibleOwnerEditorMigrationTail(expected, applied(6), true)).toThrow(
-      'Incompatible owner-editor migration ledger.',
-    );
-    expect(() => assertCompatibleOwnerEditorMigrationTail(expected, applied(7), true)).toThrow(
-      'Incompatible owner-editor migration ledger.',
-    );
-    expect(() => assertCompatibleOwnerEditorMigrationTail(expected, applied(8), true)).toThrow(
-      'Incompatible owner-editor migration ledger.',
-    );
-    expect(() => assertCompatibleOwnerEditorMigrationTail(expected, applied(9), true)).toThrow(
-      'Incompatible owner-editor migration ledger.',
-    );
+    for (let count = 0; count < expected.length; count++) {
+      expect(() =>
+        assertCompatibleOwnerEditorMigrationTail(expected, applied(count), true),
+      ).toThrow('Incompatible owner-editor migration ledger.');
+    }
     expect(() =>
-      assertCompatibleOwnerEditorMigrationTail(expected, applied(10), true),
+      assertCompatibleOwnerEditorMigrationTail(expected, applied(expected.length), true),
     ).not.toThrow();
   });
 

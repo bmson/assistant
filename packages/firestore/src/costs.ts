@@ -3,7 +3,9 @@ import {
   addLedgerMicros,
   addMicros,
   type CostEventInput,
+  type CostProviderReceipt,
   type CostRepository,
+  type CostReservationSweep,
   type CostTotals,
   type EstimatedCostActor,
   type EstimatedCostApprovalRepository,
@@ -35,6 +37,29 @@ import type { DocumentSnapshot, Transaction } from '@google-cloud/firestore';
 import { withEmulatorTransactionRetry } from './emulator-transaction.js';
 import { firestoreEstimatedCostBaseline } from './estimated-cost-baseline.js';
 import { decodeRecord, encodeRecord, type InstallationStore } from './store.js';
+
+/** Missing period counters are acceptable only when no cost event supports a charge. */
+export async function hasCostEventAccountedSince(
+  tx: Transaction,
+  store: InstallationStore,
+  periodStart: Date,
+): Promise<boolean> {
+  const limit = 100;
+  const events = await tx.get(
+    store
+      .collection('costEvents')
+      .where('createdAt', '>=', periodStart)
+      .select('accountedAt')
+      .limit(limit),
+  );
+  return (
+    events.size === limit ||
+    events.docs.some((event) => {
+      const stamp = decodeRecord<Date | null | undefined>(event.get('accountedAt'));
+      return !(stamp instanceof Date && stamp < periodStart);
+    })
+  );
+}
 
 interface Policy {
   dailyLimitMicros: number;
@@ -697,10 +722,69 @@ export class FirestoreCostRepository implements CostRepository {
     };
   }
 
+  private async periodHolds(tx: Transaction, now: Date, held: number) {
+    const dayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+    const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+    if (held === 0) return { dailyHeld: 0, monthlyHeld: 0 };
+
+    // Reuse the stale-dispatch index. The global hold document is the write
+    // fence even while the amount stays unchanged during an unknown transition.
+    const oldAttempts = await tx.get(
+      this.store
+        .collection('costReservations')
+        .where('status', '==', 'unknown')
+        .where('attemptStartedAt', '<', dayStart)
+        .orderBy('attemptStartedAt')
+        .select(
+          'status',
+          'source',
+          'reservationKind',
+          'costGrantId',
+          'attemptStartedAt',
+          'createdAt',
+          'estimatedUsd',
+        )
+        .limit(500),
+    );
+
+    let dailyRelief = 0;
+    let monthlyRelief = 0;
+    for (const reservation of oldAttempts.docs) {
+      const startedAt = this.accountableUnknownAttempt(reservation, now);
+      if (!startedAt) continue;
+      const estimate = storedLedgerUsdToMicros(reservation.get('estimatedUsd'));
+      dailyRelief = addMicros(dailyRelief, estimate);
+      if (startedAt < monthStart) monthlyRelief = addMicros(monthlyRelief, estimate);
+    }
+    if (dailyRelief > held) throw new Error('Unknown attempts exceed total budget hold');
+    return { dailyHeld: held - dailyRelief, monthlyHeld: held - monthlyRelief };
+  }
+
+  private accountableUnknownAttempt(reservation: DocumentSnapshot, now: Date): Date | undefined {
+    const kind = reservation.get('reservationKind');
+    if (
+      reservation.get('status') !== 'unknown' ||
+      reservation.get('source') !== 'model' ||
+      (kind !== undefined && kind !== 'attempt') ||
+      reservation.get('costGrantId') != null
+    )
+      return;
+    const startedAt = decodeRecord<Date>(reservation.get('attemptStartedAt'));
+    const createdAt = decodeRecord<Date>(reservation.get('createdAt'));
+    if (
+      startedAt instanceof Date &&
+      createdAt instanceof Date &&
+      startedAt >= createdAt &&
+      startedAt <= now
+    )
+      return startedAt;
+  }
+
   async totals(): Promise<CostTotals> {
     return this.store.db.runTransaction(
       async (tx) => {
-        const refs = this.refs(this.store.now());
+        const now = this.store.now();
+        const refs = this.refs(now);
         const [p, holds, daily, monthly] = await tx.getAll(
           refs.policy,
           refs.holds,
@@ -709,10 +793,14 @@ export class FirestoreCostRepository implements CostRepository {
         );
         if (!p || !holds || !daily || !monthly) throw new Error('Incomplete budget snapshot');
         const limits = policy(p);
+        const held = integer(holds, 'heldMicros');
+        const { dailyHeld, monthlyHeld } = await this.periodHolds(tx, now, held);
         return {
           dailySpentUsd: microsToUsd(integer(daily, 'spentMicros')),
           monthlySpentUsd: microsToUsd(integer(monthly, 'spentMicros')),
-          heldUsd: microsToUsd(integer(holds, 'heldMicros')),
+          heldUsd: microsToUsd(held),
+          dailyHeldUsd: microsToUsd(dailyHeld),
+          monthlyHeldUsd: microsToUsd(monthlyHeld),
           dailyLimitUsd: microsToUsd(limits.dailyLimitMicros),
           monthlyLimitUsd: microsToUsd(limits.monthlyLimitMicros),
           softPct: limits.softPct,
@@ -753,16 +841,21 @@ export class FirestoreCostRepository implements CostRepository {
       const limits = policy(p);
       const held = integer(holds, 'heldMicros');
       const factor = input.critical ? 1.1 : 1;
-      for (const [name, spent, cap, reset] of [
-        [
-          'monthly',
-          integer(monthly, 'spentMicros'),
-          limits.monthlyLimitMicros,
-          nextUtcMonthlyReset(now),
-        ],
-        ['daily', integer(daily, 'spentMicros'), limits.dailyLimitMicros, nextUtcDailyReset(now)],
+      const dailySpent = integer(daily, 'spentMicros');
+      const monthlySpent = integer(monthly, 'spentMicros');
+      const dailyCap = Math.floor(limits.dailyLimitMicros * factor);
+      const monthlyCap = Math.floor(limits.monthlyLimitMicros * factor);
+      const needsPeriodHolds =
+        addMicros(dailySpent, held, amount) > dailyCap ||
+        addMicros(monthlySpent, held, amount) > monthlyCap;
+      const { dailyHeld, monthlyHeld } = needsPeriodHolds
+        ? await this.periodHolds(tx, now, held)
+        : { dailyHeld: held, monthlyHeld: held };
+      for (const [name, spent, periodHeld, cap, reset] of [
+        ['monthly', monthlySpent, monthlyHeld, monthlyCap, nextUtcMonthlyReset(now)],
+        ['daily', dailySpent, dailyHeld, dailyCap, nextUtcDailyReset(now)],
       ] as const) {
-        if (addMicros(spent, held, amount) > Math.floor(cap * factor)) {
+        if (addMicros(spent, periodHeld, amount) > cap) {
           return {
             ok: false,
             reason: `${name} budget cannot cover this reservation`,
@@ -853,7 +946,7 @@ export class FirestoreCostRepository implements CostRepository {
   async markAttemptUnknown(
     reservationId: string,
     reason: string,
-    providerReceipt?: { requestId?: string; endpoint?: string },
+    providerReceipt?: CostProviderReceipt,
   ): Promise<void> {
     const ref = this.store.doc('costReservations', reservationId);
     await withEmulatorTransactionRetry(() =>
@@ -917,7 +1010,9 @@ export class FirestoreCostRepository implements CostRepository {
       if (!(created instanceof Date) || created >= staleBefore) return false;
     }
     const taskId: string | null = reservation?.get('taskId') ?? direct?.taskId ?? null;
-    const refs = this.refs(now, taskId);
+    const accountedAt =
+      actual && reservation ? (this.accountableUnknownAttempt(reservation, now) ?? now) : now;
+    const refs = this.refs(accountedAt, taskId);
     // Reservation status and event creation commit together, so the status guard
     // provides deduplication while the event retains its public UUID as its document ID.
     const eventRef = this.store.doc('costEvents', eventId);
@@ -1043,6 +1138,7 @@ export class FirestoreCostRepository implements CostRepository {
           description: details?.description ?? reservation?.get('description') ?? '',
           ...(direct?.idempotencyKey ? { idempotencyKey: direct.idempotencyKey } : {}),
           createdAt: now,
+          ...(accountedAt !== now ? { accountedAt } : {}),
         }),
       );
     }
@@ -1077,7 +1173,7 @@ export class FirestoreCostRepository implements CostRepository {
     );
   }
 
-  async releaseStale(olderThanMinutes = 120, batch = 500): Promise<number> {
+  async releaseStale(olderThanMinutes = 120, batch = 500): Promise<CostReservationSweep> {
     if (
       !Number.isFinite(olderThanMinutes) ||
       olderThanMinutes <= 0 ||
@@ -1125,6 +1221,7 @@ export class FirestoreCostRepository implements CostRepository {
       .orderBy('attemptStartedAt')
       .limit(batch)
       .get();
+    let markedUnknown = 0;
     for (const doc of staleDispatches.docs) {
       const id = String(doc.get('id') ?? doc.id);
       const ref = this.store.doc('costReservations', id);
@@ -1153,9 +1250,9 @@ export class FirestoreCostRepository implements CostRepository {
           return true;
         }),
       );
-      if (transitioned) released++;
+      if (transitioned) markedUnknown++;
     }
-    return released;
+    return { released, markedUnknown };
   }
 }
 

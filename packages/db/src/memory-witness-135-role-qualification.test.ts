@@ -54,7 +54,7 @@ async function dropOwnedDatabase(
 }
 
 it.skipIf(!imagesReceipt)(
-  'qualifies the schema 139 migration image, runtime readiness, and generic write compatibility',
+  'qualifies the schema 140 migration image, runtime readiness, and generic write compatibility',
   async () => {
     assertAllocatedTestTarget({
       databaseUrl: process.env.DATABASE_URL,
@@ -82,7 +82,7 @@ it.skipIf(!imagesReceipt)(
       | undefined;
     try {
       await admin`SET statement_timeout = '15s'`;
-      prefixDir = await mkdtemp(join(tmpdir(), 'assistant-memory-witness-role-139-'));
+      prefixDir = await mkdtemp(join(tmpdir(), 'assistant-memory-witness-role-140-'));
       await admin.unsafe(`CREATE DATABASE "${target.databaseName}"`);
       created = true;
       await admin.unsafe(
@@ -96,7 +96,7 @@ it.skipIf(!imagesReceipt)(
       await client`SET statement_timeout = '30s'`;
 
       // The populated historical 0134 prefix remains unchanged. The current
-      // schema 139 image must apply its witness, Calendar, cost, and MCP OAuth tail.
+      // schema 140 image must apply the witness, Calendar, cost, MCP OAuth and research assignment migrations.
       const forwardEntries = journal.entries.slice(135);
       expect(forwardEntries.map((entry: { tag: string }) => entry.tag)).toEqual([
         '0135_memory_write_witness',
@@ -104,6 +104,7 @@ it.skipIf(!imagesReceipt)(
         '0137_estimated_cost_approval',
         '0138_mcp_oauth_state',
         '0139_research_assignment_state',
+        '0140_cost_event_accounted_at',
       ]);
       const expectedForwardLedger = await Promise.all(
         forwardEntries.map(async (entry: { tag: string; when: number }) => ({
@@ -135,6 +136,7 @@ it.skipIf(!imagesReceipt)(
       const owner = randomUUID();
       const legacyMemoryId = randomUUID();
       const legacyReservationId = randomUUID();
+      const legacyCostEventId = randomUUID();
       const legacyMcpId = randomUUID();
       const legacyContent = 'Legacy owner corrected note at migration 0134';
       const contentHash = createHash('sha256').update(legacyContent).digest('hex');
@@ -163,6 +165,9 @@ it.skipIf(!imagesReceipt)(
         INSERT INTO cost_reservations (id,source,estimated_usd,status,unknown_reason)
         VALUES (${legacyReservationId},'model',0.125001,'unknown','synthetic pre-migration outcome')`;
       await client`
+        INSERT INTO cost_events (id,source,usd)
+        VALUES (${legacyCostEventId},'model',0.123000)`;
+      await client`
         INSERT INTO mcp_connections (id,agent_id,name,endpoint,status,bearer_token_encrypted)
         VALUES (${legacyMcpId},${owner},'Fixture MCP','https://mcp.invalid/', 'ready','sealed-fixture')`;
       await client.end({ timeout: 5 });
@@ -177,7 +182,7 @@ it.skipIf(!imagesReceipt)(
       });
       await client`SET statement_timeout = '15s'`;
       const firstForward = expectedForwardLedger[0];
-      if (!firstForward) throw new Error('Schema 139 forward migration tail is missing.');
+      if (!firstForward) throw new Error('Schema 140 forward migration tail is missing.');
       const forwardLedger = await client`
         SELECT hash,created_at::text AS "createdAt" FROM drizzle.__drizzle_migrations
         WHERE created_at >= ${firstForward.createdAt}
@@ -220,6 +225,16 @@ it.skipIf(!imagesReceipt)(
         grantId: null,
         unknownReason: 'synthetic pre-migration outcome',
       });
+      const [legacyCostEvent] = await client`
+        SELECT usd::text,accounted_at AS "accountedAt"
+        FROM cost_events WHERE id=${legacyCostEventId}`;
+      expect(legacyCostEvent).toEqual({ usd: '0.123000', accountedAt: null });
+      const [billEvidence] = await client`
+        SELECT is_nullable AS nullable, data_type AS type,
+               to_regclass('public.email_ingest_bill_identity_idx') IS NOT NULL AS indexed
+        FROM information_schema.columns WHERE table_schema='public'
+          AND table_name='email_ingest' AND column_name='bill_evidence'`;
+      expect(billEvidence).toEqual({ nullable: 'YES', type: 'jsonb', indexed: true });
       const [legacyMcpConnection] = await client`
         SELECT status, enabled, bearer_token_encrypted AS "bearerTokenEncrypted", oauth_state AS "oauthState"
         FROM mcp_connections WHERE id=${legacyMcpId} AND agent_id=${owner}`;
@@ -252,7 +267,7 @@ it.skipIf(!imagesReceipt)(
       const proofDirectory = process.env.ASSISTANT_MEMORY_WITNESS_PROOF_DIR;
       if (proofDirectory) {
         await writeFile(
-          join(proofDirectory, 'schema-139-forward-upgrade.json'),
+          join(proofDirectory, 'schema-140-forward-upgrade.json'),
           `${JSON.stringify(
             {
               prefixLastMigration: prefixEntries.at(-1)?.tag,
@@ -262,6 +277,7 @@ it.skipIf(!imagesReceipt)(
               disconnectedCalendarStateReadback: calendarAfter?.state,
               estimatedCostTables: budgetTables.map((row) => row.tableName),
               historicalUnknownReservationReadback: legacyReservation,
+              legacyCostEventReadback: legacyCostEvent,
               legacyMcpRecordPreserved: legacyMcpConnection?.oauthState === null,
               legacyMemoryWitnessRemainsSqlNull: legacyAfter?.witnessIsSqlNull,
             },

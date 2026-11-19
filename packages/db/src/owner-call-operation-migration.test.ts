@@ -300,26 +300,32 @@ beforeAll(async () => {
     const expectedMcpHash = createHash('sha256')
       .update(await readFile(join(folder, '0138_mcp_oauth_state.sql')))
       .digest('hex');
-    const expectedFinalHash = createHash('sha256')
+    const expectedResearchHash = createHash('sha256')
       .update(await readFile(join(folder, '0139_research_assignment_state.sql')))
       .digest('hex');
-    expect(journal.entries.at(-1)?.tag).toBe('0139_research_assignment_state');
+    const expectedFinalHash = createHash('sha256')
+      .update(await readFile(join(folder, '0140_cost_event_accounted_at.sql')))
+      .digest('hex');
+    expect(journal.entries.at(-1)?.tag).toBe('0140_cost_event_accounted_at');
     const [endpoint] = await client`
       SELECT hash FROM drizzle.__drizzle_migrations ORDER BY id DESC LIMIT 1`;
     expect(endpoint?.hash).toBe(expectedFinalHash);
     const [ledgerCount] =
       await client`SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations`;
-    expect(ledgerCount?.count).toBe(140);
+    expect(ledgerCount?.count).toBe(journal.entries.length);
     const ledgerBeforeRerun = await client`
       SELECT hash,created_at::text AS "createdAt"
       FROM drizzle.__drizzle_migrations ORDER BY id`;
-    expect(ledgerBeforeRerun).toHaveLength(140);
-    expect(ledgerBeforeRerun.at(-6)?.hash).toBe(expectedOwnerMemoryHash);
-    expect(ledgerBeforeRerun.at(-5)?.hash).toBe(expectedWitnessHash);
-    expect(ledgerBeforeRerun.at(-4)?.hash).toBe(expectedCalendarHash);
-    expect(ledgerBeforeRerun.at(-3)?.hash).toBe(expectedCostHash);
-    expect(ledgerBeforeRerun.at(-2)?.hash).toBe(expectedMcpHash);
-    expect(ledgerBeforeRerun.at(-1)?.hash).toBe(expectedFinalHash);
+    expect(ledgerBeforeRerun).toHaveLength(journal.entries.length);
+    expect(ledgerBeforeRerun.slice(-7).map(({ hash }) => hash)).toEqual([
+      expectedOwnerMemoryHash,
+      expectedWitnessHash,
+      expectedCalendarHash,
+      expectedCostHash,
+      expectedMcpHash,
+      expectedResearchHash,
+      expectedFinalHash,
+    ]);
     await client.end();
     client = undefined;
     await exec('pnpm', ['migrate'], { cwd, env, timeout: 45_000, maxBuffer: 2 * 1024 * 1024 });
