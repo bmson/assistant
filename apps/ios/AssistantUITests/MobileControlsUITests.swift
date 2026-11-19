@@ -61,38 +61,8 @@ final class MobileControlsUITests: XCTestCase {
         try require(registrations.exists && registrations.label == "1",
                     "Fixture must capture exactly one injected notification registrar call", app)
 
-        app.terminate()
-        try launch(app, fixture: "proactive")
-        let proactiveSurface = app.descendants(matching: .any)
-            .matching(identifier: "fixture.surface.proactive").firstMatch
-        try require(proactiveSurface.waitForExistence(timeout: waitBudget()), "Proactive surface unavailable", app)
-        let disclosureQuery = proactiveSurface.buttons.matching(NSPredicate(format: "label == %@", "Details"))
-        let details = disclosureQuery.firstMatch
-        try require(details.waitForExistence(timeout: waitBudget()), "Details absent from native automation tree", app)
-        try require(disclosureQuery.count == 1, "Details must identify exactly one real button", app)
-        let facts = proactiveSurface.staticTexts.matching(NSPredicate(format: "label == %@", sourceFact))
-        let summaries = proactiveSurface.staticTexts.matching(NSPredicate(format: "label == %@", actionSummary))
-        try capture(app, "proactive-collapsed-before-assertions")
-        try require(facts.count == 0 && summaries.count == 0, "Expanded-only source facts and summary must start absent", app)
-        try revealTogether([details], surface: proactiveSurface, app: app)
-        try require(details.frame.height >= 44 && details.isHittable,
-                    "Details must expose a 44pt native frame and be hittable", app)
-        details.tap()
-        try require(facts.firstMatch.waitForExistence(timeout: waitBudget()), "Details tap must reveal the exact source qualification", app)
-        try require(summaries.firstMatch.waitForExistence(timeout: waitBudget()), "Details tap must reveal the exact action summary", app)
-        try capture(app, "proactive-expanded-before-assertions")
-        try require(facts.count == 1 && summaries.count == 1, "Expanded facts and action summary must each appear once", app)
-        try revealTogether([facts.firstMatch, summaries.firstMatch], surface: proactiveSurface, app: app)
-        try capture(app, "proactive-expanded-visible-source-and-summary")
-        try revealTogether([details], surface: proactiveSurface, app: app, upwards: false)
-        details.tap()
-        let collapsed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
-            facts.count == 0 && summaries.count == 0
-        }, object: nil)
-        try require(XCTWaiter.wait(for: [collapsed], timeout: waitBudget()) == .completed,
-                    "Second Details tap must remove expanded-only source facts and summary", app)
-        try capture(app, "proactive-after-collapse")
-        try assertTransport(app)
+        // Proactive disclosure assertions run in every matrix configuration
+        // below; keeping this method to one cold launch preserves its 60s cap.
         try checkBudget()
     }
 
@@ -169,7 +139,11 @@ final class MobileControlsUITests: XCTestCase {
                         details.tap()
                         try require(facts.firstMatch.waitForExistence(timeout: waitBudget()) && facts.count == 1 && summaries.count == 1,
                                     "Expansion must show exact fact and summary once: \(key)", app)
-                        try revealTogether([facts.firstMatch], surface: surface, app: app, fullyVisible: false)
+                        if textSize == "default" {
+                            try revealTogether([facts.firstMatch, summaries.firstMatch], surface: surface, app: app)
+                        } else {
+                            try revealTogether([facts.firstMatch], surface: surface, app: app, fullyVisible: false)
+                        }
                         try capture(app, key + "-expanded-source")
                         try revealTogether([details], surface: surface, app: app, upwards: false)
                         details.tap()
@@ -178,6 +152,7 @@ final class MobileControlsUITests: XCTestCase {
                         }, object: nil)
                         try require(XCTWaiter.wait(for: [collapsed], timeout: waitBudget()) == .completed,
                                     "Second tap must collapse exact source facts: \(key)", app)
+                        try capture(app, key + "-collapsed-source")
                     }
                     try assertTransport(app)
                 }
@@ -254,7 +229,7 @@ final class MobileControlsUITests: XCTestCase {
             XCTFail("Native capability attachment count exceeded 160")
             throw CapabilityFailure.budget
         }
-        let png = app.screenshot().pngRepresentation
+        let png = XCUIScreen.main.screenshot().pngRepresentation
         guard png.count <= maximumPNGBytes - retainedPNGBytes else {
             XCTFail("Native capability PNG bytes exceeded 64MiB")
             throw CapabilityFailure.budget
