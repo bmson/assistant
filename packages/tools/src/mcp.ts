@@ -7,6 +7,7 @@ import {
 } from '@assistant/persistence';
 import { and, asc, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
+import { providerTransaction, withProviderSignal } from './bounded-provider-response.js';
 import { type McpHttpSession, pinnedAgent, pinnedRequest, resolveMcpEndpoint } from './mcp-http.js';
 import {
   AmbiguousMcpMutationError,
@@ -24,6 +25,8 @@ export { mcpApprovalBindingFingerprint as mcpToolApprovalFingerprint } from '@as
 const PROTOCOL_VERSION = '2025-11-25';
 const CLIENT_INFO = { name: 'assistant', version: '1.0.0' };
 const MAX_TOOLS = 80;
+const MAX_LIST_PAGES = 8;
+const MAX_DISCOVERY_BYTES = 300_000;
 const MAX_TOOL_NAME = 128;
 const MAX_TOOL_DESCRIPTION = 1_200;
 
@@ -78,6 +81,8 @@ interface McpSession extends McpHttpSession {
   fetchImpl: FetchImplementation;
   bearerToken?: string;
   oauth: boolean;
+  discoverySignal?: AbortSignal;
+  discoveryBytesRemaining?: number;
 }
 
 type JsonRpcResponse = McpRpcResponse;
@@ -103,21 +108,41 @@ async function rpc(
     headers,
     body: JSON.stringify({ jsonrpc: '2.0', ...payload }),
     redirect: 'error',
-    signal: AbortSignal.timeout(20_000),
+    signal: session.discoverySignal ?? AbortSignal.timeout(20_000),
   };
-  const response =
+  const pending =
     session.fetchImpl === fetch
-      ? await pinnedRequest(session, init)
-      : await session.fetchImpl(session.endpoint, init);
-  if (response.status === 401) throw new McpAuthorizationError(session.oauth);
-  if (!response.ok && response.status !== 202) {
-    throw new Error(`MCP server responded with HTTP ${response.status}.`);
+      ? pinnedRequest(session, init)
+      : session.fetchImpl(session.endpoint, init);
+  const signal = init.signal as AbortSignal;
+  void pending.then(
+    (response) => {
+      if (signal.aborted) void response.body?.cancel().catch(() => {});
+    },
+    () => {},
+  );
+  const response = await withProviderSignal(pending, signal);
+  try {
+    if (response.status === 401) throw new McpAuthorizationError(session.oauth);
+    if (!response.ok && response.status !== 202)
+      throw new Error(`MCP server responded with HTTP ${response.status}.`);
+    if (!expectsReply) return { sessionId: response.headers.get('mcp-session-id') ?? undefined };
+    const maxBytes = session.discoveryBytesRemaining ?? MAX_DISCOVERY_BYTES;
+    return {
+      response: await readMcpRpcResponse(response, payload.id, signal, {
+        maxBytes,
+        onBytesRead:
+          session.discoveryBytesRemaining === undefined
+            ? undefined
+            : (count) => {
+                session.discoveryBytesRemaining = (session.discoveryBytesRemaining ?? 0) - count;
+              },
+      }),
+      sessionId: response.headers.get('mcp-session-id') ?? undefined,
+    };
+  } finally {
+    if (!response.body?.locked) void response.body?.cancel().catch(() => {});
   }
-  if (!expectsReply) return { sessionId: response.headers.get('mcp-session-id') ?? undefined };
-  return {
-    response: await readMcpRpcResponse(response, payload.id, init.signal as AbortSignal),
-    sessionId: response.headers.get('mcp-session-id') ?? undefined,
-  };
 }
 
 class McpAuthorizationError extends Error {
@@ -148,17 +173,23 @@ async function openMcpSession(
   fetchImpl: FetchImplementation = fetch,
   bearerToken?: string,
   publicHttpsOnly = false,
+  discoverySignal?: AbortSignal,
 ): Promise<{
   session: McpSession;
   initialize: Record<string, unknown>;
 }> {
-  const target = await resolveMcpEndpoint(endpointValue, { publicHttpsOnly });
+  const target = await resolveMcpEndpoint(endpointValue, {
+    publicHttpsOnly,
+    signal: discoverySignal,
+  });
   const session: McpSession = {
     endpoint: target.endpoint,
     agent: pinnedAgent(target),
     fetchImpl,
     bearerToken,
     oauth: publicHttpsOnly,
+    discoverySignal,
+    discoveryBytesRemaining: discoverySignal ? MAX_DISCOVERY_BYTES : undefined,
   };
   try {
     const initialized = await rpc(session, {
@@ -180,7 +211,7 @@ async function openMcpSession(
   }
 }
 
-function sanitizedTools(value: unknown): McpListedTool[] {
+function sanitizedTools(value: unknown, limit = MAX_TOOLS): McpListedTool[] {
   if (!Array.isArray(value)) return [];
   const tools: McpListedTool[] = [];
   for (const candidate of value) {
@@ -197,9 +228,48 @@ function sanitizedTools(value: unknown): McpListedTool[] {
       description: clip(row.description, MAX_TOOL_DESCRIPTION) || 'No description provided.',
       inputSchema,
     });
-    if (tools.length === MAX_TOOLS) break;
+    if (tools.length === limit) break;
   }
   return tools;
+}
+
+/** Terminal-only discovery, shared by saved connection snapshots and OAuth preflight. */
+async function listMcpTools(
+  session: McpSession,
+): Promise<{ tools: McpListedTool[]; nextId: number }> {
+  const tools: McpListedTool[] = [];
+  const names = new Set<string>();
+  const cursors = new Set<string>();
+  let cursor: string | undefined;
+  for (let page = 1; ; page++) {
+    const listed = await rpc(session, {
+      id: page + 1,
+      method: 'tools/list',
+      params: cursor === undefined ? {} : { cursor },
+    });
+    const result = resultOf(listed.response, 'tools/list');
+    if (!Array.isArray(result.tools))
+      throw new Error('MCP tools/list returned an invalid tools page.');
+    // Keep the established display projection and first-80 exposure limit,
+    // while checking every received identity before declaring discovery ready.
+    for (const tool of sanitizedTools(result.tools, Number.POSITIVE_INFINITY)) {
+      if (names.has(tool.name)) throw new Error('MCP tools/list repeated a tool identity.');
+      names.add(tool.name);
+      if (tools.length < MAX_TOOLS) tools.push(tool);
+    }
+    if (result.nextCursor === undefined) return { tools, nextId: page + 2 };
+    if (
+      typeof result.nextCursor !== 'string' ||
+      !result.nextCursor ||
+      result.nextCursor.length > 4_096
+    )
+      throw new Error('MCP tools/list returned an invalid pagination cursor.');
+    if (cursors.has(result.nextCursor))
+      throw new Error('MCP tools/list repeated a pagination cursor.');
+    if (page === MAX_LIST_PAGES) throw new Error('MCP tools/list exceeded its page limit.');
+    cursors.add(result.nextCursor);
+    cursor = result.nextCursor;
+  }
 }
 
 /** Check a connection and return a bounded, display-safe discovery snapshot. */
@@ -216,27 +286,29 @@ export async function inspectMcpConnection(
     const bearerToken = options.bearerTokenEncrypted
       ? decryptMcpBearerToken(options.bearerTokenEncrypted)
       : undefined;
-    const opened = await openMcpSession(
-      endpointValue,
-      options.fetchImpl,
-      bearerToken,
-      options.publicHttpsOnly,
-    );
-    session = opened.session;
-    const { initialize } = opened;
-    const listed = await rpc(session, { id: 2, method: 'tools/list', params: {} });
-    const result = resultOf(listed.response, 'tools/list');
-    const serverInfo =
-      initialize.serverInfo && typeof initialize.serverInfo === 'object'
-        ? (initialize.serverInfo as Record<string, unknown>)
-        : {};
-    return {
-      status: 'ready',
-      serverName: clip(serverInfo.name, 160) || undefined,
-      serverVersion: clip(serverInfo.version, 80) || undefined,
-      instructions: clip(initialize.instructions, 2_000) || undefined,
-      tools: sanitizedTools(result.tools),
-    };
+    return await providerTransaction(undefined, 20_000, 'MCP discovery', async (signal) => {
+      const opened = await openMcpSession(
+        endpointValue,
+        options.fetchImpl,
+        bearerToken,
+        options.publicHttpsOnly,
+        signal,
+      );
+      session = opened.session;
+      const { initialize } = opened;
+      const { tools } = await listMcpTools(session);
+      const serverInfo =
+        initialize.serverInfo && typeof initialize.serverInfo === 'object'
+          ? (initialize.serverInfo as Record<string, unknown>)
+          : {};
+      return {
+        status: 'ready' as const,
+        serverName: clip(serverInfo.name, 160) || undefined,
+        serverVersion: clip(serverInfo.version, 80) || undefined,
+        instructions: clip(initialize.instructions, 2_000) || undefined,
+        tools,
+      };
+    });
   } catch (error) {
     if (error instanceof McpAuthorizationError) {
       return { status: 'authorization_required', tools: [], error: error.message };
@@ -265,28 +337,40 @@ export async function invokeMcpTool(
   const bearerToken = bearerTokenEncrypted
     ? decryptMcpBearerToken(bearerTokenEncrypted)
     : undefined;
-  const { session } = await openMcpSession(
-    endpointValue,
-    fetchImpl,
-    bearerToken,
-    Boolean(oauthAuthority),
-  );
+  let session: McpSession | undefined;
+  let callId = 2;
   try {
-    if (oauthAuthority) {
-      const listed = await rpc(session, { id: 2, method: 'tools/list', params: {} });
-      const tools = sanitizedTools(resultOf(listed.response, 'tools/list').tools);
-      const current = mcpApprovalBindingFingerprint(
-        { ...oauthAuthority.connection, tools },
-        toolName,
+    await providerTransaction(undefined, 20_000, 'MCP invocation discovery', async (signal) => {
+      const opened = await openMcpSession(
+        endpointValue,
+        fetchImpl,
+        bearerToken,
+        Boolean(oauthAuthority),
+        signal,
       );
-      if (current !== mcpApprovalBindingFingerprint(oauthAuthority.connection, toolName))
-        throw new Error('MCP tool changed since approval. Reconnect and request fresh approval.');
-      await oauthAuthority.assertCurrent();
-    }
+      session = opened.session;
+      if (oauthAuthority) {
+        const { tools, nextId } = await listMcpTools(session);
+        callId = nextId;
+        const prior = mcpApprovalBindingFingerprint(oauthAuthority.connection, toolName);
+        const current = mcpApprovalBindingFingerprint(
+          { ...oauthAuthority.connection, tools },
+          toolName,
+        );
+        if (!prior || !current || current !== prior)
+          throw new Error('MCP tool changed since approval. Reconnect and request fresh approval.');
+        await withProviderSignal(oauthAuthority.assertCurrent(), signal);
+      }
+    });
+    if (!session) throw new Error('MCP session did not open.');
+    // The externally consequential call retains its own bounded request and
+    // ambiguous-outcome handling; an incomplete discovery never reaches it.
+    session.discoverySignal = undefined;
+    session.discoveryBytesRemaining = undefined;
     let response: Awaited<ReturnType<typeof rpc>>;
     try {
       response = await rpc(session, {
-        id: oauthAuthority ? 3 : 2,
+        id: callId,
         method: 'tools/call',
         params: { name: toolName, arguments: input },
       });
@@ -302,7 +386,7 @@ export async function invokeMcpTool(
       throw new AmbiguousMcpMutationError();
     }
   } finally {
-    session.agent.destroy();
+    session?.agent.destroy();
   }
 }
 
