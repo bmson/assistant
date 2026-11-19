@@ -6,7 +6,7 @@ import {
   OWNER_TASK_MEMORY_RETENTION,
 } from '@assistant/persistence';
 import { inArray } from 'drizzle-orm';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createPostgresApplicationChatPersistence } from './application-chat-repository.js';
 import { createDb, type Db } from './client.js';
 import { agents, conversations, messages, tasks } from './schema.js';
@@ -719,6 +719,122 @@ describe('PostgreSQL application chat persistence', () => {
     await expect(repository.completeDirectChatTask(completion)).resolves.toBe(false);
     expect((await repository.listMessages(agent.id, conversation.id))?.messages).toMatchObject([
       { taskId: task.id, text: 'Light bends through water.' },
+    ]);
+  });
+});
+
+describe('PostgreSQL agent resolution stage observer', () => {
+  const agentId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const agent = { id: agentId } as typeof agents.$inferSelect;
+
+  function fakeDb(
+    input: {
+      ownerRows?: { id: string }[];
+      agentRows?: (typeof agents.$inferSelect)[];
+      ownerFailure?: unknown;
+      agentFailure?: unknown;
+    } = {},
+  ) {
+    let queryIndex = 0;
+    const db = {
+      select: vi.fn(() => {
+        const index = queryIndex++;
+        const query = {
+          from: vi.fn(),
+          where: vi.fn(),
+          orderBy: vi.fn(),
+          limit: vi.fn(async () => {
+            if (index === 0) {
+              if (input.ownerFailure) throw input.ownerFailure;
+              return input.ownerRows ?? [{ id: agentId }];
+            }
+            if (input.agentFailure) throw input.agentFailure;
+            return input.agentRows ?? [agent];
+          }),
+        };
+        query.from.mockReturnValue(query);
+        query.where.mockReturnValue(query);
+        query.orderBy.mockReturnValue(query);
+        return query;
+      }),
+    };
+    return { db: db as unknown as Db, select: db.select };
+  }
+
+  it('brackets the two existing reads once and suppresses observer exceptions', async () => {
+    const fixture = fakeDb();
+    const stages: string[] = [];
+    const repository = createPostgresApplicationChatPersistence(fixture.db, (stage) => {
+      stages.push(stage);
+      throw new Error('private observer failure');
+    });
+
+    await expect(repository.resolveAgent()).resolves.toMatchObject({ id: agentId });
+    expect(fixture.select).toHaveBeenCalledTimes(2);
+    expect(stages).toEqual([
+      'owner_assertion_call_started',
+      'owner_assertion_call_returned',
+      'agent_row_lookup_call_started',
+      'agent_row_lookup_call_returned',
+    ]);
+  });
+
+  it('reports a returned empty agent lookup before existing missing-agent validation', async () => {
+    const fixture = fakeDb({ agentRows: [] });
+    const stages: string[] = [];
+    const repository = createPostgresApplicationChatPersistence(fixture.db, (stage) => {
+      stages.push(stage);
+    });
+
+    await expect(repository.resolveAgent()).rejects.toThrow('no agent row');
+    expect(stages).toEqual([
+      'owner_assertion_call_started',
+      'owner_assertion_call_returned',
+      'agent_row_lookup_call_started',
+      'agent_row_lookup_call_returned',
+    ]);
+  });
+
+  it('marks owner assertion rejection and rethrows the identical error', async () => {
+    const failure = new Error('synthetic owner query failure');
+    const fixture = fakeDb({ ownerFailure: failure });
+    const stages: string[] = [];
+    const repository = createPostgresApplicationChatPersistence(fixture.db, (stage) => {
+      stages.push(stage);
+    });
+
+    await expect(repository.resolveAgent()).rejects.toBe(failure);
+    expect(fixture.select).toHaveBeenCalledOnce();
+    expect(stages).toEqual(['owner_assertion_call_started', 'owner_assertion_call_threw']);
+  });
+
+  it('marks installation-owner validation failure as a thrown assertion call', async () => {
+    const fixture = fakeDb({ ownerRows: [{ id: agentId }, { id: randomUUID() }] });
+    const stages: string[] = [];
+    const repository = createPostgresApplicationChatPersistence(fixture.db, (stage) => {
+      stages.push(stage);
+    });
+
+    await expect(repository.resolveAgent()).rejects.toThrow('exactly one owner');
+    expect(fixture.select).toHaveBeenCalledOnce();
+    expect(stages).toEqual(['owner_assertion_call_started', 'owner_assertion_call_threw']);
+  });
+
+  it('marks agent lookup rejection and rethrows the identical error', async () => {
+    const failure = new Error('synthetic agent query failure');
+    const fixture = fakeDb({ agentFailure: failure });
+    const stages: string[] = [];
+    const repository = createPostgresApplicationChatPersistence(fixture.db, (stage) => {
+      stages.push(stage);
+    });
+
+    await expect(repository.resolveAgent()).rejects.toBe(failure);
+    expect(fixture.select).toHaveBeenCalledTimes(2);
+    expect(stages).toEqual([
+      'owner_assertion_call_started',
+      'owner_assertion_call_returned',
+      'agent_row_lookup_call_started',
+      'agent_row_lookup_call_threw',
     ]);
   });
 });

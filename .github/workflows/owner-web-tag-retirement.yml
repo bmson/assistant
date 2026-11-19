@@ -13,6 +13,12 @@ on:
         description: Exact reviewed main workflow source SHA
         type: string
         required: true
+      retirement_profile:
+        description: Fixed legacy retirement, or only the proven resume-40403696377-1 alias beside the unchanged canonical100 target
+        type: choice
+        options: [legacy-01080, known-resume-40403696377-1]
+        default: legacy-01080
+        required: false
       reviewed_plan_sha256:
         description: Apply only - exact plan packet hash reviewed by release manager
         type: string
@@ -42,6 +48,7 @@ jobs:
       GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
       GCP_DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
       OWNER_TAG_REVIEWED_SOURCE: ${{ inputs.reviewed_source_sha }}
+      OWNER_TAG_RETIREMENT_PROFILE: ${{ inputs.retirement_profile || 'legacy-01080' }}
       OWNER_TAG_REVIEWED_PLAN_SHA256: ${{ inputs.reviewed_plan_sha256 }}
       OWNER_TAG_REVIEWED_OBSERVED_AT: ${{ inputs.reviewed_observed_at }}
     steps:

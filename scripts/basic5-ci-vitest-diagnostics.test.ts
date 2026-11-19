@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  BASIC5_AUTHENTICATED_NAVIGATION_COUNT,
   createBasic5BrowserRequestBudget,
   routeBasic5BrowserRequest,
 } from './basic5-browser-acceptance-support.js';
@@ -480,7 +481,7 @@ describe('BASIC5 bounded failed Vitest report diagnostics', () => {
     expect(unknown.diagnostic.checkpoint?.saveTransport?.routeBlocked).toBeNull();
   });
 
-  it('accepts optional closed request-class diagnostics while preserving legacy/current checkpoints', () => {
+  it('accepts the 16-stage, 17-bucket candidate frame and preserves nullable checkpoint forms', () => {
     const blank = {
       document: 0,
       next_static_asset: 0,
@@ -488,19 +489,21 @@ describe('BASIC5 bounded failed Vitest report diagnostics', () => {
       rsc_or_prefetch: 0,
       other: 0,
     };
-    const firstNavigation = { ...blank, document: 1, next_static_asset: 1 };
+    const lastNavigation = { ...blank, document: 1, next_static_asset: 1 };
     const diagnostics = {
-      bucketMostRecentNavigation: 1,
-      byNavigation: [firstNavigation, ...Array.from({ length: 6 }, () => ({ ...blank }))],
-      totals: { ...firstNavigation },
+      bucketMostRecentNavigation: BASIC5_AUTHENTICATED_NAVIGATION_COUNT,
+      byNavigation: Array.from({ length: BASIC5_AUTHENTICATED_NAVIGATION_COUNT + 1 }, (_, index) =>
+        index === BASIC5_AUTHENTICATED_NAVIGATION_COUNT ? lastNavigation : blank,
+      ),
+      totals: { ...lastNavigation },
     };
     const checkpoint = {
       schemaVersion: 1,
-      stage: 'browser_launched',
-      authenticatedNavigationCount: 0,
-      applyCount: 0,
-      durableReadbackCount: 0,
-      freshPageReadbackCount: 0,
+      stage: 'note_correction_fresh_page_readback_complete',
+      authenticatedNavigationCount: BASIC5_AUTHENTICATED_NAVIGATION_COUNT,
+      applyCount: 4,
+      durableReadbackCount: 4,
+      freshPageReadbackCount: 4,
       fixtureCounters: {
         observedAt: 'checkpoint',
         browserHttpRequests: 2,
@@ -522,6 +525,32 @@ describe('BASIC5 bounded failed Vitest report diagnostics', () => {
       browserPresentationHttpRequests: 2,
       browserPresentationDiagnostics: diagnostics,
     });
+
+    const sevenNavigationDiagnostics = {
+      ...diagnostics,
+      bucketMostRecentNavigation: 7,
+      byNavigation: Array.from({ length: BASIC5_AUTHENTICATED_NAVIGATION_COUNT + 1 }, (_, index) =>
+        index === 7 ? lastNavigation : blank,
+      ),
+    };
+    const sevenNavigation = output({
+      ...checkpoint,
+      stage: 'authenticated_navigation_complete',
+      authenticatedNavigationCount: 7,
+      applyCount: 1,
+      durableReadbackCount: 1,
+      freshPageReadbackCount: 1,
+      fixtureCounters: {
+        ...checkpoint.fixtureCounters,
+        browserPresentationDiagnostics: sevenNavigationDiagnostics,
+      },
+    });
+    expect(sevenNavigation.validOutput).toBe(true);
+    expect(sevenNavigation.diagnostic.checkpoint?.authenticatedNavigationCount).toBe(7);
+    expect(
+      sevenNavigation.diagnostic.checkpoint?.fixtureCounters?.browserPresentationDiagnostics
+        ?.byNavigation,
+    ).toHaveLength(BASIC5_AUTHENTICATED_NAVIGATION_COUNT + 1);
 
     const unknownDiagnostics = output({
       ...checkpoint,
@@ -547,8 +576,15 @@ describe('BASIC5 bounded failed Vitest report diagnostics', () => {
         totals: { ...diagnostics.totals, unexpected_class: 0 },
       },
       { ...diagnostics, bucketMostRecentNavigation: 1.5 },
-      { ...diagnostics, bucketMostRecentNavigation: 7 },
+      { ...diagnostics, bucketMostRecentNavigation: BASIC5_AUTHENTICATED_NAVIGATION_COUNT + 1 },
+      {
+        ...diagnostics,
+        bucketMostRecentNavigation: 6,
+        byNavigation: diagnostics.byNavigation.slice(0, 7),
+      },
       { ...diagnostics, byNavigation: diagnostics.byNavigation.slice(1) },
+      { ...diagnostics, byNavigation: undefined },
+      { ...diagnostics, byNavigation: [...diagnostics.byNavigation, { ...blank }] },
       {
         ...diagnostics,
         totals: { ...diagnostics.totals, document: 2 },
@@ -560,8 +596,8 @@ describe('BASIC5 bounded failed Vitest report diagnostics', () => {
       {
         ...diagnostics,
         byNavigation: [
-          { ...firstNavigation, document: 1.5 },
-          ...Array.from({ length: 6 }, () => ({ ...blank })),
+          { ...lastNavigation, document: 1.5 },
+          ...Array.from({ length: BASIC5_AUTHENTICATED_NAVIGATION_COUNT }, () => ({ ...blank })),
         ],
       },
     ]) {
@@ -750,9 +786,49 @@ describe('BASIC5 bounded failed Vitest report diagnostics', () => {
     expect(contentFreeBasic5CiVitestDiagnostic(result.diagnostic)).toEqual(result.diagnostic);
   });
 
+  it('keeps a malformed legacy navigation frame on the controller hard-failure path', () => {
+    const blank = {
+      document: 0,
+      next_static_asset: 0,
+      public_asset: 0,
+      rsc_or_prefetch: 0,
+      other: 0,
+    };
+    const oldFrameCheckpoint = {
+      schemaVersion: 1,
+      stage: 'authenticated_navigation_complete',
+      authenticatedNavigationCount: 7,
+      applyCount: 1,
+      durableReadbackCount: 1,
+      freshPageReadbackCount: 1,
+      fixtureCounters: {
+        observedAt: 'checkpoint',
+        browserHttpRequests: 1,
+        browserControlHttpRequests: 0,
+        browserPresentationHttpRequests: 1,
+        browserPresentationDiagnostics: {
+          bucketMostRecentNavigation: 6,
+          byNavigation: Array.from({ length: 7 }, (_, index) =>
+            index === 6 ? { ...blank, document: 1 } : { ...blank },
+          ),
+          totals: { ...blank, document: 1 },
+        },
+        browserBudgetExceeded: false,
+        localEmbeddingReceived: 0,
+        localEmbeddingFinished: 0,
+      },
+    };
+    const stdout = `BASIC5_ACCEPTANCE_CHECKPOINT ${JSON.stringify(oldFrameCheckpoint)}\nBASIC5_ACCEPTANCE_EVIDENCE {}\n${JSON.stringify(report({ status: 'passed' }))}`;
+    const result = observe(stdout, 0);
+    expect(result.validOutput).toBe(false);
+    expect(result.diagnostic.checkpoint).toBeNull();
+    expect(() => parseThroughController(stdout, 0)).toThrow('vitest_json_summary_malformed');
+  });
+
   it.each([
     { stage: `private ${privateText}` },
-    { authenticatedNavigationCount: 7 },
+    { stage: 'unknown_checkpoint_stage' },
+    { authenticatedNavigationCount: BASIC5_AUTHENTICATED_NAVIGATION_COUNT + 1 },
     { applyCount: 5 },
     { durableReadbackCount: -1 },
     { freshPageReadbackCount: 1.5 },

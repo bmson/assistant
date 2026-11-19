@@ -27,9 +27,67 @@ describe('redactAuditText', () => {
   });
 
   it('removes phone numbers in the shapes people write them', () => {
-    for (const phone of ['+1 (415) 555-0132', '415-555-0132', '+47 912 34 567']) {
+    for (const phone of [
+      '+1 (415) 555-0132',
+      '415-555-0132',
+      '+47 912 34 567',
+      '+1 415 555 0132',
+      '415 555 0123',
+      '415 555 01 23',
+      '44 20 7946 0958',
+    ]) {
       expect(redactAuditText(`Call ${phone} today`)).toBe('Call [phone] today');
     }
+  });
+
+  it('removes a parenthesized national number without stopping at a short prefix', () => {
+    expect(redactAuditText('Call (415) 555-0123.')).toBe('Call [phone].');
+  });
+
+  it('removes a dotted phone number', () => {
+    expect(redactAuditText('Call 415.555.0123.')).toBe('Call [phone].');
+  });
+
+  it('removes a phone with mixed dot and space separators as one number', () => {
+    expect(redactAuditText('Call 415.55 50123.')).toBe('Call [phone].');
+    expect(redactAuditText('The 415.55 50123.')).toBe('The [phone].');
+  });
+
+  it('preserves a date beside a phone number', () => {
+    expect(redactAuditText('Date 2026-09-07 415-555-0123.')).toBe('Date 2026-09-07 [phone].');
+  });
+
+  it('preserves a decimal amount beside a phone number', () => {
+    for (const text of [
+      'Total USD 10.99 415-555-0123.',
+      'Total 10.99 415-555-0123.',
+      'Total $10.99 415-555-0123.',
+      'Total $ 10.99 415-555-0123.',
+      'Total: 10.99 415-555-0123.',
+      'Total 10.9 415-555-0123.',
+      'Total 10.999 415-555-0123.',
+      'Total 123456.99 415-555-0123.',
+    ]) {
+      expect(redactAuditText(text)).toBe(text.replace('415-555-0123', '[phone]'));
+    }
+  });
+
+  it('redacts an ambiguous amount and short code when the joined run is phone-shaped', () => {
+    expect(redactAuditText('Total 10.99 123-456.')).toBe('Total [phone].');
+  });
+
+  it('redacts a full phone-shaped run even when its prefix looks like an amount', () => {
+    expect(redactAuditText('Total 415.55 50123.')).toBe('Total [phone].');
+    expect(redactAuditText('Total 415.555.0123.')).toBe('Total [phone].');
+    expect(redactAuditText('Total 44.20 7946 0958.')).toBe('Total [phone].');
+  });
+
+  it('redacts a written extension along with its phone number', () => {
+    expect(redactAuditText('Call +1 (415) 555-0132 ext. 99 today')).toBe('Call [phone] today');
+  });
+
+  it('does not count an extension toward the minimum phone length', () => {
+    expect(redactAuditText('Code 123-456 ext. 789')).toBe('Code 123-456 ext. 789');
   });
 
   it('removes long digit runs that identify a booking or an account', () => {

@@ -2,6 +2,7 @@ import { NextRequest } from 'next/server';
 import type { ReactNode } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { withMemoryLibraryPhase } from '@/lib/memory-library-diagnostics';
 
 const mocks = vi.hoisted(() => ({
   owner: vi.fn(),
@@ -666,6 +667,128 @@ const firestoreFailureCases = (['directory', 'dossier', 'library'] as const).fla
     failure,
   })),
 );
+
+it.each(['postgres', 'firestore'] as const)(
+  'logs only a sanitized Library load category and preserves the whole-view failure (%s)',
+  async (driver) => {
+    mocks.driver = driver;
+    const querySentinel = 'private-library-query-sentinel';
+    const filterSentinel = 'private-library-filter-sentinel';
+    const noteSentinel = 'private-library-row-must-not-render';
+    const failureMessage = 'private repository failure details';
+    const failure = Object.assign(new Error(failureMessage), {
+      code:
+        driver === 'postgres'
+          ? 'POSTGRES_PROFILE_LIBRARY_FILTER_LIMIT'
+          : 'FIRESTORE_PROFILE_READ_LIMIT',
+    });
+    const library = createProductVisualData(false).library;
+    const firstRow = library.rows[0];
+    if (!firstRow) throw new Error('Expected a synthetic note row');
+    const privateLibrary = {
+      ...library,
+      rows: [{ ...firstRow, memory: { ...firstRow.memory, content: noteSentinel } }],
+    };
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    let firestoreContext: Parameters<typeof withMemoryLibraryPhase>[0] | undefined;
+
+    try {
+      if (driver === 'postgres') {
+        mocks.library.mockResolvedValue(privateLibrary as never);
+        mocks.filters.mockRejectedValue(failure);
+      } else {
+        mocks.fsLibrary.mockImplementation(async (_input, diagnostics) => {
+          firestoreContext = diagnostics;
+          const [listed] = await Promise.all([
+            withMemoryLibraryPhase(diagnostics, 'list', async () => privateLibrary),
+            withMemoryLibraryPhase(diagnostics, 'filters', async () => {
+              throw failure;
+            }),
+          ]);
+          return [listed, { subjects: [], sources: [] }];
+        });
+      }
+
+      const html = renderToStaticMarkup(
+        await Knowledge({
+          searchParams: Promise.resolve({
+            view: 'library',
+            q: querySentinel,
+            page: '3',
+            filter: 'verified',
+            source: filterSentinel,
+          }),
+        }),
+      );
+      const retryPath = savedHref(
+        html,
+        (url) =>
+          url.pathname === '/profile/knowledge' &&
+          url.searchParams.get('q') === querySentinel &&
+          url.searchParams.get('page') === '3',
+      );
+      const retry = new URL(retryPath, 'https://assistant.test');
+      expect(html).toContain('Could not load this view');
+      expect(html).toContain('Try again');
+      expect(html).not.toContain(noteSentinel);
+      expect(retry.searchParams.get('view')).toBe('library');
+      expect(retry.searchParams.get('q')).toBe(querySentinel);
+      expect(retry.searchParams.get('page')).toBe('3');
+      expect(retry.searchParams.get('filter')).toBe('verified');
+      expect(retry.searchParams.get('source')).toBe(filterSentinel);
+      noWrites(html);
+
+      const lines = info.mock.calls.map(([line]) => String(line));
+      const events = lines.map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(events.map((event) => event.phase)).toEqual(
+        driver === 'postgres' ? ['overall'] : ['filters', 'overall'],
+      );
+      expect(events.every((event) => event.outcome === 'error')).toBe(true);
+      expect(events.at(-1)).toMatchObject({
+        event: 'memory_library_phase',
+        outcome: 'error',
+        errorCode: failure.code,
+      });
+      expect(new Set(events.map((event) => event.requestId)).size).toBe(1);
+      expect(lines.join('\n')).not.toContain(querySentinel);
+      expect(lines.join('\n')).not.toContain(filterSentinel);
+      expect(lines.join('\n')).not.toContain(noteSentinel);
+      expect(lines.join('\n')).not.toContain(failureMessage);
+
+      if (driver === 'postgres') {
+        expect(mocks.pgRead).toHaveBeenCalledOnce();
+        expect(mocks.library).toHaveBeenCalledOnce();
+        expect(mocks.filters).toHaveBeenCalledOnce();
+        expect(firestoreContext).toBeUndefined();
+      } else {
+        expect(mocks.fsLibrary).toHaveBeenCalledOnce();
+        expect(firestoreContext).toBeDefined();
+        expect(events[0]?.requestId).toBe(firestoreContext?.requestId);
+        expect(mocks.library).not.toHaveBeenCalled();
+        expect(mocks.filters).not.toHaveBeenCalled();
+      }
+    } finally {
+      info.mockRestore();
+    }
+  },
+);
+
+it('keeps Library auth rejection outside the diagnostic load catch', async () => {
+  const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+  try {
+    mocks.owner.mockRejectedValueOnce(new Error('unauthorized'));
+    await expect(Knowledge({ searchParams: Promise.resolve({ view: 'library' }) })).rejects.toThrow(
+      'unauthorized',
+    );
+    expect(info).not.toHaveBeenCalled();
+    expect(mocks.pgRead).not.toHaveBeenCalled();
+    expect(mocks.library).not.toHaveBeenCalled();
+    expect(mocks.filters).not.toHaveBeenCalled();
+    expect(mocks.fsLibrary).not.toHaveBeenCalled();
+  } finally {
+    info.mockRestore();
+  }
+});
 
 it.each(firestoreFailureCases)(
   'keeps Firestore $surface $failure unavailable with a query-preserving retry',

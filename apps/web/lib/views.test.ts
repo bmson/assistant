@@ -118,6 +118,11 @@ describe('displayTaskStatus', () => {
     expect(statusLabel('stuck')).toBe('Stuck — nothing to approve');
   });
 
+  it('labels an estimated spending decision without treating it as a tool approval', () => {
+    expect(displayTaskStatus('waiting_estimated_cost', false)).toBe('waiting_estimated_cost');
+    expect(statusLabel('waiting_estimated_cost')).toBe('Spending decision needed');
+  });
+
   it('leaves every other status untouched', () => {
     for (const status of ['pending', 'running', 'done', 'needs_attention', 'sleeping']) {
       expect(displayTaskStatus(status, false)).toBe(status);

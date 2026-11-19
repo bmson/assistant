@@ -1,0 +1,43 @@
+Buttons [
+  'Approve $0.20Approve $0.20?Approving…Approve $0.20',
+  'DeclineDecline this request?Declining…Decline',
+  'Refresh estimate',
+  'Check request',
+  'Send separate request'
+]
+Buttons [
+  'Approve $0.20Approve $0.20?Approving…Approve $0.20',
+  'DeclineDecline this request?Declining…Decline',
+  'Refresh estimate',
+  'Check request',
+  'Send separate request'
+]
+Buttons [
+  'Approve $0.20Approve $0.20?Approving…Approve $0.20',
+  'DeclineDecline this request?Declining…Decline',
+  'Refresh estimate',
+  'Check request',
+  'Send separate request'
+]
+Buttons [
+  'Approve $0.20Approve $0.20?Approving…Approve $0.20',
+  'DeclineDecline this request?Declining…Decline',
+  'Refresh estimate',
+  'Check request',
+  'Send separate request'
+]
+Buttons [
+  'Approve $0.20Approve $0.20?Approving…Approve $0.20',
+  'DeclineDecline this request?Declining…Decline',
+  'Refresh estimate',
+  'Check request',
+  'Send separate request'
+]
+Buttons [
+  'Approve $0.20Approve $0.20?Approving…Approve $0.20',
+  'DeclineDecline this request?Declining…Decline',
+  'Refresh estimate',
+  'Check request',
+  'Send separate request'
+]
+Six rendered viewports passed; synthetic A recovery plus independent B interaction passed; no page errors or viewport overflow.

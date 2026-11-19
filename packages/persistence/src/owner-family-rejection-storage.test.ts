@@ -146,8 +146,11 @@ describe('inactive owner family removal storage codec', () => {
     ).toThrow();
   });
 
-  it('keeps the active parser refusing the inactive family removal command', () => {
-    expect(() => parseOwnerEditorOperationRecord(baseRecord())).toThrow();
+  it('shares the active claim and exact terminal receipt shape without losing the legacy codec', () => {
+    for (const value of [baseRecord(), committed()])
+      expect(parseOwnerEditorOperationRecord(value)).toEqual(
+        parseInactiveOwnerFamilyRemovalOperationRecord(value),
+      );
   });
 
   it('accepts the strict inactive request and cache cursor shapes', () => {

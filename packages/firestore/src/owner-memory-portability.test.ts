@@ -31,6 +31,7 @@ const variants = [
   { name: 'omitted', fields: {} },
   { name: 'null', fields: { ownerCorrection: null } },
   { name: 'corrected', fields: { ownerCorrection: marker } },
+  { name: 'rejected family evidence', fields: { ownerFamilyRejectedContentHash: contentHash } },
 ];
 
 function bundle(version: 1 | 2 | 3, fields: Record<string, unknown>): MigrationBundle {
@@ -146,11 +147,21 @@ describe('owner correction portable compatibility', () => {
         expect(Object.hasOwn(restored, 'ownerCorrection')).toBe(
           Object.hasOwn(fields, 'ownerCorrection'),
         );
+        expect(restored.ownerFamilyRejectedContentHash).toEqual(
+          fields.ownerFamilyRejectedContentHash,
+        );
         expect(parseOwnerCorrection(restored.ownerCorrection, contentHash)).toEqual(
           fields.ownerCorrection ?? null,
         );
       },
     );
+
+    it(`rejects malformed retained-family evidence metadata in format ${version}`, () => {
+      for (const rejectedHash of [true, 'invalid', {}, 1])
+        expect(() =>
+          validate(bundle(version, { ownerFamilyRejectedContentHash: rejectedHash })),
+        ).toThrow('owner family rejection hash');
+    });
 
     it(`binds marker content to format ${version} record/table/bundle checksums and rejects stale attribution`, () => {
       const input = bundle(version, { ownerCorrection: marker });
@@ -213,12 +224,16 @@ describe('generic memory mutations and privacy export retain exact marker state'
           Object.hasOwn(fields, 'ownerCorrection'),
         );
         expect(row.ownerCorrection).toEqual(fields.ownerCorrection);
+        expect(row.ownerFamilyRejectedContentHash).toEqual(fields.ownerFamilyRejectedContentHash);
         expect(row.contentHash).toBe(contentHash);
         expect(row.source).toBe('original-import-source');
       }
       const exported = await new FirestorePrivacyExportRepository(f.store, owner).exportOwnerData();
       expect(exported.memories).toHaveLength(1);
       expect(exported.memories[0]?.ownerCorrection).toEqual(fields.ownerCorrection);
+      expect(exported.memories[0]?.ownerFamilyRejectedContentHash).toEqual(
+        fields.ownerFamilyRejectedContentHash,
+      );
       expect(JSON.stringify(exported)).not.toContain('Prior saved note');
       expect(f.stats.readsAfterWrites).toBe(0);
     },

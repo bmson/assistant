@@ -9,6 +9,28 @@ import CryptoKit
 /// deterministically. Each queued outcome is consumed by one request, so a test
 /// says exactly what the first attempt and the retry each see.
 final class StubURLProtocol: URLProtocol {
+    private struct ReplacementTaskStreamFixtureCapture {
+        let testCaseID: String
+        var callbacksDelivered: Bool?
+    }
+
+    struct DiagnosticRequestSnapshot {
+        struct ChatPost {
+            let body: Data
+            let authorization: String?
+        }
+        struct StatusGet {
+            let url: URL
+            let authorization: String?
+        }
+
+        let chatPostCount: Int
+        let secondChatPost: ChatPost?
+        let statusGetCount: Int
+        let statusGets: [StatusGet]
+        let statusGetsTruncated: Bool
+    }
+
     enum Outcome {
         case failure(URLError)
         case success(status: Int, body: Data)
@@ -46,6 +68,7 @@ final class StubURLProtocol: URLProtocol {
     private static var streamsByIdentity: [String: StubURLProtocol] = [:]
     private static var readyStreamIdentities: Set<String> = []
     private static var activeTestCaseID: String?
+    private static var replacementTaskStreamFixtureCapture: ReplacementTaskStreamFixtureCapture?
 
     static func beginTestCase(_ id: String) {
         lock.withLock {
@@ -69,12 +92,16 @@ final class StubURLProtocol: URLProtocol {
             streamsByOperation = [:]
             streamsByIdentity = [:]
             readyStreamIdentities = []
+            replacementTaskStreamFixtureCapture = nil
         }
     }
 
     static func endTestCase(_ id: String) {
         lock.withLock {
-            if activeTestCaseID == id { activeTestCaseID = nil }
+            if activeTestCaseID == id {
+                activeTestCaseID = nil
+                replacementTaskStreamFixtureCapture = nil
+            }
         }
     }
 
@@ -183,6 +210,53 @@ final class StubURLProtocol: URLProtocol {
         }
     }
 
+    static func diagnosticRequestSnapshot(testCaseID: String) -> DiagnosticRequestSnapshot? {
+        guard lock.try() else { return nil }
+        defer { lock.unlock() }
+        guard activeTestCaseID == testCaseID else { return nil }
+
+        var chatPostCount = 0
+        var secondChatPost: DiagnosticRequestSnapshot.ChatPost?
+        var statusGetCount = 0
+        var statusGets: [DiagnosticRequestSnapshot.StatusGet] = []
+        var statusGetsTruncated = false
+        for index in recordedMethods.indices {
+            guard index < recordedURLs.count,
+                  index < recordedBodies.count,
+                  index < recordedHeaders.count,
+                  Self.testCaseID(in: recordedHeaders[index]) == testCaseID else { continue }
+            let method = recordedMethods[index]
+            let url = recordedURLs[index]
+            let headers = recordedHeaders[index]
+            let authorization = headers.first {
+                $0.key.caseInsensitiveCompare("authorization") == .orderedSame
+            }?.value
+            if method == "POST", url.path == "/api/mobile/v1/chat" {
+                if chatPostCount < 2 {
+                    chatPostCount += 1
+                    if chatPostCount == 2 {
+                        secondChatPost = .init(body: recordedBodies[index], authorization: authorization)
+                    }
+                }
+            }
+            if method == "GET", url.path == "/api/mobile/v1/chat/status" {
+                statusGetCount += 1
+                if statusGets.count < 8 {
+                    statusGets.append(.init(url: url, authorization: authorization))
+                } else {
+                    statusGetsTruncated = true
+                }
+            }
+        }
+        return .init(
+            chatPostCount: chatPostCount,
+            secondChatPost: secondChatPost,
+            statusGetCount: statusGetCount,
+            statusGets: statusGets,
+            statusGetsTruncated: statusGetsTruncated
+        )
+    }
+
     static func appendStream(_ body: Data, operationId: String? = nil, authorization: String? = nil) {
         let stream = lock.withLock {
             if let operationId, let authorization {
@@ -198,6 +272,29 @@ final class StubURLProtocol: URLProtocol {
     static func isStreamReady(operationId: String, authorization: String) -> Bool {
         let key = streamIdentityKey(operationId: operationId, authorization: authorization)
         return lock.withLock { readyStreamIdentities.contains(key) }
+    }
+
+    static func tryIsStreamReady(operationId: String, authorization: String) -> Bool? {
+        let key = streamIdentityKey(operationId: operationId, authorization: authorization)
+        guard lock.try() else { return nil }
+        defer { lock.unlock() }
+        return readyStreamIdentities.contains(key)
+    }
+
+    static func captureReplacementTaskStream(testCaseID: String) {
+        guard lock.try() else { return }
+        defer { lock.unlock() }
+        guard activeTestCaseID == testCaseID else { return }
+        replacementTaskStreamFixtureCapture = .init(testCaseID: testCaseID)
+    }
+
+    static func replacementTaskStreamCallbacksDelivered(testCaseID: String) -> Bool? {
+        guard lock.try() else { return nil }
+        defer { lock.unlock() }
+        guard let capture = replacementTaskStreamFixtureCapture,
+              capture.testCaseID == testCaseID,
+              activeTestCaseID == testCaseID else { return nil }
+        return capture.callbacksDelivered
     }
 
     static func cancelStream(operationId: String, authorization: String) {
@@ -235,6 +332,61 @@ final class StubURLProtocol: URLProtocol {
             guard let requestCaseID = testCaseID(in: headers), requestCaseID == activeTestCaseID else { return }
             readyStreamIdentities.insert(identityKey)
         }
+    }
+
+    private static func noteReplacementTaskStreamCallbacksDelivered(
+        testCaseID: String?,
+        method: String?,
+        path: String?,
+        identityKey: String?
+    ) {
+        guard let testCaseID, let identityKey else { return }
+        guard method == "POST",
+              path == "/api/mobile/v1/chat",
+              let candidate = replacementChatPostIdentityCandidate(testCaseID: testCaseID),
+              let replacementBody = try? JSONSerialization.jsonObject(with: candidate.body) as? [String: Any],
+              let replacementOperationID = replacementBody["clientOperationId"] as? String,
+              identityKey == streamIdentityKey(
+                  operationId: replacementOperationID,
+                  authorization: candidate.authorization
+              ),
+              lock.try() else { return }
+        defer { lock.unlock() }
+        guard activeTestCaseID == testCaseID,
+              var capture = replacementTaskStreamFixtureCapture,
+              capture.testCaseID == testCaseID else { return }
+        capture.callbacksDelivered = true
+        replacementTaskStreamFixtureCapture = capture
+    }
+
+    private static func replacementChatPostIdentityCandidate(
+        testCaseID: String
+    ) -> (body: Data, authorization: String)? {
+        guard lock.try() else { return nil }
+        defer { lock.unlock() }
+        guard activeTestCaseID == testCaseID,
+              replacementTaskStreamFixtureCapture?.testCaseID == testCaseID else { return nil }
+        var matchingChatPosts = 0
+        var replacementPostIndex: Int?
+        for index in recordedMethods.indices {
+            guard index < recordedURLs.count,
+                  index < recordedBodies.count,
+                  index < recordedHeaders.count,
+                  recordedMethods[index] == "POST",
+                  recordedURLs[index].path == "/api/mobile/v1/chat",
+                  Self.testCaseID(in: recordedHeaders[index]) == testCaseID else { continue }
+            matchingChatPosts += 1
+            if matchingChatPosts == 2 {
+                replacementPostIndex = index
+                break
+            }
+        }
+        guard let replacementPostIndex,
+              let authorization = recordedHeaders[replacementPostIndex].first(where: {
+                  $0.key.caseInsensitiveCompare("authorization") == .orderedSame
+              })?.value,
+              !authorization.isEmpty else { return nil }
+        return (recordedBodies[replacementPostIndex], authorization)
     }
 
     private static func next(for method: String, url: URL?, body: Data, headers: [String: String], timeout: TimeInterval) -> Outcome {
@@ -419,6 +571,12 @@ final class StubURLProtocol: URLProtocol {
             client.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
             client.urlProtocol(self, didLoad: body)
             Self.markStreamReady(identityKey: registration.identityKey, headers: request.allHTTPHeaderFields ?? [:])
+            Self.noteReplacementTaskStreamCallbacksDelivered(
+                testCaseID: Self.testCaseID(in: request.allHTTPHeaderFields ?? [:]),
+                method: request.httpMethod,
+                path: request.url?.path,
+                identityKey: registration.identityKey
+            )
         case let .operationCancellation(status, outcome):
             let sent = try? JSONSerialization.jsonObject(with: requestBody) as? [String: String]
             var body: [String: Any] = [
@@ -993,6 +1151,8 @@ final class APIClientRetryTests: XCTestCase {
             "/api/mobile/v1/chats/11111111-1111-4111-8111-111111111111/messages/44444444-4444-4444-8444-444444444444",
         ])
         let chatBody = try XCTUnwrap(StubURLProtocol.bodies.first)
+        let chatHeaders = try XCTUnwrap(StubURLProtocol.headers.first)
+        XCTAssertEqual(chatHeaders.first { $0.key.caseInsensitiveCompare("X-Assistant-Estimated-Cost-Approval") == .orderedSame }?.value, "v1")
         let chat = try XCTUnwrap(JSONSerialization.jsonObject(with: chatBody) as? [String: Any])
         XCTAssertEqual(chat["clientId"] as? String, clientID)
         let deliveryBody = try XCTUnwrap(StubURLProtocol.bodies.last)
@@ -2048,9 +2208,9 @@ final class APIClientRetryTests: XCTestCase {
     }
 
     func testVisualSummaryKeepsEveryStatusAndRejectsInvalidChartValues() {
-        let summary = ActivityVisualSummary(statuses: ["waiting_approval", "waiting_budget", "needs_attention",
+        let summary = ActivityVisualSummary(statuses: ["waiting_approval", "waiting_budget", "waiting_estimated_cost", "needs_attention",
             "pending", "running", "sleeping", "waiting_event", "done", "failed", "cancelled", "new_status"])
-        XCTAssertEqual(summary.counts, [3, 2, 2, 1, 2, 1])
+        XCTAssertEqual(summary.counts, [4, 2, 2, 1, 2, 1])
         XCTAssertEqual(AssistantChartScale.shares([0, -1, .nan, .infinity]), [0, 0, 0, 0])
         XCTAssertEqual(AssistantChartScale.shares([]), [])
         XCTAssertEqual(AssistantChartScale.shares([1, 3]), [0.25, 0.75])
@@ -4097,6 +4257,30 @@ final class APIClientRetryTests: XCTestCase {
 }
 
 extension APIClientRetryTests {
+    func testEstimatedCostOverviewUsesScopedGetAndPreservesUnavailableInventory() async throws {
+        let body = #"{"ok":true,"requests":null,"tracking":{"observedAt":"2029-01-01T00:00:00Z","complete":false,"recordedDailyMicros":null,"recordedMonthlyMicros":null,"totalHeldMicros":null,"historicalUnknownMicros":null,"pendingApprovalMicros":null,"dailyPlannedExposureMicros":null,"monthlyPlannedExposureMicros":null}}"#
+        StubURLProtocol.prime([.success(status: 200, body: Data(body.utf8))])
+        let overview = try await makeClient().estimatedCostOverview()
+        XCTAssertNil(overview.requests)
+        XCTAssertNil(overview.tracking?.pendingApprovalMicros)
+        XCTAssertEqual(StubURLProtocol.attempts, ["GET"])
+        XCTAssertEqual(StubURLProtocol.urls.first?.path, "/api/mobile/v1/chat/estimated-cost/overview")
+    }
+
+    func testEstimatedCostDecisionDoesNotRetryAndAcceptsBoundStaleReceipt() async throws {
+        let decision = EstimatedCostDecision(operationId: "op-1", quoteId: "q-1", quoteVersion: "v1", decisionId: "d-1", decision: "approve")
+        StubURLProtocol.prime([.failure(URLError(.timedOut)),
+                               .success(status: 200, body: Data(#"{"ok":true}"#.utf8))])
+        do {
+            _ = try await makeClient().decideEstimatedCost(decision)
+            XCTFail("A lost decision response must not replay the POST")
+        } catch { XCTAssertEqual(StubURLProtocol.attempts, ["POST"]) }
+        StubURLProtocol.prime([.success(status: 409, body: Data(#"{"ok":true,"receipt":{"operationId":"op-1","quoteId":"q-1","decisionId":"d-1","status":"stale"}}"#.utf8))])
+        let receipt = try await makeClient().decideEstimatedCost(decision)
+        XCTAssertEqual(receipt.status, "stale")
+        XCTAssertEqual(StubURLProtocol.attempts, ["POST"])
+        XCTAssertEqual(StubURLProtocol.urls.first?.path, "/api/mobile/v1/chat/estimated-cost/decision")
+    }
     func testPhoneCalendarSharingUsesVerifiedOwnerAndGenerationWireContract() async throws {
         let activeState = #"{"version":1,"ownerId":"owner-1","publisherId":"publisher-1","generation":1,"enabled":true,"consentVersion":1,"calendars":[{"id":"work","name":"Work","purpose":"commitments"}],"updatedAt":"2026-10-22T12:00:00Z","mutationId":"mutation-1"}"#
         let disabledState = #"{"version":1,"ownerId":"owner-1","publisherId":"publisher-1","generation":2,"enabled":false,"consentVersion":1,"calendars":[],"updatedAt":"2026-10-22T12:01:00Z"}"#
@@ -5631,6 +5815,75 @@ extension APIClientRetryTests {
     }
 
     @MainActor
+    func testUserCostRefreshInvalidatesOverviewRevision() async throws {
+        let model = try await notificationModel()
+        let revision = model.costTrackingRevision
+        model.invalidateCostTrackingForUserRefresh()
+        XCTAssertEqual(model.costTrackingRevision, revision + 1)
+    }
+
+    @MainActor
+    func testParkedCostRequestReleasesSendBeforeAnotherTurnCompletes() async throws {
+        let model = try await notificationModel()
+        let first = "33333333-3333-4333-8333-333333333333"
+        let second = "44444444-4444-4444-8444-444444444444"
+        let path = "/api/mobile/v1/chat/status"
+        let waiting = try JSONEncoder().encode(ChatUpdates(taskStatus: "waiting_estimated_cost", messages: [],
+            refreshed: [], superseded: nil, nextCursor: nil, hasMore: false, activity: []))
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/chat": [.taskStream(body: Data("data: [DONE]\n\n".utf8), taskId: first),
+                                    .taskStream(body: Data("data: [DONE]\n\n".utf8), taskId: second)],
+            path: [.success(status: 200, body: waiting), .success(status: 200, body: try replyFinalFixture(taskID: second))],
+        ])
+        model.send("Synthetic request A")
+        let firstSettled = try await waitForReplyPollFixture { model.canAdmitOrdinarySend }
+        XCTAssertTrue(firstSettled)
+        XCTAssertEqual(StubURLProtocol.urls.filter { $0.path == path }.count, 1)
+        let revision = model.costTrackingRevision
+        model.send("Synthetic request B")
+        let secondSettled = try await waitForReplyPollFixture { model.messages.contains { $0.id == "final-\(second)" } && model.canAdmitOrdinarySend }
+        XCTAssertTrue(secondSettled)
+        XCTAssertGreaterThan(model.costTrackingRevision, revision)
+        model.scenePhaseDidChange(.active)
+        XCTAssertGreaterThan(model.costTrackingRevision, revision + 1)
+    }
+
+    @MainActor
+    func testHeldTalkUtteranceWaitsForAdmissionWithoutReplacingTypedDraft() async throws {
+        let model = try await notificationModel()
+        let scope = try XCTUnwrap(model.composerDraftScope)
+        _ = model.saveComposerDraft("Unrelated typed draft", in: scope)
+        let first = "33333333-3333-4333-8333-333333333333"
+        let second = "44444444-4444-4444-8444-444444444444"
+        let path = "/api/mobile/v1/chat/status"
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/chat": [.taskStream(body: Data("data: [DONE]\n\n".utf8), taskId: first),
+                                    .taskStream(body: Data("data: [DONE]\n\n".utf8), taskId: second)],
+            path: [.held(status: 200, body: try replyFinalFixture(taskID: first)),
+                   .success(status: 200, body: try replyFinalFixture(taskID: second))],
+        ])
+        defer { StubURLProtocol.retireHeldResponse(path: path, testCaseID: testCaseID) }
+        model.send("Synthetic request A")
+        let waiting = try await waitForReplyPollFixture { StubURLProtocol.isHoldingResponse(path: path) }
+        XCTAssertTrue(waiting)
+        XCTAssertTrue(model.holdTalkUtterance("Spoken request B", in: scope))
+        model.send("Spoken request B", spoken: true)
+        XCTAssertEqual(model.heldTalkUtterance(in: scope), "Spoken request B")
+        XCTAssertEqual(StubURLProtocol.urls.filter { $0.path == "/api/mobile/v1/chat" }.count, 1)
+        StubURLProtocol.releaseHeldResponse(path: path)
+        let ready = try await waitForReplyPollFixture { model.canAdmitOrdinarySend }
+        XCTAssertTrue(ready)
+        let snapshot = try XCTUnwrap(model.composerDraftSnapshot(in: scope))
+        model.send("Spoken request B", spoken: true,
+                   composerDraftContext: .init(origin: snapshot, localDraft: snapshot.text))
+        XCTAssertTrue(model.talkTurnWasAdmitted("Spoken request B", in: scope))
+        XCTAssertNil(model.heldTalkUtterance(in: scope))
+        XCTAssertEqual(model.composerDraft(in: scope), "Unrelated typed draft")
+        let settled = try await waitForReplyPollFixture { model.messages.contains { $0.id == "final-\(second)" } }
+        XCTAssertTrue(settled)
+    }
+
+    @MainActor
     func testChangedActivityStartsAHeldFollowBeforeQuietBackoff() async throws {
         let model = try await notificationModel()
         let path = "/api/mobile/v1/chat/status"
@@ -5962,6 +6215,56 @@ extension APIClientRetryTests {
         func requestCount(_ path: String) -> Int {
             StubURLProtocol.urls.filter { $0.path == path }.count
         }
+        func replacementTaskPollCount(
+            in snapshot: StubURLProtocol.DiagnosticRequestSnapshot
+        ) -> Int? {
+            guard !snapshot.statusGetsTruncated,
+                  let secondChatPost = snapshot.secondChatPost,
+                  let replacementAuthorization = secondChatPost.authorization,
+                  !replacementAuthorization.isEmpty else { return nil }
+            return min(8, snapshot.statusGets.filter { request in
+                guard request.authorization == replacementAuthorization,
+                      let statusComponents = URLComponents(url: request.url, resolvingAgainstBaseURL: false) else {
+                    return false
+                }
+                return statusComponents.queryItems?.contains {
+                    $0.name == "taskId" && $0.value == taskIDs[1]
+                } == true
+            }.count)
+        }
+        func replacementStreamReady(
+            in snapshot: StubURLProtocol.DiagnosticRequestSnapshot
+        ) -> Bool? {
+            guard let secondChatPost = snapshot.secondChatPost,
+                  let authorization = secondChatPost.authorization,
+                  !authorization.isEmpty,
+                  let body = try? JSONSerialization.jsonObject(with: secondChatPost.body) as? [String: Any],
+                  let operationID = body["clientOperationId"] as? String else { return nil }
+            return StubURLProtocol.tryIsStreamReady(operationId: operationID, authorization: authorization)
+        }
+        var replacementStatusBaseline: Int?
+        var replacementChatPostObserved: Bool?
+        var fixtureStreamCallbacksDelivered: Bool?
+        var fixtureStreamReady: Bool?
+        var workingPhaseObserved: Bool?
+        var statusRequestsSinceReplacementSend: Int?
+        var correlatedReplacementTaskPollCount: Int?
+
+        func replacementStageDiagnostics() -> String {
+            let chatPost = replacementChatPostObserved.map { String($0) } ?? "unknown"
+            let callbacksDelivered = fixtureStreamCallbacksDelivered.map { String($0) } ?? "unknown"
+            let workingPhase = workingPhaseObserved.map { String($0) } ?? "unknown"
+            let statusRequests = statusRequestsSinceReplacementSend.map { String($0) } ?? "unknown"
+            let replacementTaskPolls = correlatedReplacementTaskPollCount.map { String($0) } ?? "unknown"
+            let firstPollObserved = correlatedReplacementTaskPollCount.map { String($0 > 0) } ?? "unknown"
+            return "replacementStages={chatPost=\(chatPost), "
+                + "fixtureCallbacks=\(callbacksDelivered), "
+                + "fixtureReady=\(fixtureStreamReady.map { String($0) } ?? "unknown"), "
+                + "workingPhaseObserved=\(workingPhase), "
+                + "statusRequestsSinceReplacementSend=\(statusRequests), "
+                + "replacementTaskPolls=\(replacementTaskPolls), "
+                + "firstReplacementPoll=\(firstPollObserved), admittedTask=unknown}"
+        }
 
         model.send("Old owner turn")
         let firstFinalHeld = try await waitForReplyPollFixture {
@@ -5982,11 +6285,38 @@ extension APIClientRetryTests {
         XCTAssertFalse(model.isSettlingOrdinaryTurn, diagnostics())
         XCTAssertTrue(model.canAdmitOrdinarySend, diagnostics())
 
+        replacementStatusBaseline = StubURLProtocol
+            .diagnosticRequestSnapshot(testCaseID: testCaseID)?.statusGetCount
+        StubURLProtocol.captureReplacementTaskStream(testCaseID: testCaseID)
         model.send("Replacement owner turn")
+        let replacementStreamID = model.sendDisplayState?.streamID
         let secondFinalHeld = try await waitForReplyPollFixture {
-            requestCount(statusPath) >= 4 && StubURLProtocol.isHoldingResponse(path: statusPath)
+            if let snapshot = StubURLProtocol.diagnosticRequestSnapshot(testCaseID: testCaseID) {
+                replacementChatPostObserved = snapshot.chatPostCount >= 2
+                fixtureStreamCallbacksDelivered = StubURLProtocol
+                    .replacementTaskStreamCallbacksDelivered(testCaseID: testCaseID)
+                fixtureStreamReady = replacementStreamReady(in: snapshot)
+                if let replacementStreamID,
+                   model.sendDisplayState?.streamID == replacementStreamID,
+                   model.sendDisplayState?.phase == .working {
+                    workingPhaseObserved = true
+                } else if workingPhaseObserved == nil {
+                    workingPhaseObserved = false
+                }
+                if let replacementStatusBaseline {
+                    statusRequestsSinceReplacementSend = min(
+                        8,
+                        max(0, snapshot.statusGetCount - replacementStatusBaseline)
+                    )
+                }
+                correlatedReplacementTaskPollCount = replacementTaskPollCount(in: snapshot)
+            }
+            return requestCount(statusPath) >= 4 && StubURLProtocol.isHoldingResponse(path: statusPath)
         }
-        try requireReplyPollFixtureStage(secondFinalHeld, "Replacement-owner terminal response was not held. \(diagnostics())")
+        try requireReplyPollFixtureStage(
+            secondFinalHeld,
+            "Replacement-owner terminal response was not held. \(diagnostics()) \(replacementStageDiagnostics())"
+        )
         StubURLProtocol.releaseHeldResponse(path: statusPath)
         let secondSettlementHeld = try await waitForReplyPollFixture { surfaces.finishCount == 2 }
         try requireReplyPollFixtureStage(secondSettlementHeld, "Replacement-owner settlement was not held. \(diagnostics())")

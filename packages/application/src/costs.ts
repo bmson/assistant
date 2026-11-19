@@ -2,16 +2,29 @@ import { getAgent } from '@assistant/core/chat';
 import { type CostTotals, costTotals } from '@assistant/core/cost';
 import { budgets, costEvents, costReservations, type Db, modelCalls, tasks } from '@assistant/db';
 import {
+  addMicros,
   type BudgetCapsRepository,
+  type CostBasis,
   type CostEvidence,
   type CostEvidenceTotal,
   costBasis,
+  microsToUsd,
   normalizeBudgetCaps,
+  usdDecimalToMicros,
 } from '@assistant/persistence';
-import { count, desc, eq, gte, sql, sum } from 'drizzle-orm';
+import { and, count, desc, eq, gte, lt, sql, sum } from 'drizzle-orm';
+
+export interface ModelCostEvidenceTotal {
+  provider: string | null;
+  model: string | null;
+  basis: CostBasis;
+  usd: string;
+  count: number;
+}
 
 export interface CostsDashboard {
   byEvidence: CostEvidenceTotal[];
+  byModelEvidence: ModelCostEvidenceTotal[];
   dispatchingAttempts: UnknownCostAttemptSummary;
   unknownAttempts: UnknownCostAttemptSummary;
   timezone: string;
@@ -47,10 +60,66 @@ export interface UnknownCostAttemptSummary {
   estimateComplete: boolean;
 }
 
+function evidenceDimension(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : null;
+}
+
+function compareEvidenceDimension(left: string | null, right: string | null): number {
+  const a = left ?? '';
+  const b = right ?? '';
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function safeCount(value: number | string): number {
+  const parsed = typeof value === 'number' ? value : /^\d+$/.test(value) ? Number(value) : NaN;
+  if (!Number.isSafeInteger(parsed) || parsed < 0)
+    throw new Error('Invalid PostgreSQL model evidence count');
+  return parsed;
+}
+
+function modelEvidenceRows(
+  rows: Array<{
+    provider: string | null;
+    model: string | null;
+    basis: string | null;
+    usd: string | null;
+    count: number | string;
+  }>,
+): ModelCostEvidenceTotal[] {
+  const groups = new Map<string, ModelCostEvidenceTotal & { micros: number }>();
+  for (const row of rows) {
+    const provider = evidenceDimension(row.provider);
+    const model = evidenceDimension(row.model);
+    const basis = costBasis({ basis: row.basis } as CostEvidence);
+    const key = JSON.stringify([provider, model, basis]);
+    const group = groups.get(key) ?? { provider, model, basis, usd: '', count: 0, micros: 0 };
+    group.micros = addMicros(group.micros, usdDecimalToMicros(row.usd ?? '0'));
+    group.count += safeCount(row.count);
+    groups.set(key, group);
+  }
+  return [...groups.values()]
+    .sort((a, b) => {
+      if (a.micros !== b.micros) return a.micros > b.micros ? -1 : 1;
+      const providerOrder = compareEvidenceDimension(a.provider, b.provider);
+      if (providerOrder !== 0) return providerOrder;
+      const modelOrder = compareEvidenceDimension(a.model, b.model);
+      return modelOrder || (a.basis < b.basis ? -1 : a.basis > b.basis ? 1 : 0);
+    })
+    .map(({ micros, ...row }) => ({ ...row, usd: microsToUsd(micros).toFixed(6) }));
+}
+
 /** Load the cost-governance dashboard as a stable presentation contract. */
-export async function getCostsDashboard(db: Db): Promise<CostsDashboard> {
+export async function getCostsDashboard(db: Db, modelEvidenceAt?: Date): Promise<CostsDashboard> {
   const agent = await getAgent(db);
   const monthStart = sql`date_trunc('month', now())`;
+  const modelEvidenceClock = modelEvidenceAt
+    ? sql`${modelEvidenceAt.toISOString()}::timestamptz`
+    : sql`now()`;
+  const modelUtcMonth = sql`date_trunc('month', timezone('UTC', ${modelEvidenceClock}))`;
+  const modelMonthStart = sql`${modelUtcMonth} AT TIME ZONE 'UTC'`;
+  const modelMonthEnd = sql`(${modelUtcMonth} + interval '1 month') AT TIME ZONE 'UTC'`;
   const [totals, bySource, byModel, topTasks, held, recent, [parkedCount], [taskDefault]] =
     await Promise.all([
       costTotals(db),
@@ -119,25 +188,53 @@ export async function getCostsDashboard(db: Db): Promise<CostsDashboard> {
         .where(eq(budgets.scope, 'task_default')),
     ]);
 
-  const [evidenceRows, [dispatchingReservations], [unknownReservations]] = await Promise.all([
-    db
-      .select({
-        basis: sql<string>`${costEvents.evidence}->>'basis'`,
-        usd: sum(costEvents.usd),
-        count: sql<number>`count(*)`,
-      })
-      .from(costEvents)
-      .where(gte(costEvents.createdAt, monthStart))
-      .groupBy(sql`${costEvents.evidence}->>'basis'`),
-    db
-      .select({ count: count(), estimatedUsd: sum(costReservations.estimatedUsd) })
-      .from(costReservations)
-      .where(eq(costReservations.status, 'dispatching')),
-    db
-      .select({ count: count(), estimatedUsd: sum(costReservations.estimatedUsd) })
-      .from(costReservations)
-      .where(eq(costReservations.status, 'unknown')),
-  ]);
+  const providerExpression = sql<
+    string | null
+  >`case when jsonb_typeof(${costEvents.evidence}->'provider') = 'string' then nullif(btrim(${costEvents.evidence}->>'provider'), '') else null end`;
+  const modelExpression = sql<
+    string | null
+  >`case when jsonb_typeof(${costEvents.evidence}->'model') = 'string' then nullif(btrim(${costEvents.evidence}->>'model'), '') else null end`;
+  const basisExpression = sql<
+    string | null
+  >`case when jsonb_typeof(${costEvents.evidence}->'basis') = 'string' then ${costEvents.evidence}->>'basis' else null end`;
+  const [evidenceRows, modelEvidenceRawRows, [dispatchingReservations], [unknownReservations]] =
+    await Promise.all([
+      db
+        .select({
+          basis: sql<string>`${costEvents.evidence}->>'basis'`,
+          usd: sum(costEvents.usd),
+          count: sql<number>`count(*)`,
+        })
+        .from(costEvents)
+        .where(gte(costEvents.createdAt, monthStart))
+        .groupBy(sql`${costEvents.evidence}->>'basis'`),
+      db
+        .select({
+          provider: providerExpression,
+          model: modelExpression,
+          basis: basisExpression,
+          usd: sum(costEvents.usd),
+          // postgres-js returns int8 as a decimal string unless explicitly configured otherwise.
+          count: sql<string>`count(*)`,
+        })
+        .from(costEvents)
+        .where(
+          and(
+            eq(costEvents.source, 'model'),
+            gte(costEvents.createdAt, modelMonthStart),
+            lt(costEvents.createdAt, modelMonthEnd),
+          ),
+        )
+        .groupBy(providerExpression, modelExpression, basisExpression),
+      db
+        .select({ count: count(), estimatedUsd: sum(costReservations.estimatedUsd) })
+        .from(costReservations)
+        .where(eq(costReservations.status, 'dispatching')),
+      db
+        .select({ count: count(), estimatedUsd: sum(costReservations.estimatedUsd) })
+        .from(costReservations)
+        .where(eq(costReservations.status, 'unknown')),
+    ]);
 
   return {
     byEvidence: evidenceRows.map((row) => ({
@@ -145,6 +242,7 @@ export async function getCostsDashboard(db: Db): Promise<CostsDashboard> {
       usd: row.usd ?? '0',
       count: Number(row.count),
     })),
+    byModelEvidence: modelEvidenceRows(modelEvidenceRawRows),
     dispatchingAttempts: {
       count: Number(dispatchingReservations?.count ?? 0),
       countComplete: true,

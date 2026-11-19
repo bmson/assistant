@@ -1,3 +1,19 @@
+import {
+  type EstimatedCostReleaseProfile,
+  estimatedCostReleaseEnvironment,
+  verifyEstimatedCostProvider,
+} from '../infra/gcp/estimated-cost-release-config.mjs';
+import { googleCalendarReleaseCallback } from '../infra/gcp/google-calendar-release-config.mjs';
+import {
+  disabled,
+  retiredCurrentCondition,
+  retiredCurrentRevisionCondition,
+} from './owner-release-current-snapshot.js';
+import { revisionWithRequestedImage } from './owner-release-image-resolution.js';
+import {
+  matchesNativeServiceDigest,
+  nativeServiceDefaults,
+} from './owner-release-native-service-defaults.js';
 /** Unwired raw-response projection. No IO, credentials or supplied-proof acceptance. */
 
 import {
@@ -11,6 +27,7 @@ import {
   HISTORICAL_WEB_TAGS,
   immutableWebRevision,
   tagHash,
+  WEB_CANONICAL_URL,
   WEB_SERVICE,
 } from './owner-web-tag-retirement.js';
 import { reconciliationDigest as digest } from './owner-web-traffic-reconciliation-model.js';
@@ -64,23 +81,49 @@ function template(value: unknown): Obj {
   requireNative(Object.keys(t).every((k) => (TEMPLATE_FIELDS as readonly string[]).includes(k)));
   return t;
 }
-function environment(r: Obj): Record<string, string> {
+function environment(
+  r: Obj,
+  expectedCallback?: string,
+  estimatedCost?: EstimatedCostReleaseProfile,
+  requireMcpOff = false,
+): Record<string, string> {
   const containers = r.containers;
   requireNative(Array.isArray(containers) && containers.length === 1);
   const env = nativeObject(containers[0]).env;
   requireNative(Array.isArray(env) && env.length <= 256);
   const result: Record<string, string> = {},
     seen = new Set<string>();
+  if (estimatedCost) verifyEstimatedCostProvider(env, estimatedCost);
+  const budgetEnv = estimatedCost ? estimatedCostReleaseEnvironment(estimatedCost) : {};
   for (const e of env) {
     const entry = nativeObject(e),
       name = text(entry.name, /^[A-Za-z_][A-Za-z0-9_]{0,127}$/);
     requireNative(!seen.has(name));
     seen.add(name);
+    if (Object.hasOwn(budgetEnv, name)) {
+      requireNative(
+        Object.keys(entry).sort().join(',') === 'name,value' && entry.value === budgetEnv[name],
+      );
+      result[name] = budgetEnv[name] as string;
+    }
+    if (name === 'GOOGLE_CALENDAR_OAUTH_CALLBACK_URL' && expectedCallback !== undefined) {
+      requireNative(Object.keys(entry).sort().join(',') === 'name,value');
+      const callback = googleCalendarReleaseCallback(entry.value);
+      requireNative(callback !== undefined);
+      result[name] = callback;
+    }
+    if (name === 'MCP_OAUTH_ENABLED' && requireMcpOff) {
+      requireNative(
+        Object.keys(entry).sort().join(',') === 'name,value' && entry.value === 'false',
+      );
+      result[name] = 'false';
+    }
     if (name.startsWith('ASSISTANT_RELEASE_')) {
       requireNative(Object.keys(entry).sort().join(',') === 'name,value');
       result[name] = text(entry.value, /^[A-Za-z0-9_.:-]{1,128}$/);
     }
   }
+  requireNative(!requireMcpOff || result.MCP_OAUTH_ENABLED === 'false');
   return result;
 }
 function revisionProof(raw: unknown, name: string, c: Context): NativeProof {
@@ -88,16 +131,37 @@ function revisionProof(raw: unknown, name: string, c: Context): NativeProof {
   const conditions = r.conditions;
   requireNative(Array.isArray(conditions) && conditions.length > 0 && conditions.length <= 16);
   const ready = conditions.map(nativeObject).filter((c) => c.type === 'Ready');
-  requireNative(conditions.every((c) => nativeObject(c).state === 'CONDITION_SUCCEEDED'));
+  const reviewedCurrent = name === c.canonical ? c.currentBinding : undefined;
+  requireNative(
+    conditions.every((condition) => {
+      const v = nativeObject(condition);
+      return (
+        v.state === 'CONDITION_SUCCEEDED' ||
+        (reviewedCurrent?.preclosed && retiredCurrentRevisionCondition(v))
+      );
+    }),
+  );
+  if (name !== c.canonical)
+    requireNative(
+      conditions
+        .map(nativeObject)
+        .every((v) => v.reason === undefined && v.revisionReason === undefined),
+    );
   requireNative(
     r.name === `${WEB_SERVICE}/revisions/${name}` &&
-      r.service === WEB_SERVICE &&
+      (r.service === WEB_SERVICE || r.service === 'assistant-web') &&
       ready.length === 1 &&
-      ready[0]?.state === 'CONDITION_SUCCEEDED' &&
+      (ready[0]?.state === 'CONDITION_SUCCEEDED' ||
+        (reviewedCurrent?.preclosed && retiredCurrentRevisionCondition(ready[0] as Obj))) &&
       (r.reconciling === undefined || r.reconciling === false),
   );
   const uid = text(r.uid, /^[A-Za-z0-9-]{1,128}$/),
-    env = environment(r),
+    env = environment(
+      r,
+      name === c.canonical ? undefined : c.releaseEnv.GOOGLE_CALENDAR_OAUTH_CALLBACK_URL,
+      name === c.canonical ? undefined : c.estimatedCost,
+      name !== c.canonical && c.releaseEnv.MCP_OAUTH_ENABLED === 'false',
+    ),
     pin = HISTORICAL_WEB_TAGS.find((p) => p.revision === name && p.revision === c.canonical);
   let image: string,
     source: string,
@@ -105,7 +169,19 @@ function revisionProof(raw: unknown, name: string, c: Context): NativeProof {
     attempt: string,
     manifest: string,
     paused: boolean;
-  if (pin) {
+  if (reviewedCurrent) {
+    ({ image, source, runId, attempt, manifest, paused } = reviewedCurrent.proof);
+    requireNative(tagHash(uid) === reviewedCurrent.proof.uid);
+    requireNative(env.ASSISTANT_RELEASE_MANIFEST === manifest);
+    requireNative(!env.ASSISTANT_RELEASE_SOURCE_SHA || env.ASSISTANT_RELEASE_SOURCE_SHA === source);
+    requireNative(
+      !env.ASSISTANT_RELEASE_WORKFLOW_RUN_ID || env.ASSISTANT_RELEASE_WORKFLOW_RUN_ID === runId,
+    );
+    requireNative(
+      !env.ASSISTANT_RELEASE_WORKFLOW_RUN_ATTEMPT ||
+        env.ASSISTANT_RELEASE_WORKFLOW_RUN_ATTEMPT === attempt,
+    );
+  } else if (pin) {
     image = pin.image;
     source = pin.source;
     const parts = pin.tag.split('-');
@@ -139,10 +215,13 @@ function revisionProof(raw: unknown, name: string, c: Context): NativeProof {
   }
   requireNative(env.ASSISTANT_RELEASE_WRITES_PAUSED === String(paused));
   immutableWebRevision(r, name, image, paused);
+  const semantic = revisionWithRequestedImage(r, image);
   const projected: Obj = {};
   for (const key of TEMPLATE_FIELDS)
-    if (key !== 'revision' && r[key] !== undefined) projected[key] = r[key];
+    if (key !== 'revision' && semantic[key] !== undefined) projected[key] = semantic[key];
   projected.revision = name;
+  if (reviewedCurrent)
+    requireNative(digest(template(projected)) === reviewedCurrent.proof.templateSha256);
   return {
     uid: tagHash(uid),
     image,
@@ -165,7 +244,8 @@ function uri(v: unknown): string {
       u.pathname === '/' &&
       !u.search &&
       !u.hash &&
-      /^(?:[a-z][a-z0-9-]{0,62}---)?assistant-web-[a-z0-9]+-uw\.a\.run\.app$/.test(u.hostname),
+      (/^(?:[a-z][a-z0-9-]{0,62}---)?assistant-web-[a-z0-9]+-uw\.a\.run\.app$/.test(u.hostname) ||
+        value === WEB_CANONICAL_URL),
   );
   return value;
 }
@@ -215,13 +295,49 @@ const OUTPUT = new Set([
   'etag',
   'template',
 ]);
+function stableConfiguration(raw: unknown) {
+  return Object.fromEntries(Object.entries(nativeObject(raw)).filter(([k]) => !OUTPUT.has(k)));
+}
+export function nativeStableConfigurationDigest(raw: unknown) {
+  return digest(nativeServiceDefaults(stableConfiguration(raw)));
+}
+export function matchesNativeStableConfigurationDigest(raw: unknown, expected: string) {
+  return matchesNativeServiceDigest(stableConfiguration(raw), expected, digest);
+}
+/** Bind the reviewed current provider default without changing either raw capture. */
+function currentSemanticTemplate(
+  t: Obj,
+  rawRevision: unknown,
+  revisionTemplateSha256: string,
+  reviewedCurrent: boolean,
+): Obj {
+  if (digest(t) === revisionTemplateSha256) return t;
+  requireNative(reviewedCurrent);
+  const requested = t.containers,
+    actual = nativeObject(rawRevision).containers;
+  requireNative(
+    Array.isArray(requested) &&
+      requested.length === 1 &&
+      Array.isArray(actual) &&
+      actual.length === 1,
+  );
+  const container = nativeObject(requested[0]);
+  requireNative(!Object.hasOwn(container, 'name') && nativeObject(actual[0]).name === 'web-1');
+  const semantic = { ...t, containers: [{ ...container, name: 'web-1' }] };
+  // Every other configuration field must still match the bound revision exactly.
+  requireNative(digest(semantic) === revisionTemplateSha256);
+  return semantic;
+}
 /** Full native revisions are consumed here; external hashes/booleans are never accepted. */
 function projectSnapshot(raw: unknown, native: Record<string, unknown>, c: Context): Snapshot {
   const s = nativeObject(raw);
   requireNative(
     s.name === WEB_SERVICE &&
       (s.reconciling === undefined || s.reconciling === false) &&
-      nativeObject(s.terminalCondition).state === 'CONDITION_SUCCEEDED' &&
+      (nativeObject(s.terminalCondition).state === 'CONDITION_SUCCEEDED' ||
+        (c.currentBinding?.preclosed &&
+          disabled(s) &&
+          retiredCurrentCondition(nativeObject(s.terminalCondition)))) &&
       s.deleteTime === undefined &&
       s.expireTime === undefined,
   );
@@ -256,13 +372,14 @@ function projectSnapshot(raw: unknown, native: Record<string, unknown>, c: Conte
   );
   requireNative(Array.isArray(s.urls) && s.urls.length <= 9);
   const urls = s.urls.map((v) => tagHash(uri(v))),
-    t = template(s.template),
     latestReady = nativeRevisionName(s.latestReadyRevision),
     latestCreated = nativeRevisionName(s.latestCreatedRevision);
-  requireNative(
-    latestReady === latestCreated &&
-      revisions[latestReady] &&
-      revisions[latestReady]?.templateSha256 === digest(t),
+  requireNative(latestReady === latestCreated && revisions[latestReady]);
+  const t = currentSemanticTemplate(
+    template(s.template),
+    native[latestReady],
+    revisions[latestReady].templateSha256,
+    latestReady === c.canonical && !!c.currentBinding,
   );
   const generation = text(s.generation, /^[1-9][0-9]{0,18}$/);
   requireNative(generation === s.observedGeneration);
@@ -273,15 +390,14 @@ function projectSnapshot(raw: unknown, native: Record<string, unknown>, c: Conte
     generation,
     observedGeneration: generation,
     reconciling: false,
-    succeeded: true,
+    succeeded: nativeObject(s.terminalCondition).state === 'CONDITION_SUCCEEDED',
+    ...(c.currentBinding?.preclosed && disabled(s) ? { admissionDisabled: true as const } : {}),
     desired,
     observed,
     latestReady,
     latestCreated,
     template: t,
-    stableConfigSha256: digest(
-      Object.fromEntries(Object.entries(s).filter(([k]) => !OUTPUT.has(k))),
-    ),
+    stableConfigSha256: nativeStableConfigurationDigest(s),
     rootUriSha256: tagHash(root),
     tagUris,
     urls,

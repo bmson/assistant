@@ -150,6 +150,7 @@ enum AssistantDestination: Hashable {
     case route(AssistantRoute)
     case peopleConnections
     case person(id: String)
+    case estimatedCostApproval(operationID: String)
 }
 
 /// An action the error banner can offer when a failure is worth another go.
@@ -253,6 +254,11 @@ struct NotificationTurnSettlements {
 
 /// One model observed per property; unrelated projection refreshes do not
 /// invalidate a screen that only reads its conversation or draft state.
+struct HeldTalkUtterance: Equatable {
+    let scope: ComposerDraftScope
+    let text: String
+}
+
 @MainActor
 @Observable
 final class AppModel {
@@ -306,6 +312,7 @@ final class AppModel {
     private(set) var memoryReviewCount = 0
     private(set) var mcpConnections: [McpConnection] = []
     private(set) var mcpConnectionsLoaded = false
+    private(set) var mcpOAuthConfigured = false
     private(set) var modelProviders: ModelProviderSettings? {
         get { edits.visible.modelProviders }
         set { edits.updateRemote(resources: [.providers]) { $0.modelProviders = newValue } }
@@ -411,6 +418,7 @@ final class AppModel {
     private(set) var composerRecoveryRevision = 0
     private(set) var calendarDraftRestoreRevision = 0
     private(set) var isPreparingCalendarContext = false
+    private(set) var heldTalkUtterances: [HeldTalkUtterance] = []
     // Its session and recovery are read through composerDraftScope/helpers.
     // Keep this tracked even though the storage itself is private.
     private var conversationDrafts = ConversationDrafts()
@@ -495,6 +503,7 @@ final class AppModel {
         let streamID: String
         let userMessageID: String
         let ownerText: String
+        let spoken: Bool
         let requestBody: Data
         var taskId: String?
         var cancellationRequested: Bool
@@ -649,6 +658,32 @@ final class AppModel {
         return conversationDrafts.scope(conversationID: conversationId)
     }
 
+    func heldTalkUtterance(in scope: ComposerDraftScope) -> String? {
+        heldTalkUtterances.first { $0.scope == scope }?.text
+    }
+
+    @discardableResult
+    func holdTalkUtterance(_ text: String, in scope: ComposerDraftScope) -> Bool {
+        guard composerDraftScope == scope, !text.isEmpty else { return false }
+        if let held = heldTalkUtterances.first(where: { $0.scope == scope }) { return held.text == text }
+        heldTalkUtterances.append(.init(scope: scope, text: text))
+        return true
+    }
+
+    func talkTurnWasAdmitted(_ text: String, in scope: ComposerDraftScope) -> Bool {
+        composerDraftScope == scope && isSending && ordinaryTurn?.spoken == true && ordinaryTurn?.ownerText == text
+            && ordinaryTurn?.conversationId == scope.conversationID
+    }
+
+    private func clearHeldTalkUtterance(_ text: String, in scope: ComposerDraftScope) {
+        heldTalkUtterances.removeAll { $0.scope == scope && $0.text == text }
+    }
+
+    func discardHeldTalkUtterance(_ held: HeldTalkUtterance) {
+        guard composerDraftScope == held.scope, !isPreparingCalendarContext else { return }
+        clearHeldTalkUtterance(held.text, in: held.scope)
+    }
+
     func composerDraftSnapshot(in scope: ComposerDraftScope) -> ComposerDraftSnapshot? {
         conversationDrafts.snapshot(in: scope)
     }
@@ -798,6 +833,7 @@ final class AppModel {
     }
 
     var activityConnectionVersion: Int { activityConnectionRevision }
+    private(set) var costTrackingRevision = 0
 
     func activityConnectionIsCurrent(version: Int) -> Bool {
         activityConnectionRevision == version && client != nil
@@ -814,6 +850,30 @@ final class AppModel {
 
     func checklistCorrectionConnectionIsCurrent(ownerID: String, version: Int) -> Bool {
         activityConnectionRevision == version && client != nil && bootstrap?.identity.id == ownerID
+    }
+
+    func mcpSignInOptionsRequestContext(for connection: McpConnection) -> McpSignInOptionsRequestContext? {
+        guard let client, let ownerID = bootstrap?.identity.id,
+              mcpConnections.contains(where: { McpSignInOptionsIdentity($0) == McpSignInOptionsIdentity(connection) }) else { return nil }
+        return .init(ownerID: ownerID, version: activityConnectionRevision,
+                     identity: McpSignInOptionsIdentity(connection), client: client)
+    }
+
+    func mcpSignInOptionsConnectionIsCurrent(_ context: McpSignInOptionsRequestContext) -> Bool {
+        activityConnectionRevision == context.version && bootstrap?.identity.id == context.ownerID
+            && client?.configuration == context.client.configuration
+            && context.identity.enabled
+            && mcpConnections.contains(where: { McpSignInOptionsIdentity($0) == context.identity })
+    }
+
+    func googleCalendarRequestContext() -> GoogleCalendarRequestContext? {
+        guard let client, let ownerID = bootstrap?.identity.id else { return nil }
+        return GoogleCalendarRequestContext(ownerID: ownerID, version: activityConnectionRevision, client: client)
+    }
+
+    func googleCalendarConnectionIsCurrent(_ context: GoogleCalendarRequestContext) -> Bool {
+        activityConnectionRevision == context.version && bootstrap?.identity.id == context.ownerID
+            && client?.configuration == context.client.configuration
     }
 
     func securityReviewRequestContext() -> SecurityReviewRequestContext? {
@@ -1887,6 +1947,7 @@ final class AppModel {
         workspace = nil
         modelProviders = nil
         mcpConnections = []
+        mcpOAuthConfigured = false
         mcpConnectionsLoaded = false
         savedCards = []
         cachedCalls = nil
@@ -1938,6 +1999,7 @@ final class AppModel {
         cardFormObservedTaskStatuses.removeAll()
         cardFormStateRevision += 1
         conversationDrafts.reset()
+        heldTalkUtterances = []
         composerRecoveryRevision += 1
         navigationPath = []
         dismissError()
@@ -2060,6 +2122,7 @@ final class AppModel {
         guard isSceneActive != isNowActive else { return }
         isSceneActive = isNowActive
         if isNowActive {
+            costTrackingRevision += 1
             edits.refreshConfirmed()
             discardStaleConnectionsIfNeeded()
             if let bootstrap {
@@ -2943,6 +3006,10 @@ final class AppModel {
         _ = await (workspaceRead, peopleRead)
     }
 
+    func invalidateCostTrackingForUserRefresh() {
+        costTrackingRevision += 1
+    }
+
     @discardableResult
     func refreshWorkspace(reportFailure: Bool = true) async -> Bool {
         guard let client else { return false }
@@ -3488,6 +3555,7 @@ final class AppModel {
             let response = try await client.mcpConnections()
             guard connectionIsCurrent(client, version: version) else { return false }
             mcpConnections = response.connections
+            mcpOAuthConfigured = response.oauthConfigured == true
             mcpConnectionsLoaded = true
             return true
         } catch {
@@ -3503,8 +3571,13 @@ final class AppModel {
         }
     }
 
-    func updateMcpConnection(id: String, action: String) async -> Bool {
-        await mcpConnectionMutation { try await $0.updateMcpConnection(id: id, action: action) }
+    func updateMcpConnection(id: String, action: String) async -> (updated: Bool, requiresReconnect: Bool) {
+        var requiresReconnect = false
+        let updated = await mcpConnectionMutation {
+            let result = try await $0.updateMcpConnection(id: id, action: action)
+            requiresReconnect = result.requiresOAuthReconnectForRefresh
+        }
+        return (updated, updated && requiresReconnect)
     }
 
     func deleteMcpConnection(id: String) async -> Bool {
@@ -4341,10 +4414,12 @@ final class AppModel {
             streamID: streamID,
             userMessageID: localUser.id,
             ownerText: text,
+            spoken: spoken,
             requestBody: requestBody,
             taskId: nil,
             cancellationRequested: false
         )
+        if spoken { clearHeldTalkUtterance(text, in: draftScope) }
         pollTask = Task { [weak self] in
             guard let self else { return }
             // `ensure`, not `start`: starting ends every live activity first,
@@ -5222,13 +5297,14 @@ final class AppModel {
         return message.parts.contains { part in
             (part.type == "text" && !(part.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 || (part.type == "data-card" && MessageResponseCard(part: part, formRendererAvailable: true) != nil)
+                || (part.type == "estimated-cost-approval" && !(part.operationId ?? "").isEmpty)
         }
     }
 
     private func pollForReply(taskId: String?, streamID: String, ordinaryTurnToken: UUID? = nil) async {
         guard let client, let conversationId else { return }
         let version = connectionVersion
-        let settled = Set(["done", "failed", "cancelled", "waiting_approval", "waiting_budget", "needs_attention"])
+        let settled = Set(["done", "failed", "cancelled", "waiting_approval", "waiting_budget", "waiting_estimated_cost", "needs_attention"])
         let attention = Set(["waiting_approval", "waiting_budget", "needs_attention"])
         var grace = 0
         var finalStatus: String?
@@ -5324,7 +5400,7 @@ final class AppModel {
                     if settled.contains(status) {
                         finalStatus = status
                         grace += 1
-                        if receivedCurrentReply || grace >= 4 { break }
+                        if status == "waiting_estimated_cost" || receivedCurrentReply || grace >= 4 { break }
                         if updates.hasMore { continue }
                     }
                 }
@@ -5372,6 +5448,7 @@ final class AppModel {
         toolActivity = []
         if let taskId, let finalStatus, ["done", "failed", "cancelled"].contains(finalStatus) {
             observeCardFormTask(finalStatus, taskId: taskId)
+            costTrackingRevision += 1
         }
         let settlement = notificationTurnSettlements.begin()
         let sendSettlementID = UUID()
@@ -5412,7 +5489,11 @@ final class AppModel {
         let reply = messages.reversed().first(where: {
             currentReplyMessageIDs.contains($0.id) && $0.role == .assistant && !$0.text.isEmpty
         })?.text
-        if let finalStatus, attention.contains(finalStatus) {
+        if finalStatus == "waiting_estimated_cost" {
+            setActivityThought(.needsYou, proposedDetail: receivedCurrentReply
+                ? "Review spending permission for this request."
+                : "This request is waiting for spending review; its card is not available yet.")
+        } else if let finalStatus, attention.contains(finalStatus) {
             let matchingApproval = finalStatus == "waiting_approval"
                 ? overview?.approvals.pending.first(where: { $0.approval.taskId == taskId })
                 : nil
@@ -5609,6 +5690,7 @@ final class AppModel {
             isVisibleDurableAssistantReply(message) ? message.id : nil
         })
         let newlyVisibleAssistantIDs = visibleAssistantIDsAfter.subtracting(visibleAssistantIDsBefore)
+        if !newlyVisibleAssistantIDs.isEmpty { costTrackingRevision += 1 }
         if let notice = missingTaskReplyNotice,
            notice.ownerID == ownerID,
            notice.conversationID == conversationId,

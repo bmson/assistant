@@ -19,6 +19,7 @@ import {
   correctOwnerKnowledgeGraphFactFromRepository,
   createCardFormAdmissionService,
   createChatConversation,
+  createEstimatedCostApprovalService,
   createMcpConnection,
   decideApproval,
   deleteApprovalPolicy,
@@ -92,6 +93,7 @@ import {
 import { readAuditInvestigation } from '@assistant/application/audit-investigation';
 import type { CallsPorts } from '@assistant/application/calls';
 import type { GoalInput } from '@assistant/application/goals';
+import { createGoogleCalendarConnectionService } from '@assistant/application/google-calendar-connection';
 import { GRAPH_EXTRACTION_VERSION } from '@assistant/application/knowledge-graph';
 import type { ModelProviderPorts } from '@assistant/application/model-providers';
 import { listPeopleDirectoryPage, personSummaryFromStoredRow } from '@assistant/application/people';
@@ -104,7 +106,9 @@ import {
 } from '@assistant/application/profile';
 import { getProviderBilling } from '@assistant/application/provider-billing';
 import {
+  estimatedCostApprovalEnabled,
   loadConfig,
+  mcpOAuthReleaseReady,
   parseFirestoreEmbeddingSpace,
   repoRoot,
   validateAgentPersistenceConfig,
@@ -115,6 +119,7 @@ import {
   getAgent,
   getOrCreatePrimaryConversation,
 } from '@assistant/core/chat';
+import { googleCalendarOAuthConfig } from '@assistant/core/google-calendar-oauth';
 import {
   decryptStoredCredential,
   encryptMcpBearerToken,
@@ -138,9 +143,15 @@ import {
   createPostgresCardFormAdmissionRepository,
   createPostgresCardRefreshRepository,
   createPostgresEmailSyncRepository,
+  createPostgresEstimatedCostApprovalRepository,
+  createPostgresEstimatedCostQuotePreparer,
+  createPostgresEstimatedCostTurnParking,
   createPostgresGeneratedCardRepository,
+  createPostgresGoogleCalendarConnectionRepository,
+  createPostgresMcpOAuthRepository,
   createPostgresModelCatalogRepository,
   createPostgresModelConnectionRepository,
+  createPostgresModelRoutingRepository,
   createPostgresRecallSurfacingRepository,
   createPostgresSelfRepairRepository,
   createPostgresTaskDiscoveryRepository,
@@ -149,13 +160,20 @@ import {
   documents,
   files,
   improvementProposals,
+  mcpConnections,
+  type PostgresAgentResolutionStageObserver,
   skills,
   withPostgresPrivacyObservationFence,
 } from '@assistant/db';
 import {
   assertPrivacyErasureFenceUnchanged,
   createFirestoreCardFormAdmissionRepository,
+  createFirestoreEstimatedCostApprovalRepository,
+  createFirestoreEstimatedCostQuotePreparer,
+  createFirestoreEstimatedCostTurnParking,
   createFirestoreExecutionPersistence,
+  createFirestoreGoogleCalendarConnectionRepository,
+  createFirestoreMcpOAuthRepository,
   createFirestoreProfileMemoryCommandPersistence,
   createFirestoreSettingsPersistence,
   createInstallationStore,
@@ -172,6 +190,7 @@ import {
   FirestoreImportOverviewRepository,
   FirestoreLocationPingRepository,
   FirestoreMcpConnectionMutationRepository,
+  FirestoreMcpConnectionReadRepository,
   FirestoreModelCatalogRepository,
   FirestoreModelConnectionRepository,
   FirestoreOwnerKnowledgeGraphFactRepository,
@@ -190,23 +209,39 @@ import {
   readPrivacyErasureFence,
 } from '@assistant/firestore';
 import { FirestoreSkillLibraryRepository } from '@assistant/firestore/skill-library';
-import type { SelfRepairRepository } from '@assistant/persistence';
 import {
+  allowsManualMcpCredential,
   embeddingSpaceIdentityKey,
   POSTGRES_EMBEDDING_DIMENSIONS,
   type RecallSurfacingRepository,
+  type SelfRepairRepository,
   validateEmbedding,
 } from '@assistant/persistence';
 import type { CardFormSubmission } from '@assistant/persistence/card-form';
 import { inspectMcpConnection } from '@assistant/tools/mcp';
 import {
+  inspectMcpAuthorization,
+  unavailableMcpAuthorization,
+} from '@assistant/tools/mcp-authorization';
+import { discoverMcpOAuthServers, McpOAuthError } from '@assistant/tools/mcp-oauth';
+import {
+  parseMcpOAuthRegistrations,
+  resolveMcpOAuthClient,
+} from '@assistant/tools/mcp-oauth-registration';
+import { createMcpOAuthService } from '@assistant/tools/mcp-oauth-service';
+import {
   GcsWorkspaceStore,
   LocalWorkspaceStore,
   type WorkspaceStore,
 } from '@assistant/tools/workspace';
-import { and, asc, desc, eq, gt, lt, or } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, lt, or, sql } from 'drizzle-orm';
 import { unstable_cache } from 'next/cache';
 import { cache } from 'react';
+import { isValidFormSessionScope } from '../app/auth-form-session-scope';
+import { estimatedCostProviderSource } from './estimated-cost-provider-source';
+import type { McpAuthorizationDiagnostic } from './mcp-authorization-types';
+import { mcpOAuthClientMetadata } from './mcp-oauth-client-metadata';
+import type { McpOAuthManagementService } from './mcp-oauth-wire';
 import {
   decodeMobileDocumentCursor,
   encodeMobileDocumentCursor,
@@ -329,8 +364,13 @@ export function getFirestoreInstallationStore() {
     projectId: config.GCP_PROJECT,
     installationId: config.ASSISTANT_WORKSPACE_ID,
     databaseId: config.FIRESTORE_DATABASE_ID,
+    estimatedCostProviderSource: getEstimatedCostRuntimeProviderSource(),
   });
   return globalCache.__assistantFirestoreStore;
+}
+
+function oauthManagedRefresh(connectionId: string) {
+  return { connectionId, status: 'oauth_reconnect_to_refresh' as const };
 }
 
 /** Run guarded discovery through the shared SSRF-checked MCP transport. */
@@ -338,13 +378,23 @@ export async function discoverFirestoreMcpConnection(connectionId: string) {
   const config = loadConfig();
   if (config.PERSISTENCE_DRIVER !== 'firestore')
     return { error: 'Firestore MCP discovery requires Firestore persistence.' };
-  const repository = new FirestoreMcpConnectionMutationRepository(
-    getFirestoreInstallationStore(),
-    config.FIRESTORE_AGENT_ID,
-  );
+  const store = getFirestoreInstallationStore();
+  const ownerId = config.FIRESTORE_AGENT_ID;
+  const repository = new FirestoreMcpConnectionMutationRepository(store, ownerId);
+  const checkOAuth = async () => {
+    const current = await new FirestoreMcpConnectionReadRepository(store, ownerId).getForTools(
+      ownerId,
+      connectionId,
+    );
+    return current?.enabled &&
+      !allowsManualMcpCredential(current.oauthState, { ownerId, connectionId }, current.endpoint)
+      ? oauthManagedRefresh(connectionId)
+      : null;
+  };
   try {
     const connection = await repository.beginDiscovery(connectionId);
-    if (!connection) return { error: 'MCP connection not found or disabled.' };
+    if (!connection)
+      return (await checkOAuth()) ?? { error: 'MCP connection not found or disabled.' };
     const result = await inspectMcpConnection(connection.endpoint, {
       bearerTokenEncrypted: connection.bearerTokenEncrypted,
     });
@@ -358,7 +408,9 @@ export async function discoverFirestoreMcpConnection(connectionId: string) {
         error: result.error ?? null,
       }))
     )
-      return { error: 'MCP connection changed while discovery was running.' };
+      return (
+        (await checkOAuth()) ?? { error: 'MCP connection changed while discovery was running.' }
+      );
     return {
       connectionId,
       status: result.status,
@@ -528,7 +580,9 @@ export function getRouter(): ModelRouter {
   if (!globalCache.__assistantRouter) {
     const connections = createPostgresModelConnectionRepository(getDb());
     globalCache.__assistantRouter = new ModelRouter(
-      getDb(),
+      createPostgresModelRoutingRepository(getDb(), {
+        providerSource: getEstimatedCostRuntimeProviderSource(),
+      }),
       config.OPENROUTER_API_KEY,
       config.LLM_AUDIT_CAPTURE,
       createConnectedModelProviders(config, () => connections.list()),
@@ -537,6 +591,51 @@ export function getRouter(): ModelRouter {
     );
   }
   return globalCache.__assistantRouter;
+}
+
+/** The configured, budget-guarded router for the active persistence driver. */
+export function getCalendarDuplicateRouter(): ModelRouter {
+  return loadConfig().PERSISTENCE_DRIVER === 'firestore'
+    ? getFirestoreChatApplication().calendarDuplicateRouter
+    : getRouter();
+}
+
+/** Install the optional parking port only for the explicitly enabled profile.
+ * Client capability and exact router denial are checked by the application. */
+function getEstimatedCostTurnParking() {
+  const config = loadConfig();
+  if (!estimatedCostApprovalEnabled(config)) return undefined;
+  const options = {
+    mutationsEnabled: () => estimatedCostApprovalEnabled(config),
+    providerSource: getEstimatedCostRuntimeProviderSource(),
+  };
+  return config.PERSISTENCE_DRIVER === 'firestore'
+    ? createFirestoreEstimatedCostTurnParking(getFirestoreInstallationStore(), options)
+    : createPostgresEstimatedCostTurnParking(getDb(), options);
+}
+
+export function getEstimatedCostRuntimeProviderSource() {
+  return estimatedCostProviderSource(loadConfig(), process.env.BUILD_SHA);
+}
+
+/** OFF preserves scoped readback and decline without minting new authority. */
+export function getEstimatedCostApprovalService() {
+  const config = loadConfig();
+  const enabled = () => estimatedCostApprovalEnabled(config);
+  const options = {
+    mutationsEnabled: enabled,
+    providerSource: getEstimatedCostRuntimeProviderSource(),
+  };
+  const firestore = config.PERSISTENCE_DRIVER === 'firestore';
+  return createEstimatedCostApprovalService({
+    repository: firestore
+      ? createFirestoreEstimatedCostApprovalRepository(getFirestoreInstallationStore(), options)
+      : createPostgresEstimatedCostApprovalRepository(getDb(), options),
+    preparer: firestore
+      ? createFirestoreEstimatedCostQuotePreparer(getFirestoreInstallationStore(), options)
+      : createPostgresEstimatedCostQuotePreparer(getDb(), options),
+    enabled,
+  });
 }
 
 /**
@@ -644,13 +743,29 @@ function createApplication(options: { profileMemory?: ProfileMemoryCommandPersis
   });
   const workspace = getWorkspace();
   const refreshMcpConnection = async (connectionId: string) => {
+    const checkOAuth = async () => {
+      const ownerId = await assertPostgresInstallationOwner(db);
+      const [row] = await db
+        .select({
+          enabled: mcpConnections.enabled,
+          endpoint: mcpConnections.endpoint,
+          oauthState: sql<unknown>`to_jsonb(${mcpConnections})->'oauth_state'`,
+        })
+        .from(mcpConnections)
+        .where(and(eq(mcpConnections.id, connectionId), eq(mcpConnections.agentId, ownerId)))
+        .limit(1);
+      return row?.enabled &&
+        !allowsManualMcpCredential(row.oauthState, { ownerId, connectionId }, row.endpoint)
+        ? oauthManagedRefresh(connectionId)
+        : null;
+    };
     const current = await getMcpConnection(db, connectionId);
-    if (!current) return { error: 'MCP connection not found.' };
+    if (!current) return (await checkOAuth()) ?? { error: 'MCP connection not found.' };
     const discovery = await inspectMcpConnection(current.endpoint, {
       bearerTokenEncrypted: current.bearerTokenEncrypted,
     });
     if (!(await saveMcpDiscovery(db, connectionId, discovery))) {
-      return { error: 'MCP connection not found.' };
+      return (await checkOAuth()) ?? { error: 'MCP connection not found.' };
     }
     return { connectionId, ...discovery };
   };
@@ -775,8 +890,11 @@ function createApplication(options: { profileMemory?: ProfileMemoryCommandPersis
     acknowledgeMessageDelivery: (conversationId: string, messageId: string, clientId: string) =>
       acknowledgeChatMessageDelivery(db, conversationId, messageId, clientId),
     archiveInactiveChats: () => archiveInactiveChats(db),
-    listChatHistory: (archived: boolean, observeStage?: ChatHistoryStageObserver) =>
-      listChatHistory(db, archived, observeStage),
+    listChatHistory: (
+      archived: boolean,
+      observeStage?: ChatHistoryStageObserver,
+      observePostgresAgentResolutionStage?: PostgresAgentResolutionStageObserver,
+    ) => listChatHistory(db, archived, observeStage, observePostgresAgentResolutionStage),
     getChatConversation: (conversationId: string, input: { taskId?: string; cursor?: string }) =>
       getChatConversationView(db, conversationId, input),
     getChatUpdates: (input: {
@@ -813,7 +931,12 @@ function createApplication(options: { profileMemory?: ProfileMemoryCommandPersis
     cancelChatTurn: (input: { conversationId: string; clientOperationId: string }) =>
       cancelChatTurn(db, input),
     handleChatTurn: (request: Request) =>
-      handleChatTurn(request, { config: loadConfig(), db, router: getRouter() }),
+      handleChatTurn(request, {
+        config: loadConfig(),
+        db,
+        router: getRouter(),
+        estimatedCostTurnParking: getEstimatedCostTurnParking(),
+      }),
     checkReadiness: () => checkReadiness(db),
   };
 }
@@ -1497,6 +1620,7 @@ function createFirestoreChatApplication() {
     return embedSkillText(skillEmbeddingText(input));
   };
   return {
+    calendarDuplicateRouter: router,
     recordOwnerLocationPing: async (body: unknown) => {
       const agent = await chat.resolveAgent();
       return recordOwnerLocationPingWithRepository(
@@ -1637,14 +1761,23 @@ function createFirestoreChatApplication() {
     acknowledgeMessageDelivery: (conversationId: string, messageId: string, clientId: string) =>
       acknowledgeChatMessageDelivery(chat, conversationId, messageId, clientId),
     archiveInactiveChats: () => archiveInactiveChats(chat),
-    listChatHistory: (archived: boolean, observeStage?: ChatHistoryStageObserver) =>
-      listChatHistory(chat, archived, observeStage),
+    listChatHistory: (
+      archived: boolean,
+      observeStage?: ChatHistoryStageObserver,
+      _observePostgresAgentResolutionStage?: PostgresAgentResolutionStageObserver,
+    ) => listChatHistory(chat, archived, observeStage),
     getChatConversation: (conversationId: string, input: { taskId?: string; cursor?: string }) =>
       getChatConversationView(chatReads, conversationId, input),
     cancelChatTurn: (input: { conversationId: string; clientOperationId: string }) =>
       cancelChatTurn(chat, input),
     handleChatTurn: (request: Request) =>
-      handleChatTurn(request, { config, router, chat, persistence }),
+      handleChatTurn(request, {
+        config,
+        router,
+        chat,
+        persistence,
+        estimatedCostTurnParking: getEstimatedCostTurnParking(),
+      }),
     getChatUpdates: (input: Parameters<typeof waitForChatUpdates>[1]) =>
       waitForChatUpdates(chatReads, input),
     submitCardForm: async (submission: CardFormSubmission) => {
@@ -1884,7 +2017,11 @@ export async function loadOwnerMemoryEditorView(
 ) {
   const [
     { readPostgresOwnerEditorIssuanceContext, readPostgresOwnerMemoryEditorSnapshot },
-    { readFirestoreOwnerEditorIssuanceContext, readFirestoreOwnerMemoryEditorSnapshot },
+    {
+      readFirestoreOwnerEditorIssuanceContext,
+      readFirestoreOwnerMemoryEditorSnapshot,
+      readFirestoreOwnerMemoryRemovalSnapshot,
+    },
     { buildOwnerMemoryEditorView },
   ] = await Promise.all([
     import('@assistant/db'),
@@ -1899,9 +2036,11 @@ export async function loadOwnerMemoryEditorView(
   const finish = (
     snapshot: NonNullable<Awaited<ReturnType<typeof readPostgresOwnerMemoryEditorSnapshot>>>,
     context: Awaited<ReturnType<typeof readPostgresOwnerEditorIssuanceContext>>,
+    removalImpact?: import('@assistant/persistence').OwnerEditorMemoryRemovalImpact | null,
   ) =>
     buildOwnerMemoryEditorView({
       snapshot,
+      removalImpact,
       context,
       formSessionScope,
       secret: config.AUTH_SECRET,
@@ -1918,6 +2057,8 @@ export async function loadOwnerMemoryEditorView(
   if (validateAgentPersistenceConfig(config).length)
     throw new Error('Memory persistence is unavailable');
   const store = getFirestoreInstallationStore();
+  const canReviewRemovalImpact =
+    enabled && Boolean(config.AUTH_SECRET) && isValidFormSessionScope(formSessionScope);
   return store.db.runTransaction(async (tx) => {
     const snapshot = await readFirestoreOwnerMemoryEditorSnapshot(
       store,
@@ -1926,13 +2067,44 @@ export async function loadOwnerMemoryEditorView(
       tx,
     );
     if (!snapshot) return null;
-    const context = await readFirestoreOwnerEditorIssuanceContext(
-      store,
-      config.FIRESTORE_AGENT_ID,
-      tx,
-    );
-    return finish(snapshot, context);
+    let context: Awaited<ReturnType<typeof readFirestoreOwnerEditorIssuanceContext>> = null;
+    if (snapshot.eligible && canReviewRemovalImpact)
+      context = await readFirestoreOwnerEditorIssuanceContext(store, config.FIRESTORE_AGENT_ID, tx);
+    let impact: import('@assistant/persistence').OwnerEditorMemoryRemovalImpact | null = null;
+    if (snapshot.eligible && context && canReviewRemovalImpact) {
+      try {
+        const removal = await readFirestoreOwnerMemoryRemovalSnapshot(
+          store,
+          config.FIRESTORE_AGENT_ID,
+          memoryId,
+          tx,
+        );
+        if (
+          removal &&
+          removal.snapshot.revision === snapshot.revision &&
+          removal.snapshot.contentHash === snapshot.contentHash
+        )
+          impact = removal.impact;
+      } catch {
+        // Impact-read failures disable only note removal; correction remains available.
+      }
+    }
+    return finish(snapshot, context, impact);
   });
+}
+
+/** Owner/session partition for receipt lookup when the saved row is already absent. */
+export async function loadOwnerMemoryEditorRecoverySession(formSessionScope: string | undefined) {
+  if (!formSessionScope) return null;
+  const config = loadConfig();
+  if (config.PERSISTENCE_DRIVER === 'firestore') {
+    if (validateAgentPersistenceConfig(config).length || !config.FIRESTORE_AGENT_ID) return null;
+    return { ownerId: config.FIRESTORE_AGENT_ID, formSessionScope };
+  }
+  return withPostgresMemoryBrowseRead(async (tx) => ({
+    ownerId: await assertPostgresInstallationOwner(tx),
+    formSessionScope,
+  }));
 }
 
 /** One exact owner-scoped saved-note read with no editor context or grant issuance. */
@@ -1983,5 +2155,178 @@ export async function loadOwnerMemoryCorrectionAuthorizationState(
     if (!snapshot) return null;
     const context = await readFirestoreOwnerEditorIssuanceContext(store, ownerId, tx);
     return { snapshot, context };
+  });
+}
+
+/** Optional personal Calendar onboarding, using the installation's existing store. */
+export function getGoogleCalendarConnectionService() {
+  const config = loadConfig();
+  if (config.PERSISTENCE_DRIVER === 'firestore' && validateAgentPersistenceConfig(config).length)
+    throw new Error('Calendar connection unavailable');
+  const repository =
+    config.PERSISTENCE_DRIVER === 'firestore'
+      ? createFirestoreGoogleCalendarConnectionRepository(getFirestoreInstallationStore())
+      : createPostgresGoogleCalendarConnectionRepository(getDb());
+  return createGoogleCalendarConnectionService({
+    repository,
+    config: googleCalendarOAuthConfig(config),
+  });
+}
+
+/** Read one configured-owner MCP reference. Credentials are never returned to diagnostics. */
+export async function readOwnerMcpAuthorizationConnection(
+  ownerId: string,
+  id: string,
+): Promise<{ id: string; ownerId: string; endpoint: string; enabled: boolean } | null> {
+  const config = loadConfig();
+  if (config.PERSISTENCE_DRIVER === 'firestore') {
+    if (validateAgentPersistenceConfig(config).length)
+      throw new Error('MCP diagnostics unavailable');
+    if (ownerId !== config.FIRESTORE_AGENT_ID) return null;
+    const repo = new FirestoreMcpConnectionReadRepository(
+      getFirestoreInstallationStore(),
+      config.FIRESTORE_AGENT_ID,
+    );
+    const row = await repo.getForTools(ownerId, id);
+    return row ? { id: row.id, ownerId, endpoint: row.endpoint, enabled: row.enabled } : null;
+  }
+  const db = getDb();
+  if ((await assertPostgresInstallationOwner(db)) !== ownerId) return null;
+  const [row] = await db
+    .select({
+      id: mcpConnections.id,
+      ownerId: mcpConnections.agentId,
+      endpoint: mcpConnections.endpoint,
+      enabled: mcpConnections.enabled,
+    })
+    .from(mcpConnections)
+    .where(and(eq(mcpConnections.id, id), eq(mcpConnections.agentId, ownerId)))
+    .limit(1);
+  return row ?? null;
+}
+
+/** The facade's declared wire type checks compatibility with the browser-safe DTO. */
+export async function inspectMcpAuthorizationEndpoint(
+  endpoint: string,
+  options: { signal?: AbortSignal },
+): Promise<McpAuthorizationDiagnostic> {
+  return inspectMcpAuthorization(endpoint, options);
+}
+export function unavailableMcpAuthorizationDiagnostic(
+  reason: 'connection_disabled',
+): McpAuthorizationDiagnostic {
+  return unavailableMcpAuthorization(reason);
+}
+
+/** Owner-facing MCP inventory for either store; no credential ciphertext is exposed. */
+export async function listOwnerMcpConnections() {
+  const config = loadConfig();
+  if (config.PERSISTENCE_DRIVER === 'firestore') {
+    if (validateAgentPersistenceConfig(config).length) throw new Error('MCP inventory unavailable');
+    return new FirestoreMcpConnectionReadRepository(
+      getFirestoreInstallationStore(),
+      config.FIRESTORE_AGENT_ID,
+    ).list(config.FIRESTORE_AGENT_ID);
+  }
+  const db = getDb();
+  await assertPostgresInstallationOwner(db);
+  return listMcpConnections(db);
+}
+
+function configuredMcpOAuth(config: ReturnType<typeof loadConfig>) {
+  if (
+    !mcpOAuthReleaseReady(config, 'web') ||
+    !/^[a-f0-9]{64}$/i.test(config.MCP_ENC_KEY) ||
+    (config.PERSISTENCE_DRIVER === 'firestore' && validateAgentPersistenceConfig(config).length)
+  ) {
+    return null;
+  }
+  const metadata = mcpOAuthClientMetadata(config.AUTH_URL);
+  if (!metadata) return null;
+  try {
+    return { metadata, registrations: parseMcpOAuthRegistrations(config.MCP_OAUTH_REGISTRATIONS) };
+  } catch {
+    return null;
+  }
+}
+
+export function isMcpOAuthConfigured(): boolean {
+  return configuredMcpOAuth(loadConfig()) !== null;
+}
+
+type McpOAuthOptions = Parameters<typeof createMcpOAuthService>[0];
+
+function composeMcpOAuthManagement(options: McpOAuthOptions): McpOAuthManagementService {
+  const service = createMcpOAuthService(options);
+  return {
+    ...service,
+    async verifyProvider(ownerId, connectionId) {
+      const status = await service.status(ownerId, connectionId);
+      if (!status?.signInAvailable) return status;
+      const connection = await options.readConnection(ownerId, connectionId);
+      const redirectUri = options.metadata.redirect_uris[0];
+      if (!connection?.enabled || !redirectUri) return { ...status, providerAvailable: false };
+      let providerAvailable: boolean;
+      try {
+        const servers = await discoverMcpOAuthServers(connection.endpoint);
+        providerAvailable = servers.some(
+          (server) =>
+            !!resolveMcpOAuthClient(server, {
+              hostedClientId: options.metadata.client_id,
+              redirectUri,
+              registrations: options.registrations,
+            }),
+        );
+      } catch (error) {
+        if (!(error instanceof McpOAuthError) || error.reason !== 'unsupported_client') throw error;
+        providerAvailable = false;
+      }
+      const latest = await options.readConnection(ownerId, connectionId);
+      if (!latest?.enabled || latest.endpoint !== connection.endpoint) return null;
+      const currentStatus = await service.status(ownerId, connectionId);
+      return currentStatus ? { ...currentStatus, providerAvailable } : null;
+    },
+  };
+}
+
+export function getMcpOAuthManagementService(): McpOAuthManagementService | null {
+  const config = loadConfig();
+  const configured = configuredMcpOAuth(config);
+  if (!configured) return null;
+  if (config.PERSISTENCE_DRIVER === 'firestore') {
+    const store = getFirestoreInstallationStore();
+    const ownerId = config.FIRESTORE_AGENT_ID;
+    const connections = new FirestoreMcpConnectionReadRepository(store, ownerId);
+    return composeMcpOAuthManagement({
+      repo: createFirestoreMcpOAuthRepository(store, ownerId),
+      ...configured,
+      resolveOwner: async () => ownerId,
+      readConnection: (requestedOwner, connectionId) =>
+        connections.getForTools(requestedOwner, connectionId),
+    });
+  }
+  const db = getDb();
+  return composeMcpOAuthManagement({
+    repo: createPostgresMcpOAuthRepository(db),
+    ...configured,
+    resolveOwner: () => assertPostgresInstallationOwner(db),
+    readConnection: async (ownerId, connectionId) => {
+      if ((await assertPostgresInstallationOwner(db)) !== ownerId) return null;
+      const [connection] = await db
+        .select({
+          id: mcpConnections.id,
+          name: mcpConnections.name,
+          status: mcpConnections.status,
+          enabled: mcpConnections.enabled,
+          serverName: mcpConnections.serverName,
+          tools: mcpConnections.tools,
+          endpoint: mcpConnections.endpoint,
+          bearerTokenEncrypted: mcpConnections.bearerTokenEncrypted,
+        })
+        .from(mcpConnections)
+        .where(and(eq(mcpConnections.id, connectionId), eq(mcpConnections.agentId, ownerId)))
+        .limit(1);
+      return connection ?? null;
+    },
   });
 }

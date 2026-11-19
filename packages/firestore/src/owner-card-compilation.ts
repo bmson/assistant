@@ -10,6 +10,7 @@ import {
   type Query,
   type QueryDocumentSnapshot,
 } from '@google-cloud/firestore';
+import { ownerFamilySourceIsRejected } from './owner-family-source-rejection.js';
 import { privacyErasureIsActive } from './privacy-erasure.js';
 import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from './store.js';
 
@@ -101,6 +102,7 @@ export class FirestoreOwnerCardCompilationRepository implements OwnerCardCompila
             'agentId',
             'content',
             'contentHash',
+            'ownerFamilyRejectedContentHash',
             'subjectContactId',
             'category',
             'expiresAt',
@@ -134,7 +136,9 @@ export class FirestoreOwnerCardCompilationRepository implements OwnerCardCompila
           .map((row) => this.store.doc('memoryTombstones', row.contentHash));
         if (refs.length > 0) tombstones.push(...(await tx.getAll(...refs)));
       }
-      const eligible = memories.filter((_, index) => !tombstones[index]?.exists);
+      const eligible = memories.filter(
+        (memory, index) => !tombstones[index]?.exists && !ownerFamilySourceIsRejected(memory),
+      );
       const owner = contacts.find((contact) => contact.trust === 'owner');
       const ownerFacts = owner
         ? eligible

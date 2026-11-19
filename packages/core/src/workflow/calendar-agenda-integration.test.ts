@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { calendarAgendaSummary } from './calendar-agenda.js';
 import { detectPersonalReadRequest } from './read-intent.js';
-import { responseCardsForFinal } from './response-cards.js';
+import { calendarResponseCards, responseCardsForFinal } from './response-cards.js';
 
 const ownerText = 'What does my calendar look like tomorrow?';
 const request = detectPersonalReadRequest([{ role: 'user', content: ownerText }], {
@@ -33,6 +33,79 @@ const evidence = (events: unknown[], overrides: Record<string, unknown> = {}) =>
 });
 
 describe('deterministic calendar agenda integration', () => {
+  it('shows a differently named cross-calendar game once and only one overlap with a gala', () => {
+    const family = {
+      calendarId: 'family',
+      calendar: 'Family',
+      eventId: 'family-game',
+      summary: '⚽ United v Palo Alto (5:10PM)',
+      start: '2026-10-23T16:25:00-07:00',
+      end: '2026-10-23T18:30:00-07:00',
+      allDay: false,
+      blocksTime: true,
+      location:
+        'Crocker Amazon Soccer Fields, soccer field & Parking lot, 785 Moscow St, San Francisco, CA 94112, USA',
+    };
+    const team = {
+      ...family,
+      calendarId: 'soccer',
+      calendar: 'SF United Soccer',
+      eventId: 'team-game',
+      summary: '26/27 U13B Azul vs Palo Alto SC 13/14B Gold',
+      start: '2026-10-23T17:10:00-07:00',
+      location: 'Crocker Amazon\n1669 Geneva Avenue, San Francisco, CA 94134',
+    };
+    const gala = {
+      ...team,
+      eventId: 'gala',
+      summary: '26/27 U13B Azul - Casino Night Gala',
+      start: '2026-10-23T17:00:00-07:00',
+      end: '2026-10-23T22:30:00-07:00',
+      location: 'Leon Event Hall\n5051 Mission Street, San Francisco, CA 94112',
+    };
+    const sourceEvents = [family, team, gala];
+    const before = structuredClone(sourceEvents);
+    for (const order of [
+      [family, team, gala],
+      [gala, team, family],
+    ]) {
+      const read = evidence(order);
+      const projections = calendarResponseCards([read], request);
+      expect(projections).toHaveLength(2);
+      expect(projections.find((event) => event.probableMatch)).toMatchObject({
+        title: family.summary,
+        start: family.start,
+        end: family.end,
+        calendars: ['Family', 'SF United Soccer'],
+        sourceVariants: [family, team].map(({ calendarId, eventId, start, location }) => ({
+          calendarId,
+          eventId,
+          start,
+          location,
+        })),
+      });
+      const cards = responseCardsForFinal({
+        evidence: [read],
+        readRequest: request,
+        requestText: ownerText,
+      });
+      const sections = cards[0]?.sections as Array<Record<string, unknown>>;
+      const agendaItems = sections.find((section) => section.type === 'agenda')?.items as Array<
+        Record<string, unknown>
+      >;
+      expect(agendaItems).toHaveLength(2);
+      expect(agendaItems.find((item) => item.title === family.summary)).toMatchObject({
+        time: '4:25 PM – 6:30 PM',
+      });
+      expect(JSON.stringify(agendaItems)).toContain('5:10 PM');
+      const overlap = sections.find((section) => Array.isArray(section.overlaps));
+      expect(overlap?.overlapCount).toBe(1);
+      expect(overlap?.overlaps).toHaveLength(1);
+      expect(JSON.stringify(overlap)).toContain(gala.summary);
+    }
+    expect(sourceEvents).toEqual(before);
+  });
+
   it('projects ordinary and briefing evidence into one primary briefing with all thirteen rows', () => {
     const cards = responseCardsForFinal({
       evidence: [evidence(Array.from({ length: 13 }, (_, index) => event(index)))],

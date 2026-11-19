@@ -1,6 +1,8 @@
 import type {
   EmbeddingSpace,
+  OwnerEditorApply,
   OwnerEditorClaim,
+  OwnerEditorPersonRemovalImpact,
   OwnerKnowledgeGraphFactAtomicInput,
 } from '@assistant/persistence';
 import { ownerEditorCommitRevision } from '@assistant/persistence';
@@ -12,20 +14,28 @@ import {
   firestoreOwnerEditorContext,
   readFirestoreOwnerEditorContact,
   readFirestoreOwnerEditorFamily,
+  readFirestoreOwnerEditorPersonRemovalSnapshot,
 } from './owner-editor-graph.js';
 import {
   commitFirestoreOwnerMemoryCorrection,
+  commitFirestoreOwnerMemoryRemoval,
   readFirestoreOwnerMemoryEditorSnapshot,
+  readFirestoreOwnerMemoryRemovalSnapshot,
 } from './owner-editor-memory.js';
 import {
   commitFirestoreOwnerMemoryCreation,
   readFirestoreOwnerMemoryCreationTarget,
 } from './owner-editor-memory-create.js';
+import { commitFirestoreOwnerEditorPersonRemoval } from './owner-editor-removal.js';
 import {
   beginFirestoreOwnerEditorWrite,
   completeFirestoreOwnerEditorWrite,
   readFirestoreOwnerEditorIssuanceContext,
 } from './owner-editor-repository.js';
+import {
+  readOwnerFamilyRejectionReview,
+  rejectOwnerFamilyClaimInFirestore,
+} from './owner-family-rejection.js';
 import { FirestoreOwnerKnowledgeGraphFactRepository } from './owner-knowledge-graph-fact.js';
 import { createFirestoreProfileMemoryCommandPersistence } from './profile-memory-commands.js';
 import { FirestoreProfilePeopleCommandRepository } from './profile-people-command.js';
@@ -63,6 +73,28 @@ export function createFirestoreOwnerEditorDomainStorage(
       prepared: import('./owner-editor-memory.js').PreparedFirestoreOwnerMemoryCorrection,
       now: Date,
     ) => commitFirestoreOwnerMemoryCorrection(store, embeddingSpace, claim, prepared, now),
+    memoryRemovalSnapshot: (
+      expected: string,
+      id: string,
+      scope: import('@assistant/persistence').OwnerEditorScope,
+    ) => {
+      if (expected !== ownerId) throw new Error('Owner changed');
+      return store.db.runTransaction(async (tx) => {
+        const current = await readFirestoreOwnerEditorIssuanceContext(store, ownerId, tx);
+        if (
+          !current ||
+          current.epoch !== scope.epoch ||
+          current.privacyGeneration !== scope.privacyGeneration
+        )
+          return null;
+        return readFirestoreOwnerMemoryRemovalSnapshot(store, ownerId, id, tx);
+      });
+    },
+    commitMemoryRemoval: (
+      claim: OwnerEditorClaim,
+      prepared: import('./owner-editor-memory.js').PreparedFirestoreOwnerMemoryRemoval,
+      now: Date,
+    ) => commitFirestoreOwnerMemoryRemoval(store, claim, prepared, now),
     memoryCreationTarget: (
       expected: string,
       subjectContactId: string,
@@ -174,6 +206,83 @@ export function createFirestoreOwnerEditorDomainStorage(
       prepared: Parameters<typeof people.commitEditor>[1],
       now: Date,
     ) => people.commitEditor(claim, prepared, now),
+    async personRemovalSnapshot(
+      expected: string,
+      contactId: string,
+      scope: import('@assistant/persistence').OwnerEditorScope,
+    ) {
+      if (
+        expected !== ownerId ||
+        scope.ownerId !== ownerId ||
+        scope.command !== 'remove_person' ||
+        scope.targetId !== contactId
+      )
+        return null;
+      return store.db.runTransaction(async (tx) => {
+        const current = await readFirestoreOwnerEditorIssuanceContext(store, ownerId, tx);
+        if (
+          !current ||
+          current.epoch !== scope.epoch ||
+          current.privacyGeneration !== scope.privacyGeneration
+        )
+          return null;
+        const snapshot = await readFirestoreOwnerEditorPersonRemovalSnapshot(
+          store,
+          ownerId,
+          contactId,
+          tx,
+        );
+        return { impact: snapshot.impact, contactRevision: snapshot.contactRevision };
+      });
+    },
+    commitPersonRemoval: (
+      claim: OwnerEditorClaim,
+      prepared: {
+        request: Extract<OwnerEditorApply, { command: 'remove_person' }>;
+        impact: OwnerEditorPersonRemovalImpact;
+      },
+      now: Date,
+    ) =>
+      commitFirestoreOwnerEditorPersonRemoval({
+        store,
+        configuredOwnerId: ownerId,
+        claim,
+        request: prepared.request,
+        reviewedImpact: prepared.impact,
+        now,
+      }),
+    async familyRemovalRevision(
+      expected: string,
+      relationId: string,
+      scope: import('@assistant/persistence').OwnerEditorScope,
+    ) {
+      if (
+        expected !== ownerId ||
+        scope.ownerId !== ownerId ||
+        scope.command !== 'remove_owner_family_relationship' ||
+        scope.targetId !== relationId
+      )
+        return null;
+      const review = await readOwnerFamilyRejectionReview({
+        store,
+        ownerId,
+        relationId,
+        scope,
+      });
+      return review?.revision ?? null;
+    },
+    commitFamilyRemoval: (
+      claim: OwnerEditorClaim,
+      request: Extract<OwnerEditorApply, { command: 'remove_owner_family_relationship' }>,
+      now: Date,
+    ) =>
+      rejectOwnerFamilyClaimInFirestore({
+        store,
+        configuredOwnerId: ownerId,
+        claim,
+        request,
+        now,
+      }),
     async commitFamily(_claim: OwnerEditorClaim, prepared: OwnerKnowledgeGraphFactAtomicInput) {
       if (!prepared.editor) throw new Error('Editor claim required for editor writer');
       const saved = await graph.createAtomic(prepared);

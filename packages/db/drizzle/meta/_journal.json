@@ -953,6 +953,27 @@
       "when": 1793798375365,
       "tag": "0135_memory_write_witness",
       "breakpoints": true
+    },
+    {
+      "idx": 136,
+      "version": "7",
+      "when": 1794697200000,
+      "tag": "0136_google_calendar_connections",
+      "breakpoints": true
+    },
+    {
+      "idx": 137,
+      "version": "7",
+      "when": 1794765054109,
+      "tag": "0137_estimated_cost_approval",
+      "breakpoints": true
+    },
+    {
+      "idx": 138,
+      "version": "7",
+      "when": 1795023841106,
+      "tag": "0138_mcp_oauth_state",
+      "breakpoints": true
     }
   ]
 }

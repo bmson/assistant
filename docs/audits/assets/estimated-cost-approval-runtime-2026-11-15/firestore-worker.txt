@@ -1,0 +1,17 @@
+Captured from the Backend Engineer's executed command output, without rerunning.
+Committed source: 9806ab9598d59214547f7d7cb3624311d8155753
+Command: /bin/zsh -lc "FIRESTORE_EMULATOR_HOST=127.0.0.1:18789 GCLOUD_PROJECT=demo-estimated-cost-test NODE_OPTIONS='--import=./scripts/deny-test-egress.mjs' pnpm exec vitest run apps/agent/src/estimated-cost-worker.e2e.test.ts"
+Exit code: 0
+
+ RUN  v5.0.5 /Users/baldvinsmarason/.codex/worktrees/ai-calendar-server-release/assistant
+
+(node:31743) Warning: AI SDK Warning System: To turn off warning logging, set the AI_SDK_LOG_WARNINGS global to false.
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:31743) [AISDK_DEP_GENERATE_OBJECT] DeprecationWarning: AI SDK Warning: Deprecated: "generateObject". Use generateText with an output setting instead.
+
+ Test Files  1 passed (1)
+      Tests  8 passed (8)
+   Start at  12:00:03
+   Duration  8.91s (tests 80%, import 12%, transform 8%)
+
+

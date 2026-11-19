@@ -20,6 +20,7 @@ import {
   type RequestRecoveryNote,
   requestStatusNote,
 } from './chat-request-recovery';
+import { isCostQuotePayload } from './estimated-cost-decision';
 import { uniqueMessageIds } from './message-reconciliation';
 import {
   type RecallSource,
@@ -49,7 +50,12 @@ export interface ChatActivityItem {
 export type PollTrouble = 'stale' | 'expired' | null;
 
 /** Task statuses that mean "parked on the owner", not "finished". */
-const PARKED_TASK_STATUSES = new Set(['waiting_approval', 'waiting_budget', 'needs_attention']);
+const PARKED_TASK_STATUSES = new Set([
+  'waiting_approval',
+  'waiting_budget',
+  'waiting_estimated_cost',
+  'needs_attention',
+]);
 
 /**
  * A task publishes a parked status before the card explaining the park is
@@ -274,6 +280,8 @@ export function taskTimeoutNote(status: string | null): string {
       return 'This task is waiting for approval. Check Activity for its current approval status.';
     case 'waiting_budget':
       return 'This task is waiting for a budget decision. Check Activity.';
+    case 'waiting_estimated_cost':
+      return requestStatusNote(status);
     case 'needs_attention':
       return 'This task needs your attention. Check Activity.';
     case 'sleeping':
@@ -316,6 +324,7 @@ export function useChatPolling({
   setLiveRecall,
   setPollTrouble,
   onTaskTerminal,
+  onEstimatedCostParked,
   keepPollingTask,
 }: {
   conversationId: string;
@@ -339,11 +348,14 @@ export function useChatPolling({
   setLiveRecall: Dispatch<SetStateAction<RecallSource[] | null>>;
   setPollTrouble: Dispatch<SetStateAction<PollTrouble>>;
   onTaskTerminal?: (taskId: string, status: 'done' | 'failed' | 'cancelled') => void;
+  onEstimatedCostParked?: (taskId: string) => void;
   /** Tasks blocking an unsent form draft must remain observed through parked states. */
   keepPollingTask?: (taskId: string) => boolean;
 }): void {
   const onTaskTerminalRef = useRef(onTaskTerminal);
   onTaskTerminalRef.current = onTaskTerminal;
+  const onEstimatedCostParkedRef = useRef(onEstimatedCostParked);
+  onEstimatedCostParkedRef.current = onEstimatedCostParked;
   const keepPollingTaskRef = useRef(keepPollingTask);
   keepPollingTaskRef.current = keepPollingTask;
   // biome-ignore lint/correctness/useExhaustiveDependencies: the loop reads component-owned refs and stable setters by design — re-subscribing on every cursor move would restart the poll mid-conversation, so a new conversation or authenticated session invalidates the observation.
@@ -565,6 +577,31 @@ export function useChatPolling({
           const advanced =
             ownsCursor && Boolean(data.nextCursor) && data.nextCursor !== cursorRef.current;
           if (ownsCursor && data.nextCursor) cursorRef.current = data.nextCursor;
+          if (
+            sameTurn &&
+            turnState &&
+            data.taskStatus === 'waiting_estimated_cost' &&
+            !keepPollingTaskRef.current?.(turnState.taskId)
+          ) {
+            // A durable park releases this admission even if its exact card is
+            // delayed. The thread-level observer continues fetching messages.
+            const hasExactCard = [
+              ...logRef.current,
+              ...data.messages,
+              ...(data.refreshed ?? []),
+            ].some(
+              (message) =>
+                message.role === 'assistant' &&
+                (message.parts as unknown[]).some(
+                  (part) => isCostQuotePayload(part) && part.taskId === turnState.taskId,
+                ),
+            );
+            onEstimatedCostParkedRef.current?.(turnState.taskId);
+            return settle(
+              turnState.taskId,
+              hasExactCard ? null : requestStatusNote(data.taskStatus),
+            );
+          }
           if (data.hasMore && advanced) {
             nextDelayMs = 0;
             return;

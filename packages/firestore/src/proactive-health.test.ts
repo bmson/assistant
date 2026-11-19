@@ -58,4 +58,23 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore proactive healt
       pushDevices: 1,
     });
   });
+
+  it('counts admitted automated mail even when no conversation message was needed', async () => {
+    await put('emailIngest', {
+      agentId,
+      createdAt: ago(1),
+      pipelineStage: 'message_persisted',
+      ingestMode: 'direct',
+      authenticated: true,
+      scoreStatus: 'prepared',
+      admittedSourceKind: 'automated_source',
+      admittedSourceId: 'source',
+      messagePersisted: false,
+    });
+    const counts = await new FirestoreProactiveHealthRepository(store).counts(agentId, {
+      since24h: ago(24),
+      since7d: ago(168),
+    });
+    expect(counts).toMatchObject({ mailScored24h: 1, mailScored7d: 1 });
+  });
 });

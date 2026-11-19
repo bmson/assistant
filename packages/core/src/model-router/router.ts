@@ -1,4 +1,5 @@
-import { createHash } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { createHash, randomUUID } from 'node:crypto';
 import { loadConfig } from '@assistant/config';
 import { createPostgresModelRoutingRepository, type Db } from '@assistant/db';
 import {
@@ -6,6 +7,7 @@ import {
   type EmbeddingSpace,
   embeddingModelId,
   embeddingSpaceIdentityKey,
+  ledgerUsdToMicros,
   type ModelRoutingRepository,
   POSTGRES_EMBEDDING_DIMENSIONS,
   validateEmbeddingSpace,
@@ -113,7 +115,11 @@ export type Route =
     }
   | { ok: false; decision: Extract<BudgetDecision, { mode: 'park' | 'block' }> };
 
+const estimatedCostAttemptState = Symbol('estimatedCostAttemptState');
+
 export interface CallOptions {
+  /** @internal Shared across router-owned retries. */
+  [estimatedCostAttemptState]?: { dispatched: boolean };
   taskId?: string;
   modelOverride?: string;
   /** Use this role's configured fallback model even when the budget is healthy. */
@@ -142,6 +148,26 @@ export interface CallOptions {
   requestProfile?: Omit<ProviderRequestProfile, 'reasoning' | 'maxPrice' | 'privacy'>;
   /** Opt-in direct owner chat: revalidate its lease before one pre-output retry. */
   recoverBeforeOutput?: () => Promise<boolean>;
+  /** Durable parking for this exact call, only before any provider attempt. */
+  parkEstimatedCost?: (input: {
+    candidate: Awaited<ReturnType<ModelRouter['prepareEstimatedCostCandidate']>>;
+    options: Readonly<CallOptions>;
+    decision: Extract<BudgetDecision, { mode: 'park' | 'block' }>;
+    providerAttempts: 0;
+  }) => Promise<'parked' | 'not_parked'>;
+}
+
+type TrackedCallOptions = CallOptions & { [estimatedCostAttemptState]?: { dispatched: boolean } };
+
+/** A parked or ambiguous durable write must never be retried as provider work. */
+export class EstimatedCostParkedError extends Error {
+  constructor(
+    readonly outcome: 'parked' | 'unknown',
+    options?: ErrorOptions,
+  ) {
+    super('Estimated cost approval stopped this model call', options);
+    this.name = 'EstimatedCostParkedError';
+  }
 }
 
 /** Keep optional per-call cost ceilings inside the reservation path. */
@@ -758,6 +784,37 @@ function schemaInputTokens(schema: ZodType): number {
   return estimatedSerializedTokens(z.toJSONSchema(schema));
 }
 
+/** Bind the model-visible schema and tool contract, not just their token count. */
+function estimatedCostRequestShape(opts: CallOptions): unknown {
+  const extended = opts as CallOptions & {
+    schema?: ZodType;
+    tools?: ToolSet;
+    toolChoice?: StepToolChoice;
+  };
+  return {
+    schema: extended.schema ? z.toJSONSchema(extended.schema) : null,
+    tools: extended.tools
+      ? Object.entries(extended.tools).map(([name, raw]) => {
+          const tool = raw as unknown as {
+            description?: string;
+            inputSchema?: ZodType;
+            parameters?: ZodType;
+          };
+          const schema = tool.inputSchema ?? tool.parameters;
+          if (!schema) throw new Error(`Tool ${name} does not expose a countable input schema`);
+          return {
+            name,
+            description: tool.description ?? '',
+            parameters: z.toJSONSchema(schema, { target: 'draft-7', io: 'input' }),
+          };
+        })
+      : null,
+    toolChoice: extended.toolChoice ?? null,
+    temperature: opts.temperature ?? null,
+    maxRetries: opts.maxRetries ?? null,
+  };
+}
+
 function toolInputTokens(tools: ToolSet): number {
   const requestSchema = Object.entries(tools).map(([name, raw]) => {
     const tool = raw as unknown as {
@@ -910,7 +967,63 @@ export class ModelCallFallbackAttemptError extends Error {
   }
 }
 
+export interface EstimatedCostGrantContext {
+  actor: import('@assistant/persistence').EstimatedCostActor;
+  operationId: string;
+  taskId: string;
+  grantId: string;
+  bindingDigest: string;
+  leaseToken: string;
+}
+
+export function estimatedCostGrantContextForTask(
+  task: import('@assistant/persistence').TaskLease,
+  installationId: string,
+): EstimatedCostGrantContext | null {
+  const state =
+    task.state && typeof task.state === 'object' && !Array.isArray(task.state)
+      ? (task.state as Record<string, unknown>)
+      : null;
+  const marker = state?.estimatedCostApproval;
+  if (marker == null) return null;
+  if (!marker || typeof marker !== 'object' || Array.isArray(marker))
+    throw new Error('Invalid estimated cost checkpoint');
+  const row = marker as Record<string, unknown>;
+  if (
+    row.status !== 'approved' ||
+    typeof row.operationId !== 'string' ||
+    typeof row.grantId !== 'string' ||
+    typeof row.bindingDigest !== 'string' ||
+    !task.leaseToken ||
+    !installationId
+  )
+    throw new Error('Estimated cost checkpoint is unavailable');
+  return {
+    actor: { installationId, ownerId: task.agentId },
+    operationId: row.operationId,
+    taskId: task.id,
+    grantId: row.grantId,
+    bindingDigest: row.bindingDigest,
+    leaseToken: task.leaseToken,
+  };
+}
+
 export class ModelRouter {
+  private readonly grantContext = new AsyncLocalStorage<EstimatedCostGrantContext>();
+  private readonly grantReservations = new Map<
+    string,
+    {
+      context: EstimatedCostGrantContext;
+      candidate: Awaited<ReturnType<ModelRouter['prepareEstimatedCostCandidate']>>;
+    }
+  >();
+  /** Scope the approved original task to all router calls in this async execution. */
+  withEstimatedCostGrant<T>(
+    context: EstimatedCostGrantContext,
+    work: () => Promise<T>,
+  ): Promise<T> {
+    return this.grantContext.run(context, work);
+  }
   private readonly providers: ModelProviderSet;
   private readonly persistence: ModelRoutingRepository;
   private readonly configuredEmbeddingSpace?: Readonly<EmbeddingSpace>;
@@ -1060,6 +1173,15 @@ export class ModelRouter {
       return { ok: false, decision };
     }
 
+    return this.resolveRoute(role, opts, decision);
+  }
+
+  /** Candidate resolution is private so quote preparation cannot authorize a call. */
+  private async resolveRoute(
+    role: ModelRole,
+    opts: RouteOptions,
+    decision: Extract<BudgetDecision, { mode: 'primary' | 'fallback' }>,
+  ): Promise<Extract<Route, { ok: true }>> {
     const roleRow = await this.persistence.role(role);
     if (!roleRow) throw new Error(`no model_roles row for role: ${role}`);
 
@@ -1326,6 +1448,73 @@ export class ModelRouter {
     };
   }
 
+  /** Select and price a candidate without a reservation or provider request.
+   * This result is evidence for a quote, not authority to dispatch. */
+  async prepareEstimatedCostCandidate(
+    role: Exclude<ModelRole, 'embed'>,
+    opts: CallOptions,
+    toolCall = false,
+  ): Promise<{
+    role: Exclude<ModelRole, 'embed'>;
+    critical: boolean;
+    modelId: string;
+    nextAttemptMicros: number;
+    routingDigest: string;
+    requestDigest: string;
+  }> {
+    await this.providers.refresh();
+    const budget = evaluateBudget(await this.budgetSnapshot(opts.taskId), {
+      critical: opts.critical,
+    });
+    const decision: Extract<BudgetDecision, { mode: 'primary' | 'fallback' }> =
+      budget.mode === 'block' || budget.mode === 'park'
+        ? { mode: 'fallback', reason: 'estimate candidate under budget pressure' }
+        : budget;
+    const route = await this.resolveRoute(role, opts, decision);
+    const { maxOutputTokens } = this.modelCallBudget(role, route, opts, toolCall);
+    const inputTokens = estimatedInputTokens(opts);
+    const estimatedUsd = Math.max(
+      0.000001,
+      ((inputTokens * route.promptCostPerMTok + maxOutputTokens * route.completionCostPerMTok) /
+        1_000_000) *
+        ESTIMATE_SAFETY_FACTOR,
+    );
+    assertEstimatedCostWithinLimit(estimatedUsd, opts.maxEstimatedCostUsd);
+    const nextAttemptMicros = ledgerUsdToMicros(estimatedUsd);
+    const requestDigest = createHash('sha256')
+      .update(JSON.stringify({ system: opts.system, prompt: opts.prompt, messages: opts.messages }))
+      .digest('hex');
+    const routingDigest = createHash('sha256')
+      .update(
+        JSON.stringify({
+          role,
+          taskId: opts.taskId ?? null,
+          modelId: route.modelId,
+          promptCostPerMTok: route.promptCostPerMTok,
+          completionCostPerMTok: route.completionCostPerMTok,
+          params: route.params,
+          requestProfile: route.requestProfile,
+          maxOutputTokens,
+          inputTokens,
+          reasoning: this.reasoningMode(role, route, toolCall),
+          critical: opts.critical === true,
+          toolCall,
+          maxEstimatedCostUsd: opts.maxEstimatedCostUsd ?? null,
+          requestDigest,
+          requestShape: estimatedCostRequestShape(opts),
+        }),
+      )
+      .digest('hex');
+    return {
+      role,
+      critical: opts.critical === true,
+      modelId: route.modelId,
+      nextAttemptMicros,
+      routingDigest,
+      requestDigest,
+    };
+  }
+
   private async reserveModelCall(
     role: Exclude<ModelRole, 'embed'>,
     route: Extract<Route, { ok: true }>,
@@ -1358,6 +1547,8 @@ export class ModelRouter {
     reservationId: string,
     outputTokenLimit: number,
   ): Promise<void> {
+    const state = (opts as TrackedCallOptions)[estimatedCostAttemptState];
+    if (state) state.dispatched = true;
     const metadata = {
       provider: connectionIdForModel(route.modelId),
       model: route.modelId,
@@ -1375,7 +1566,22 @@ export class ModelRouter {
         opts.requestProfile?.tools !== undefined && opts.requestProfile.tools !== 'none',
       ),
     } as const;
-    if (!(await beginCostAttempt(this.persistence.costs, reservationId, metadata))) {
+    const grant = this.grantReservations.get(reservationId);
+    if (grant) this.grantReservations.delete(reservationId);
+    const began = grant
+      ? await this.persistence.costs.beginEstimatedCostGrantAttempt?.({
+          ...grant.context,
+          reservationId,
+          role,
+          critical: opts.critical === true,
+          modelId: route.modelId,
+          nextAttemptMicros: grant.candidate.nextAttemptMicros,
+          routingDigest: grant.candidate.routingDigest,
+          requestDigest: grant.candidate.requestDigest,
+          metadata,
+        })
+      : await beginCostAttempt(this.persistence.costs, reservationId, metadata);
+    if (!began) {
       throw new Error('Provider attempt reservation was already dispatched or closed');
     }
   }
@@ -1403,6 +1609,55 @@ export class ModelRouter {
         estimatedUsd: number;
       }
   > {
+    const grant = this.grantContext.getStore();
+    if (grant) {
+      if (
+        opts.taskId !== grant.taskId ||
+        !this.persistence.costs.drawEstimatedCostGrant ||
+        !this.persistence.costs.beginEstimatedCostGrantAttempt
+      )
+        throw new Error('Estimated cost grant context is unavailable');
+      const candidate = await this.prepareEstimatedCostCandidate(role, opts, toolCall);
+      const route = await this.resolveRoute(role, opts, {
+        mode: 'fallback',
+        reason: 'approved estimated cost',
+      });
+      if (route.modelId !== candidate.modelId)
+        throw new Error('Estimated cost grant route changed');
+      const budget = this.modelCallBudget(role, route, opts, toolCall);
+      const id = randomUUID();
+      const drawn = await this.persistence.costs.drawEstimatedCostGrant({
+        ...grant,
+        attemptId: id,
+        source: 'model',
+        estimatedMicros: candidate.nextAttemptMicros,
+        description: `${role}:${route.modelId} preflight`,
+      });
+      if (!drawn.ok) {
+        if (
+          (drawn.reason === 'expired' || drawn.reason === 'exhausted') &&
+          this.persistence.costs.parkEstimatedCostGrantRenewal
+        ) {
+          try {
+            if (await this.persistence.costs.parkEstimatedCostGrantRenewal({ ...grant, candidate }))
+              throw new EstimatedCostParkedError('parked');
+          } catch (error) {
+            if (error instanceof EstimatedCostParkedError) throw error;
+            throw new EstimatedCostParkedError('unknown', { cause: error });
+          }
+        }
+        throw new Error(`Estimated cost grant unavailable: ${drawn.reason}`);
+      }
+      this.grantReservations.set(drawn.reservationId, { context: grant, candidate });
+      return {
+        ok: true,
+        route,
+        reservationId: drawn.reservationId,
+        maxOutputTokens: budget.maxOutputTokens,
+        providerOptions: budget.providerOptions,
+        estimatedUsd: candidate.nextAttemptMicros / 1_000_000,
+      };
+    }
     const attempt = async (forceFallback: boolean) => {
       const route = await this.route(role, { ...opts, forceFallback });
       if (!route.ok) return { ok: false as const, decision: route.decision };
@@ -1425,13 +1680,35 @@ export class ModelRouter {
     };
 
     const preferred = await attempt(Boolean(opts.forceFallback));
-    if (preferred.ok || !preferred.route || preferred.route.degraded) return preferred;
-
-    const fallback = await attempt(true);
-    // A role may intentionally point primary and fallback at the same model.
-    // Preserve the first failure instead of repeating the identical decision.
-    if (fallback.route?.modelId === preferred.route.modelId) return preferred;
-    return fallback;
+    if (preferred.ok) return preferred;
+    let denied = preferred;
+    if (preferred.route && !preferred.route.degraded) {
+      const fallback = await attempt(true);
+      if (fallback.ok) return fallback;
+      // A role may intentionally point primary and fallback at the same model.
+      // Preserve the first failure instead of repeating the identical decision.
+      if (fallback.route?.modelId !== preferred.route.modelId) denied = fallback;
+    }
+    const state = (opts as TrackedCallOptions)[estimatedCostAttemptState];
+    if (opts.parkEstimatedCost && state && !state.dispatched) {
+      const candidate = await this.prepareEstimatedCostCandidate(role, opts, toolCall);
+      // Never attach a quote for a newly selected route to a different denial.
+      if (denied.route && denied.route.modelId !== candidate.modelId) return denied;
+      let outcome: 'parked' | 'not_parked';
+      try {
+        outcome = await opts.parkEstimatedCost({
+          candidate,
+          options: opts,
+          decision: denied.decision,
+          providerAttempts: 0,
+        });
+      } catch (cause) {
+        throw new EstimatedCostParkedError('unknown', { cause });
+      }
+      if (outcome === 'parked') throw new EstimatedCostParkedError('parked');
+      if (outcome !== 'not_parked') throw new EstimatedCostParkedError('unknown');
+    }
+    return denied;
   }
 
   /**
@@ -1694,7 +1971,11 @@ export class ModelRouter {
   /** Non-streaming call with metering. Callers must handle { ok: false }. */
   async generate(role: ModelRole, opts: CallOptions): Promise<GenerateOutcome> {
     if (role === 'embed') throw new Error('generate() cannot use the embed role');
-    opts = { ...opts, requestProfile: opts.requestProfile ?? textRequestProfile(false) };
+    opts = {
+      ...opts,
+      [estimatedCostAttemptState]: { dispatched: false },
+      requestProfile: opts.requestProfile ?? textRequestProfile(false),
+    } as TrackedCallOptions;
     try {
       return await this.withTimeoutRetry(opts, () => this.generateOnce(role, opts));
     } catch (error) {
@@ -1821,6 +2102,7 @@ export class ModelRouter {
       onError?: (error: unknown) => Promise<void>;
     },
   ): Promise<StreamOutcome> {
+    opts = { ...opts, [estimatedCostAttemptState]: { dispatched: false } } as typeof opts;
     if (!opts.recoverBeforeOutput || opts.singleAttempt) return this.streamOnce(role, opts);
     // Both application attempts share one deadline. SDK transport retries are
     // unchanged and also obey this signal; this is not a network-request count.
@@ -2126,6 +2408,7 @@ export class ModelRouter {
     if (role === 'embed') throw new Error('step() cannot use the embed role');
     opts = {
       ...withAdditionalInputTokens(opts, toolInputTokens(opts.tools)),
+      [estimatedCostAttemptState]: { dispatched: false },
       requestProfile: opts.requestProfile ?? {
         tools: Object.keys(opts.tools).length > 0 ? 'required' : 'none',
         toolChoice: opts.toolChoice ?? 'auto',
@@ -2359,6 +2642,7 @@ export class ModelRouter {
     if (role === 'embed') throw new Error('object() cannot use the embed role');
     opts = {
       ...withAdditionalInputTokens(opts, schemaInputTokens(opts.schema)),
+      [estimatedCostAttemptState]: { dispatched: false },
       requestProfile: opts.requestProfile ?? {
         tools: 'none',
         output: 'json_schema',
@@ -2628,6 +2912,8 @@ export class ModelRouter {
       expectedSpace?: EmbeddingSpace;
     } = {},
   ): Promise<number[][]> {
+    if (this.grantContext.getStore())
+      throw new Error('Embedding is unavailable for an estimated cost grant');
     const expectedSpace = opts.expectedSpace
       ? Object.freeze({ ...opts.expectedSpace })
       : this.configuredEmbeddingSpace;

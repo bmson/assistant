@@ -6,7 +6,11 @@ import type {
   OwnerEditorScope,
 } from '@assistant/persistence';
 import { describe, expect, it, vi } from 'vitest';
-import { createOwnerEditorDomain, type OwnerEditorDomainStorage } from './owner-editor-domain.js';
+import {
+  createOwnerEditorDomain,
+  type OwnerEditorDomainStorage,
+  type PreparedOwnerEditor,
+} from './owner-editor-domain.js';
 
 function fixture() {
   const left = {
@@ -329,7 +333,15 @@ describe('actual owner editor domain preparation and transaction handoff', () =>
         ...f.scope,
         command,
         operationId,
-        targetId: command === 'remove_person' ? f.left.id : randomUUID(),
+        targetId:
+          command === 'remove_person'
+            ? f.left.id
+            : (
+                request as Extract<
+                  OwnerEditorApply,
+                  { command: 'remove_owner_family_relationship' }
+                >
+              ).targetRelationId,
       };
       const contactRead = vi.spyOn(f.storage, 'contact');
       const contextRead = vi.spyOn(f.storage, 'context');
@@ -339,7 +351,13 @@ describe('actual owner editor domain preparation and transaction handoff', () =>
 
       await expect(f.domain.prepare(request, scope)).resolves.toEqual({
         ok: false,
-        result: { outcome: 'unavailable', reason: 'editor_command_unavailable' },
+        result: {
+          outcome: 'unavailable',
+          reason:
+            command === 'remove_person'
+              ? 'person_removal_unavailable'
+              : 'family_removal_unavailable',
+        },
       });
       expect(contactRead).not.toHaveBeenCalled();
       expect(f.family).not.toHaveBeenCalled();
@@ -355,4 +373,110 @@ describe('actual owner editor domain preparation and transaction handoff', () =>
       expect(f.commitUnchangedFamily).not.toHaveBeenCalled();
     },
   );
+
+  it('binds person removal preparation to the exact contact and reviewed impact, then hands it to the atomic writer', async () => {
+    const f = fixture();
+    const operationId = randomUUID();
+    const request: OwnerEditorApply = {
+      version: 1,
+      intent: 'apply',
+      command: 'remove_person' as const,
+      operationId,
+      contactId: f.left.id,
+      expectedContactRevision: f.left.revision,
+      expectedImpactRevision: '9'.repeat(64),
+    };
+    const scope: OwnerEditorScope = {
+      ...f.scope,
+      command: request.command,
+      operationId,
+      targetId: f.left.id,
+    };
+    const impact = {
+      contactId: f.left.id,
+      revision: request.expectedImpactRevision,
+      facts: 1,
+      occasions: 0,
+      connections: 2,
+      retainedSourceNotes: 1,
+      entityLinks: 1,
+      sourceLinks: 1,
+    };
+    f.storage.personRemovalSnapshot = vi.fn(async () => ({
+      impact,
+      contactRevision: f.left.revision,
+    }));
+    f.storage.commitPersonRemoval = vi.fn(
+      async (
+        _claim: OwnerEditorClaim,
+        _prepared: Extract<PreparedOwnerEditor, { kind: 'person-removal' }>,
+      ) => ({
+        version: 1 as const,
+        authority: 'operation_receipt' as const,
+        command: 'remove_person' as const,
+        operationId,
+        requestHash: _claim.requestHash,
+        statusVersion: 2,
+        outcome: 'saved' as const,
+        ids: { contactId: f.left.id },
+        revision: 'a'.repeat(64),
+      }),
+    );
+
+    const prepared = await f.domain.prepare(request, scope);
+    expect(prepared).toEqual({ ok: true, prepared: { kind: 'person-removal', request, impact } });
+    if (!prepared.ok) throw new Error('Expected exact reviewed removal impact');
+    const reply = await f.domain.commit(f.claim, prepared.prepared, new Date());
+    expect(reply).toMatchObject({
+      authority: 'operation_receipt',
+      outcome: 'saved',
+      ids: { contactId: f.left.id },
+    });
+    expect(f.storage.personRemovalSnapshot).toHaveBeenCalledWith(scope.ownerId, f.left.id, scope);
+    expect(f.storage.commitPersonRemoval).toHaveBeenCalledWith(
+      f.claim,
+      prepared.prepared,
+      expect.any(Date),
+    );
+    expect(f.embed).not.toHaveBeenCalled();
+  });
+
+  it('rejects stale contact or impact revision before invoking destructive storage', async () => {
+    const f = fixture();
+    const operationId = randomUUID();
+    const request: OwnerEditorApply = {
+      version: 1,
+      intent: 'apply',
+      command: 'remove_person',
+      operationId,
+      contactId: f.left.id,
+      expectedContactRevision: f.left.revision,
+      expectedImpactRevision: '9'.repeat(64),
+    };
+    const scope: OwnerEditorScope = {
+      ...f.scope,
+      command: request.command,
+      operationId,
+      targetId: f.left.id,
+    };
+    f.storage.personRemovalSnapshot = vi.fn(async () => ({
+      impact: {
+        contactId: f.left.id,
+        revision: '8'.repeat(64),
+        facts: 0,
+        occasions: 0,
+        connections: 0,
+        retainedSourceNotes: 0,
+        entityLinks: 0,
+        sourceLinks: 0,
+      },
+      contactRevision: f.left.revision,
+    }));
+    f.storage.commitPersonRemoval = vi.fn();
+    await expect(f.domain.prepare(request, scope)).resolves.toMatchObject({
+      ok: false,
+      result: { outcome: 'conflict', reason: 'person_impact_changed' },
+    });
+    expect(f.storage.commitPersonRemoval).not.toHaveBeenCalled();
+  });
 });

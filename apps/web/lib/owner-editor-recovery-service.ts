@@ -59,6 +59,7 @@ const recognizedCommands = [
   'add_family_relationship',
   'correct_owner_family_relationship',
   'correct_owner_memory',
+  'remove_owner_memory',
   'create_owner_memory',
 ] as const;
 

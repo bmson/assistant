@@ -289,7 +289,7 @@ describe('calendar sources through provider normalization and persisted agenda',
         .filter((section) => section.type === 'agenda')
         .flatMap((section) => section.items ?? []);
       expect(rows, variant).toHaveLength(
-        variant === 'dense' ? 2000 : named ? 1 : canonicalDispute ? 2 : 3,
+        variant === 'dense' ? 2000 : named ? 1 : canonicalDispute || variant === 'mirror' ? 2 : 3,
       );
       const fixtureDirectory = process.env.CALENDAR_REVIEW_FIXTURE_DIR;
       if (fixtureDirectory) {
@@ -344,7 +344,25 @@ describe('calendar sources through provider normalization and persisted agenda',
       if (named) expect(JSON.stringify(card)).not.toContain('Team planning');
       else {
         expect(JSON.stringify(card)).toContain('Team planning');
-        if (variant === 'mirror') expect(JSON.stringify(card)).toContain('Possible copies:');
+        if (variant === 'mirror') {
+          const planning = rows.filter(
+            (row) => (row as { title?: string }).title === 'Team planning',
+          ) as Array<{
+            sourceVariants: Array<{ calendarId: string; eventId: string }>;
+            calendars: string[];
+          }>;
+          expect(planning).toHaveLength(1);
+          expect(planning[0]?.sourceVariants).toMatchObject([
+            { calendarId: 'primary', eventId: 'google-review' },
+            { calendarId: 'iphone:work', eventId: 'phone-review' },
+          ]);
+          expect(planning[0]?.calendars).toEqual(['Work', 'Phone work (iPhone)']);
+          expect(JSON.stringify(card)).toContain('Likely the same event');
+          const sections = card?.sections as Array<{ overlapCount?: number }>;
+          expect(sections.reduce((total, section) => total + (section.overlapCount ?? 0), 0)).toBe(
+            1,
+          );
+        }
         if (variant === 'verified')
           expect(JSON.stringify(card)).toContain('Your accepted commitments overlap');
         if (variant === 'marked')

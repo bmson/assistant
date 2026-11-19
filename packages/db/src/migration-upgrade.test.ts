@@ -14,6 +14,10 @@ import { expect, it } from 'vitest';
 import { resolveApproval } from './approval-repository.js';
 import { createDb } from './client.js';
 import {
+  type FixturePrimaryOutcome,
+  finishMigrationUpgradeFixture,
+} from './migration-upgrade-fixture.js';
+import {
   allocateTestTarget,
   assertAllocatedTestTarget,
   isolatedTestEnvironment,
@@ -179,6 +183,7 @@ it.each(historicalPrefixes)(
     const prefixDir = await mkdtemp(join(tmpdir(), 'assistant-upgrade-'));
     let created = false;
     let client: ReturnType<typeof postgres> | undefined;
+    let primary: FixturePrimaryOutcome = { thrown: false };
     try {
       await admin.unsafe(`CREATE DATABASE "${target.databaseName}"`);
       created = true;
@@ -459,17 +464,27 @@ it.each(historicalPrefixes)(
           await client`SELECT max(created_at)::text AS watermark FROM drizzle.__drizzle_migrations`
         )[0]?.watermark,
       ).toBe(String(journal.entries.at(-1).when));
-    } finally {
-      if (client) await client.end({ timeout: 5 });
-      if (created) await dropOwnedUpgradeDatabase(admin, target);
-      await admin.end({ timeout: 5 });
-      await rm(prefixDir, { recursive: true, force: true });
+    } catch (error) {
+      primary = { thrown: true, error };
     }
+    const fixtureClient = client;
+    await finishMigrationUpgradeFixture({
+      primary,
+      created,
+      closeClient: fixtureClient ? () => fixtureClient.end({ timeout: 5 }) : undefined,
+      dropOwnedDatabase: () => dropOwnedUpgradeDatabase(admin, target),
+      databaseIsAbsent: async () =>
+        (await admin`SELECT datname FROM pg_database WHERE datname=${target.databaseName}`)
+          .length === 0,
+      closeAdmin: () => admin.end({ timeout: 5 }),
+      removePrefixDirectory: () => rm(prefixDir, { recursive: true, force: true }),
+    });
   },
   120000,
 );
 
-it('upgrades a populated 0134 memory through the standard 0135 migration and portable export', async () => {
+// Keep the historical selector used by the portable-handoff script; assert the full current tail.
+it('upgrades a populated 0134 memory through the standard 0135 migration and portable export (forward tail through 0136)', async () => {
   const portableMode = selectPortableExportMode(process.env);
   const outerDatabaseName = assertAllocatedTestTarget({
     databaseUrl: process.env.DATABASE_URL,
@@ -484,7 +499,7 @@ it('upgrades a populated 0134 memory through the standard 0135 migration and por
   let prefixDir: string | undefined;
   let created = false;
   let client: ReturnType<typeof postgres> | undefined;
-  let primaryError: unknown;
+  let primary: FixturePrimaryOutcome = { thrown: false };
   try {
     prefixDir = await mkdtemp(join(tmpdir(), 'assistant-memory-witness-134-'));
     await admin.unsafe(`CREATE DATABASE "${target.databaseName}"`);
@@ -498,6 +513,7 @@ it('upgrades a populated 0134 memory through the standard 0135 migration and por
     expect(prefixEntries).toHaveLength(135);
     expect(prefixEntries.at(-1)?.tag).toBe('0134_owner_memory_creation');
     expect(journal.entries[135]?.tag).toBe('0135_memory_write_witness');
+    expect(journal.entries[136]?.tag).toBe('0136_google_calendar_connections');
     await mkdir(join(prefixDir, 'meta'));
     await writeFile(
       join(prefixDir, 'meta/_journal.json'),
@@ -558,7 +574,12 @@ it('upgrades a populated 0134 memory through the standard 0135 migration and por
       WHERE created_at >= ${expectedOwnerTailStart}
       ORDER BY created_at ASC,id ASC
     `;
-    expect(beforeTail).toEqual(expectedOwnerTail.slice(0, -1));
+    // This historical prefix ends at 0134 even as the shipped forward tail advances.
+    expect(beforeTail).toEqual(expectedOwnerTail.slice(0, prefixEntries.length - 130));
+    expect(
+      (await client`SELECT to_regclass('public.google_calendar_connections') AS relation`)[0]
+        ?.relation,
+    ).toBeNull();
     await client.end();
     client = undefined;
 
@@ -582,6 +603,11 @@ it('upgrades a populated 0134 memory through the standard 0135 migration and por
       ORDER BY created_at ASC,id ASC
     `;
     expect(installedTail).toEqual(expectedOwnerTail);
+    // 0136 adds optional credentials without creating grants or changing existing owner data.
+    expect(await client`SELECT agent_id,state FROM google_calendar_connections`).toEqual([]);
+    expect(
+      await client`SELECT convalidated FROM pg_constraint WHERE conrelid='public.google_calendar_connections'::regclass AND conname='google_calendar_connections_agent_id_agents_id_fk'`,
+    ).toEqual([{ convalidated: true }]);
     const witnessColumn = await client`
       SELECT column_name,is_nullable,column_default FROM information_schema.columns
       WHERE table_schema='public' AND table_name='memories' AND column_name='memory_write_witness'
@@ -698,31 +724,23 @@ it('upgrades a populated 0134 memory through the standard 0135 migration and por
       );
     }
   } catch (error) {
-    primaryError = error;
+    primary = { thrown: true, error };
   }
-  const cleanupErrors: unknown[] = [];
-  const attemptCleanup = async (cleanup: () => Promise<unknown>) => {
-    try {
-      await cleanup();
-    } catch (error) {
-      cleanupErrors.push(error);
-    }
-  };
   const fixtureClient = client;
-  if (fixtureClient) await attemptCleanup(() => fixtureClient.end({ timeout: 5 }));
-  if (created) await attemptCleanup(() => dropOwnedUpgradeDatabase(admin, target));
-  await attemptCleanup(() => admin.end({ timeout: 5 }));
   const temporaryPrefixDir = prefixDir;
-  if (temporaryPrefixDir)
-    await attemptCleanup(() => rm(temporaryPrefixDir, { recursive: true, force: true }));
-  if (primaryError && cleanupErrors.length)
-    throw new AggregateError(
-      [primaryError, ...cleanupErrors],
-      'Populated 0134 memory upgrade fixture and cleanup failed',
-    );
-  if (primaryError) throw primaryError;
-  if (cleanupErrors.length)
-    throw new AggregateError(cleanupErrors, 'Populated 0134 memory upgrade cleanup failed');
+  await finishMigrationUpgradeFixture({
+    primary,
+    created,
+    closeClient: fixtureClient ? () => fixtureClient.end({ timeout: 5 }) : undefined,
+    dropOwnedDatabase: () => dropOwnedUpgradeDatabase(admin, target),
+    databaseIsAbsent: async () =>
+      (await admin`SELECT datname FROM pg_database WHERE datname=${target.databaseName}`).length ===
+      0,
+    closeAdmin: () => admin.end({ timeout: 5 }),
+    removePrefixDirectory: temporaryPrefixDir
+      ? () => rm(temporaryPrefixDir, { recursive: true, force: true })
+      : undefined,
+  });
 }, 120_000);
 
 it('rejects the historical contact-only 0131 ledger before any shipped migration write', async () => {
@@ -738,6 +756,7 @@ it('rejects the historical contact-only 0131 ledger before any shipped migration
   const prefixDir = await mkdtemp(join(tmpdir(), 'assistant-contact-131-'));
   let created = false;
   let client: ReturnType<typeof postgres> | undefined;
+  let primary: FixturePrimaryOutcome = { thrown: false };
   try {
     await admin.unsafe(`CREATE DATABASE "${target.databaseName}"`);
     created = true;
@@ -814,12 +833,21 @@ it('rejects the historical contact-only 0131 ledger before any shipped migration
     expect(afterLedger).toEqual(beforeLedger);
     expect(afterMemory).toEqual([]);
     expect(afterCommand[0]?.definition).not.toContain('correct_owner_memory');
-  } finally {
-    if (client) await client.end({ timeout: 5 });
-    if (created) await dropOwnedUpgradeDatabase(admin, target);
-    await admin.end({ timeout: 5 });
-    await rm(prefixDir, { recursive: true, force: true });
+  } catch (error) {
+    primary = { thrown: true, error };
   }
+  const fixtureClient = client;
+  await finishMigrationUpgradeFixture({
+    primary,
+    created,
+    closeClient: fixtureClient ? () => fixtureClient.end({ timeout: 5 }) : undefined,
+    dropOwnedDatabase: () => dropOwnedUpgradeDatabase(admin, target),
+    databaseIsAbsent: async () =>
+      (await admin`SELECT datname FROM pg_database WHERE datname=${target.databaseName}`).length ===
+      0,
+    closeAdmin: () => admin.end({ timeout: 5 }),
+    removePrefixDirectory: () => rm(prefixDir, { recursive: true, force: true }),
+  });
 }, 120_000);
 
 async function dropOwnedUpgradeDatabase(

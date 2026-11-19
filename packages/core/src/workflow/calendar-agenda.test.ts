@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   calendarAgendaCards,
   calendarAgendaScopedEvidence,
+  calendarAgendaSummary,
   wantsCalendarAgenda,
 } from './calendar-agenda.js';
 import { calendarRelationship } from './calendar-relationship.js';
@@ -82,6 +83,9 @@ describe('calendarAgendaCards', () => {
     });
     expect(complete).toHaveLength(1);
     expect(complete[0]).toMatchObject({ complete: true, lead: '1 calendar entry from Work.' });
+    expect(complete[0]?.householdDay).toMatchObject({
+      coverage: { freshnessSummary: 'No source freshness timestamp was reported by this read.' },
+    });
     expect(agenda(complete)[0]).toMatchObject({ complete: true });
 
     const partial = calendarAgendaCards({
@@ -99,6 +103,529 @@ describe('calendarAgendaCards', () => {
     expect(partial[0]).toMatchObject({ complete: false });
     expect(partial[0]?.lead).toContain('Coverage is incomplete');
     expect(agenda(partial)[0]).toMatchObject({ complete: false });
+  });
+
+  it('projects verified source RSVP and only asks about driving for an explicit verified clash', () => {
+    const accepted = { status: 'accepted', identityVerified: true, basis: 'attendee-email' };
+    const events = [
+      event('a', '2026-10-22T16:00:00Z', '2026-10-22T17:00:00Z', {
+        title: 'Workshop',
+        ownerParticipation: accepted,
+      }),
+      event('b', '2026-10-22T16:30:00Z', '2026-10-22T17:30:00Z', {
+        title: 'Piano',
+        ownerParticipation: accepted,
+      }),
+      event('c', '2026-10-22T18:00:00Z', '2026-10-22T19:00:00Z', {
+        title: 'Dinner',
+        ownerParticipation: accepted,
+      }),
+      event('d', '2026-10-22T18:30:00Z', '2026-10-22T19:30:00Z', {
+        title: 'Call',
+        ownerParticipation: accepted,
+      }),
+    ];
+    const withoutOwnerRelevance = calendarAgendaCards({
+      evidence: [evidence()],
+      events,
+      request: request(),
+    });
+    expect(withoutOwnerRelevance[0]?.householdDay).not.toHaveProperty('nextQuestion');
+
+    const withOwnerRelevance = calendarAgendaCards({
+      evidence: [evidence()],
+      events,
+      request: request(),
+      requestText: 'Show my agenda. Who is driving between these commitments?',
+    });
+    expect(withOwnerRelevance[0]?.householdDay).toMatchObject({
+      coverage: { complete: true },
+      nextQuestion: {
+        basis: 'verified_owner_accepted_overlap',
+        eventIds: ['a', 'b'],
+        remainingIssueCount: 1,
+        detail: 'These accepted commitments overlap. Driving is not stated.',
+      },
+    });
+    const projected = items(withOwnerRelevance);
+    expect(projected[0]?.householdDetails).toMatchObject({
+      version: 1,
+      sources: [{ rsvp: 'accepted' }],
+      eventFor: 'not_stated',
+      driving: 'not_stated',
+    });
+    expect(calendarAgendaSummary(withOwnerRelevance as Array<Record<string, unknown>>)).toContain(
+      'RSVP by source: Work: accepted. Event for: not stated. Driving: not stated.',
+    );
+    expect(calendarAgendaSummary(withOwnerRelevance as Array<Record<string, unknown>>)).toContain(
+      'Next question:',
+    );
+    const curlyContraction = calendarAgendaCards({
+      evidence: [evidence()],
+      events,
+      request: request(),
+      requestText: 'Show my agenda. Who’s driving?',
+    });
+    expect(curlyContraction[0]?.householdDay).toHaveProperty('nextQuestion');
+    for (const requestText of [
+      "Show my agenda. Don't ask who is driving?",
+      'Show my agenda. Don’t ask who is driving?',
+      'Show my agenda. Shouldn’t ask who is driving?',
+      'Show my agenda. Can’t ask who is driving?',
+      'Translate "Who is driving?"',
+      '"Who is driving?"',
+      '`Who is driving?`',
+      'Show my agenda. "Who is driving?" is the text on an invitation.',
+      'Show my agenda. Translate who is driving?',
+      'Show my agenda. My spouse asks who is driving?',
+      "Show my agenda. The note says 'Who is driving?'",
+      'Show my agenda. The note says ‘Who is driving?’',
+    ]) {
+      const guarded = calendarAgendaCards({
+        evidence: [evidence()],
+        events,
+        request: request(),
+        requestText,
+      });
+      expect(guarded[0]?.householdDay?.nextQuestion, requestText).toBeUndefined();
+      if (requestText.startsWith('Show my agenda.')) {
+        expect(items(guarded)).toHaveLength(projected.length);
+        expect(guarded[0]?.counts).toEqual(withOwnerRelevance[0]?.counts);
+      }
+    }
+  });
+
+  it('keeps contradictory source RSVP values and binds compare only to distinct actual event IDs', () => {
+    const cards = calendarAgendaCards({
+      evidence: [evidence()],
+      events: [
+        event('work-row', '2026-10-22T16:00:00Z', '2026-10-22T17:00:00Z', {
+          sourceVariants: [
+            {
+              calendar: 'Work',
+              calendarId: 'google:work',
+              eventId: 'work-row',
+              summary: 'Workshop',
+              start: '2026-10-22T16:00:00Z',
+              end: '2026-10-22T17:00:00Z',
+              allDay: false,
+              iCalUID: 'shared',
+              originalStartTime: '2026-10-22T16:00:00Z',
+              ownerParticipation: {
+                status: 'accepted',
+                identityVerified: true,
+                basis: 'attendee-email',
+              },
+            },
+            {
+              calendar: 'Backup',
+              calendarId: 'google:backup',
+              eventId: 'work-copy',
+              summary: 'Workshop',
+              start: '2026-10-22T16:00:00Z',
+              end: '2026-10-22T17:00:00Z',
+              allDay: false,
+              iCalUID: 'shared',
+              originalStartTime: '2026-10-22T16:00:00Z',
+              ownerParticipation: {
+                status: 'declined',
+                identityVerified: true,
+                basis: 'attendee-email',
+              },
+            },
+          ],
+        }),
+        event('phone-row', '2026-10-22T16:30:00Z', '2026-10-22T17:30:00Z', {
+          sourceVariants: [
+            {
+              calendar: 'Phone',
+              calendarId: 'iphone:family',
+              eventId: 'phone-row',
+              summary: 'Workshop',
+              start: '2026-10-22T16:30:00Z',
+              end: '2026-10-22T17:30:00Z',
+              allDay: false,
+              iCalUID: 'shared',
+              originalStartTime: '2026-10-22T16:00:00Z',
+              ownerParticipation: {
+                status: 'accepted',
+                identityVerified: true,
+                basis: 'attendee-email',
+              },
+            },
+          ],
+        }),
+      ],
+      request: request({ timeZone: 'UTC' }),
+    });
+    const projected = items(cards);
+    expect(projected.map((item) => item.householdDetails)).toEqual([
+      expect.objectContaining({
+        sources: [
+          expect.objectContaining({ rsvp: 'accepted' }),
+          expect.objectContaining({ rsvp: 'declined' }),
+        ],
+      }),
+      expect.objectContaining({ sources: [expect.objectContaining({ rsvp: 'accepted' })] }),
+    ]);
+    const firstDetails = projected[0]?.householdDetails as
+      | { sources: Array<{ calendar: string }> }
+      | undefined;
+    expect(firstDetails?.sources.map((source) => source.calendar)).toEqual(['Work', 'Backup']);
+    expect(JSON.stringify(projected[0]?.householdDetails)).not.toContain('google:work');
+    const sections = cards.flatMap((card) => card.sections as Array<Record<string, unknown>>);
+    const compared = sections.flatMap((section) =>
+      Array.isArray(section.items) ? (section.items as Array<Record<string, unknown>>) : [],
+    );
+    expect(compared).toContainEqual(
+      expect.objectContaining({
+        comparison: { version: 1, leftEventId: 'work-row', rightEventId: 'phone-row' },
+      }),
+    );
+  });
+
+  it('omits per-source details when source-owned title, start, or all-day facts are missing', () => {
+    const cards = calendarAgendaCards({
+      evidence: [evidence()],
+      events: [
+        event('merged', '2026-10-22T16:00:00Z', '2026-10-22T17:00:00Z', {
+          title: 'Preferred source title',
+          sourceVariants: [
+            {
+              calendar: 'Work',
+              summary: 'Work title',
+              start: '2026-10-22T16:00:00Z',
+              allDay: false,
+            },
+            { calendar: 'Family', end: '2026-10-22T17:00:00Z' },
+          ],
+        }),
+      ],
+      request: request(),
+    });
+    expect(items(cards)[0]).not.toHaveProperty('householdDetails');
+  });
+
+  it('puts named source gaps and actual phone freshness timestamps in coverage', () => {
+    const cards = calendarAgendaCards({
+      evidence: [
+        evidence({
+          ok: true,
+          complete: true,
+          calendarsSearched: ['Work'],
+          calendarsResolved: [{ id: 'iphone:family', name: 'Family calendar' }],
+          phoneCalendarCoverage: {
+            complete: false,
+            capturedAt: '2026-10-22T15:00:00Z',
+            receivedAt: '2026-10-22T15:05:00Z',
+            sources: [{ calendarId: 'family', status: 'permission-denied', complete: false }],
+          },
+        }),
+      ],
+      events: [],
+      request: request(),
+    });
+    expect(cards[0]?.householdDay).toMatchObject({
+      coverage: {
+        complete: false,
+        summary: expect.stringContaining('Family calendar: permission denied'),
+        freshnessSummary: expect.stringContaining('Phone capture 2026-10-22T15:00:00Z'),
+      },
+    });
+    const freshnessSummary = cards[0]?.householdDay?.coverage.freshnessSummary;
+    expect(freshnessSummary).toContain('Assistant received phone snapshot 2026-10-22T15:05:00Z');
+  });
+
+  it('keeps accepted driving questions after the 100-detail cap without changing pair counts', () => {
+    const accepted = { status: 'accepted', identityVerified: true, basis: 'attendee-email' };
+    const events = Array.from({ length: 16 }, (_, index) =>
+      event(
+        `dense-${String(index).padStart(2, '0')}`,
+        '2026-10-22T16:00:00Z',
+        '2026-10-22T17:00:00Z',
+        {
+          title: `Commitment ${index}`,
+          ...(index < 14 ? { calendarPurpose: 'commitments' } : { ownerParticipation: accepted }),
+        },
+      ),
+    );
+    const cards = calendarAgendaCards({
+      evidence: [evidence()],
+      events,
+      request: request(),
+      requestText: 'Show my agenda. Who will drive?',
+    });
+    expect(cards[0]?.householdDay).toMatchObject({
+      nextQuestion: {
+        eventIds: ['dense-14', 'dense-15'],
+        remainingIssueCount: 119,
+      },
+    });
+    const denseSections = cards[0]?.sections as Array<Record<string, unknown>> | undefined;
+    const conflict = denseSections?.find((section) => typeof section.overlapCount === 'number');
+    expect(conflict).toMatchObject({ overlapCount: 120, overlapsTruncated: true });
+  });
+
+  it('text fallback ignores unsupported optional versions and questions without unique actual rows', () => {
+    const accepted = { status: 'accepted', identityVerified: true, basis: 'attendee-email' };
+    const cards = calendarAgendaCards({
+      evidence: [evidence()],
+      events: [
+        event('left', '2026-10-22T16:00:00Z', '2026-10-22T17:00:00Z', {
+          ownerParticipation: accepted,
+        }),
+        event('right', '2026-10-22T16:30:00Z', '2026-10-22T17:30:00Z', {
+          ownerParticipation: accepted,
+        }),
+      ],
+      request: request(),
+      requestText: 'Show my agenda. Who will drive?',
+    });
+    const card = cards[0];
+    if (!card) throw new Error('calendar agenda card was not produced');
+    expect(card?.householdDay).toHaveProperty('nextQuestion');
+    const validDay = card?.householdDay;
+    const unsupportedVersion = {
+      ...card,
+      householdDay: { ...validDay, version: 2 },
+    } as Record<string, unknown>;
+    const unsupportedSummary = calendarAgendaSummary([unsupportedVersion]);
+    expect(unsupportedSummary).not.toContain('Next question:');
+
+    const sections = (card.sections as Array<Record<string, unknown>>).map((section) => {
+      if (section.type !== 'agenda') return section;
+      const rows = section.items as Array<Record<string, unknown>>;
+      return {
+        ...section,
+        items: [
+          ...rows,
+          {
+            ...rows[0],
+            id: 'left',
+            householdDetails: {
+              version: 999,
+              sources: [{ calendar: 'Fake', title: 'Wrong', start: 'invalid', rsvp: 'accepted' }],
+              eventFor: 'someone',
+              driving: 'me',
+            },
+          },
+        ],
+      };
+    });
+    const duplicateIds = {
+      ...card,
+      sections,
+      householdDay: validDay,
+    } as Record<string, unknown>;
+    const duplicateSummary = calendarAgendaSummary([duplicateIds]);
+    expect(duplicateSummary).not.toContain('Next question:');
+    expect(duplicateSummary).not.toContain('RSVP by source: Fake');
+  });
+
+  it('suppresses stale questions when either linked source RSVP is declined or not verified', () => {
+    const accepted = { status: 'accepted', identityVerified: true, basis: 'attendee-email' };
+    const cards = calendarAgendaCards({
+      evidence: [evidence()],
+      events: [
+        event('left', '2026-10-22T16:00:00Z', '2026-10-22T17:00:00Z', {
+          ownerParticipation: accepted,
+        }),
+        event('right', '2026-10-22T16:30:00Z', '2026-10-22T17:30:00Z', {
+          ownerParticipation: accepted,
+        }),
+      ],
+      request: request(),
+      requestText: 'Show my agenda. Who will drive?',
+    });
+    const card = cards[0];
+    if (!card) throw new Error('calendar agenda card was not produced');
+    const makeStaleQuestionCard = (leftRsvp: string, rightRsvp: string) =>
+      ({
+        ...card,
+        sections: (card.sections as Array<Record<string, unknown>>).map((section) => {
+          if (section.type !== 'agenda') return section;
+          const rows = section.items as Array<Record<string, unknown>>;
+          return {
+            ...section,
+            items: rows.map((row) => {
+              const rsvp = row.id === 'left' ? leftRsvp : rightRsvp;
+              const details = row.householdDetails as {
+                version: 1;
+                sources: Array<Record<string, unknown>>;
+                eventFor: 'not_stated';
+                driving: 'not_stated';
+              };
+              return {
+                ...row,
+                householdDetails: {
+                  ...details,
+                  sources: details.sources.map((source) => ({ ...source, rsvp })),
+                },
+              };
+            }),
+          };
+        }),
+      }) as unknown as Record<string, unknown>;
+    for (const statuses of [
+      ['declined', 'accepted'],
+      ['accepted', 'not_verified'],
+      ['declined', 'not_verified'],
+    ]) {
+      const summary = calendarAgendaSummary([
+        makeStaleQuestionCard(statuses[0] ?? '', statuses[1] ?? ''),
+      ]);
+      expect(summary).not.toContain('Next question:');
+    }
+  });
+
+  it('does not promote one aggregate accepted RSVP into an unverified source variant', () => {
+    const accepted = { status: 'accepted', identityVerified: true, basis: 'attendee-email' };
+    const cards = calendarAgendaCards({
+      evidence: [evidence()],
+      events: [
+        event('aggregate', '2026-10-22T16:00:00Z', '2026-10-22T17:00:00Z', {
+          ownerParticipation: accepted,
+          sourceVariants: [
+            {
+              calendar: 'Family',
+              summary: 'Family event',
+              start: '2026-10-22T16:00:00Z',
+              end: '2026-10-22T17:00:00Z',
+              allDay: false,
+              blocksTime: true,
+              ownerParticipation: {
+                status: 'accepted',
+                identityVerified: false,
+                basis: 'unverified',
+              },
+            },
+          ],
+        }),
+        event('accepted', '2026-10-22T16:30:00Z', '2026-10-22T17:30:00Z', {
+          ownerParticipation: accepted,
+        }),
+      ],
+      request: request(),
+      requestText: 'Show my agenda. Who will drive?',
+    });
+    expect(items(cards)[0]?.householdDetails).toMatchObject({
+      sources: [{ calendar: 'Family', rsvp: 'not_verified' }],
+    });
+    expect(cards[0]?.householdDay).not.toHaveProperty('nextQuestion');
+
+    const declinedCards = calendarAgendaCards({
+      evidence: [evidence()],
+      events: [
+        event('declined-source', '2026-10-22T16:00:00Z', '2026-10-22T17:00:00Z', {
+          ownerParticipation: accepted,
+          sourceVariants: [
+            {
+              calendar: 'Family',
+              summary: 'Family event',
+              start: '2026-10-22T16:00:00Z',
+              end: '2026-10-22T17:00:00Z',
+              allDay: false,
+              blocksTime: true,
+              ownerParticipation: {
+                status: 'declined',
+                identityVerified: true,
+                basis: 'attendee-email',
+              },
+            },
+          ],
+        }),
+        event('other', '2026-10-22T16:30:00Z', '2026-10-22T17:30:00Z', {
+          ownerParticipation: accepted,
+        }),
+      ],
+      request: request(),
+      requestText: 'Show my agenda. Who will drive?',
+    });
+    expect(items(declinedCards)[0]?.householdDetails).toMatchObject({
+      sources: [{ calendar: 'Family', rsvp: 'declined' }],
+    });
+    expect(declinedCards[0]?.householdDay).not.toHaveProperty('nextQuestion');
+  });
+
+  it('omits a cross-midnight question when both exact event rows are not on the overlap day card', () => {
+    const accepted = { status: 'accepted', identityVerified: true, basis: 'attendee-email' };
+    const cards = calendarAgendaCards({
+      evidence: [evidence()],
+      events: [
+        event('previous-day', '2026-10-22T23:30:00Z', '2026-10-23T00:30:00Z', {
+          ownerParticipation: accepted,
+        }),
+        event('overlap-day', '2026-10-23T00:00:00Z', '2026-10-23T00:45:00Z', {
+          ownerParticipation: accepted,
+        }),
+      ],
+      request: request({ timeZone: 'UTC' }),
+      requestText: 'Show my agenda. Who will drive?',
+    });
+    expect(cards).toHaveLength(2);
+    expect(cards.every((card) => !card.householdDay?.nextQuestion)).toBe(true);
+    expect(calendarAgendaSummary(cards as Array<Record<string, unknown>>)).not.toContain(
+      'Next question:',
+    );
+  });
+
+  it('selects the earliest owner-relevant accepted overlap, breaks ties by IDs, and omits unknown family prompts', () => {
+    const accepted = { status: 'accepted', identityVerified: true, basis: 'attendee-email' };
+    const pair = [
+      event('one', '2026-10-22T16:00:00Z', '2026-10-22T17:00:00Z', {
+        ownerParticipation: accepted,
+      }),
+      event('two', '2026-10-22T16:30:00Z', '2026-10-22T17:30:00Z', {
+        ownerParticipation: accepted,
+      }),
+    ];
+    const ownerQuestion = 'Show my agenda. Who will drive?';
+    const oneIssue = calendarAgendaCards({
+      evidence: [evidence()],
+      events: pair,
+      request: request(),
+      requestText: ownerQuestion,
+    });
+    expect(oneIssue[0]?.householdDay).toMatchObject({
+      nextQuestion: { eventIds: ['one', 'two'], remainingIssueCount: 0 },
+    });
+
+    const tied = calendarAgendaCards({
+      evidence: [evidence()],
+      events: [
+        event('c', '2026-10-22T16:00:00Z', '2026-10-22T17:00:00Z', {
+          ownerParticipation: accepted,
+        }),
+        event('b', '2026-10-22T16:00:00Z', '2026-10-22T17:00:00Z', {
+          ownerParticipation: accepted,
+        }),
+        event('a', '2026-10-22T16:00:00Z', '2026-10-22T17:00:00Z', {
+          ownerParticipation: accepted,
+        }),
+      ],
+      request: request(),
+      requestText: ownerQuestion,
+    });
+    expect(tied[0]?.householdDay).toMatchObject({
+      nextQuestion: { eventIds: ['a', 'b'], remainingIssueCount: 2 },
+    });
+
+    const familyContextOnly = calendarAgendaCards({
+      evidence: [evidence()],
+      events: [
+        event('family-a', '2026-10-22T16:00:00Z', '2026-10-22T17:00:00Z', {
+          calendar: 'Family',
+          calendarPurpose: 'family',
+        }),
+        event('family-b', '2026-10-22T16:30:00Z', '2026-10-22T17:30:00Z', {
+          calendar: 'Family',
+          calendarPurpose: 'family',
+        }),
+      ],
+      request: request(),
+      requestText: ownerQuestion,
+    });
+    expect(familyContextOnly[0]?.householdDay).not.toHaveProperty('nextQuestion');
   });
 
   it('closes coverage only when every page chain reaches a complete final page', () => {
@@ -123,7 +650,7 @@ describe('calendarAgendaCards', () => {
       request: request(),
     });
     expect(cards[0]).toMatchObject({ complete: true });
-    expect(cards[0]?.lead).toContain('No events on Work');
+    expect(cards[0]?.lead).toContain('No events returned from Work');
   });
 
   it('distinguishes read failures, unresolved names, and permission coverage gaps', () => {

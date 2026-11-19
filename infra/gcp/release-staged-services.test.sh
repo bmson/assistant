@@ -10,7 +10,7 @@ POSTGRES_SCHEMA_VERSION="$(node "$ROOT/release-schema-version.mjs" postgres)"
 POSTGRES_PREVIOUS_SCHEMA_VERSION=$((POSTGRES_SCHEMA_VERSION - 1))
 export POSTGRES_SCHEMA_VERSION POSTGRES_PREVIOUS_SCHEMA_VERSION
 cat >"$TEST_ROOT/state.json" <<JSON
-{"assistant-agent":{"revision":"agent-old","traffic":{"agent-old":100},"env":{"QUEUE_DRIVER":"cloudtasks","ASSISTANT_RELEASE_API_CONTRACT":"1","ASSISTANT_RELEASE_SCHEMA_DRIVER":"postgres","ASSISTANT_RELEASE_SCHEMA_VERSION":"${POSTGRES_SCHEMA_VERSION}","ASSISTANT_RELEASE_WEB_API_MIN":"1","ASSISTANT_RELEASE_WEB_API_MAX":"1","ASSISTANT_RELEASE_SCHEMA_DRIVER":"postgres","ASSISTANT_RELEASE_SCHEMA_MIN":"${POSTGRES_SCHEMA_VERSION}","ASSISTANT_RELEASE_SCHEMA_MAX":"${POSTGRES_SCHEMA_VERSION}"},"next":0},"assistant-web":{"revision":"web-old","traffic":{"web-old":100},"env":{"ASSISTANT_RELEASE_API_CONTRACT":"1","ASSISTANT_RELEASE_AGENT_API_MIN":"1","ASSISTANT_RELEASE_AGENT_API_MAX":"1","ASSISTANT_RELEASE_SCHEMA_DRIVER":"postgres","ASSISTANT_RELEASE_SCHEMA_MIN":"${POSTGRES_SCHEMA_VERSION}","ASSISTANT_RELEASE_SCHEMA_MAX":"${POSTGRES_SCHEMA_VERSION}"},"next":0},"assistant-browser":{"image":"registry/old-browser","next":0},"assistant-processor":{"image":"registry/old-processor","next":0}}
+{"assistant-agent":{"revision":"agent-old","traffic":{"agent-old":100},"env":{"QUEUE_DRIVER":"cloudtasks","ASSISTANT_RELEASE_API_CONTRACT":"3","ASSISTANT_RELEASE_SCHEMA_DRIVER":"postgres","ASSISTANT_RELEASE_SCHEMA_VERSION":"${POSTGRES_SCHEMA_VERSION}","ASSISTANT_RELEASE_WEB_API_MIN":"3","ASSISTANT_RELEASE_WEB_API_MAX":"3","ASSISTANT_RELEASE_SCHEMA_DRIVER":"postgres","ASSISTANT_RELEASE_SCHEMA_MIN":"${POSTGRES_SCHEMA_VERSION}","ASSISTANT_RELEASE_SCHEMA_MAX":"${POSTGRES_SCHEMA_VERSION}"},"next":0},"assistant-web":{"revision":"web-old","traffic":{"web-old":100},"env":{"ASSISTANT_RELEASE_API_CONTRACT":"3","ASSISTANT_RELEASE_AGENT_API_MIN":"3","ASSISTANT_RELEASE_AGENT_API_MAX":"3","ASSISTANT_RELEASE_SCHEMA_DRIVER":"postgres","ASSISTANT_RELEASE_SCHEMA_MIN":"${POSTGRES_SCHEMA_VERSION}","ASSISTANT_RELEASE_SCHEMA_MAX":"${POSTGRES_SCHEMA_VERSION}"},"next":0},"assistant-browser":{"image":"registry/old-browser","next":0},"assistant-processor":{"image":"registry/old-processor","next":0}}
 JSON
 cat >"$TEST_ROOT/bin/gcloud" <<'PY'
 #!/usr/bin/env python3
@@ -54,8 +54,9 @@ if a[:3]==['run','services','describe']:
     traffic.append({'revisionName':revision,'percent':pct})
   active_revisions=set(svc['traffic'])
   traffic += [{'revisionName':x['revision'],'tag':x['tag'],'percent':0,'url':f"https://{x['tag']}-{name}.example"} for x in svc.get('tags',[]) if x['revision'] not in active_revisions]
-  traffic += [{'revisionName':x['revision'],'tag':x['tag'],'percent':0,'url':f"https://{x['tag']}-{name}.example"} for x in svc.get('staged',[])]
-  print(json.dumps({'spec':{'template':{'spec':{'containers':[{'env':[{'name':k,'value':v} for k,v in svc['env'].items()]}] }}},'status':{'url':f'https://{name}.example','traffic':traffic}})); sys.exit(0)
+  traffic += [{'revisionName':x['revision'],'tag':x['tag'],'percent':0,'url':f"https://{x['tag']}-{name}.example"} for x in svc.get('staged',[]) if x['tag']]
+  latest=svc.get('staged',[])[-1] if svc.get('staged') else {'revision':svc['revision'],'image':'legacy-image'}
+  print(json.dumps({'spec':{'template':{'spec':{'containers':[{'image':latest['image'],'env':[{'name':k,'value':v} for k,v in svc['env'].items()]}] }}},'status':{'latestCreatedRevisionName':latest['revision'],'url':f'https://{name}.example','traffic':traffic}})); sys.exit(0)
  if 'value(status.url)' in ' '.join(a): print(f'https://{name}.example'); sys.exit(0)
 if a[:3]==['run','revisions','describe']:
  revision=a[3]
@@ -82,7 +83,11 @@ if a[:3]==['run','services','update']:
  if len(name)+len(val('--tag'))>46:
   print('traffic tag and service exceed Cloud Run limit', file=sys.stderr); sys.exit(2)
  if name=='assistant-agent' and os.getenv('FAIL_AGENT_STAGE')=='1': sys.exit(1)
- svc=s[name]; svc['next']+=1; rev=f"{name}-new{svc['next']}"
+ svc=s[name]; svc['next']+=1; suffix=val('--revision-suffix')
+ rev=f"{name}-{suffix}" if suffix else f"{name}-new{svc['next']}"
+ if name=='assistant-agent' and os.getenv('FAIL_AGENT_CREATE_WITH_OLD_TAG')=='1':
+  if val('--tag'): svc.setdefault('tags',[]).append({'revision':'agent-old','tag':val('--tag')})
+  save(); sys.exit(1)
  for item in val('--update-env-vars').split(','):
   if '=' in item:
    k,v=item.split('=',1); svc['env'][k]=v
@@ -92,6 +97,13 @@ if a[:3]==['run','services','update']:
  sys.exit(0)
 if a[:3]==['run','services','update-traffic']:
  name=a[3]; mapping=val('--to-revisions'); svc=s[name]
+ if '--update-tags' in a:
+  tag,revision=val('--update-tags').split('=',1)
+  stage=next((x for x in svc.get('staged',[]) if x['revision']==revision),None)
+  if not stage: sys.exit(1)
+  stage['tag']=tag
+  save()
+  sys.exit(1 if os.getenv('FAIL_AGENT_TAG_RESPONSE')=='1' else 0)
  if '--remove-tags' in a:
   if os.getenv('FAIL_TAG_REMOVAL')=='1': sys.exit(1)
   tags=set(val('--remove-tags').split(','))
@@ -130,12 +142,13 @@ elif path=='/api/health':
 elif path=='/api/ready':
  if legacy_live_web: sys.exit(22)
  print('{"ready":true}')
-elif path=='/api/release-probe':
+elif path in ('/api/release-probe', '/api/release-probe?peer=staged', '/api/release-probe?peer=canonical'):
  if legacy_live_web: sys.exit(22)
  fail=(os.getenv('CANDIDATE_WEB_PROBE_FAIL')=='1' and 'candidate-' in url) or (os.getenv('FINAL_NEW_PAIR_PROBE_FAIL')=='1' and web_new and agent_new)
  fail=fail or (os.getenv('RESUME_WEB_PROBE_FAIL')=='1' and 'resume-' in url)
  if os.getenv('RESUME_LIVE_PROBE_FAIL')=='1' and url.startswith('https://assistant-web.example/'):
   if any('new' in rev for rev in s['assistant-web']['traffic']) and s['assistant-web']['env'].get('ASSISTANT_RELEASE_WRITES_PAUSED')=='false': fail=True
+ if path=='/api/release-probe?peer=staged' and os.getenv('STAGED_PEER_PROBE_FAIL')=='1': fail=True
  if url.startswith('https://candidate-') or url.startswith('https://resume-'):
   tag=url.split('https://',1)[1].split('-assistant-web.example',1)[0]
   stage=next((x for x in s['assistant-web'].get('staged',[]) if x['tag']==tag),None)
@@ -164,6 +177,8 @@ with open(os.environ['STUB_ADMISSION_COMMANDS'],'a') as f:
   'manifestPath':os.getenv('OWNER_TAG_MANIFEST_PATH'),
   'manifestDigest':os.getenv('OWNER_TAG_MANIFEST_DIGEST'),
   'stagingTag':os.getenv('OWNER_TAG_STAGING_TAG'),
+  'bootstrapRole':os.getenv('OWNER_BOOTSTRAP_ROLE'),
+  'bootstrapRevision':os.getenv('OWNER_BOOTSTRAP_REVISION'),
   'args':sys.argv[1:]})+'\n')
 PY
 chmod +x "$TEST_ROOT/bin/pnpm"
@@ -174,6 +189,8 @@ release_retire_captured_web_tags "$admission_source" "$RELEASE_MANIFEST_PATH" "$
 release_verify_owned_web_tag_admission "$admission_source" "$RELEASE_MANIFEST_PATH" "$admission_digest" candidate-12345-1 || fail 'verification wrapper should invoke the fixed admission command'
 release_record_owned_web_tag candidate "$admission_source" "$RELEASE_MANIFEST_PATH" "$admission_digest" candidate-12345-1 || fail 'candidate receipt wrapper should invoke the fixed record command'
 release_record_owned_web_tag resume "$admission_source" "$RELEASE_MANIFEST_PATH" "$admission_digest" candidate-12345-1 || fail 'resume receipt wrapper should invoke the fixed record command'
+OWNER_BOOTSTRAP_ROLE=agent OWNER_BOOTSTRAP_REVISION=paused-agent \
+  release_owner_web_tag_admission_command --bootstrap-agent-resume "$admission_source" "$RELEASE_MANIFEST_PATH" "$admission_digest" candidate-12345-1 || fail 'agent successor must use the protected command transport'
 python3 - "$STUB_ADMISSION_COMMANDS" "$admission_source" "$RELEASE_MANIFEST_PATH" "$admission_digest" <<'PY'
 import json,sys
 rows=[json.loads(x) for x in open(sys.argv[1])]
@@ -183,10 +200,12 @@ assert [x['args'] for x in rows]==[
  ['exec','tsx','scripts/owner-web-tag-admission.ts','--verify-admission'],
  ['exec','tsx','scripts/owner-web-tag-admission.ts','--record-candidate'],
  ['exec','tsx','scripts/owner-web-tag-admission.ts','--record-resume'],
+ ['exec','tsx','scripts/owner-web-tag-admission.ts','--bootstrap-agent-resume'],
 ], rows
 for row in rows:
  assert row['source']==sys.argv[2] and row['manifestPath']==sys.argv[3] and row['manifestDigest']==sys.argv[4], row
-assert [x['stagingTag'] for x in rows]==['candidate-12345-1']*5, rows
+assert [x['stagingTag'] for x in rows]==['candidate-12345-1']*6, rows
+assert rows[-1]['bootstrapRole']=='agent' and rows[-1]['bootstrapRevision']=='paused-agent', rows[-1]
 PY
 TEST_BASIC5_CAPABILITY=false
 release_basic_editor_forward_only() { printf '%s' "$TEST_BASIC5_CAPABILITY"; }
@@ -251,20 +270,22 @@ v2_job='{"template":{"template":{"containers":[{"image":"registry/v2-image"}]}}}
 [[ "$(release_job_image "$v2_job")" == registry/v2-image ]] || { echo 'v2 job image path not parsed' >&2; exit 1; }
 reset_case() {
  cat >"$TEST_ROOT/state.json" <<JSON
-{"assistant-agent":{"revision":"agent-old","traffic":{"agent-old":100},"env":{"QUEUE_DRIVER":"cloudtasks","ASSISTANT_RELEASE_API_CONTRACT":"1","ASSISTANT_RELEASE_SCHEMA_DRIVER":"postgres","ASSISTANT_RELEASE_SCHEMA_VERSION":"${POSTGRES_SCHEMA_VERSION}","ASSISTANT_RELEASE_WEB_API_MIN":"1","ASSISTANT_RELEASE_WEB_API_MAX":"1","ASSISTANT_RELEASE_SCHEMA_DRIVER":"postgres","ASSISTANT_RELEASE_SCHEMA_MIN":"${POSTGRES_SCHEMA_VERSION}","ASSISTANT_RELEASE_SCHEMA_MAX":"${POSTGRES_SCHEMA_VERSION}"},"next":0},"assistant-web":{"revision":"web-old","traffic":{"web-old":100},"env":{"ASSISTANT_RELEASE_API_CONTRACT":"1","ASSISTANT_RELEASE_AGENT_API_MIN":"1","ASSISTANT_RELEASE_AGENT_API_MAX":"1","ASSISTANT_RELEASE_SCHEMA_DRIVER":"postgres","ASSISTANT_RELEASE_SCHEMA_MIN":"${POSTGRES_SCHEMA_VERSION}","ASSISTANT_RELEASE_SCHEMA_MAX":"${POSTGRES_SCHEMA_VERSION}"},"next":0},"assistant-browser":{"image":"registry/old-browser","next":0},"assistant-processor":{"image":"registry/old-processor","next":0}}
+{"assistant-agent":{"revision":"agent-old","traffic":{"agent-old":100},"env":{"QUEUE_DRIVER":"cloudtasks","ASSISTANT_RELEASE_API_CONTRACT":"3","ASSISTANT_RELEASE_SCHEMA_DRIVER":"postgres","ASSISTANT_RELEASE_SCHEMA_VERSION":"${POSTGRES_SCHEMA_VERSION}","ASSISTANT_RELEASE_WEB_API_MIN":"3","ASSISTANT_RELEASE_WEB_API_MAX":"3","ASSISTANT_RELEASE_SCHEMA_DRIVER":"postgres","ASSISTANT_RELEASE_SCHEMA_MIN":"${POSTGRES_SCHEMA_VERSION}","ASSISTANT_RELEASE_SCHEMA_MAX":"${POSTGRES_SCHEMA_VERSION}"},"next":0},"assistant-web":{"revision":"web-old","traffic":{"web-old":100},"env":{"ASSISTANT_RELEASE_API_CONTRACT":"3","ASSISTANT_RELEASE_AGENT_API_MIN":"3","ASSISTANT_RELEASE_AGENT_API_MAX":"3","ASSISTANT_RELEASE_SCHEMA_DRIVER":"postgres","ASSISTANT_RELEASE_SCHEMA_MIN":"${POSTGRES_SCHEMA_VERSION}","ASSISTANT_RELEASE_SCHEMA_MAX":"${POSTGRES_SCHEMA_VERSION}"},"next":0},"assistant-browser":{"image":"registry/old-browser","next":0},"assistant-processor":{"image":"registry/old-processor","next":0}}
 JSON
  unset FAIL_AGENT_BUILD FAIL_AGENT_STAGE UNHEALTHY_AGENT UNHEALTHY_WEB UNHEALTHY_LIVE_WEB \
     CANDIDATE_WEB_PROBE_FAIL FINAL_NEW_PAIR_PROBE_FAIL RESUME_WEB_PROBE_FAIL RESUME_LIVE_PROBE_FAIL \
     FAIL_AGENT_PROMOTE FAIL_WEB_PROMOTE FAIL_REPAUSE FAIL_RESUME_DRAIN STUB_WEB_TIMEOUT_SECONDS STUB_WEB_TIMEOUT_MISSING \
     FAIL_WORKER_UPDATE STALE_WORKER_IMAGE FAIL_TAG_REMOVAL MUTATE_TRAFFIC_AFTER_TAG_REMOVAL \
     ADD_FOREIGN_TAG_TO_PROMOTED_REVISION FAIL_RESUME_STAGE_UNCERTAIN REASSIGN_RESUME_TAG_ON_REPAUSE AGENT_IMAGE_PUSH_DIGEST \
-    FAIL_ADMISSION_CAPTURE FAIL_ADMISSION_RETIRE FAIL_ADMISSION_VERIFY FAIL_CANDIDATE_RECEIPT FAIL_RESUME_RECEIPT FAIL_AGENT_READY_RECEIPT OWNED_TAGS_ALREADY_ABSENT
+    FAIL_ADMISSION_CAPTURE FAIL_ADMISSION_RETIRE FAIL_ADMISSION_VERIFY FAIL_CANDIDATE_RECEIPT FAIL_RESUME_RECEIPT FAIL_AGENT_READY_RECEIPT OWNED_TAGS_ALREADY_ABSENT \
+    FAIL_BOOTSTRAP_AGENT_RESUME FAIL_BOOTSTRAP_AGENT_STALE FAIL_AGENT_CREATE_WITH_OLD_TAG FAIL_AGENT_TAG_RESPONSE
  : >"$STUB_CURL_CALLS"
  : >"$STUB_RELEASE_CALLS"
  : >"$STUB_SERVICE_UPDATE_CALLS"
  : >"$STUB_DRAIN_CALLS"
  : >"$STUB_ADMISSION_CALLS"
  TEST_BASIC5_CAPABILITY=false
+ unset GOOGLE_CALENDAR_OAUTH_CALLBACK_URL
  unset RELEASE_EMAIL_OBSERVER_WORKER_ENABLED
  export RELEASE_COMPONENTS=agent,web RELEASE_MODULES=none RELEASE_PERSISTENCE_DRIVER=postgres
  export PROJECT=test-project REGION=us-west1 REPO=assistant IMAGE_ROOT=us-west1-docker.pkg.dev/test-project/assistant
@@ -327,6 +348,25 @@ import json,sys
 import os
 s=json.load(open(sys.argv[1])); env=s['assistant-agent']['env']; live=s['assistant-agent']['revisions']['agent-old']['env']; current=os.environ['POSTGRES_SCHEMA_VERSION']; old=os.environ['POSTGRES_PREVIOUS_SCHEMA_VERSION']; assert env['ASSISTANT_RELEASE_SCHEMA_MIN']==current; assert env['ASSISTANT_RELEASE_SCHEMA_MAX']==current; assert live['ASSISTANT_RELEASE_SCHEMA_MIN']==old; assert live['ASSISTANT_RELEASE_SCHEMA_MAX']==old
 PYCONTROL
+for invalid_callback in 'http://bot.bmson.com/api/oauth/google-calendar/callback' 'https://bot.bmson.com/api/oauth/google-calendar/callback,PRIVATE=replace' 'https://bot.bmson.com/wrong'; do
+ reset_case; export GOOGLE_CALENDAR_OAUTH_CALLBACK_URL="$invalid_callback"
+ if release_staged_services; then fail 'invalid Calendar callback must fail'; fi
+ [[ ! -s "$STUB_SERVICE_UPDATE_CALLS" ]] || fail 'invalid Calendar callback mutated a service'
+done
+reset_case; export GOOGLE_CALENDAR_OAUTH_CALLBACK_URL='https://bot.bmson.com/api/oauth/google-calendar/callback'
+release_staged_services || fail 'optional Calendar callback should stage the pair'
+python3 - "$STUB_SERVICE_UPDATE_CALLS" <<'PYTEST'
+import json,sys
+calls=[json.loads(line) for line in open(sys.argv[1])]
+for service in ['assistant-agent','assistant-web']:
+ call=next(x for x in calls if x[3]==service)
+ assert 'GOOGLE_CALENDAR_OAUTH_CALLBACK_URL=https://bot.bmson.com/api/oauth/google-calendar/callback' in call[call.index('--update-env-vars')+1]
+ assert '--no-traffic' in call
+PYTEST
+reset_case; export GOOGLE_CALENDAR_OAUTH_CALLBACK_URL='https://bot.bmson.com/api/oauth/google-calendar/callback' RELEASE_COMPONENTS=web RELEASE_SCHEMA_UNCHANGED=true
+if release_staged_services; then fail 'Calendar configuration must reject web-only release'; fi
+[[ ! -s "$STUB_SERVICE_UPDATE_CALLS" ]] || fail 'web-only Calendar configuration mutated a service'
+reset_case
 reset_case; export RELEASE_EMAIL_OBSERVER_WORKER_ENABLED=bogus
 if release_staged_services; then fail 'invalid worker flag must fail before staging'; fi
 [[ ! -s "$STUB_SERVICE_UPDATE_CALLS" && ! -s "$STUB_RELEASE_CALLS" ]] || fail 'invalid worker flag reached a staging or traffic mutation'
@@ -512,6 +552,25 @@ PY
 if release_staged_services; then fail 'web-only release must reject incompatible live API metadata'; fi
 assert_old_traffic
 reset_case
+# Same Firestore schema is insufficient on either side of the OAuth authority boundary.
+for old_peer in assistant-agent assistant-web; do
+  reset_case
+  prepare_firestore_state
+  python3 - "$TEST_ROOT/state.json" "$old_peer" <<'PYTHON'
+import json,sys
+p, role = sys.argv[1:]
+with open(p) as f:
+    state = json.load(f)
+state[role]['env']['ASSISTANT_RELEASE_API_CONTRACT'] = '1'
+with open(p, 'w') as f:
+    json.dump(state, f)
+PYTHON
+  if release_preflight_compatibility agent,web; then
+    fail "Firestore preflight accepted pre-OAuth ${old_peer} despite the shared storage version"
+  fi
+  assert_old_traffic
+done
+reset_case
 prepare_firestore_state
 release_preflight_compatibility agent,web || fail 'Firestore contract metadata should pass preflight'
 python3 - "$TEST_ROOT/state.json" <<'PY'
@@ -583,7 +642,7 @@ assert all(key in web_updates[1] for key in (
  'ASSISTANT_RELEASE_WORKFLOW_RUN_ATTEMPT=1',
  'ASSISTANT_RELEASE_SOURCE_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'))
 PY
-# Before any unpaused tagged revision exists, old-pair rollback still applies.
+# Before an unpaused web revision exists, ordinary old-pair rollback still applies.
 reset_case; prepare_firestore_state; export RELEASE_MODULES=browser FINAL_NEW_PAIR_PROBE_FAIL=1
 if release_staged_services; then fail 'paused preadmission probe failure must roll back'; fi
 assert_old_traffic
@@ -591,7 +650,7 @@ python3 - "$TEST_ROOT/state.json" "$STUB_SERVICE_UPDATE_CALLS" <<'PYCASE'
 import json,sys
 state=json.load(open(sys.argv[1])); updates=[json.loads(x) for x in open(sys.argv[2])]
 assert state['assistant-browser']['image']=='registry/old-browser', state
-assert not any('ASSISTANT_RELEASE_WRITES_PAUSED=false' in x[x.index('--update-env-vars')+1] for x in updates), updates
+assert not any(x[3]=='assistant-web' and 'ASSISTANT_RELEASE_WRITES_PAUSED=false' in x[x.index('--update-env-vars')+1] for x in updates), updates
 PYCASE
 
 # BASIC5 must never enter the staging path outside a paired Firestore release.
@@ -826,12 +885,12 @@ mkdir -p "$CAP_FIXTURE_ROOT/infra/gcp" "$CAP_FIXTURE_ROOT/apps/web/lib"
 cp "$ROOT/release-staged-services.sh" "$CAP_FIXTURE_ROOT/infra/gcp/release-staged-services.sh"
 cp "$ROOT/release-contracts.json" "$CAP_FIXTURE_ROOT/infra/gcp/release-contracts.json"
 : >"$CAP_FIXTURE_ROOT/apps/web/lib/owner-editor-runtime.ts"
-[[ "$(bash -c 'source "$1"; release_basic_editor_forward_only' -- "$CAP_FIXTURE_ROOT/infra/gcp/release-staged-services.sh")" == true ]] || fail 'intrinsic person-note source capability not detected'
+[[ "$(bash -c 'source "$1"; release_basic_editor_forward_only' -- "$CAP_FIXTURE_ROOT/infra/gcp/release-staged-services.sh")" == true ]] || fail 'intrinsic reviewed editor source capability not detected'
 python3 - "$CAP_FIXTURE_ROOT/infra/gcp/release-contracts.json" <<'PYCASE'
 import json,sys
 p=sys.argv[1]; c=json.load(open(p)); c['components']['web']['ownerEditorV1'].append('remove_person'); open(p,'w').write(json.dumps(c))
 PYCASE
-if bash -c 'source "$1"; release_basic_editor_forward_only' -- "$CAP_FIXTURE_ROOT/infra/gcp/release-staged-services.sh"; then fail 'broadened capability must fail closed'; fi
+if bash -c 'source "$1"; release_basic_editor_forward_only' -- "$CAP_FIXTURE_ROOT/infra/gcp/release-staged-services.sh"; then fail 'duplicate capability must fail closed'; fi
 python3 - "$CAP_FIXTURE_ROOT/infra/gcp/release-contracts.json" <<'PYCASE'
 import json,sys
 p=sys.argv[1]; c=json.load(open(p)); del c['components']['web']['ownerEditorV1']; open(p,'w').write(json.dumps(c))
@@ -839,4 +898,169 @@ PYCASE
 if bash -c 'source "$1"; release_basic_editor_forward_only' -- "$CAP_FIXTURE_ROOT/infra/gcp/release-staged-services.sh"; then fail 'runtime without capability must fail closed'; fi
 rm "$CAP_FIXTURE_ROOT/apps/web/lib/owner-editor-runtime.ts"
 [[ "$(bash -c 'source "$1"; release_basic_editor_forward_only' -- "$CAP_FIXTURE_ROOT/infra/gcp/release-staged-services.sh")" == false ]] || fail 'older source without runtime/capability must remain legacy'
+
+# Bootstrap uses the same promotion phases; no successful promotion means no admission restoration.
+release_bootstrap_scaling() {
+  printf 'bootstrap:%s:%s:%s\n' "$1" "$2" "$3" >>"$STUB_ADMISSION_CALLS"
+  if [[ "$1" == --bootstrap-agent-resume ]]; then
+    [[ "${basic_editor_admission_possible:-false}" == true ]] || fail 'seal admission before the reachable agent successor create'
+    printf 'bootstrap-agent-admission:true\n' >>"$STUB_ADMISSION_CALLS"
+    [[ "${FAIL_BOOTSTRAP_AGENT_STALE:-0}" != 1 ]] || return 0
+    python3 - "$STUB_ROOT/state.json" "$3" <<'PYCASE'
+import json,sys
+p=sys.argv[1]; s=json.load(open(p)); svc=s['assistant-agent']
+paused=next(x for x in svc['staged'] if x['revision']==sys.argv[2])
+assert paused['env']['ASSISTANT_RELEASE_WRITES_PAUSED']=='true'
+env=dict(paused['env']); env['ASSISTANT_RELEASE_WRITES_PAUSED']='false'
+svc['next']+=1; revision=f"assistant-agent-new{svc['next']}"
+successor={'revision':revision,'tag':paused['tag'],'image':paused['image'],'env':env}
+svc['staged']=[successor if x['tag']==paused['tag'] else x for x in svc['staged']]
+svc['env']=env
+svc['revisions'][revision]={'env':dict(env),'image':paused['image']}
+open(p,'w').write(json.dumps(s))
+PYCASE
+    [[ "${FAIL_BOOTSTRAP_AGENT_RESUME:-0}" != 1 ]] || return 1
+    return 0
+  fi
+  if [[ "${FAIL_BOOTSTRAP_UNKNOWN:-0}" == 1 && "$2" == web ]]; then return 1; fi
+}
+reset_case; prepare_firestore_state
+export OWNER_RELEASE_BOOTSTRAP_RECEIPT='{"format":1,"kind":"disabled-bootstrap","source":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}'
+export OWNER_RELEASE_BOOTSTRAP_SHA256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+RELEASE_DRAINED_API_TRANSITION=true release_staged_services >/dev/null || fail 'reviewed bootstrap phase handoff should succeed'
+python3 - "$STUB_ADMISSION_CALLS" <<'PYCASE'
+import sys
+rows=open(sys.argv[1]).read().splitlines()
+def index(prefix): return next(i for i,x in enumerate(rows) if x.startswith(prefix))
+assert index('stage:assistant-agent:') < index('native-phase:promoteP')
+assert next(x for x in rows if x.startswith('stage:assistant-agent:')).endswith(':true')
+assert index('native-phase:promoteP') < index('bootstrap:--bootstrap-restore:web') < index('retire:')
+assert index('retire:') < index('bootstrap:--bootstrap-agent-resume:agent:assistant-agent-p-') < index('bootstrap-agent-admission:true')
+assert index('bootstrap-agent-admission:true') < index('traffic:assistant-agent:assistant-agent-new2=100')
+assert index('traffic:assistant-agent:assistant-agent-new2=100') < index('bootstrap:--bootstrap-restore:agent:assistant-agent-new2') < index('agent-ready:')
+assert index('agent-ready:') < next(i for i,x in enumerate(rows) if x.startswith('stage:assistant-web:') and x.endswith(':false'))
+canonical=[i for i,x in enumerate(rows) if x.startswith('probe:') and x.endswith('/api/release-probe?peer=canonical')]
+staged=[i for i,x in enumerate(rows) if x.startswith('probe:') and x.endswith('/api/release-probe?peer=staged')]
+assert len(staged)==4 and index('bootstrap:--bootstrap-verify-paused-agent:agent:') < min(staged), rows
+assert max(staged) < index('bootstrap:--bootstrap-agent-resume:agent:'), rows
+assert canonical and index('bootstrap:--bootstrap-restore:agent:') < min(canonical) < index('agent-ready:'), rows
+PYCASE
+python3 - "$STUB_ROOT/state.json" <<'PYCASE'
+import json,sys
+s=json.load(open(sys.argv[1])); a=s['assistant-agent']; p=next(v for k,v in a['revisions'].items() if k.startswith('assistant-agent-p-')); r=a['revisions']['assistant-agent-new2']
+assert p['image']==r['image']
+assert p['env']['MCP_OAUTH_ENABLED']=='false' and r['env']['MCP_OAUTH_ENABLED']=='false'
+assert p['env']['ASSISTANT_RELEASE_WRITES_PAUSED']=='true' and r['env']['ASSISTANT_RELEASE_WRITES_PAUSED']=='false'
+assert {k:v for k,v in p['env'].items() if k!='ASSISTANT_RELEASE_WRITES_PAUSED'}=={k:v for k,v in r['env'].items() if k!='ASSISTANT_RELEASE_WRITES_PAUSED'}
+assert a['traffic']=={'assistant-agent-new2':100}
+PYCASE
+reset_case; prepare_firestore_state
+(
+  release_read_contract() {
+    RELEASE_STORAGE_DRIVER=firestore RELEASE_SCHEMA_VERSION=1
+    export RELEASE_AGENT_API=1 RELEASE_AGENT_PEER_MIN=1 RELEASE_AGENT_PEER_MAX=1
+    RELEASE_WEB_API=1 RELEASE_WEB_PEER_MIN=1 RELEASE_WEB_PEER_MAX=1
+    export RELEASE_AGENT_SCHEMA_MIN=1 RELEASE_AGENT_SCHEMA_MAX=1
+    RELEASE_WEB_SCHEMA_MIN=1 RELEASE_WEB_SCHEMA_MAX=1
+  }
+  release_staged_services >/dev/null
+) || fail 'API 1 bootstrap must retain the original peer probes'
+python3 - "$STUB_ADMISSION_CALLS" <<'PYCASE'
+import sys
+rows=open(sys.argv[1]).read().splitlines()
+peer=[i for i,x in enumerate(rows) if x.startswith('probe:') and x.endswith('/api/release-probe')]
+resume=next(i for i,x in enumerate(rows) if x.startswith('bootstrap:--bootstrap-agent-resume'))
+assert peer and min(peer) < resume
+assert not any('peer=staged' in x or 'bootstrap-verify-paused-agent' in x for x in rows)
+PYCASE
+reset_case; prepare_firestore_state
+python3 - "$STUB_ROOT/state.json" <<'PYCASE'
+import json,sys
+p=sys.argv[1]; s=json.load(open(p))
+for role in ('agent','web'): s['assistant-'+role]['env']['MCP_OAUTH_ENABLED']='true'
+open(p,'w').write(json.dumps(s))
+PYCASE
+release_staged_services >/dev/null || fail 'same-contract API 3 recovery bootstrap needs the paused peer'
+python3 - "$STUB_ROOT/state.json" <<'PYCASE'
+import json,sys
+s=json.load(open(sys.argv[1]))
+assert s['assistant-agent']['env']['MCP_OAUTH_ENABLED']=='false'
+PYCASE
+reset_case; prepare_firestore_state
+if FAIL_AGENT_CREATE_WITH_OLD_TAG=1 release_staged_services >/dev/null 2>&1; then
+  fail 'uncertain API 3 create must stop before tag attachment'
+fi
+assert_old_traffic
+if rg -q -- '--update-tags|--remove-tags' "$STUB_RELEASE_CALLS"; then fail 'failed agent create wrote alias routing'; fi
+python3 - "$STUB_ROOT/state.json" <<'PYCASE'
+import json,sys
+s=json.load(open(sys.argv[1])); assert not s['assistant-agent'].get('tags'), s
+PYCASE
+reset_case; prepare_firestore_state
+if FAIL_AGENT_TAG_RESPONSE=1 release_staged_services >/dev/null 2>&1; then
+  fail 'lost API 3 tag attachment response must stop'
+fi
+assert_old_traffic
+python3 - "$STUB_ROOT/state.json" <<'PYCASE'
+import json,sys
+s=json.load(open(sys.argv[1])); a=s['assistant-agent']; candidates=[x for x in a['staged'] if x['tag']]
+assert len(candidates)==1 and candidates[0]['revision'].startswith('assistant-agent-p-'), a
+assert not a.get('tags') and not s['assistant-web'].get('staged'), s
+PYCASE
+if rg -q -- '--remove-tags' "$STUB_RELEASE_CALLS"; then fail 'uncertain agent tag attachment triggered a write'; fi
+reset_case; prepare_firestore_state
+release_staged_services >/dev/null || fail 'same-contract API 3 recovery bootstrap needs the paused peer'
+grep -q 'peer=staged' "$STUB_ADMISSION_CALLS" || fail 'API 3 recovery would probe the disabled canonical agent'
+reset_case; prepare_firestore_state
+if RELEASE_DRAINED_API_TRANSITION=true STAGED_PEER_PROBE_FAIL=1 release_staged_services >/dev/null 2>&1; then
+  fail 'unreachable staged agent must block the API transition before promotion'
+fi
+if rg -q '^native-phase:promoteP|^bootstrap:--bootstrap-agent-resume' "$STUB_ADMISSION_CALLS"; then
+  fail 'failed staged peer canary changed admitted traffic'
+fi
+reset_case; prepare_firestore_state
+if RELEASE_DRAINED_API_TRANSITION=true FINAL_NEW_PAIR_PROBE_FAIL=1 release_staged_services >/dev/null 2>&1; then
+  fail 'unhealthy canonical API 3 pair must block web resume'
+fi
+if rg -q '^native-phase:createR|^native-phase:restoreC|^traffic:assistant-agent:agent-old=100' "$STUB_ADMISSION_CALLS"; then
+  fail 'failed canonical peer canary admitted web writes or reopened the API 1 pair'
+fi
+reset_case; prepare_firestore_state
+export FAIL_WEB_PROMOTE=1
+if release_staged_services >/dev/null 2>&1; then fail 'failed paused web promotion must fail bootstrap'; fi
+if rg -q '^bootstrap:--bootstrap-restore:' "$STUB_ADMISSION_CALLS"; then fail 'failed promotion restored automatic scaling'; fi
+reset_case; prepare_firestore_state
+export FAIL_AGENT_PROMOTE=1
+if release_staged_services >/dev/null 2>&1; then fail 'failed agent promotion must fail bootstrap'; fi
+python3 - "$STUB_ADMISSION_CALLS" <<'PYCASE'
+import sys
+rows=open(sys.argv[1]).read().splitlines()
+assert not any(x.startswith('bootstrap:--bootstrap-restore:agent') for x in rows)
+assert 'bootstrap-agent-admission:true' in rows
+assert not any(x.startswith('native-phase:restoreC') for x in rows), rows
+assert not any(x=='traffic:assistant-agent:agent-old=100' for x in rows), rows
+PYCASE
+reset_case; prepare_firestore_state
+export FAIL_BOOTSTRAP_AGENT_RESUME=1
+if release_staged_services >/dev/null 2>&1; then fail 'unknown agent successor create must fail closed'; fi
+python3 - "$STUB_ADMISSION_CALLS" "$STUB_ROOT/state.json" <<'PYCASE'
+import json,sys
+rows=open(sys.argv[1]).read().splitlines(); state=json.load(open(sys.argv[2]))
+assert 'bootstrap-agent-admission:true' in rows
+assert not any(x.startswith('native-phase:restoreC') or x.startswith('bootstrap:--bootstrap-restore:agent') for x in rows), rows
+assert not any(x=='traffic:assistant-agent:agent-old=100' for x in rows)
+assert state['assistant-agent']['staged'][0]['revision']=='assistant-agent-new2'
+assert state['assistant-agent']['staged'][0]['env']['ASSISTANT_RELEASE_WRITES_PAUSED']=='false'
+PYCASE
+reset_case; prepare_firestore_state
+export FAIL_BOOTSTRAP_AGENT_STALE=1
+if release_staged_services >/dev/null 2>&1; then fail 'a successful helper without an observed new unpaused revision must stop'; fi
+if rg -q '^traffic:assistant-agent:assistant-agent-new' "$STUB_ADMISSION_CALLS"; then fail 'stale paused agent was promoted as its successor'; fi
+if rg -q '^native-phase:restoreC' "$STUB_ADMISSION_CALLS"; then fail 'unconfirmed agent successor resumed old code'; fi
+reset_case; prepare_firestore_state
+export FAIL_BOOTSTRAP_UNKNOWN=1
+if release_staged_services >/dev/null 2>&1; then fail 'unknown scaling restoration must fail closed'; fi
+if rg -q '^native-phase:restoreC' "$STUB_ADMISSION_CALLS"; then fail 'unknown scaling outcome resumed legacy traffic'; fi
+unset FAIL_BOOTSTRAP_UNKNOWN OWNER_RELEASE_BOOTSTRAP_RECEIPT OWNER_RELEASE_BOOTSTRAP_SHA256
+bash "$ROOT/google-calendar-release-config.test.sh"
 echo 'staged release protocol tests passed'

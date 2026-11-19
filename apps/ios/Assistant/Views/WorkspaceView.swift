@@ -475,7 +475,7 @@ struct WorkspaceView: View {
         .assistantSubmenuChrome()
         .toolbarBackground(area == .skills ? .visible : .hidden, for: .navigationBar)
         .toolbarBackground(AssistantTheme.canvas(for: colorScheme), for: .navigationBar)
-        .refreshable { await refresh() }
+        .refreshable { await refresh(userInitiated: true) }
         .onDisappear { cancelFileImport() }
         .task(id: scenePhase) {
             guard scenePhase == .active else { return }
@@ -651,6 +651,7 @@ struct WorkspaceView: View {
     @ViewBuilder
     private func workspaceContent(_ workspace: WorkspaceResponse) -> some View {
         if let failedSection = area.availabilityKeys.first(where: { !workspace.isSectionAvailable($0) }) {
+            if area == .costs { EstimatedCostOverviewCard() }
             WorkspaceAvailabilityNotice(title: failedSection.capitalized)
                 .accessibilityIdentifier("workspace-section-unavailable-\(failedSection)")
         } else {
@@ -1007,6 +1008,7 @@ struct WorkspaceView: View {
                     providerBillingCard(report)
                 }
             }
+            EstimatedCostOverviewCard()
             sectionHeading("Assistant usage ledger")
             Text("Includes estimates used for spending limits. These limits do not cap your cloud bill. Ledger costs overlap provider billing and are not added to it.")
                 .font(.footnote)
@@ -2755,6 +2757,7 @@ struct WorkspaceView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .disclosureGroupStyle(AssistantEvidenceDisclosureStyle())
         }
         .assistantCard(in: colorScheme, strokeTint: AssistantTheme.inkMuted(for: colorScheme).opacity(0.3))
     }
@@ -3106,8 +3109,9 @@ struct WorkspaceView: View {
         }
     }
 
-    private func refresh() async {
+    private func refresh(userInitiated: Bool = false) async {
         guard !isLoading, workspaceActionInFlight == nil else { return }
+        if userInitiated && area == .costs { model.invalidateCostTrackingForUserRefresh() }
         isLoading = true
         let refreshed: Bool
         if area == .documents {
@@ -3206,11 +3210,21 @@ struct SpendingBreakdownCard: View {
                     Text(entry.amountLabel).font(.subheadline.monospacedDigit())
                 }
             } else {
-                HStack(alignment: .firstTextBaseline, spacing: 10) {
-                    Text(entry.label).font(.subheadline.weight(.medium))
-                    Spacer(minLength: 4)
-                    Text(entry.amountLabel).font(.subheadline.monospacedDigit())
-                        .layoutPriority(1)
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        Text(entry.label).font(.subheadline.weight(.medium))
+                            .fixedSize(horizontal: true, vertical: true)
+                        Spacer(minLength: 4)
+                        Text(entry.amountLabel).font(.subheadline.monospacedDigit())
+                            .fixedSize(horizontal: true, vertical: true)
+                            .layoutPriority(1)
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(entry.label).font(.subheadline.weight(.medium))
+                            .fixedSize(horizontal: false, vertical: true)
+                        Text(entry.amountLabel).font(.subheadline.monospacedDigit())
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
             Text("\(entry.count) usage \(entry.count == 1 ? "entry" : "entries")")

@@ -154,6 +154,7 @@ export class FirestorePrivacyExportRepository implements PrivacyExportRepository
           'domain',
           'ownerConfirmed',
           'ownerCorrection',
+          'ownerFamilyRejectedContentHash',
           'pinned',
           'source',
           'createdAt',

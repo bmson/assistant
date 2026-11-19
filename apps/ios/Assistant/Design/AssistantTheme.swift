@@ -258,13 +258,14 @@ extension View {
     func assistantCard(
         in scheme: ColorScheme,
         surface: Color? = nil,
-        strokeTint: Color? = nil
+        strokeTint: Color? = nil,
+        padded: Bool = true
     ) -> some View {
         let shape = RoundedRectangle(cornerRadius: AssistantTheme.cardCornerRadius, style: .continuous)
 
         return self
-            .padding(.horizontal, AssistantTheme.compactGutter)
-            .padding(.vertical, 16)
+            .padding(.horizontal, padded ? AssistantTheme.compactGutter : 0)
+            .padding(.vertical, padded ? 16 : 0)
             .frame(minHeight: AssistantTheme.responseCardMinHeight)
             .background(surface ?? AssistantTheme.raised(for: scheme), in: shape)
             .overlay {
@@ -641,7 +642,7 @@ struct ActivityVisualSummary {
         var counts = Array(repeating: 0, count: Self.labels.count)
         for status in statuses {
             let index: Int = switch status {
-            case "waiting_approval", "waiting_budget", "needs_attention", "stuck": 0
+            case "waiting_approval", "waiting_budget", "waiting_estimated_cost", "needs_attention", "stuck": 0
             case "pending", "running": 1
             case "sleeping", "waiting_event": 2
             case "done": 3

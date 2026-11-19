@@ -7,6 +7,17 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		E61C0000000000000000000B /* GoogleCalendarConnectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E61C0000000000000000000C /* GoogleCalendarConnectionTests.swift */; };
+		E63C00000000000000000001 /* McpSignInOptionsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E63C00000000000000000002 /* McpSignInOptionsTests.swift */; };
+		E61C00000000000000000009 /* Views/GoogleCalendarConnectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E61C0000000000000000000A /* Views/GoogleCalendarConnectionView.swift */; };
+		E63C00000000000000000003 /* Views/McpSignInOptionsSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = E63C00000000000000000004 /* Views/McpSignInOptionsSection.swift */; };
+		E64C00000000000000000001 /* Views/McpOAuthControl.swift in Sources */ = {isa = PBXBuildFile; fileRef = E64C00000000000000000002 /* Views/McpOAuthControl.swift */; };
+		E61C00000000000000000007 /* System/GoogleCalendarConnectionCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = E61C00000000000000000008 /* System/GoogleCalendarConnectionCoordinator.swift */; };
+		E63C00000000000000000005 /* System/McpSignInOptionsCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = E63C00000000000000000006 /* System/McpSignInOptionsCoordinator.swift */; };
+		E61C00000000000000000005 /* Models/GoogleCalendarConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = E61C00000000000000000006 /* Models/GoogleCalendarConnection.swift */; };
+		E63C00000000000000000007 /* Models/McpSignInOptions.swift in Sources */ = {isa = PBXBuildFile; fileRef = E63C00000000000000000008 /* Models/McpSignInOptions.swift */; };
+		E61C00000000000000000003 /* GoogleCalendarAuthenticationSessionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E61C00000000000000000004 /* GoogleCalendarAuthenticationSessionTests.swift */; };
+		E61C00000000000000000001 /* System/GoogleCalendarAuthenticationSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = E61C00000000000000000002 /* System/GoogleCalendarAuthenticationSession.swift */; };
 		B000000000000000000000BD /* OptimisticEditsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000BD /* OptimisticEditsTests.swift */; };
 		B000000000000000000000BC /* OptimisticEdits.swift in Sources */ = {isa = PBXBuildFile; fileRef = C000000000000000000000BC /* OptimisticEdits.swift */; };
 		B00000000000000000000001 /* AssistantApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000001 /* AssistantApp.swift */; };
@@ -205,6 +216,17 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		E61C0000000000000000000C /* GoogleCalendarConnectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GoogleCalendarConnectionTests.swift; sourceTree = "<group>"; };
+		E63C00000000000000000002 /* McpSignInOptionsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = McpSignInOptionsTests.swift; sourceTree = "<group>"; };
+		E61C0000000000000000000A /* Views/GoogleCalendarConnectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/GoogleCalendarConnectionView.swift; sourceTree = "<group>"; };
+		E63C00000000000000000004 /* Views/McpSignInOptionsSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/McpSignInOptionsSection.swift; sourceTree = "<group>"; };
+		E64C00000000000000000002 /* Views/McpOAuthControl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/McpOAuthControl.swift; sourceTree = "<group>"; };
+		E61C00000000000000000008 /* System/GoogleCalendarConnectionCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = System/GoogleCalendarConnectionCoordinator.swift; sourceTree = "<group>"; };
+		E63C00000000000000000006 /* System/McpSignInOptionsCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = System/McpSignInOptionsCoordinator.swift; sourceTree = "<group>"; };
+		E61C00000000000000000006 /* Models/GoogleCalendarConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models/GoogleCalendarConnection.swift; sourceTree = "<group>"; };
+		E63C00000000000000000008 /* Models/McpSignInOptions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models/McpSignInOptions.swift; sourceTree = "<group>"; };
+		E61C00000000000000000004 /* GoogleCalendarAuthenticationSessionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GoogleCalendarAuthenticationSessionTests.swift; sourceTree = "<group>"; };
+		E61C00000000000000000002 /* System/GoogleCalendarAuthenticationSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = System/GoogleCalendarAuthenticationSession.swift; sourceTree = "<group>"; };
 		C000000000000000000000BD /* OptimisticEditsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OptimisticEditsTests.swift; sourceTree = "<group>"; };
 		C000000000000000000000BC /* OptimisticEdits.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models/OptimisticEdits.swift; sourceTree = "<group>"; };
 		C00000000000000000000001 /* AssistantApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AssistantApp.swift; sourceTree = "<group>"; };
@@ -369,6 +391,14 @@
 		D00000000000000000000001 /* Assistant */ = {
 			isa = PBXGroup;
 			children = (
+				E61C0000000000000000000A /* Views/GoogleCalendarConnectionView.swift */,
+				E63C00000000000000000004 /* Views/McpSignInOptionsSection.swift */,
+				E64C00000000000000000002 /* Views/McpOAuthControl.swift */,
+				E61C00000000000000000008 /* System/GoogleCalendarConnectionCoordinator.swift */,
+				E63C00000000000000000006 /* System/McpSignInOptionsCoordinator.swift */,
+				E61C00000000000000000006 /* Models/GoogleCalendarConnection.swift */,
+				E63C00000000000000000008 /* Models/McpSignInOptions.swift */,
+				E61C00000000000000000002 /* System/GoogleCalendarAuthenticationSession.swift */,
 				C00000000000000000000001 /* AssistantApp.swift */,
 				C00000000000000000000002 /* AppModel.swift */,
 				C000000000000000000000B4 /* Views/PhoneCalendarsView.swift */,
@@ -446,6 +476,9 @@
 		D00000000000000000000002 /* AssistantTests */ = {
 			isa = PBXGroup;
 			children = (
+				E61C0000000000000000000C /* GoogleCalendarConnectionTests.swift */,
+				E63C00000000000000000002 /* McpSignInOptionsTests.swift */,
+				E61C00000000000000000004 /* GoogleCalendarAuthenticationSessionTests.swift */,
 				C00000000000000000000020 /* APIModelsTests.swift */,
 				C13A99000000000000000003 /* MemoryCorrectionPresentationTests.swift */,
 				C13A99000000000000000005 /* NativeMemoryCorrectionRecoveryTests.swift */,
@@ -676,6 +709,14 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				E61C00000000000000000009 /* Views/GoogleCalendarConnectionView.swift in Sources */,
+				E63C00000000000000000003 /* Views/McpSignInOptionsSection.swift in Sources */,
+				E64C00000000000000000001 /* Views/McpOAuthControl.swift in Sources */,
+				E61C00000000000000000007 /* System/GoogleCalendarConnectionCoordinator.swift in Sources */,
+				E63C00000000000000000005 /* System/McpSignInOptionsCoordinator.swift in Sources */,
+				E61C00000000000000000005 /* Models/GoogleCalendarConnection.swift in Sources */,
+				E63C00000000000000000007 /* Models/McpSignInOptions.swift in Sources */,
+				E61C00000000000000000001 /* System/GoogleCalendarAuthenticationSession.swift in Sources */,
 				B00000000000000000000001 /* AssistantApp.swift in Sources */,
 				B00000000000000000000002 /* AppModel.swift in Sources */,
 				B000000000000000000000B4 /* Views/PhoneCalendarsView.swift in Sources */,
@@ -748,6 +789,9 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				E61C0000000000000000000B /* GoogleCalendarConnectionTests.swift in Sources */,
+				E63C00000000000000000001 /* McpSignInOptionsTests.swift in Sources */,
+				E61C00000000000000000003 /* GoogleCalendarAuthenticationSessionTests.swift in Sources */,
 				B00000000000000000000012 /* APIModelsTests.swift in Sources */,
 				B13A99000000000000000003 /* MemoryCorrectionPresentationTests.swift in Sources */,
 				B13A99000000000000000005 /* NativeMemoryCorrectionRecoveryTests.swift in Sources */,

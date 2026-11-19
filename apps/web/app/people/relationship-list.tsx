@@ -3,6 +3,7 @@ import { relationSpanLabel } from '@assistant/application/people-presentation';
 import Link from 'next/link';
 import type { ReactNode } from 'react';
 import { PersonAvatar } from '@/app/people/person-avatar';
+import { memoryPersonConnectionHref } from '@/lib/memory-editor-context';
 import { memoryNoteHref } from '@/lib/memory-note-context';
 import { Badge } from '@/lib/ui';
 
@@ -21,6 +22,7 @@ export function RelationshipList({
   relations,
   now,
   peopleQuery = '',
+  returnTo = '',
   selectedRelationId,
   editControls,
   readOnlyReasons,
@@ -28,6 +30,7 @@ export function RelationshipList({
   relations: PersonRelation[];
   now: Date;
   peopleQuery?: string;
+  returnTo?: string;
   selectedRelationId?: string;
   editControls?: Record<string, ReactNode>;
   readOnlyReasons?: Record<string, { reason: string; sourceMemoryId?: string }>;
@@ -35,6 +38,12 @@ export function RelationshipList({
   return (
     <ul className="mt-3 flex flex-col gap-2">
       {relations.map((relation) => {
+        const peerHref = memoryPersonConnectionHref(
+          relation.otherContactId,
+          relation.id,
+          returnTo,
+          peopleQuery,
+        );
         const normalizedId = relation.id.toLowerCase();
         const selected = normalizedId === selectedRelationId;
         // Recorded owner meaning is already present in the authoritative
@@ -76,9 +85,9 @@ export function RelationshipList({
                 : undefined
             }
           >
-            {relation.otherContactId ? (
+            {peerHref ? (
               <Link
-                href={`/people/${relation.otherContactId}${peopleQuery ? `?q=${encodeURIComponent(peopleQuery.slice(0, 120))}` : ''}`}
+                href={peerHref}
                 className={`mobile-touch-target ${rowClass} motion-safe:transition-colors hover:bg-sunken/50`}
               >
                 {body}

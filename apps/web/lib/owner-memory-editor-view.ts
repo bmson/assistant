@@ -2,6 +2,7 @@ import type { OwnerMemoryEditorSnapshot } from '@assistant/persistence';
 import type {
   OwnerEditorFormGrant,
   OwnerEditorIssuanceContext,
+  OwnerEditorMemoryRemovalImpact,
   OwnerEditorSessionView,
 } from '@assistant/persistence/owner-editor';
 import { isValidFormSessionScope } from '@/app/auth-form-session-scope';
@@ -11,12 +12,15 @@ export interface OwnerMemoryEditorView {
   snapshot: OwnerMemoryEditorSnapshot;
   session: OwnerEditorSessionView | null;
   grant: OwnerEditorFormGrant | null;
+  removalGrant: OwnerEditorFormGrant | null;
+  removalImpact: OwnerEditorMemoryRemovalImpact | null;
   unavailableReason: string | null;
 }
 
 /** Grant and displayed text come from the same authoritative bounded snapshot. */
 export function buildOwnerMemoryEditorView(input: {
   snapshot: OwnerMemoryEditorSnapshot;
+  removalImpact?: OwnerEditorMemoryRemovalImpact | null;
   context: OwnerEditorIssuanceContext | null;
   formSessionScope: string | undefined;
   secret: string | undefined;
@@ -28,6 +32,8 @@ export function buildOwnerMemoryEditorView(input: {
     snapshot,
     session: null,
     grant: null,
+    removalGrant: null,
+    removalImpact: null,
     unavailableReason: reason,
   });
   if (!snapshot.eligible) return unavailable(snapshot.readOnlyReason ?? 'unverified_source');
@@ -40,6 +46,21 @@ export function buildOwnerMemoryEditorView(input: {
   )
     return unavailable('unverified_source');
   if (!secret || !isValidFormSessionScope(formSessionScope)) return unavailable('refresh_session');
+  const removalImpact = input.removalImpact;
+  const validRemovalImpact =
+    removalImpact?.memoryId === snapshot.memoryId &&
+    /^[a-f0-9]{64}$/.test(removalImpact.revision) &&
+    Number.isSafeInteger(removalImpact.connectionCount) &&
+    removalImpact.connectionCount >= 0 &&
+    Number.isSafeInteger(removalImpact.sourceEvidenceCount) &&
+    removalImpact.sourceEvidenceCount >= 0 &&
+    Array.isArray(removalImpact.orphanedItems) &&
+    removalImpact.orphanedItems.every(
+      (item) =>
+        typeof item.id === 'string' &&
+        typeof item.label === 'string' &&
+        item.label.trim().length > 0,
+    );
   const session = { ownerId: context.ownerId, formSessionScope };
   return {
     snapshot,
@@ -52,6 +73,18 @@ export function buildOwnerMemoryEditorView(input: {
       secret,
       now: input.now,
     }),
+    removalGrant:
+      validRemovalImpact && removalImpact
+        ? issueOwnerEditorFormGrant({
+            context,
+            session,
+            command: 'remove_owner_memory',
+            targetId: snapshot.memoryId,
+            secret,
+            now: input.now,
+          })
+        : null,
+    removalImpact: validRemovalImpact ? removalImpact : null,
     unavailableReason: null,
   };
 }
