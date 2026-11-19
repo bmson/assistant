@@ -1,7 +1,7 @@
 import { resetConfigForTest } from '@assistant/config';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GET } from '../../apps/web/app/api/health/route.js';
-import { assertQaWebInstallation, requireQaOrigin } from './qa-installation.js';
+import { assertQaWebInstallation, openQaInstallation, requireQaOrigin } from './qa-installation.js';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -66,3 +66,12 @@ describe('web installation proof', () => {
     await expect(assertQaWebInstallation(origin, target)).rejects.toThrow(/did not prove/);
   });
 });
+
+it.each(['host=localhost', 'port=5432', 'options=fixture'])(
+  'rejects database routing or session overrides before verifying a marker (%s)',
+  async (query) => {
+    await expect(
+      openQaInstallation({ DATABASE_URL: `postgres://127.0.0.1/assistant_test?${query}` }),
+    ).rejects.toThrow(/cannot override/);
+  },
+);

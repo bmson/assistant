@@ -5,7 +5,9 @@ import { listVisualQaManifests } from './fixture-runs.js';
 import { openQaInstallation } from './qa-installation.js';
 
 if (process.argv.length !== 2) throw new Error('The QA inventory takes no arguments.');
-const { db, target } = await openQaInstallation();
+const { db, target } = await openQaInstallation().catch(() => {
+  throw new Error('Could not open a verified disposable QA installation.');
+});
 try {
   const manifests = (await listVisualQaManifests()).filter(
     (manifest) =>

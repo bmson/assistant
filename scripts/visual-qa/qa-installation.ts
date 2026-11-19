@@ -33,12 +33,25 @@ export function requireQaOrigin(requested: string | undefined, configured: strin
 export async function openQaInstallation(env: NodeJS.ProcessEnv = process.env) {
   if (env.NODE_ENV === 'production' || env.ASSISTANT_TEST_TARGET_KIND === 'restore')
     throw new Error('QA requires a disposable QA installation.');
+  if (env.DATABASE_URL) {
+    let database: URL;
+    try {
+      database = new URL(env.DATABASE_URL);
+    } catch {
+      throw new Error('QA requires a valid local PostgreSQL URL.');
+    }
+    if (
+      !['postgres:', 'postgresql:'].includes(database.protocol) ||
+      ['host', 'port', 'options'].some((key) => database.searchParams.has(key))
+    )
+      throw new Error('QA database URLs cannot override connection routing or session options.');
+  }
   const target = assertAllocatedTestTargetMarker({
     databaseUrl: env.DATABASE_URL,
     testDatabaseUrl: env.TEST_DATABASE_URL,
     token: env.ASSISTANT_TEST_TARGET_TOKEN,
   });
-  const db = createDb(target.databaseUrl);
+  const db = createDb(target.databaseUrl, { max: 1, readOnly: true });
   try {
     await assertAllocatedTestDatabaseOwnership(db, target);
     return { db, target };
