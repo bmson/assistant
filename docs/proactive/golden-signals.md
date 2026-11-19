@@ -134,6 +134,8 @@ With a local PostgreSQL test server and the Firestore emulator running, set `TES
 
 The current slice measures delivery timing for S13, S16, S17 and S24, and suppression after a source-matched payment for S14. It reads durable cards and ledger acknowledgments from a simulated push service. S13 measures each unpaid source on arrival day and again three days before its due date. Its same-day arrival control and S14's pre-payment setup confirm that a bill can be delivered. S24 checks an early sweep before the minimum source age, three next-morning sweeps, and a repeat sweep while the mail is still recent. Those controls and the generic-mail control are excluded from recall and precision.
 
+In the frozen timing run at `a9961850f5e99b4e848f2b0af4e889ee92987018`, both S13 invoices stayed quiet on their arrival-day sweep at +4 hours. Each produced one exact-source notice at 09:01 owner-local time three days before it was due, 11 days after arrival. The same-day control produced one notice at 13:01. In S14, the wrong receipt left the invoice due, and the matching receipt closed it without a new notice. Both storage drivers recorded 7 of 7 on-time deliveries with zero quiet violations across the five covered scenarios.
+
 The scorecard distinguishes replay validation from product results. S13's lead-time findings are recorded as product outcomes, while the fixture and same-day control remain required in CI. The scorecard lists each scenario and driver. A covered case has replay evidence with a pass or fail result. An implemented case without evidence is awaiting evidence. The remaining scenarios are unimplemented. Production recall remains unmeasured.
 
 ## Adding scenarios (H2)
