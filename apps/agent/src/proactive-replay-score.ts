@@ -44,6 +44,10 @@ export function scoreReplayCase(
   sourceEvidence: ReplayEvidence,
 ) {
   const findings: string[] = [];
+  const deliveryChecks: Array<Timing & { tick: string; kind: string; credit: number }> = [];
+  const quietChecks: Array<
+    Suppression & { tick: string; observations: number; violations: number }
+  > = [];
   let matched = 0;
   let setupMatches = 0;
   let setupDeliveries = 0;
@@ -53,13 +57,33 @@ export function scoreReplayCase(
       findings.push(`source: expected ${fact} = ${String(value)}`);
   for (const [name, expected] of Object.entries(definition.ticks)) {
     const seen = ticks.filter((tick) => tick.name === name);
+    if (expected.deliveries === 1 && expected.setup)
+      setupDeliveries += seen.reduce((sum, tick) => sum + observedDeliveries(tick), 0);
+    const deliveryCheck =
+      expected.deliveries === 1 && !expected.setup
+        ? {
+            tick: name,
+            kind: expected.kind,
+            earliestMinutes: expected.earliestMinutes,
+            latestMinutes: expected.latestMinutes,
+            credit: 0,
+          }
+        : null;
+    if (deliveryCheck) deliveryChecks.push(deliveryCheck);
+    if (expected.deliveries === 0) {
+      const violations = seen.reduce(
+        (sum, tick) => sum + Math.max(observedDeliveries(tick), tick.selected === null ? 0 : 1),
+        0,
+      );
+      quietViolations += violations;
+      quietChecks.push({ ...expected, tick: name, observations: seen.length, violations });
+    }
     if (seen.length !== 1) {
       findings.push(`${name}: expected one observation, found ${seen.length}`);
       continue;
     }
     const tick = seen[0];
     if (!tick) continue;
-    if (expected.deliveries === 1 && expected.setup) setupDeliveries += observedDeliveries(tick);
     if (
       tick.moments.length !== expected.deliveries ||
       tick.ownerNotices !== expected.deliveries ||
@@ -70,36 +94,34 @@ export function scoreReplayCase(
       findings.push(`${name}: logical delivery, sink call, or sink acknowledgment count differs`);
     }
     if (expected.deliveries === 0) {
-      quietViolations += Math.max(
-        tick.moments.length,
-        tick.ownerNotices,
-        tick.pushSinkCalls,
-        tick.selected === null ? 0 : 1,
-      );
       if (tick.selected !== null || tick.reason !== expected.reason)
         findings.push(`${name}: expected no selection with ${expected.reason}`);
       continue;
     }
-    const [moment] = tick.moments;
-    const grounded =
-      tick.selected === expected.kind &&
-      moment?.kind === expected.kind &&
-      moment.exactSource &&
-      moment.durableCard &&
-      moment.groundedCard;
-    if (!grounded)
+    const grounded = tick.moments.filter(
+      (moment) =>
+        tick.selected === expected.kind &&
+        moment.kind === expected.kind &&
+        moment.exactSource &&
+        moment.durableCard &&
+        moment.groundedCard,
+    );
+    if (grounded.length === 0)
       findings.push(`${name}: expected exact-source ${expected.kind} with a durable card`);
-    const onTime =
-      moment &&
+    const onTime = (moment: ReplayTick['moments'][number]) =>
       moment.elapsedMinutes >= expected.earliestMinutes &&
       moment.elapsedMinutes <= expected.latestMinutes;
-    if (moment && !onTime) findings.push(`${name}: durable moment outside the delivery window`);
-    if (grounded && onTime) {
-      const credit =
-        tick.pushSinkCalls === 1 && tick.pushAcknowledged && moment.durablePushAcknowledged
-          ? 1
-          : 0.5;
+    if (tick.moments.some((moment) => !onTime(moment)))
+      findings.push(`${name}: durable moment outside the delivery window`);
+    const matches = grounded.filter(onTime);
+    if (matches.length > 0) {
+      const confirmedPush =
+        tick.pushSinkCalls === 1 &&
+        tick.pushAcknowledged &&
+        matches.some((moment) => moment.durablePushAcknowledged);
+      const credit = confirmedPush ? 1 : 0.5;
       matched += credit;
+      if (deliveryCheck) deliveryCheck.credit = credit;
       if (expected.setup) {
         setupMatches += credit;
       }
@@ -120,12 +142,68 @@ export function scoreReplayCase(
     setupDeliveries,
     setupMatches,
     quietViolations,
+    quietChecks,
+    deliveryChecks,
     sourceEvidence,
     ticks: ticks.map((tick) => ({ ...tick, expected: definition.ticks[tick.name] ?? null })),
   };
 }
 
 export type ScoredReplayCase = ReturnType<typeof scoreReplayCase>;
+
+type KindEvidence = {
+  kind: string | null;
+  delivered: number;
+  expectations: Array<ScoredReplayCase['deliveryChecks'][number] & { caseId: string }>;
+  observedTiming: Array<{ caseId: string; tick: string; elapsedMinutes: number }>;
+};
+
+// The caller supplies the observed benchmark cases, excluding the generic control.
+export function scoreReplayKinds(cases: readonly ScoredReplayCase[]) {
+  const kinds = new Map<string | null, KindEvidence>();
+  const forKind = (kind: string | null) => {
+    let row = kinds.get(kind);
+    if (!row) {
+      row = { kind, delivered: 0, expectations: [], observedTiming: [] };
+      kinds.set(kind, row);
+    }
+    return row;
+  };
+  for (const row of cases) {
+    for (const check of row.deliveryChecks)
+      forKind(check.kind).expectations.push({ ...check, caseId: row.id });
+    for (const tick of row.ticks) {
+      if (tick.expected?.deliveries === 1 && tick.expected.setup) continue;
+      for (const moment of tick.moments) {
+        const kind = forKind(moment.kind);
+        kind.delivered++;
+        kind.observedTiming.push({
+          caseId: row.id,
+          tick: tick.name,
+          elapsedMinutes: moment.elapsedMinutes,
+        });
+      }
+      const excess = observedDeliveries(tick) - tick.moments.length;
+      if (excess > 0) forKind(null).delivered += excess;
+    }
+  }
+  return [...kinds.values()]
+    .sort((a, b) => (a.kind ?? '').localeCompare(b.kind ?? ''))
+    .map((row) => {
+      const expected = row.expectations.length;
+      const matched = row.expectations.reduce((sum, check) => sum + check.credit, 0);
+      const misses = row.expectations.filter((check) => check.credit === 0).length;
+      return {
+        ...row,
+        expected,
+        matched,
+        misses,
+        falsePositives: row.delivered - (expected - misses),
+        recall: expected ? matched / expected : null,
+        precision: row.delivered ? matched / row.delivered : null,
+      };
+    });
+}
 
 export function writeReplayEvidence(driver: ReplayDriver, cases: readonly ScoredReplayCase[]) {
   const directory = process.env.ASSISTANT_REPLAY_SCORE_TEMP;

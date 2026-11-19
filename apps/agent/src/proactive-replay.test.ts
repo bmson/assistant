@@ -35,7 +35,12 @@ import {
 } from '../../../packages/modules/src/google/email-sync.js';
 import { createIsolatedTestDatabase } from './isolated-test-database.fixture.js';
 import { replayCardGrounded, replayCases, teacherMessages } from './proactive-replay-cases.js';
-import { type ReplayTick, scoreReplayCase, writeReplayEvidence } from './proactive-replay-score.js';
+import {
+  type ReplayTick,
+  scoreReplayCase,
+  scoreReplayKinds,
+  writeReplayEvidence,
+} from './proactive-replay-score.js';
 
 const RECEIVED = new Date('2026-11-18T23:01:00Z');
 const at = (minutes: number) => new Date(RECEIVED.getTime() + minutes * 60_000);
@@ -940,7 +945,39 @@ describe('frozen proactive replay', () => {
               ]),
             );
           }
-          expect(scores().filter((item) => !item.passed && item.id !== billLeadCase)).toEqual([]);
+          const scored = scores();
+          expect(scored.filter((item) => !item.passed && item.id !== billLeadCase)).toEqual([]);
+          expect(scoreReplayKinds(scored.filter(({ id }) => id === cancellationId))).toMatchObject([
+            {
+              kind: 'calendar-cancelled',
+              expected: 1,
+              delivered: 1,
+              matched: 1,
+              recall: 1,
+              precision: 1,
+              expectations: [{ earliestMinutes: 0, latestMinutes: 20, credit: 1 }],
+              observedTiming: [{ elapsedMinutes: 19 }],
+            },
+          ]);
+          const paid = scored.filter(({ id }) => id === billId);
+          expect(scoreReplayKinds(paid)).toEqual([]);
+          expect(paid).toMatchObject([
+            {
+              sourceEvidence: {
+                beforePayment: 'due',
+                afterWrongReceipt: 'due',
+                afterPayment: 'paid',
+                exactReceipt: true,
+              },
+              quietViolations: 0,
+              quietChecks: [
+                'paid pulse',
+                'out-of-order paid pulse',
+                'paid morning briefing',
+                'payment wins admission race',
+              ].map((tick) => ({ tick, observations: 1, violations: 0 })),
+            },
+          ]);
         } finally {
           try {
             writeReplayEvidence(driver, scores());
