@@ -6,6 +6,8 @@ import {
 export const INVENTORY_STAGES = [
   'arguments',
   'source_capability',
+  'archived_runtime_evidence',
+  'archived_runtime_observation',
   'source_manifest',
   'protected_context',
   'credential_file',

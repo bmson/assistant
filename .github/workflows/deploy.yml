@@ -40,6 +40,14 @@ on:
         description: Signed recovery review for the exact prebuilt API 3 pair
         required: false
         type: string
+      archive_maintenance_run_id:
+        description: Exact protected maintenance run that established the disabled archive bootstrap
+        required: false
+        type: string
+      archive_restore_proof:
+        description: Independent signed archive restore target review for this closed bootstrap
+        required: false
+        type: string
       native_web_qualification:
         description: Read-only native web qualification; no image, release, delivery hold or cleanup
         required: false
@@ -183,6 +191,22 @@ jobs:
           ESTIMATED_COST_RELEASE_PROFILE_JSON: ${{ inputs.estimated_cost_release_profile }}
           ESTIMATED_COST_DRAIN_PACKET_JSON: ${{ inputs.estimated_cost_drain_packet }}
         run: bash infra/gcp/verify-build-only-context.sh
+      - name: Validate paired archive promotion inputs before authentication
+        if: inputs.archive_maintenance_run_id != '' || inputs.archive_restore_proof != ''
+        env:
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+          RELEASE_PREBUILT_RUN_ID: ${{ inputs.prebuilt_run_id }}
+          ARCHIVE_MAINTENANCE_RUN_ID: ${{ inputs.archive_maintenance_run_id }}
+          ARCHIVE_RESTORE_PROOF: ${{ inputs.archive_restore_proof }}
+          BOOTSTRAP_SNAPSHOT: ${{ inputs.bootstrap_snapshot }}
+          BOOTSTRAP_SNAPSHOT_SHA256: ${{ inputs.bootstrap_snapshot_sha256 }}
+          API3_RECOVERY_PROOF: ${{ inputs.api3_recovery_proof }}
+          REQUESTED_PERSISTENCE: ${{ inputs.persistence }}
+          REQUESTED_COMPONENTS: ${{ inputs.components }}
+          NATIVE_WEB_QUALIFICATION: ${{ inputs.native_web_qualification }}
+          BUILD_ONLY: ${{ inputs.build_only }}
+          BREAK_GLASS: ${{ inputs.break_glass }}
+        run: node infra/gcp/verify-prebuilt-firestore.mjs validate-archive-context "$RELEASE_SHA"
       # Manual releases use the same exact-source gate as automatic releases.
       # The explicit, audited break-glass input is only for a deliberate
       # exception; dispatching this privileged workflow from another branch is
@@ -473,6 +497,7 @@ jobs:
       ESTIMATED_COST_DRAIN_PACKET_JSON: ${{ inputs.estimated_cost_drain_packet }}
       RELEASE_PREBUILT_RUN_ID: ${{ inputs.prebuilt_run_id }}
       API3_RECOVERY_PROOF: ${{ inputs.api3_recovery_proof }}
+      ARCHIVE_MAINTENANCE_RUN_ID: ${{ inputs.archive_maintenance_run_id }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -546,6 +571,31 @@ jobs:
         with:
           cosign-release: v3.1.3
           install-dir: ${{ runner.temp }}/estimated-cost-cosign
+      - name: Verify the exact prior archive maintenance observation
+        if: inputs.archive_maintenance_run_id != ''
+        id: archive_observation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER_RELEASE_RESTORE_TARGET_PROOF: ${{ inputs.archive_restore_proof }}
+          IMAGE_TAG: ${{ needs.plan.outputs.sha }}
+          RELEASE_COMPONENTS: ${{ needs.plan.outputs.components }}
+        run: pnpm exec tsx scripts/owner-release-archive-handoff.ts --artifact
+      - name: Download the exact archive maintenance observation
+        if: inputs.archive_maintenance_run_id != ''
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          github-token: ${{ github.token }}
+          repository: bmson/assistant
+          run-id: ${{ inputs.archive_maintenance_run_id }}
+          artifact-ids: ${{ steps.archive_observation.outputs.artifact_id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/archive-maintenance
+      - name: Install the fixed archived-runtime signature verifier
+        if: inputs.archive_maintenance_run_id != ''
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: v3.1.4
+          install-dir: ${{ github.workspace }}/.artifacts/archived-runtime-tools
       - name: Verify and pin the signed prebuilt Firestore images
         if: inputs.prebuilt_run_id != ''
         env:
@@ -615,12 +665,33 @@ jobs:
           else
             echo 'basic5=false' >> "$GITHUB_OUTPUT"
           fi
+      - name: Bind the maintained native pair and archive before any delivery mutation
+        if: inputs.archive_maintenance_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER_RELEASE_RESTORE_TARGET_PROOF: ${{ inputs.archive_restore_proof }}
+          ARCHIVE_ARTIFACT_ID: ${{ steps.archive_observation.outputs.artifact_id }}
+          ARCHIVE_FIRESTORE_PAIR: ${{ steps.release_path.outputs.firestore_pair }}
+          IMAGE_TAG: ${{ needs.plan.outputs.sha }}
+          RELEASE_COMPONENTS: ${{ needs.plan.outputs.components }}
+          GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          GCP_DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+        run: |
+          [[ "$ARCHIVE_FIRESTORE_PAIR" == true ]]
+          pnpm exec tsx scripts/owner-release-archive-handoff.ts --prepare
+          # Expose the compact reviewed input only to this opted-in release.
+          if [[ "$OWNER_RELEASE_RESTORE_TARGET_PROOF" == *$'\n'* || "$OWNER_RELEASE_RESTORE_TARGET_PROOF" == *$'\r'* ]]; then
+            exit 2
+          fi
+          echo "OWNER_RELEASE_RESTORE_TARGET_PROOF=$OWNER_RELEASE_RESTORE_TARGET_PROOF" >> "$GITHUB_ENV"
       - name: Check declared basic editor prerequisites before delivery guard mutations
         if: steps.release_path.outputs.firestore_pair == 'true'
         env:
           GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           GCP_DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
           RELEASE_SHA: ${{ needs.plan.outputs.sha }}
+          IMAGE_TAG: ${{ needs.plan.outputs.sha }}
+          RELEASE_COMPONENTS: ${{ needs.plan.outputs.components }}
         run: |
           [[ "$(git rev-parse HEAD)" == "$RELEASE_SHA" ]]
           pnpm exec tsx scripts/owner-editor-release-inventory.ts --release-preflight
@@ -760,8 +831,30 @@ jobs:
             ${{ runner.temp }}/owner-bootstrap-agent-successor-observed_exact_successor.json
           if-no-files-found: ignore
           retention-days: 14
+      - name: Archive reviewed restore decision journal
+        if: always() && steps.release_path.outputs.firestore_pair == 'true'
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        with:
+          name: owner-release-recovery-${{ needs.plan.outputs.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/owner-release-recovery-${{ github.run_id }}-${{ github.run_attempt }}/start.json
+            ${{ runner.temp }}/owner-release-recovery-${{ github.run_id }}-${{ github.run_attempt }}/admission.json
+            ${{ runner.temp }}/owner-release-recovery-${{ github.run_id }}-${{ github.run_attempt }}/outcome.json
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Archive the protected deployment handoff identity
+        if: always() && inputs.archive_maintenance_run_id != ''
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        with:
+          name: owner-release-archive-handoff-${{ needs.plan.outputs.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/owner-release-archive-handoff.json
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Remove runner-local private archived runtime inputs
+        if: always() && inputs.archive_maintenance_run_id != ''
+        run: /usr/bin/rm -rf -- "$RUNNER_TEMP/owner-archived-runtime-pack" "$RUNNER_TEMP/archive-maintenance"
       - name: Keep only the current deployment
-        if: vars.CURRENT_ONLY_CLEANUP == 'true'
+        if: vars.CURRENT_ONLY_CLEANUP == 'true' && inputs.archive_maintenance_run_id == ''
         run: >-
           python3 infra/gcp/cleanup-current.py
           --project "$GCP_PROJECT" --region "$GCP_REGION"
@@ -772,6 +865,7 @@ jobs:
       github.event_name == 'workflow_dispatch' &&
       inputs.native_web_qualification == 'read_only' && inputs.build_only != true &&
       inputs.prebuilt_run_id == '' && inputs.api3_recovery_proof == '' &&
+      inputs.archive_maintenance_run_id == '' && inputs.archive_restore_proof == '' &&
       github.ref == 'refs/heads/main' && github.run_attempt == '1' &&
       github.workflow_ref == 'bmson/assistant/.github/workflows/deploy.yml@refs/heads/main' &&
       github.workflow_sha == github.sha &&

@@ -49,7 +49,20 @@ export ASSISTANT_RELEASE_WRITES_PAUSED
 # pair and selected candidate declare compatible API and Firestore schema ranges.
 RELEASE_DRAINED_API_TRANSITION=false
 echo "Checking live/new schema and API compatibility before Firestore release mutations"
-if ! release_preflight_compatibility "$RELEASE_COMPONENTS"; then
+if [[ -n "${OWNER_RELEASE_RESTORE_TARGET_PROOF+x}" ]]; then
+  if [[ "$RELEASE_COMPONENTS" != agent,web || -z "${RELEASE_PREBUILT_RUN_ID:-}" ||
+        "$(release_reviewed_snapshot_kind "$TAG")" != disabled-bootstrap ||
+        ( "$#" == 0 && "${SKIP_IMAGE_BUILD:-false}" != true ) ]]; then
+    echo 'Reviewed archive transition requires the prebuilt Firestore pair and exact disabled bootstrap.' >&2
+    exit 2
+  fi
+  # An opted-in archive release must run the archive gate on every invocation.
+  # Ordinary compatibility is not an alternative for an explicit restore request.
+  RELEASE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+  (cd "$RELEASE_ROOT" && IMAGE_TAG="$TAG" pnpm exec tsx scripts/owner-release-archive-handoff.ts --verify &&
+    IMAGE_TAG="$TAG" pnpm exec tsx scripts/owner-release-api-transition.ts) || exit 1
+  RELEASE_DRAINED_API_TRANSITION=true
+elif ! release_preflight_compatibility "$RELEASE_COMPONENTS"; then
   if [[ "$RELEASE_COMPONENTS" == agent,web && -n "${OWNER_RELEASE_BOOTSTRAP_RECEIPT:-}" &&
         "$(release_reviewed_snapshot_kind "$TAG")" == disabled-bootstrap ]]; then
     RELEASE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -424,6 +437,10 @@ if step "Verifying agent configuration" verify_agent_configuration; then
   fi
 else
   record_failure "Service promotion skipped — agent configuration unverified"
+  if [[ -n "${OWNER_RELEASE_RESTORE_TARGET_PROOF+x}" ]]; then
+    echo 'Reviewed release stopped before staging; delivery must remain held.' >&2
+    exit "$RELEASE_STAGED_OBSERVATION_REQUIRED"
+  fi
 fi
 
 if [[ "$RELEASE_COMPONENTS" == agent,web ]]; then

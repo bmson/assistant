@@ -65,6 +65,36 @@ const env = {
 };
 const contract = { components: { web: { ownerEditorV1: [...BASIC_EDITOR_COMMANDS] } } };
 describe('protected V1 operator entrypoint and private packet envelope', () => {
+  it('keeps the especially bound observation out of the ordinary metadata mutation path', () => {
+    const workflow = readFileSync('.github/workflows/owner-editor-v1-maintenance.yml', 'utf8');
+    const source = readFileSync('scripts/owner-editor-v1-maintenance.ts', 'utf8');
+    expect(workflow).toMatch(
+      /name: Execute bounded metadata operation\s+if: inputs.mode != 'before-maintenance'/,
+    );
+    expect(workflow).toMatch(/name: owner-release-before-maintenance-\$\{\{ github.run_id \}\}-1/);
+    expect(workflow).not.toMatch(/path: .*owner-archived-runtime-pack/);
+    const observe = source.indexOf(
+      "if (mode === 'before-maintenance') return observeBeforeMaintenance",
+    );
+    expect(observe).toBeGreaterThan(0);
+    expect(observe).toBeLessThan(source.indexOf('const store = createInstallationStore'));
+    expect(() =>
+      verifyOperatorSource(
+        {
+          ...env,
+          OWNER_EDITOR_MAINTENANCE_MODE: 'before-maintenance',
+          GITHUB_JOB: 'maintenance',
+          GITHUB_EVENT_NAME: 'workflow_dispatch',
+          GITHUB_WORKFLOW_SHA: sha,
+          OWNER_RELEASE_BEFORE_MAINTENANCE_INTENT: 'unsigned-fixture',
+        },
+        sha,
+        contract,
+        true,
+      ),
+    ).toThrow();
+  });
+
   it('round-trips an encrypted bounded packet without exposing target or epoch in the artifact', () => {
     const p = packet(),
       encrypted = encryptMaintenancePacket(p, keys.publicKey),

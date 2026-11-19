@@ -409,6 +409,9 @@ release_job_image() {
 }
 
 release_restore_jobs() {
+  # The opted-in path plans recovery from a fresh readback; never blindly
+  # reverse a worker update whose response may have been lost.
+  [[ -z "${OWNER_RELEASE_RESTORE_TARGET_PROOF+x}" ]] || return 1
   local job image failed=false
   while IFS='|' read -r job image; do
     [[ -n "$job" && -n "$image" ]] || continue
@@ -459,6 +462,12 @@ release_validate_basic_editor_preflight_context() {
   basic_editor="$(release_basic_editor_forward_only)" || return 1
   node "${BASH_SOURCE[0]%/*}/estimated-cost-release-config.mjs" --preflight || return 2
   if [[ -n "${OWNER_RELEASE_BOOTSTRAP_RECEIPT:-}" ]]; then release_reviewed_snapshot_kind "$source_sha" >/dev/null || return 2; fi
+  if [[ -n "${OWNER_RELEASE_RESTORE_TARGET_PROOF+x}" &&
+        ( "$basic_editor" != true || -z "${OWNER_RELEASE_RESTORE_TARGET_PROOF:-}" ||
+          -z "${OWNER_RELEASE_BOOTSTRAP_RECEIPT:-}" || "${GITHUB_EVENT_NAME:-}" != workflow_dispatch ) ]]; then
+    echo '  Reviewed restore target requires the protected paired Firestore bootstrap.' >&2
+    return 2
+  fi
   [[ "$basic_editor" == true ]] || return 0
   case "$selected" in full|agent,web|web,agent) selected=agent,web ;; esac
   if [[ "$selected" != agent,web ]]; then
@@ -505,7 +514,86 @@ release_staged_observation_required() {
   return "$RELEASE_STAGED_OBSERVATION_REQUIRED"
 }
 
+release_restore_target_check() {
+  local stage="$1" expected="$2" root output
+  root="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)" || return 1
+  output="$(cd "$root" && IMAGE_TAG="$TAG" pnpm exec tsx scripts/owner-release-restore-target.ts --verify "$stage" 2>/dev/null)" || return 1
+  [[ "${#output}" -le 8192 ]] || return 1
+  node -e '
+    const [raw,source,runId,attempt,decision]=process.argv.slice(1);
+    const x=JSON.parse(raw);
+    if (!x || typeof x!=="object" || Array.isArray(x) || Object.keys(x).sort().join(",")!=="attempt,decision,format,runId,source" ||
+        x.format!==1 || x.source!==source || x.runId!==runId || x.attempt!==attempt || x.decision!==decision) process.exit(1);
+  ' "$output" "$TAG" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$expected" 2>/dev/null
+}
+
+release_restore_target_write() {
+  local file="$1" phase="$2" decision="$3"
+  node -e '
+    const fs=require("node:fs"),path=require("node:path"),crypto=require("node:crypto");
+    const [file,phase,decision,source,runId,attempt]=process.argv.slice(1);
+    const proofSha256=crypto.createHash("sha256").update(process.env.OWNER_RELEASE_RESTORE_TARGET_PROOF??"").digest("hex");
+    const fd=fs.openSync(file,"wx",0o600);
+    try {
+      fs.writeFileSync(fd,JSON.stringify({format:1,source,runId,attempt,phase,decision,proofSha256,mutationAuthorized:false,observationRequired:phase==="interrupted"})+"\n");
+      fs.fsyncSync(fd);
+    } finally { fs.closeSync(fd); }
+    for (const dir of [path.dirname(file),path.dirname(path.dirname(file))]) {
+      const d=fs.openSync(dir,"r");
+      try { fs.fsyncSync(d); } finally { fs.closeSync(d); }
+    }
+  ' "$file" "$phase" "$decision" "$TAG" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" 2>/dev/null
+}
+
+release_restore_target_cross_admission() {
+  [[ -n "${restore_journal:-}" ]] || return 0
+  if [[ "$restore_admission_attempted" == true ]]; then
+    release_restore_target_check before_web_resume verified
+    return $?
+  fi
+  release_restore_target_check before_admission verified || return 1
+  # A failed or partial local seal is uncertain too; never select API 1 then.
+  restore_admission_attempted=true
+  release_restore_target_write "$restore_journal/admission.json" admission_possible api3_forward_only
+}
+
 release_staged_services() {
+  if [[ -z "${OWNER_RELEASE_RESTORE_TARGET_PROOF+x}" ]]; then
+    release_staged_services_body
+    return $?
+  fi
+
+  local restore_journal restore_admission_attempted=false stage decision
+  if ! release_validate_basic_editor_context "${RELEASE_COMPONENTS:-agent,web}" firestore "$TAG" ||
+     [[ ! -d "${RUNNER_TEMP:-}" || -L "${RUNNER_TEMP:-}" ]] ||
+     ! release_restore_target_check before_mutation verified; then
+    release_staged_observation_required 'Reviewed restore target is unproven.'
+    return $?
+  fi
+  restore_journal="$RUNNER_TEMP/owner-release-recovery-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+  if ! mkdir -m 700 -- "$restore_journal" ||
+     ! release_restore_target_write "$restore_journal/start.json" started verified; then
+    release_staged_observation_required 'Recovery journal unavailable or already exists; do not restart this attempt.'
+    return $?
+  fi
+  if release_staged_services_body; then return 0; fi
+
+  if [[ "$restore_admission_attempted" == true ]]; then
+    stage=post_admission_forward
+    decision=api3_forward_only
+  else
+    stage=pre_admission_restore
+    decision=rehydrate_original_children
+  fi
+  if ! release_restore_target_check "$stage" "$decision"; then decision=observation_required; fi
+  if ! release_restore_target_write "$restore_journal/outcome.json" interrupted "$decision"; then
+    release_staged_observation_required 'Recovery outcome could not be recorded.'
+    return $?
+  fi
+  release_staged_observation_required 'Release interrupted; use the run-bound recovery outcome for read-only reconciliation.'
+}
+
+release_staged_services_body() {
   local selected="${RELEASE_COMPONENTS:-agent,web}" traffic_tag_suffix staging_tag
   traffic_tag_suffix="$(release_traffic_tag_suffix)" || return $?
   staging_tag="candidate-${traffic_tag_suffix}"
@@ -557,6 +645,10 @@ release_staged_services() {
   fi
   if [[ "$bootstrap_disabled" == true && "$RELEASE_AGENT_API" == 3 && "$RELEASE_WEB_API" == 3 ]]; then
     staged_api3_bootstrap=true
+  fi
+  if [[ -n "${restore_journal:-}" && "$staged_api3_bootstrap" != true ]]; then
+    echo '  Reviewed restore target requires the API 3 Firestore transition.' >&2
+    return 1
   fi
 
   web_digest="$(release_component_digest web)" || return 1
@@ -832,6 +924,7 @@ release_staged_services() {
     if [[ "$promoted_ok" == true ]]; then
       # The successor's zero-percent tag is reachable before promotion. Seal
       # admission before its creation; an unknown result can never resume old code.
+      release_restore_target_cross_admission || return 1
       basic_editor_admission_possible=true
       if ! release_bootstrap_scaling --bootstrap-agent-resume agent "$paused_agent_revision" "$TAG" "$manifest_path" "$manifest_sha" "$staging_tag"; then
         promoted_ok=false
@@ -904,6 +997,7 @@ release_staged_services() {
           promoted_ok=false
         fi
         if [[ "$promoted_ok" == true && "$basic_editor_forward_only" == true ]]; then
+          release_restore_target_cross_admission || return 1
           basic_editor_admission_possible=true
         fi
         if [[ "$promoted_ok" == true && "$basic_editor_forward_only" == true ]]; then
@@ -1009,6 +1103,7 @@ release_staged_services() {
   fi
 
   if [[ "$promoted_ok" != true ]]; then
+    [[ -z "${restore_journal:-}" ]] || return 1
     if [[ "$bootstrap_disabled" == true && "$basic_editor_admission_possible" != true ]]; then
       # Re-establish canonical admission closure before any legacy traffic restoration.
       # Unknown scaling outcomes stop here; no blind retry or old-runtime resume.

@@ -43,6 +43,20 @@ export function verifyReuseContext(env, source) {
   );
 }
 
+export function verifyArchivePromotionContext(env, source) {
+  verifyReuseContext(env, source);
+  check(
+    RUN_ID.test(env.ARCHIVE_MAINTENANCE_RUN_ID ?? '') &&
+      env.ARCHIVE_MAINTENANCE_RUN_ID !== env.GITHUB_RUN_ID &&
+      env.ARCHIVE_MAINTENANCE_RUN_ID !== env.RELEASE_PREBUILT_RUN_ID &&
+      env.ARCHIVE_RESTORE_PROOF?.length > 0 &&
+      env.ARCHIVE_RESTORE_PROOF.length <= 16_384 &&
+      env.BOOTSTRAP_SNAPSHOT?.length > 0 &&
+      /^[a-f0-9]{64}$/.test(env.BOOTSTRAP_SNAPSHOT_SHA256 ?? '') &&
+      env.API3_RECOVERY_PROOF?.length > 0,
+  );
+}
+
 export function verifyBuildRun(run, listing, source, runId) {
   check(
     run &&
@@ -156,6 +170,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     const env = process.env;
     const [mode, source, artifactRoot, output] = process.argv.slice(2);
     if (mode === 'validate-context') verifyReuseContext(env, source);
+    else if (mode === 'validate-archive-context') verifyArchivePromotionContext(env, source);
     else if (mode === 'verify-provenance') verifyBuildProvenance(env, source);
     else if (mode === 'verify' && artifactRoot && output)
       verifyPrebuilt(env, source, artifactRoot, output);

@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { protectedRecoveryReview } from '../infra/gcp/api3-recovery-proof.mjs';
 import { estimatedCostMetadataRead } from './estimated-cost-release-native-read.js';
 import { reviewedEstimatedCostReleaseProfile } from './estimated-cost-release-profile.js';
+import { loadReviewedArchivedRuntimePack } from './owner-archived-runtime-input.js';
 import { verifyPreAuthEnvironment } from './owner-editor-release-inventory.js';
 import { verifyBootstrapRevisionTemplate } from './owner-release-bootstrap.js';
 import {
@@ -14,6 +15,15 @@ import {
   verifyCurrentSnapshot,
 } from './owner-release-current-snapshot.js';
 import { createImageResolutionReader } from './owner-release-image-resolution.js';
+import {
+  assertRestoreTargetReviewFresh,
+  protectedRestoreTargetReview,
+} from './owner-restore-target-review.js';
+import {
+  recheckArchivedRestoreTargets,
+  registerReviewedArchivedOriginal,
+  verifyArchivedOriginalNativePair,
+} from './owner-restore-target-verify.js';
 import { verifyOperatorOwnedHold } from './owner-web-release-operator-hold.js';
 import { protectedWebTagCredential } from './owner-web-tag-cloud.js';
 import { tagHash } from './owner-web-tag-retirement.js';
@@ -119,7 +129,7 @@ export function verifyDrainedApiTransition(
   }
 }
 
-export async function verifyProductionApiTransition() {
+export async function verifyProductionApiTransition(confirmPreAdmission = false) {
   const env = process.env;
   verifyPreAuthEnvironment(env);
   check(env.GITHUB_EVENT_NAME === 'workflow_dispatch');
@@ -134,6 +144,12 @@ export async function verifyProductionApiTransition() {
   verifyTransitionCandidateContract(
     JSON.parse(readFileSync('infra/gcp/release-contracts.json', 'utf8')),
   );
+  // An explicitly empty or malformed restore request must never use the ordinary path.
+  const archived = env.OWNER_RELEASE_RESTORE_TARGET_PROOF !== undefined;
+  if (archived || confirmPreAdmission) check(env.OWNER_RELEASE_RESTORE_TARGET_PROOF);
+  const pack = archived ? await loadReviewedArchivedRuntimePack() : undefined;
+  const restore = pack ? protectedRestoreTargetReview(env, current, pack.sha256) : undefined;
+  if (pack) registerReviewedArchivedOriginal(current, pack);
   await verifyOperatorOwnedHold({
     source: current.source,
     runId: env.GITHUB_RUN_ID as string,
@@ -142,18 +158,37 @@ export async function verifyProductionApiTransition() {
   const token = await protectedWebTagCredential();
   const deadline = Date.now() + 60_000;
   const read = estimatedCostMetadataRead(token, deadline);
-  const resolveImage = createImageResolutionReader(token, fetch, deadline);
+  const resolveImage = pack ? undefined : createImageResolutionReader(token, fetch, deadline);
   const bindings = current.services;
   async function observe(role: Role) {
     const { image, service, revision } = bindings[role];
-    await resolveImage(image);
+    await resolveImage?.(image);
     return {
       service: await read(RUN_ROOT + service),
       revision: await read(`${RUN_ROOT}${service}/revisions/${revision}`),
     };
   }
-  const [agent, web] = await Promise.all([observe('agent'), observe('web')]);
-  verifyDrainedApiTransition(current, { agent, web }, profile);
+  const observePair = async () => {
+    const [agent, web] = await Promise.all([observe('agent'), observe('web')]);
+    const pair = { agent, web };
+    verifyDrainedApiTransition(current, pair, profile);
+    if (pack) verifyArchivedOriginalNativePair(current, pack, pair);
+    return pair;
+  };
+  const pair = await observePair();
+  if (pack && restore) {
+    assertRestoreTargetReviewFresh(restore);
+    await recheckArchivedRestoreTargets(token, restore.targets, pack.roles, fetch, deadline);
+    const reobserved = await observePair();
+    check(bootstrapDigest(pair) === bootstrapDigest(reobserved));
+    if (confirmPreAdmission) {
+      const { assertResumeRevisionsAbsent } = await import('./owner-release-resume-absence.js');
+      await assertResumeRevisionsAbsent(current, restore.runId, token, deadline);
+    }
+    const confirmed = protectedRestoreTargetReview(env, current, pack.sha256);
+    check(bootstrapDigest(confirmed) === bootstrapDigest(restore));
+    assertRestoreTargetReviewFresh(confirmed);
+  }
   // The review must still be current and cover the same images after the provider reads.
   check(bootstrapDigest(protectedRecoveryReview(env, current.source)) === recoveryReview);
 }

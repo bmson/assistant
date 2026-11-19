@@ -711,9 +711,107 @@ export function requireBasicEditorReadiness(receipt: unknown, current?: Bootstra
   )
     throw new Error('basic editor release prerequisites unproven');
 }
+function inventoryCredentialContext(mark: InventoryStageMarker) {
+  mark('credential_file');
+  const identity = verifyWifEnvironment(process.env, (file) => {
+    const stat = lstatSync(file);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 32768)
+      throw new Error('invalid credential file');
+    return JSON.parse(readFileSync(file, 'utf8'));
+  });
+  mark('cli_context');
+  const runnerTemp = process.env.RUNNER_TEMP;
+  if (!runnerTemp) throw new Error('invalid context');
+  const cloudConfig = resolve(runnerTemp, 'owner-editor-inventory-gcloud');
+  if (relative(resolve(runnerTemp), cloudConfig).startsWith('..'))
+    throw new Error('invalid context');
+  const childEnv = {
+    PATH: process.env.PATH,
+    HOME: process.env.HOME,
+    CLOUDSDK_CONFIG: cloudConfig,
+    CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: identity.file,
+    CLOUDSDK_CORE_PROJECT: PROJECT,
+    CLOUDSDK_CORE_DISABLE_PROMPTS: '1',
+    CLOUDSDK_COMPONENT_MANAGER_DISABLE_UPDATE_CHECK: 'true',
+  };
+  return { identity, childEnv };
+}
+
+async function observeArchivedOriginal(mark: InventoryStageMarker) {
+  mark('protected_context');
+  verifyPrerequisitesBinding(process.env);
+  mark('archived_runtime_evidence');
+  const { loadReviewedArchivedRuntimePack } = await import('./owner-archived-runtime-input.js');
+  const { observeArchivedRuntimePair } = await import('./owner-archived-runtime-native.js');
+  const hosted = process.env.OWNER_ARCHIVED_RUNTIME_INTAKE !== undefined;
+  const intake = hosted ? await import('./owner-archived-runtime-hosted.js') : undefined;
+  if (hosted && process.env.OWNER_ARCHIVED_RUNTIME_INTAKE !== 'hosted')
+    throw new Error('invalid archived runtime intake mode');
+  if (intake) intake.verifyArchiveObjectBinding(process.env);
+  const localPack = intake ? undefined : await loadReviewedArchivedRuntimePack();
+  const { childEnv } = inventoryCredentialContext(mark);
+  mark('access_token');
+  const { stdout } = await exec('gcloud', ['auth', 'print-access-token', '--quiet'], {
+    env: childEnv,
+    timeout: 8000,
+    maxBuffer: 16384,
+    killSignal: 'SIGKILL',
+  });
+  const token = stdout.trim();
+  async function observe(pack: Awaited<ReturnType<typeof loadReviewedArchivedRuntimePack>>) {
+    mark('archived_runtime_observation');
+    return {
+      packSha256: pack.sha256,
+      observation: await observeArchivedRuntimePair(
+        pack.nativeBinding,
+        pack.roles,
+        createReadOnlyGet(token, Date.now() + 60_000),
+      ),
+    };
+  }
+  mark('archived_runtime_evidence');
+  const observation = intake
+    ? await intake.withHostedArchivedRuntimePack(process.env, token, async (pack, binding) => ({
+        ...(await observe(pack)),
+        archiveObject: binding,
+      }))
+    : localPack
+      ? await observe(localPack)
+      : undefined;
+  if (!observation) throw new Error('invalid archive input');
+  const receipt = {
+    format: 1,
+    kind: 'archived-original-runtime-observation',
+    ...observation,
+    workflowSource: process.env.GITHUB_SHA,
+    workflowRun: process.env.GITHUB_RUN_ID,
+    observedAt: new Date().toISOString(),
+    maintenanceAuthorized: false,
+    recoveryPairQualified: false,
+  };
+  mark('receipt_write');
+  writeFileSync('owner-archived-runtime-observation.json', `${JSON.stringify(receipt)}\n`, {
+    flag: 'wx',
+    mode: 0o600,
+  });
+}
+
 async function main(mark: InventoryStageMarker) {
   mark('arguments');
   const mode = process.argv[2];
+  if (process.argv.length === 3 && mode === '--verify-archived-source') {
+    mark('protected_context');
+    verifyPrerequisitesBinding(process.env);
+    mark('archived_runtime_evidence');
+    if (process.env.OWNER_ARCHIVED_RUNTIME_INTAKE !== 'hosted')
+      throw new Error('invalid archived runtime intake mode');
+    const { verifyArchiveObjectBinding } = await import('./owner-archived-runtime-hosted.js');
+    verifyArchiveObjectBinding(process.env);
+    return;
+  }
+  if (process.argv.length === 3 && mode === '--observe-archived-runtime') {
+    return observeArchivedOriginal(mark);
+  }
   if (
     process.argv.length !== 3 ||
     !['--verify-source', '--collect', '--release-preflight'].includes(mode ?? '')
@@ -750,29 +848,14 @@ async function main(mark: InventoryStageMarker) {
     process.env,
     candidateSource ?? process.env.GITHUB_SHA ?? '',
   );
+  if (releasePreflight) {
+    const { preloadArchivedOriginalForProtectedRelease } = await import(
+      './owner-restore-target-verify.js'
+    );
+    await preloadArchivedOriginalForProtectedRelease(process.env, candidateSource);
+  }
   const started = Date.now();
-  mark('credential_file');
-  const identity = verifyWifEnvironment(process.env, (file) => {
-    const stat = lstatSync(file);
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 32768)
-      throw new Error('invalid credential file');
-    return JSON.parse(readFileSync(file, 'utf8'));
-  });
-  mark('cli_context');
-  const runnerTemp = process.env.RUNNER_TEMP;
-  if (!runnerTemp) throw new Error('invalid context');
-  const cloudConfig = resolve(runnerTemp, 'owner-editor-inventory-gcloud');
-  if (relative(resolve(runnerTemp), cloudConfig).startsWith('..'))
-    throw new Error('invalid context');
-  const childEnv = {
-    PATH: process.env.PATH,
-    HOME: process.env.HOME,
-    CLOUDSDK_CONFIG: cloudConfig,
-    CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: identity.file,
-    CLOUDSDK_CORE_PROJECT: PROJECT,
-    CLOUDSDK_CORE_DISABLE_PROMPTS: '1',
-    CLOUDSDK_COMPONENT_MANAGER_DISABLE_UPDATE_CHECK: 'true',
-  };
+  const { identity, childEnv } = inventoryCredentialContext(mark);
   let retainedBytes = 0;
   const command = async (args: readonly string[], maxBuffer = LIMIT / 2) => {
     const remaining = started + 60000 - Date.now();

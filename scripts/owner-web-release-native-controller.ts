@@ -6,6 +6,7 @@ import {
 import { googleCalendarReleaseCallback } from '../infra/gcp/google-calendar-release-config.mjs';
 import { createImageResolutionReader } from './owner-release-image-resolution.js';
 import { matchesNativeServiceDigest } from './owner-release-native-service-defaults.js';
+import { preloadArchivedOriginalForProtectedRelease } from './owner-restore-target-verify.js';
 /** Fixed BASIC5 paired web lifecycle controller; caller supplies protected transport and operator hold verifier. */
 
 import { nativeWebCreationFixtureClient } from './owner-web-release-creation-client.js';
@@ -48,6 +49,7 @@ const NATIVE_ROOT = 'https://run.googleapis.com/v2/';
 export async function protectedNativeReleaseDependencies(
   receipts: Receipts,
 ): Promise<FixtureDependencies> {
+  const archived = await preloadArchivedOriginalForProtectedRelease();
   const token = await protectedWebTagCredential();
   const resolveImage = createImageResolutionReader(token);
   // Bootstrap capture has no lifecycle yet; its current bindings are checked by
@@ -59,6 +61,8 @@ export async function protectedNativeReleaseDependencies(
     /* Capture precedes initialization. */
   }
   if (context) {
+    if (archived && context.image === archived.current.services.web.image)
+      throw new Error('Candidate image overlaps the archived original');
     await resolveImage(context.image);
     if (context.currentBinding) await resolveImage(context.currentBinding.proof.image);
   }

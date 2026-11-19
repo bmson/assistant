@@ -67,3 +67,24 @@ Set `OWNER_EDITOR_LOCAL_OPERATOR=bmson@bmson.com`, `OWNER_EDITOR_RELEASE_SHA=<re
 Dry-run/apply instead use `OWNER_EDITOR_LOCAL_PACKET_FILE` (regular nonsymlink0600 bounded private file) and the exact `OWNER_EDITOR_V1_REVIEWED_PACKET_SHA256`. The existing native parser, 30-minute expiry, exact target/source/owner/privacy/native-version-or-absence CAS, recovery/drain hashes on apply, single transaction attempt and same-operation reconciliation remain unchanged. Apply is cursor activation; it is not ordinary observation. Do not reuse an uncertain operation with a new UUID or restore an old cursor.
 
 Every invocation freshly collects exact index parity, PITR/backup metadata and the two service/revision bindings, then rereads the two service templates before opening the transaction. Services must have unambiguous100% traffic with matching template/revision configuration, as in the existing collector. The relief revision's retained old tag must therefore be handled in the reviewed maintenance sequence; the local adapter does not hide it or retire it. Provider service disable/request completion still does not prove old background task/job settlement, recovery compatibility or authority to activate. No READY requirement is added to preparation, and no ordinary deployment READY check is bypassed.
+
+## Before-maintenance release evidence
+
+The `before-maintenance` dispatch observes the original API 1 pair in its reviewed Automatic serving state and checks the executable child manifests and referenced blobs before separate hold and drain operations. It skips the metadata packet, the normal inventory step and the Firestore transaction. The protected step binds the exact main checkout to the authenticated GitHub metadata for the actual first-attempt maintenance run.
+
+The independent reviewer signs the UTF-8 bytes of `owner-release-before-maintenance-v1\0` (ending in a NUL byte) followed by the compact JSON payload. The Ed25519 signature and payload are base64url encoded without padding in an envelope with fields `payload` and `signature`. Submit that envelope as `before_maintenance_intent`. The signer can review the candidate build and original evidence before GitHub assigns the maintenance run ID.
+
+The payload fields are:
+
+| Field                                                                  | Required value                                                                                                  |
+| ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `format`, `kind`                                                       | `1`, `owner-release-before-maintenance`                                                                         |
+| `source`, `workflowRef`                                                | Exact reviewed main SHA and `bmson/assistant/.github/workflows/owner-editor-v1-maintenance.yml@refs/heads/main` |
+| `project`, `region`, `database`                                        | `bmson-assistant`, `us-west1`, `assistant-production`                                                           |
+| `generation`, `objectSha256`                                           | Exact immutable private archive object generation and byte digest, matching the protected environment variables |
+| `packSha256`, `nativeBindingSha256`                                    | Verified pack fingerprint and canonical digest of the reviewed original native binding                          |
+| `candidateBuildRunId`, `candidateBuildSha256`, `candidateReviewSha256` | Candidate build-only run and canonical digests of its verified build receipt and independent qualification      |
+| `recoveryEvidenceSha256`                                               | Reviewed recovery evidence digest carried into the later disabled bootstrap                                     |
+| `reviewedAt`, `expiresAt`                                              | UTC milliseconds with a validity window of at most 30 minutes                                                   |
+
+The existing protected WIF identity reads the generation-qualified private archive. The workflow verifies original image signatures, checks the exact recoverable runtime references and rereads the original services and revisions. It emits the sanitized artifact `owner-release-before-maintenance-<runId>-1`, containing only `owner-release-before-maintenance.json`. Pass its exact run ID as `archive_maintenance_run_id` in the later paired-release dispatch. The release authenticates the completed run and selected artifact, then binds the verified receipt digest to its own run-local handoff. Establish and verify the actual hold, drain and closed native bootstrap as separate evidence. The before-maintenance receipt grants no authority to mutate services or delivery.

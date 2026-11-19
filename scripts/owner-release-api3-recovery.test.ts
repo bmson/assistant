@@ -9,6 +9,7 @@ import { estimatedCostReleaseEnvironment } from '../infra/gcp/estimated-cost-rel
 import {
   planApi3ForwardRecovery,
   reconcileApi3ForwardRecovery,
+  verifyRestoreCheckpointPair,
 } from './owner-release-api3-recovery.js';
 import {
   type BootstrapReceipt,
@@ -681,4 +682,92 @@ describe('recover a partially staged Firestore transition', () => {
       rmSync(directory, { recursive: true });
     }
   }, 45000);
+});
+
+describe('restore target checkpoint routing', () => {
+  function staged() {
+    const f = scenario();
+    const agent = f.add('agent', 'p'),
+      web = f.add('web', 'p');
+    f.setRouting('agent', [route(f.old.agent), route(agent, 0, candidate)]);
+    f.setRouting('web', [route(web)], true);
+    return f;
+  }
+  it('accepts an untouched drained pair only for restoration and the exact staged pair for admission', () => {
+    const untouched = scenario();
+    expect(() =>
+      verifyRestoreCheckpointPair(untouched.review, untouched.pair, 'pre_admission_restore'),
+    ).not.toThrow();
+    expect(() =>
+      verifyRestoreCheckpointPair(untouched.review, untouched.pair, 'before_admission'),
+    ).toThrow();
+    const f = staged();
+    for (const stage of [
+      'before_admission',
+      'pre_admission_restore',
+      'post_admission_forward',
+    ] as const)
+      expect(() => verifyRestoreCheckpointPair(f.review, f.pair, stage)).not.toThrow();
+  });
+  it('rejects a pre-admission direction after an agent successor even with zero percent traffic', () => {
+    const f = staged();
+    const next = f.add('agent', 'r');
+    f.setRouting('agent', [route(f.old.agent), route(next, 0, candidate)]);
+    expect(() => verifyRestoreCheckpointPair(f.review, f.pair, 'pre_admission_restore')).toThrow();
+    expect(() =>
+      verifyRestoreCheckpointPair(f.review, f.pair, 'post_admission_forward'),
+    ).not.toThrow();
+  });
+  it('preserves provider-quoted etags in action preconditions and holds malformed values', () => {
+    const f = staged();
+    const quoted = `"${'aB3/'.repeat(26)}ZQ=="`;
+    f.pair.web.service.etag = quoted;
+    expect(() => verifyRestoreCheckpointPair(f.review, f.pair, 'before_admission')).not.toThrow();
+    expect(planApi3ForwardRecovery(f.review, f.pair)).toMatchObject({
+      outcome: 'action',
+      action: { body: { etag: quoted } },
+    });
+    for (const malformed of [
+      quoted.slice(1),
+      quoted.slice(0, -1),
+      '""',
+      `W/${quoted}`,
+      'malformed\r\netag',
+    ]) {
+      f.pair.web.service.etag = malformed;
+      expect(() => verifyRestoreCheckpointPair(f.review, f.pair, 'before_admission')).toThrow();
+    }
+  });
+  it('requires the resumed canonical agent and the paused canonical web immediately before web admission', () => {
+    const f = staged();
+    const agent = f.add('agent', 'r');
+    f.setRouting('agent', [route(f.old.agent), route(agent, 0, candidate)]);
+    expect(() =>
+      verifyRestoreCheckpointPair(f.review, f.pair, 'post_admission_forward'),
+    ).not.toThrow();
+    expect(() => verifyRestoreCheckpointPair(f.review, f.pair, 'before_web_resume')).toThrow();
+    f.setRouting('agent', [route(agent), route(agent, 0, candidate)], true);
+    expect(() => verifyRestoreCheckpointPair(f.review, f.pair, 'before_web_resume')).not.toThrow();
+    f.setRouting('agent', [route(agent), route(f.old.agent, 0, candidate)], true);
+    expect(() => verifyRestoreCheckpointPair(f.review, f.pair, 'before_web_resume')).toThrow();
+  });
+  it('holds on original revision substitution, exposed old traffic, foreign aliases and unhealthy staged readiness', () => {
+    for (const mutation of [
+      (f: Case) => {
+        const old = f.pair.web.revisions[f.old.web];
+        if (old) old.timeout = '900s';
+      },
+      (f: Case) => f.setRouting('web', [route(f.old.web)], true),
+      (f: Case) =>
+        f.setRouting('web', [route(phase('web', 'p')), route(f.old.web, 0, 'unrelated')], true),
+      (f: Case) => {
+        const revision = f.pair.web.revisions[phase('web', 'p')];
+        revision?.conditions.push({ type: 'Ready', state: 'CONDITION_FAILED' });
+      },
+    ]) {
+      const f = staged();
+      mutation(f);
+      expect(() => verifyRestoreCheckpointPair(f.review, f.pair, 'before_admission')).toThrow();
+    }
+  });
 });

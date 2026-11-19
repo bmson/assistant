@@ -197,12 +197,19 @@ export async function runWebTagAdmission(mode: string | undefined) {
     : undefined;
   const bootstrapEvidence = bootstrap ? bootstrapDigest(bootstrap) : undefined;
   const preclosed = bootstrap?.kind === 'disabled-bootstrap';
-  const io = await protectedWebTagCloud();
+  const candidateAgentImage = String(rec(rec(manifest.components).agent).image);
+  if (
+    process.env.OWNER_RELEASE_RESTORE_TARGET_PROOF !== undefined &&
+    (image === bootstrap?.services.web.image ||
+      candidateAgentImage === bootstrap?.services.agent.image)
+  )
+    throw new Error('Candidate image overlaps the archived original');
+  const io = await protectedWebTagCloud(undefined, 'tagged', true);
   // Expected parents come only from the verified release/current evidence. Keep raw
   // native responses intact; later semantic checks require this content proof.
   for (const expectedImage of new Set([
     image,
-    String(rec(rec(manifest.components).agent).image),
+    candidateAgentImage,
     ...Object.values(bootstrap?.services ?? {}).map((binding) => binding.image),
   ]))
     await io.ensureImage?.(expectedImage);

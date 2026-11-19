@@ -25,6 +25,7 @@ import {
 import { verifyPreAuthEnvironment } from './owner-editor-release-inventory.js';
 import { bootstrapDigest, reviewedCurrentEnvironment } from './owner-release-current-snapshot.js';
 import { createImageResolutionReader } from './owner-release-image-resolution.js';
+import { preloadArchivedOriginalForProtectedRelease } from './owner-restore-target-verify.js';
 import { protectedWebTagCredential } from './owner-web-tag-cloud.js';
 
 export async function runEstimatedCostReleasePreflight(mode?: string) {
@@ -35,6 +36,8 @@ export async function runEstimatedCostReleasePreflight(mode?: string) {
   if (mode !== undefined) throw new Error('Invalid spending profile preflight mode');
   const env = process.env;
   const profile = estimatedCostReleaseProfile(env.ESTIMATED_COST_RELEASE_PROFILE_JSON);
+  if (env.OWNER_RELEASE_RESTORE_TARGET_PROOF !== undefined && profile?.mode !== 'compatible-off')
+    throw new Error('Archived restore target requires compatible-OFF spending profile');
   if (!profile) {
     if (env.ESTIMATED_COST_DRAIN_PACKET_JSON) throw new Error('Spending profile missing');
     verifyPreAuthEnvironment(env);
@@ -48,6 +51,7 @@ export async function runEstimatedCostReleasePreflight(mode?: string) {
   verifyPreAuthEnvironment(env);
   const current = reviewedCurrentEnvironment(env, profile.source);
   if (!current || !env.RUNNER_TEMP) throw new Error('Reviewed paired snapshot required');
+  await preloadArchivedOriginalForProtectedRelease(env, profile.source);
   const token = await protectedWebTagCredential();
   const read = estimatedCostMetadataRead(token, Date.now() + 180000);
   const resolveImage = createImageResolutionReader(token);

@@ -5,6 +5,7 @@ import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { verifyWifEnvironment } from './owner-editor-release-inventory.js';
 import { createImageResolutionReader } from './owner-release-image-resolution.js';
+import { preloadArchivedOriginalForProtectedRelease } from './owner-restore-target-verify.js';
 import { nativeRetirementClient, type RetainedTargetPolicy } from './owner-web-tag-native.js';
 
 const exec = promisify(execFile);
@@ -105,9 +106,11 @@ export async function protectedWebTagCredential(
 export async function protectedWebTagCloud(
   mark: (stage: ProtectedCloudStage) => void = () => undefined,
   retainedTarget: RetainedTargetPolicy = 'tagged',
+  allowArchivedOriginal = false,
 ) {
   if (!['tagged', 'canonical-untagged'].includes(retainedTarget))
     throw new Error('Invalid native retained-target policy');
+  if (allowArchivedOriginal) await preloadArchivedOriginalForProtectedRelease();
   const token = await protectedWebTagCredential(mark);
   return {
     ...nativeRetirementClient(token, fetch, undefined, undefined, retainedTarget),
