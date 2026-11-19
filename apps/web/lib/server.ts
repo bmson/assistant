@@ -119,7 +119,10 @@ import {
   getAgent,
   getOrCreatePrimaryConversation,
 } from '@assistant/core/chat';
-import { googleCalendarOAuthConfig } from '@assistant/core/google-calendar-oauth';
+import {
+  googleCalendarOAuthConfig,
+  googleCalendarWriteContractReady,
+} from '@assistant/core/google-calendar-oauth';
 import {
   decryptStoredCredential,
   encryptMcpBearerToken,
@@ -2171,6 +2174,7 @@ export function getGoogleCalendarConnectionService() {
   return createGoogleCalendarConnectionService({
     repository,
     config: googleCalendarOAuthConfig(config),
+    writeContractReady: googleCalendarWriteContractReady(),
   });
 }
 

@@ -28,7 +28,9 @@ const MAX_CALENDAR_ROSTER_PAGES = 10;
 const MAX_CALENDAR_CURSOR_BYTES = 2_000_000;
 const MAX_EVENT_PAGES_PER_CALENDAR_PER_CALL = 20;
 
-async function assertBookingCurrent(ctx: Parameters<AssistantTool['execute']>[1]): Promise<void> {
+export async function assertBookingCurrent(
+  ctx: Parameters<AssistantTool['execute']>[1],
+): Promise<void> {
   if (!ctx.bookingOccurrence) return;
   if (!ctx.assertBookingOccurrenceCurrent || !(await ctx.assertBookingOccurrenceCurrent())) {
     throw new Error(

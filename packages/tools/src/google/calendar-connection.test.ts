@@ -124,9 +124,28 @@ describe('Calendar account routing', () => {
           account: 'personal',
         }) as Record<string, unknown>
       ).account,
-    ).toBeUndefined();
+    ).toBe('personal');
   });
 
+  it('rejects explicit personal selectors for mutations outside the create slice', () => {
+    const { registry } = setup();
+    for (const name of [
+      'calendar.update_event',
+      'calendar.cancel_event',
+      'calendar.respond_to_event',
+    ]) {
+      const registered = registry.get(name);
+      if (!registered) continue;
+      expect(
+        registered.tool.inputSchema.safeParse({
+          account: 'personal',
+          eventId: 'event-123',
+          summary: 'change',
+          response: 'accepted',
+        }).success,
+      ).toBe(false);
+    }
+  });
   it('allows an explicit assistant read without querying personal credentials', async () => {
     const resolve = vi.fn(async () => {
       throw new Error('Personal account disconnected');

@@ -35,8 +35,9 @@ export const calendarModule = defineModule<GoogleClient>({
           googleAvailable: client.configured(),
           phoneCalendars: (agentId) => readPhoneCalendars(persistence.toolExecution, agentId),
           personalAccount,
+          creationExecution: persistence.toolExecution,
         },
-        { readOnly: true },
+        { readOnly: true, personalCreate: true },
       );
     } else if (!client.configured()) {
       console.warn('calendar module enabled but unavailable — configure Google OAuth credentials');

@@ -53,6 +53,7 @@ const PORTABLE_TOOLS = [
   'calendar.create_event',
   'calendar.list_calendars',
   'calendar.list_events',
+  'calendar.reconcile_event_creation',
   'calendar.respond_to_event',
   'calendar.search_events',
   'calendar.update_event',

@@ -1454,6 +1454,14 @@ struct APIClient: Sendable, GoogleCalendarConnectionService, McpSignInOptionsSer
         return try await perform(request, as: GoogleCalendarConnectResponse.self)
     }
 
+    func upgradeGoogleCalendarWriteAccess() async throws -> GoogleCalendarConnectResponse {
+        var request = makeRequest(url: configuration.baseURL.appending(path: "api/mobile/v1/connections/google-calendar/connect"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(["capability": "calendarWrite"])
+        return try await perform(request, as: GoogleCalendarConnectResponse.self)
+    }
+
     func cancelGoogleCalendarFlow(id: String) async throws {
         let url = configuration.baseURL.appending(path: "api/mobile/v1/connections/google-calendar/flow")
             .appending(queryItems: [URLQueryItem(name: "flowId", value: id)])

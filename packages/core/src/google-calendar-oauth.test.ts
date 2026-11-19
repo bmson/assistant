@@ -1,8 +1,9 @@
-import { GOOGLE_CALENDAR_READ_SCOPE } from '@assistant/persistence';
+import { GOOGLE_CALENDAR_READ_SCOPE, GOOGLE_CALENDAR_WRITE_SCOPE } from '@assistant/persistence';
 import { describe, expect, it } from 'vitest';
 import {
   googleCalendarOAuthConfig,
   googleCalendarReadFailureReason,
+  googleCalendarWriteContractReady,
   validGoogleCalendarScopes,
 } from './google-calendar-oauth.js';
 
@@ -33,7 +34,7 @@ describe('Calendar OAuth configuration and scope boundaries', () => {
     ])
       expect(googleCalendarOAuthConfig({ ...config, ...change })).toBeNull();
   });
-  it('accepts only identity plus Calendar readonly, including canonical email scope', () => {
+  it('accepts identity plus read and optional event-write scope, rejecting other capabilities', () => {
     expect(validGoogleCalendarScopes(['openid', 'email', GOOGLE_CALENDAR_READ_SCOPE])).toBe(true);
     expect(
       validGoogleCalendarScopes([
@@ -43,6 +44,14 @@ describe('Calendar OAuth configuration and scope boundaries', () => {
       ]),
     ).toBe(true);
     expect(validGoogleCalendarScopes(['openid', 'email'])).toBe(false);
+    expect(
+      validGoogleCalendarScopes([
+        'openid',
+        'email',
+        GOOGLE_CALENDAR_READ_SCOPE,
+        GOOGLE_CALENDAR_WRITE_SCOPE,
+      ]),
+    ).toBe(true);
     expect(
       validGoogleCalendarScopes([
         'openid',
@@ -146,5 +155,48 @@ describe('optional Calendar dashboard-client fallback', () => {
       { MCP_ENC_KEY: 'weak' },
     ])
       expect(googleCalendarOAuthConfig({ ...fallback, ...change })).toBeNull();
+  });
+});
+
+describe('Calendar event-write release boundary', () => {
+  const next = {
+    ASSISTANT_RELEASE_API_CONTRACT: '2',
+    ASSISTANT_RELEASE_AGENT_API_MIN: '2',
+    ASSISTANT_RELEASE_AGENT_API_MAX: '2',
+    ASSISTANT_RELEASE_SCHEMA_DRIVER: 'firestore',
+    ASSISTANT_RELEASE_SCHEMA_VERSION: '2',
+    ASSISTANT_RELEASE_SCHEMA_MIN: '2',
+    ASSISTANT_RELEASE_SCHEMA_MAX: '2',
+  };
+  it('stays off without exact API/peer/storage version-2 evidence', () => {
+    expect(googleCalendarWriteContractReady({})).toBe(false);
+    expect(googleCalendarWriteContractReady(next)).toBe(true);
+    for (const patch of [
+      { ASSISTANT_RELEASE_API_CONTRACT: '1' },
+      { ASSISTANT_RELEASE_SCHEMA_VERSION: '1' },
+      { ASSISTANT_RELEASE_SCHEMA_MIN: '1' },
+      { ASSISTANT_RELEASE_AGENT_API_MIN: undefined },
+      { ASSISTANT_RELEASE_AGENT_API_MAX: '3' },
+      { ASSISTANT_RELEASE_WEB_API_MIN: '1', ASSISTANT_RELEASE_WEB_API_MAX: '1' },
+    ])
+      expect(googleCalendarWriteContractReady({ ...next, ...patch })).toBe(false);
+    expect(
+      googleCalendarWriteContractReady({
+        ...next,
+        ASSISTANT_RELEASE_SCHEMA_DRIVER: 'postgres',
+        ASSISTANT_RELEASE_SCHEMA_VERSION: '136',
+        ASSISTANT_RELEASE_SCHEMA_MIN: '136',
+        ASSISTANT_RELEASE_SCHEMA_MAX: '136',
+      }),
+    ).toBe(false);
+    expect(
+      googleCalendarWriteContractReady({
+        ...next,
+        ASSISTANT_RELEASE_SCHEMA_DRIVER: 'postgres',
+        ASSISTANT_RELEASE_SCHEMA_VERSION: '137',
+        ASSISTANT_RELEASE_SCHEMA_MIN: '137',
+        ASSISTANT_RELEASE_SCHEMA_MAX: '137',
+      }),
+    ).toBe(true);
   });
 });

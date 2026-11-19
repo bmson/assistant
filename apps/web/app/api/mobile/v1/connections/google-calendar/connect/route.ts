@@ -5,10 +5,17 @@ export const dynamic = 'force-dynamic';
 export async function POST(request: Request): Promise<Response> {
   const owner = await authenticateMobileOwner(request);
   if (!owner) return mobileUnauthorized();
-  const body = await readMobileMutationBody(request, []);
+  const body = await readMobileMutationBody(request, ['capability']);
   if (!body.ok) return body.response;
+  if (body.value.capability !== undefined && body.value.capability !== 'calendarWrite')
+    return mobileJson({ error: 'Unsupported Calendar capability' }, { status: 400 });
   try {
-    return mobileJson(await getGoogleCalendarConnectionService().connect(owner.ownerId));
+    const service = getGoogleCalendarConnectionService();
+    return mobileJson(
+      await (body.value.capability === 'calendarWrite'
+        ? service.connect(owner.ownerId, 'calendarWrite')
+        : service.connect(owner.ownerId)),
+    );
   } catch {
     return mobileJson(
       { error: 'Calendar connection is not configured or is unavailable' },
