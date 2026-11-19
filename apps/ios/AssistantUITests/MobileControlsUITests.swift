@@ -1,4 +1,5 @@
 import XCTest
+import UIKit
 
 /// Contract: NATIVE-XCUI-SEAM-PLAN-001/CONTRACT.v2.1.json, SHA fc972018d21107f15a398fd3d83b5e6a04b33186d74d690ebd98f6f20e6f728e.
 /// Synthetic component-host capability only; no production account or VoiceOver claim.
@@ -9,7 +10,7 @@ final class MobileControlsUITests: XCTestCase {
     private var attachmentCount = 0
     private var retainedPNGBytes = 0
     private var surfaceSwipes: [String: Int] = [:]
-    private let maximumPNGBytes = 32 * 1024 * 1024
+    private let maximumPNGBytes = 64 * 1024 * 1024
     private let sourceFact = "The phone calendar was not checked. These synthetic facts are not evidence of live calendar coverage."
     private let actionSummary = "Read both original listings before deciding."
 
@@ -95,10 +96,96 @@ final class MobileControlsUITests: XCTestCase {
         try checkBudget()
     }
 
-    private func launch(_ app: XCUIApplication, fixture: String) throws {
+    /// Real simulator orientations and XCUI automation replace in-process
+    /// UIView accessibility enumeration. No production account or writes.
+    func testAccessibleControlsMatrix() throws {
+        continueAfterFailure = false
+        executionTimeAllowance = 900
+        deadline = ContinuousClock.now.advanced(by: .seconds(900))
+        attachmentCount = 0
+        retainedPNGBytes = 0
+        let app = XCUIApplication()
+        defer { app.terminate(); XCUIDevice.shared.orientation = .portrait }
+        let layouts: [(String, UIDeviceOrientation, String)] = [
+            ("portrait-default", .portrait, "default"),
+            ("portrait-AX5", .portrait, "AX5"),
+            ("landscape-default", .landscapeLeft, "default"),
+            ("landscape-AX1", .landscapeLeft, "AX1"),
+            ("landscape-AX5", .landscapeLeft, "AX5"),
+        ]
+        for theme in ["light", "dark"] {
+            for (layout, orientation, textSize) in layouts {
+                for fixture in ["approvals", "proactive"] {
+                    try checkBudget()
+                    app.terminate()
+                    surfaceSwipes = [:]
+                    XCUIDevice.shared.orientation = orientation
+                    try launch(app, fixture: fixture, theme: theme, textSize: textSize)
+                    let key = "\(fixture)-\(layout)-\(theme)"
+                    let surface = app.descendants(matching: .any)
+                        .matching(identifier: "fixture.surface.\(fixture)").firstMatch
+                    try require(surface.waitForExistence(timeout: waitBudget()), "Missing native surface: \(key)", app)
+                    let landscape = orientation == .landscapeLeft
+                    try require(landscape ? app.frame.width > app.frame.height : app.frame.height > app.frame.width,
+                                "Native orientation did not settle: \(key)", app)
+                    if fixture == "approvals" {
+                        let actions = [surface.buttons["assistant.approvals.approval.approved"],
+                                       surface.buttons["assistant.approvals.approval.denied"],
+                                       surface.buttons.matching(NSPredicate(format: "label == %@", "More")).firstMatch]
+                        for action in actions {
+                            try require(action.waitForExistence(timeout: waitBudget()), "Approval action missing: \(key)", app)
+                        }
+                        // All native frames share a common viewport before any scroll.
+                        // Offscreen frames preserve their common content origin.
+                        let frames = actions.map(\.frame)
+                        if textSize != "default" {
+                            try require(frames[0].maxY <= frames[1].minY + 1 && frames[1].maxY <= frames[2].minY + 1,
+                                        "Accessibility actions must stack Approve, Deny, More: \(key)", app)
+                        } else {
+                            try require(precedes(frames[0], frames[1]) && precedes(frames[1], frames[2]),
+                                        "Actions must preserve visual order: \(key)", app)
+                        }
+                        for action in actions {
+                            try revealTogether([action], surface: surface, app: app)
+                            try require(action.frame.height >= 44 && action.isHittable,
+                                        "Action must expose a hittable 44pt native frame: \(key)", app)
+                        }
+                        try capture(app, key + "-last-action-reached")
+                        let geometry = XCTAttachment(string: frames.map { String(describing: $0) }.joined(separator: "\n"))
+                        geometry.name = key + "-same-snapshot-action-frames"
+                        geometry.lifetime = .keepAlways
+                        add(geometry)
+                    } else {
+                        let details = surface.buttons.matching(NSPredicate(format: "label == %@", "Details")).firstMatch
+                        let facts = surface.staticTexts.matching(NSPredicate(format: "label == %@", sourceFact))
+                        let summaries = surface.staticTexts.matching(NSPredicate(format: "label == %@", actionSummary))
+                        try require(details.waitForExistence(timeout: waitBudget()), "Details missing: \(key)", app)
+                        try require(facts.count == 0 && summaries.count == 0, "Details must begin collapsed: \(key)", app)
+                        try revealTogether([details], surface: surface, app: app)
+                        try require(details.frame.height >= 44 && details.isHittable, "Details target below 44pt: \(key)", app)
+                        details.tap()
+                        try require(facts.firstMatch.waitForExistence(timeout: waitBudget()) && facts.count == 1 && summaries.count == 1,
+                                    "Expansion must show exact fact and summary once: \(key)", app)
+                        try revealTogether([facts.firstMatch], surface: surface, app: app, fullyVisible: false)
+                        try capture(app, key + "-expanded-source")
+                        try revealTogether([details], surface: surface, app: app, upwards: false)
+                        details.tap()
+                        let collapsed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                            facts.count == 0 && summaries.count == 0
+                        }, object: nil)
+                        try require(XCTWaiter.wait(for: [collapsed], timeout: waitBudget()) == .completed,
+                                    "Second tap must collapse exact source facts: \(key)", app)
+                    }
+                    try assertTransport(app)
+                }
+            }
+        }
+    }
+
+    private func launch(_ app: XCUIApplication, fixture: String, theme: String = "light", textSize: String = "default") throws {
         try checkBudget()
-        app.launchArguments = ["--fixture-case", fixture, "--fixture-theme", "light",
-                               "--fixture-text-size", "default", "--fixture-nonce", UUID().uuidString]
+        app.launchArguments = ["--fixture-case", fixture, "--fixture-theme", theme,
+                               "--fixture-text-size", textSize, "--fixture-nonce", UUID().uuidString]
         app.launch()
         try capture(app, "\(fixture)-launch-before-ready-assertion")
         let ready = app.staticTexts["fixture.ready"]
@@ -115,11 +202,11 @@ final class MobileControlsUITests: XCTestCase {
     }
 
     private func revealTogether(_ elements: [XCUIElement], surface: XCUIElement,
-                                app: XCUIApplication, upwards: Bool = true) throws {
+                                app: XCUIApplication, upwards: Bool = true, fullyVisible: Bool = true) throws {
         let key = surface.identifier
         while true {
             try checkBudget()
-            if elements.allSatisfy({ $0.exists && $0.isHittable && app.frame.contains($0.frame) }) { return }
+            if elements.allSatisfy({ $0.exists && $0.isHittable && (fullyVisible ? app.frame.contains($0.frame) : app.frame.intersects($0.frame)) }) { return }
             guard surfaceSwipes[key, default: 0] < 12 else { break }
             surfaceSwipes[key, default: 0] += 1
             if upwards { surface.swipeUp() } else { surface.swipeDown() }
@@ -144,7 +231,7 @@ final class MobileControlsUITests: XCTestCase {
 
     private func checkBudget() throws {
         guard ContinuousClock.now < deadline else {
-            XCTFail("Native capability exceeded its 60-second monotonic budget")
+            XCTFail("Native capability exceeded its monotonic budget")
             throw CapabilityFailure.budget
         }
     }
@@ -160,13 +247,13 @@ final class MobileControlsUITests: XCTestCase {
 
     private func capture(_ app: XCUIApplication, _ name: String) throws {
         try checkBudget()
-        guard attachmentCount + 2 <= 24 else {
-            XCTFail("Native capability attachment count exceeded 24")
+        guard attachmentCount + 2 <= 160 else {
+            XCTFail("Native capability attachment count exceeded 160")
             throw CapabilityFailure.budget
         }
         let png = app.screenshot().pngRepresentation
         guard png.count <= maximumPNGBytes - retainedPNGBytes else {
-            XCTFail("Native capability PNG bytes exceeded 32MiB")
+            XCTFail("Native capability PNG bytes exceeded 64MiB")
             throw CapabilityFailure.budget
         }
         retainedPNGBytes += png.count

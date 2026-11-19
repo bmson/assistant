@@ -5,6 +5,8 @@ import Foundation
 private struct FixtureArguments {
     let scene: String
     let nonce: String
+    let theme: ColorScheme
+    let textSize: DynamicTypeSize
     init?(_ args: [String]) {
         guard args.count == 8 else { return nil }
         var values: [String: String] = [:]
@@ -15,11 +17,13 @@ private struct FixtureArguments {
             values[key] = args[index + 1]
         }
         guard let scene = values["--fixture-case"], ["approvals", "proactive"].contains(scene),
-              let theme = values["--fixture-theme"], theme == "light",
-              let text = values["--fixture-text-size"], text == "default",
+              let theme = values["--fixture-theme"], ["light", "dark"].contains(theme),
+              let text = values["--fixture-text-size"], ["default", "AX1", "AX5"].contains(text),
               let nonce = values["--fixture-nonce"],
               nonce.range(of: "^[A-Za-z0-9_-]{1,48}$", options: .regularExpression) != nil else { return nil }
         self.scene = scene; self.nonce = nonce
+        self.theme = theme == "dark" ? .dark : .light
+        self.textSize = text == "AX5" ? .accessibility5 : text == "AX1" ? .accessibility1 : .large
     }
 }
 
@@ -73,8 +77,9 @@ private struct FixtureRoot: View {
                 }
             } else { ProgressView("Preparing synthetic fixture") }
         }
-        .environment(\.colorScheme, .light)
-        .environment(\.dynamicTypeSize, .large)
+        .environment(\.colorScheme, arguments.theme)
+        .preferredColorScheme(arguments.theme)
+        .environment(\.dynamicTypeSize, arguments.textSize)
         .transaction { $0.animation = nil; $0.disablesAnimations = true }
         .task { await prepare() }
     }
@@ -89,7 +94,7 @@ private struct FixtureRoot: View {
             defaults = store
             let id = "approval"
             let pending = PendingApproval(approval: .init(id: id, taskId: "synthetic-task", shortCode: "A12",
-                summary: "Send the synthetic arrival update only to the named recipient.",
+                summary: "Send the synthetic arrival update only to the named recipient. Keep the confirmed time and original scope; do not change the booking, add recipients or agree to a fee.",
                 payload: .object(["to": .string("recipient@example.test"), "body": .string("Synthetic arrival update")]),
                 resolutionPayload: nil, status: "pending", requestedAt: "2026-11-04T09:00:00Z",
                 resolvedAt: nil, resolvedVia: nil, expiresAt: "2099-11-04T09:00:00Z"),

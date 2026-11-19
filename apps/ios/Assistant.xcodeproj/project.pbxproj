@@ -175,6 +175,14 @@
 		B10000000000000000000044 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000011 /* Assets.xcassets */; };
 		B10000000000000000000045 /* Resources/mermaid.min.js in Resources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000057 /* Resources/mermaid.min.js */; };
 		B10000000000000000000046 /* Resources/mermaid-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000058 /* Resources/mermaid-LICENSE.txt */; };
+		B20000000000000000000001 /* Views/GoogleCalendarConnectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E61C0000000000000000000A /* Views/GoogleCalendarConnectionView.swift */; };
+		B20000000000000000000002 /* Views/McpSignInOptionsSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = E63C00000000000000000004 /* Views/McpSignInOptionsSection.swift */; };
+		B20000000000000000000003 /* Views/McpOAuthControl.swift in Sources */ = {isa = PBXBuildFile; fileRef = E64C00000000000000000002 /* Views/McpOAuthControl.swift */; };
+		B20000000000000000000004 /* System/GoogleCalendarConnectionCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = E61C00000000000000000008 /* System/GoogleCalendarConnectionCoordinator.swift */; };
+		B20000000000000000000005 /* System/McpSignInOptionsCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = E63C00000000000000000006 /* System/McpSignInOptionsCoordinator.swift */; };
+		B20000000000000000000006 /* Models/GoogleCalendarConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = E61C00000000000000000006 /* Models/GoogleCalendarConnection.swift */; };
+		B20000000000000000000007 /* Models/McpSignInOptions.swift in Sources */ = {isa = PBXBuildFile; fileRef = E63C00000000000000000008 /* Models/McpSignInOptions.swift */; };
+		B20000000000000000000008 /* System/GoogleCalendarAuthenticationSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = E61C00000000000000000002 /* System/GoogleCalendarAuthenticationSession.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -824,6 +832,14 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B20000000000000000000001 /* Views/GoogleCalendarConnectionView.swift in Sources */,
+				B20000000000000000000002 /* Views/McpSignInOptionsSection.swift in Sources */,
+				B20000000000000000000003 /* Views/McpOAuthControl.swift in Sources */,
+				B20000000000000000000004 /* System/GoogleCalendarConnectionCoordinator.swift in Sources */,
+				B20000000000000000000005 /* System/McpSignInOptionsCoordinator.swift in Sources */,
+				B20000000000000000000006 /* Models/GoogleCalendarConnection.swift in Sources */,
+				B20000000000000000000007 /* Models/McpSignInOptions.swift in Sources */,
+				B20000000000000000000008 /* System/GoogleCalendarAuthenticationSession.swift in Sources */,
 				B10000000000000000000001 /* AppModel.swift in Sources */,
 				B10000000000000000000002 /* Views/PhoneCalendarsView.swift in Sources */,
 				B10000000000000000000003 /* System/PhoneCalendarStore.swift in Sources */,
@@ -1098,6 +1114,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "Assistant UI Fixtures";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
@@ -1122,6 +1139,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "Assistant UI Fixtures";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;

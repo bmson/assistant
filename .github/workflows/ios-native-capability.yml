@@ -1,4 +1,4 @@
-name: Native controls one-off capability
+name: Native controls qualification
 on:
   pull_request:
     paths:
@@ -7,6 +7,8 @@ on:
       - apps/ios/Assistant.xcodeproj/project.pbxproj
       - apps/ios/Assistant.xcodeproj/xcshareddata/xcschemes/AssistantUIFixtures.xcscheme
       - apps/ios/Assistant/AppModel.swift
+      - apps/ios/Assistant/Views/ApprovalsView.swift
+      - apps/ios/Assistant/Components/MessageBubble.swift
       - .github/workflows/ios-native-capability.yml
 permissions:
   contents: read
@@ -15,10 +17,10 @@ concurrency:
   cancel-in-progress: false
 jobs:
   capability:
-    # One-off mechanism qualification; not an ongoing full component gate.
-    name: One native controls capability
+    # Native automation qualifies shipping controls in the isolated synthetic host.
+    name: Native controls capability and accessibility matrix
     runs-on: macos-latest
-    timeout-minutes: 15
+    timeout-minutes: 35
     steps:
       - name: Record the fixed job budget
         timeout-minutes: 1
@@ -28,8 +30,8 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
-      - name: Build and run exactly one synthetic capability
-        timeout-minutes: 12
+      - name: Build and run synthetic native controls qualification
+        timeout-minutes: 30
         env:
           EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
@@ -43,8 +45,8 @@ jobs:
           env['PATH'] = '/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin'
           log_bytes = 0
           elapsed = time.time() - float((Path(os.environ['RUNNER_TEMP'])/'native-controls-start').read_text())
-          if not 0 <= elapsed < 720: raise RuntimeError('Job budget unavailable')
-          main_deadline = time.monotonic() + 720 - elapsed
+          if not 0 <= elapsed < 1800: raise RuntimeError('Job budget unavailable')
+          main_deadline = time.monotonic() + 1800 - elapsed
           def save(name, value):
               (root / name).write_text(json.dumps(value, indent=2) + '\n')
           def observe_group(pid, timeout_seconds):
@@ -185,7 +187,7 @@ jobs:
               name = 'Assistant-Capability-' + os.environ['GITHUB_RUN_ID'] + '-' + os.environ['GITHUB_RUN_ATTEMPT']
               preexisting = [d for ds in devices['devices'].values() for d in ds]
               if any(d['name']==name for d in preexisting): raise RuntimeError('Lease name already exists')
-              if main_deadline-time.monotonic()<650: raise RuntimeError('Insufficient admitted build/test/cleanup reserve')
+              if main_deadline-time.monotonic()<1650: raise RuntimeError('Insufficient admitted build/test/cleanup reserve')
               lease = {'nameAbsentPreflight':True,'preexistingIDs':[d['udid'] for d in preexisting],'udid':None,'name':name,'runtime':runtime,'template':template,'createdByRun':os.environ['GITHUB_RUN_ID']}
               save('lease.json', lease) # Durable intent precedes resource creation.
               def bind_lease(text):
@@ -194,8 +196,8 @@ jobs:
                   if udid in lease['preexistingIDs']: raise RuntimeError('Created UUID was preexisting')
                   lease['udid'] = udid; save('lease.json', lease)
               udid = run('create-simulator', ['xcrun','simctl','create',name,template['deviceTypeIdentifier'],runtime], 10, bind_lease).strip()
-              run('boot-owned-simulator', ['xcrun','simctl','bootstatus',udid,'-b'], 90)
-              run('build', ['xcodebuild','-project','apps/ios/Assistant.xcodeproj','-scheme','AssistantUIFixtures','-configuration','Debug','-destination','id='+udid,'-derivedDataPath',str(build),'CODE_SIGNING_ALLOWED=NO','CODE_SIGNING_REQUIRED=NO','CODE_SIGN_IDENTITY=','build-for-testing'], 330)
+              run('build', ['xcodebuild','-project','apps/ios/Assistant.xcodeproj','-scheme','AssistantUIFixtures','-configuration','Debug','-destination','generic/platform=iOS Simulator','-derivedDataPath',str(build),'CODE_SIGNING_ALLOWED=NO','CODE_SIGNING_REQUIRED=NO','CODE_SIGN_IDENTITY=','build-for-testing'], 480)
+              run('boot-owned-simulator', ['xcrun','simctl','bootstatus',udid,'-b'], 240)
               products = build / 'Build/Products'
               runs = list(products.glob('*.xctestrun'))
               if len(runs) != 1: raise RuntimeError('Expected exactly one built xctestrun')
@@ -207,7 +209,7 @@ jobs:
               save('binary-pins.json', {'xctestrunSHA':hashlib.sha256(runs[0].read_bytes()).hexdigest(),'bundles':binaries})
               if any(hashlib.sha256(Path(p).read_bytes()).hexdigest()!=h for p,h in pins.items()): raise RuntimeError('Source drift')
               result = root / 'capability.xcresult'
-              output = run('test', ['xcodebuild','test-without-building','-xctestrun',str(runs[0]),'-destination','id='+udid,'-destination-timeout','30','-parallel-testing-enabled','NO','-maximum-concurrent-test-simulator-destinations','1','-test-timeouts-enabled','YES','-default-test-execution-time-allowance','60','-maximum-test-execution-time-allowance','60','-only-testing:AssistantUITests/MobileControlsUITests/testNativeControlsCapability','-resultBundlePath',str(result)], 180)
+              output = run('test', ['xcodebuild','test-without-building','-xctestrun',str(runs[0]),'-destination','id='+udid,'-destination-timeout','30','-parallel-testing-enabled','NO','-maximum-concurrent-test-simulator-destinations','1','-test-timeouts-enabled','YES','-default-test-execution-time-allowance','900','-maximum-test-execution-time-allowance','900','-only-testing:AssistantUITests/MobileControlsUITests','-resultBundlePath',str(result)], 1020)
               summary = json.loads(run('summary', ['xcrun','xcresulttool','get','test-results','summary','--path',str(result)], 10))
               tests = json.loads(run('named-tests', ['xcrun','xcresulttool','get','test-results','tests','--path',str(result)], 10))
               named = re.search(r'MobileControlsUITests[^\n]{0,160}testNativeControlsCapability[^\n]{0,80}\bpassed\b', output, re.I)
@@ -217,10 +219,10 @@ jobs:
                   if node.get('nodeType')=='Test Case': cases.append((node,bundle))
                   for child in node.get('children',[]): visit(child,bundle)
               for node in tests.get('testNodes',[]): visit(node)
-              expected = {'MobileControlsUITests/testNativeControlsCapability','AssistantUITests/MobileControlsUITests/testNativeControlsCapability'}
-              structured = len(cases)==1 and cases[0][1] and cases[0][0].get('nodeIdentifier','').removesuffix('()') in expected and cases[0][0].get('result')=='Passed'
-              if not structured or not named or [summary.get(k) for k in ['totalTestCount','passedTests','failedTests','skippedTests']] != [1,1,0,0]: raise RuntimeError('Missing exact named single PASS/zero-skip evidence')
-              save('outcome.json', {'result':'PASS','namedTest':'AssistantUITests/MobileControlsUITests/testNativeControlsCapability','summary':summary,'sourceHead':head,'qualification':'synthetic capability only; no full matrix, VoiceOver, rotation or persistence acceptance'})
+              identities = {node.get('nodeIdentifier','').removesuffix('()').removeprefix('AssistantUITests/') for node, _ in cases}
+              structured = len(cases)==2 and identities == {'MobileControlsUITests/testNativeControlsCapability','MobileControlsUITests/testAccessibleControlsMatrix'} and all(bundle and node.get('result')=='Passed' for node,bundle in cases)
+              if not structured or not named or [summary.get(k) for k in ['totalTestCount','passedTests','failedTests','skippedTests']] != [2,2,0,0]: raise RuntimeError('Missing both exact named PASS/zero-skip evidence')
+              save('outcome.json', {'result':'PASS','namedTests':['AssistantUITests/MobileControlsUITests/testNativeControlsCapability','AssistantUITests/MobileControlsUITests/testAccessibleControlsMatrix'],'summary':summary,'sourceHead':head,'qualification':'synthetic capability and 20-case native simulator matrix; no physical-device, VoiceOver or persistence acceptance'})
           except BaseException as error:
               save('failure.json', {'result':'HOLD','error':repr(error)})
               raise
@@ -228,7 +230,7 @@ jobs:
       - name: Close only the leased simulator and bound evidence
         id: cleanup
         if: always()
-        timeout-minutes: 1
+        timeout-minutes: 3
         run: |
           python3 - <<'PY'
           import os, json, subprocess, signal, time
@@ -236,7 +238,7 @@ jobs:
           root = Path(os.environ['RUNNER_TEMP']) / 'native-controls-evidence'
           root.mkdir(mode=0o700, exist_ok=True)
           errors = []; receipt = {'attempted':True,'commands':[]}
-          deadline=time.monotonic()+48
+          deadline=time.monotonic()+150
           env={k:v for k,v in os.environ.items() if k in {'HOME','USER','LOGNAME','SHELL','TMPDIR','LANG','LC_ALL'}}
           env['PATH']='/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin'
           def present(pid):
@@ -257,7 +259,7 @@ jobs:
               try:
                   rest=deadline-time.monotonic()-2
                   if rest<=0:raise subprocess.TimeoutExpired(args,0)
-                  output,_=p.communicate(timeout=min(4,rest))
+                  output,_=p.communicate(timeout=min(20,rest))
               except subprocess.TimeoutExpired: problem='Cleanup command timeout'
               except Exception as error: problem=repr(error)
               finally:
