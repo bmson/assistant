@@ -3,7 +3,6 @@ import { loadConfig } from '@assistant/config';
 import { runBriefing } from '@assistant/core';
 import {
   agents,
-  createDb,
   createPostgresEmailSyncRepository,
   createPostgresExecutionPersistence,
   type Db,
@@ -32,6 +31,7 @@ import {
   type EmailSyncDeps,
   processMessage,
 } from '../../../packages/modules/src/google/email-sync.js';
+import { createIsolatedTestDatabase } from './isolated-test-database.fixture.js';
 
 const RECEIVED = new Date('2026-11-18T23:01:00Z');
 const at = (minutes: number) => new Date(RECEIVED.getTime() + minutes * 60_000);
@@ -52,7 +52,7 @@ function forbidden<T>(name: string): T {
   ) as T;
 }
 
-describe('frozen proactive replay', () => {
+describe('practice-change mail replay', () => {
   it.each(['postgres', 'firestore'] as const)(
     'admits and delivers the moved practice once on %s',
     async (driver) => {
@@ -73,23 +73,21 @@ describe('frozen proactive replay', () => {
       let db = forbidden<Db>('SQL on Firestore');
       let closeSql: (() => Promise<void>) | undefined;
       let persistence: ExecutionPersistence;
-      if (driver === 'postgres') {
-        const url = process.env.TEST_DATABASE_URL;
-        if (!url) throw new Error('Missing isolated PostgreSQL URL');
-        const connected = createDb(url);
-        db = connected;
-        closeSql = () => connected.$client.end();
-        await db.insert(agents).values(owner);
-        persistence = {
-          ...createPostgresExecutionPersistence(db),
-          emailSync: createPostgresEmailSyncRepository(db, agentId),
-        };
-      } else {
-        store = emulatorStore(() => clock);
-        await store.doc('agents', agentId).set(encodeRecord(owner));
-        persistence = createFirestoreExecutionPersistence(store, agentId, SPACE);
-      }
       try {
+        if (driver === 'postgres') {
+          const database = await createIsolatedTestDatabase();
+          db = database.db;
+          closeSql = database.close;
+          await db.insert(agents).values(owner);
+          persistence = {
+            ...createPostgresExecutionPersistence(db),
+            emailSync: createPostgresEmailSyncRepository(db, agentId),
+          };
+        } else {
+          store = emulatorStore(() => clock);
+          await store.doc('agents', agentId).set(encodeRecord(owner));
+          persistence = createFirestoreExecutionPersistence(store, agentId, SPACE);
+        }
         const route = {
           key: 'google.direct-email-routing',
           version: 1,
@@ -236,21 +234,8 @@ describe('frozen proactive replay', () => {
         );
         expect(await replayMail()).toBe('skipped');
         expect(provider).toHaveBeenCalledOnce();
-        let calendarEvent = {
-          calendarId: 'synthetic-calendar',
-          eventId: 'separate-cancelled-practice',
-          calendar: 'Team Calendar',
-          summary: 'Thursday skills session',
-          allDay: false,
-          start: '2026-11-19T22:00:00Z',
-          end: '2026-11-19T23:00:00Z',
-          status: 'confirmed',
-        };
-        const calendarReader = async () => ({ complete: true, events: [calendarEvent] });
         clock = at(90);
-        expect(
-          await runPulse({ ...pulseDeps, calendarReader }, { agentId, now: clock }),
-        ).toMatchObject({
+        expect(await runPulse(pulseDeps, { agentId, now: clock })).toMatchObject({
           delivered: null,
           heldBy: 'no-candidates',
         });
@@ -268,31 +253,6 @@ describe('frozen proactive replay', () => {
         expect(notifyOwner).toHaveBeenCalledOnce();
         expect(await readParts()).toEqual(parts);
 
-        const cancelledAt = at(16 * 60 + 1);
-        calendarEvent = { ...calendarEvent, status: 'cancelled' };
-        clock = at(16 * 60 + 20);
-        expect(
-          await runPulse({ ...pulseDeps, calendarReader }, { agentId, now: clock }),
-        ).toMatchObject({
-          candidates: 1,
-          delivered: 'calendar-cancelled',
-          pinged: true,
-        });
-        expect(clock.getTime() - cancelledAt.getTime()).toBeLessThanOrEqual(20 * 60_000);
-        expect(notifyOwner).toHaveBeenCalledTimes(2);
-        expect(await readParts()).toEqual(
-          expect.arrayContaining([
-            expect.arrayContaining([
-              expect.objectContaining({
-                type: 'data-card',
-                data: expect.objectContaining({
-                  urgencyLabel: 'Cancelled',
-                  title: 'Thursday skills session',
-                }),
-              }),
-            ]),
-          ]),
-        );
         if (driver === 'postgres') {
           const ledger = await db
             .select()

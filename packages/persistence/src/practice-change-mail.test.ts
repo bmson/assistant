@@ -11,6 +11,9 @@ function evidence(
   author: 'sender' | 'external' = 'sender',
 ): NonNullable<Records['emailIngest']['emailContentProvenance']> {
   return {
+    version: 1,
+    mode: author === 'sender' ? 'direct' : 'forwarded',
+    authenticated: true,
     sourceLength: body.length,
     storedLength: body.length,
     sourceHash: 'fixture',
@@ -20,7 +23,7 @@ function evidence(
     hasExternalOrUnknown: author !== 'sender',
     spans: [{ start: 0, end: body.length, author }],
     parts: [],
-  } as NonNullable<Records['emailIngest']['emailContentProvenance']>;
+  };
 }
 
 describe('practice-change evidence', () => {
