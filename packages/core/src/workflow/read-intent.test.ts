@@ -751,6 +751,12 @@ describe('detectPersonalReadRequest', () => {
       requiresThreadRead: true,
       emailReview: { windowDays: 7, requestedCount: 5 },
     });
+    expect(
+      detectPersonalReadRequest(turn(prompt.replace('last seven days', 'last two weeks'))),
+    ).toMatchObject({
+      mailQuery: 'newer_than:14d -from:me',
+      emailReview: { windowDays: 14, requestedCount: 5 },
+    });
     const review = detectPersonalReadRequest(turn(prompt));
     if (!review) throw new Error('Expected email review request');
     expect(buildReadToolInput(review, 'gmail.search', [])).toMatchObject({
@@ -1153,6 +1159,7 @@ describe('detectPersonalReadRequest', () => {
     ['last Monday', '2026-09-07T07:00:00.000Z', '2026-09-08T07:00:00.000Z'],
     ['last month', '2026-08-01T07:00:00.000Z', '2026-09-01T07:00:00.000Z'],
     ['past 3 days', '2026-09-05T07:00:00.000Z', '2026-09-08T07:00:00.000Z'],
+    ['past three days', '2026-09-05T07:00:00.000Z', '2026-09-08T07:00:00.000Z'],
   ])('keeps historical calendar range %s in the past', (text, timeMin, timeMax) => {
     expect(
       resolveTimeWindow(text, 'calendar', false, {
@@ -1160,6 +1167,20 @@ describe('detectPersonalReadRequest', () => {
         timeZone: 'America/Los_Angeles',
       }),
     ).toMatchObject({ timeMin, timeMax });
+  });
+
+  it('binds a spelled two-week calendar lookup across a local clock change', () => {
+    const options = { now: new Date('2026-10-28T17:00:00Z'), timeZone: 'America/Los_Angeles' };
+    const requested = detectPersonalReadRequest(
+      turn('What is on my calendar for the next two weeks?'),
+      options,
+    );
+    expect(requested?.temporalIssue).toBeUndefined();
+    expect(requested?.timeWindow).toEqual({
+      timeMin: '2026-10-28T07:00:00.000Z',
+      timeMax: '2026-11-11T08:00:00.000Z',
+      label: 'the next 2 weeks',
+    });
   });
 
   it('returns a typed interval while preserving the legacy public window shape', () => {

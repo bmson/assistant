@@ -1143,6 +1143,45 @@ describe('response cards', () => {
     ]);
   });
 
+  it('shows the probability without inventing a rain or snow label for a conflicting reading', () => {
+    const day = {
+      date: '2026-08-29',
+      weekday: 'Sat',
+      lowC: 12,
+      highC: 18,
+      description: 'precipitation type uncertain',
+      precipProbabilityMax: 95,
+    };
+    const [card] = weatherLookupResponseCards([
+      {
+        toolName: 'weather.lookup',
+        status: 'succeeded',
+        result: {
+          place: 'San Francisco',
+          forecast: [day],
+          target: {
+            date: day.date,
+            weekday: day.weekday,
+            day,
+            windows: [{ ...day, label: 'midday', window: '11:00–14:00' }],
+          },
+        },
+      },
+    ]);
+    expect(card).toMatchObject({
+      condition: 'precipitation type uncertain',
+      symbol: 'uncertain',
+      details: [
+        { label: 'Day', value: 'Sat' },
+        { label: 'Precipitation chance', value: '95%' },
+        {
+          label: 'Sat Midday',
+          value: '11:00–14:00 · 12–18°C, precipitation type uncertain, 95% chance of precipitation',
+        },
+      ],
+    });
+  });
+
   it('headlines today with the current reading when the bands are today’s own', () => {
     // The tool's forecast starts tomorrow, so a target it cannot find a day row
     // for is today — and today's headline is what the sky is doing right now.

@@ -1281,6 +1281,18 @@ describe('durable request checklist', () => {
     },
   );
 
+  it('counts a literal planner span with terminal punctuation as the same requested action', () => {
+    const single = 'Find my hotel reservation.';
+    expect(buildRequestChecklist(single, [{ requestSpan: single }])).toBeUndefined();
+
+    const compound = 'Find my hotel, then remind me about the hotel.';
+    const proposed = [
+      { requestSpan: 'Find my hotel,' },
+      { requestSpan: 'remind me about the hotel.' },
+    ];
+    expect(buildRequestChecklist(compound, proposed)).toEqual(buildRequestChecklist(compound));
+  });
+
   it('rejects planner-invented outcomes', () => {
     expect(
       buildRequestChecklist('Find my hotel', [{ requestSpan: 'send it to Alice' }]),

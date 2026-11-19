@@ -63,11 +63,32 @@ const WMO: Record<number, string> = {
   99: 'thunderstorm with hail',
 };
 
+const UNCERTAIN_PRECIPITATION = 'precipitation type uncertain';
+const MISSING_WEATHER_CODE = -1;
+const SNOW_CODES = new Set([71, 73, 75, 77, 85, 86]);
+// Above this threshold the provider's snow code needs corroboration beyond
+// the near-surface evidence available here. A conflict does not imply rain.
+const MAX_SNOW_CORROBORATION_TEMP_C = 3;
+
+function condition(code: number, snowSupported: boolean) {
+  return SNOW_CODES.has(code) && !snowSupported
+    ? { code: MISSING_WEATHER_CODE, description: UNCERTAIN_PRECIPITATION }
+    : { code, description: describeWeather(code) };
+}
+
+function precipitationName(description: string): string {
+  return description === UNCERTAIN_PRECIPITATION ||
+    description === 'unsettled' ||
+    description.includes('snow')
+    ? 'precipitation'
+    : 'rain';
+}
+
 function describeWeather(code: number): string {
   return WMO[code] ?? 'unsettled';
 }
 function isWet(code: number): boolean {
-  return (code >= 51 && code <= 86) || code >= 95;
+  return !SNOW_CODES.has(code) && ((code >= 51 && code <= 86) || code >= 95);
 }
 
 export interface WeatherDay {
@@ -110,11 +131,13 @@ export interface WeatherNow {
   highC: number;
   lowC: number;
   precipProbabilityMax: number;
+  /** The daily precipitation chance includes snow or an unverified weather type. */
+  dailyPrecipitationType?: 'unspecified';
   /** Tomorrow onward — a "this weekend" question needs more than today. */
   forecast: WeatherDay[];
   /** IANA zone the local times above are in (Open-Meteo `timezone`). */
   timezone?: string;
-  /** Absent unless `fetchWeather` was asked for it — see the ambient note there. */
+  /** Full hour rows are emitted only when requested. */
   hourly?: WeatherHour[];
 }
 
@@ -141,29 +164,43 @@ function mergeSignals(signal: AbortSignal | undefined, timeoutMs: number): Abort
  * from the local wall-clock string rather than computed, because a DST day has
  * 23 or 25 entries and any arithmetic over the index drifts after the change.
  */
-function parseHourly(hourly?: {
+interface HourlyWeather {
   time?: string[];
   temperature_2m?: number[];
   apparent_temperature?: number[];
   weather_code?: number[];
   precipitation_probability?: number[];
   wind_speed_10m?: number[];
-}): WeatherHour[] {
+}
+
+function parseHourly(hourly?: HourlyWeather, units?: Record<string, string>): WeatherHour[] {
+  const toCelsius = (value: number, unit?: string) =>
+    unit === '°F' ? ((value - 32) * 5) / 9 : value;
+  const tempUnit = units?.temperature_2m;
+  // The request explicitly selects Celsius. Missing or unexpected metadata
+  // may still be displayed using that requested unit but cannot confirm snow.
+  const knownTemperatureUnit = tempUnit === '°C' || tempUnit === '°F';
   return (hourly?.time ?? [])
     .map((time, index): WeatherHour | null => {
       const temp = hourly?.temperature_2m?.[index];
-      const parsed = /^(\d{4}-\d{2}-\d{2})T(\d{2}):/.exec(time ?? '');
-      if (typeof temp !== 'number' || !parsed?.[1] || !parsed[2]) return null;
-      const code = hourly?.weather_code?.[index] ?? 0;
+      const parsed = /^(\d{4}-\d{2}-\d{2})T([01]\d|2[0-3]):[0-5]\d$/.exec(time ?? '');
+      if (typeof temp !== 'number' || !Number.isFinite(temp) || !parsed?.[1] || !parsed[2])
+        return null;
+      const date = new Date(`${parsed[1]}T00:00:00Z`);
+      if (!Number.isFinite(date.getTime()) || date.toISOString().slice(0, 10) !== parsed[1])
+        return null;
+      const tempC = toCelsius(temp, tempUnit);
+      const code = hourly?.weather_code?.[index] ?? MISSING_WEATHER_CODE;
       const feels = hourly?.apparent_temperature?.[index];
       return {
         time,
         date: parsed[1],
         hour: Number(parsed[2]),
-        tempC: Math.round(temp),
-        ...(typeof feels === 'number' ? { feelsLikeC: Math.round(feels) } : {}),
-        code,
-        description: describeWeather(code),
+        tempC: Math.round(tempC),
+        ...(typeof feels === 'number' && Number.isFinite(feels)
+          ? { feelsLikeC: Math.round(toCelsius(feels, units?.apparent_temperature)) }
+          : {}),
+        ...condition(code, knownTemperatureUnit && tempC <= MAX_SNOW_CORROBORATION_TEMP_C),
         precipProbability: hourly?.precipitation_probability?.[index] ?? 0,
         windKmh: Math.round(hourly?.wind_speed_10m?.[index] ?? 0),
       };
@@ -174,10 +211,9 @@ function parseHourly(hourly?: {
 /**
  * Current conditions + the week's forecast from the free Open-Meteo API (no key).
  *
- * `opts.hourly` is opt-in on purpose. The ambient snapshot reads only `current`
- * and `daily`, and asking for seven days of hourly rows would roughly triple a
- * payload it refreshes every half hour and persists into `ambient_snapshots`.
- * Only `weather.lookup` — answering about a specific hour — pays for it.
+ * Current and daily readings include the two hourly columns needed to check
+ * snow against local temperatures. Only time-specific lookups request and
+ * return full hourly rows. Ambient snapshots retain daily summaries.
  */
 export async function fetchWeather(
   lat: number,
@@ -194,8 +230,8 @@ export async function fetchWeather(
     '&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max' +
     (opts.hourly
       ? '&hourly=temperature_2m,apparent_temperature,weather_code,precipitation_probability,wind_speed_10m'
-      : '') +
-    `&forecast_days=${forecastDays}&timezone=auto`;
+      : '&hourly=temperature_2m,weather_code') +
+    `&forecast_days=${forecastDays}&temperature_unit=celsius&timezone=auto`;
   const res = await fetchImpl(url, { signal: mergeSignals(opts.signal, WEATHER_TIMEOUT_MS) });
   if (!res.ok) throw new Error(`weather fetch failed: ${res.status}`);
   const data = (await res.json()) as {
@@ -212,19 +248,19 @@ export async function fetchWeather(
       temperature_2m_min?: number[];
       precipitation_probability_max?: number[];
     };
-    hourly?: {
-      time?: string[];
-      temperature_2m?: number[];
-      apparent_temperature?: number[];
-      weather_code?: number[];
-      precipitation_probability?: number[];
-      wind_speed_10m?: number[];
-    };
+    hourly?: HourlyWeather;
+    hourly_units?: Record<string, string>;
     timezone?: string;
   };
   const cur = data.current;
   const day = data.daily;
   if (!cur || typeof cur.temperature_2m !== 'number') return null;
+  const hours = parseHourly(data.hourly, data.hourly_units);
+  const dailyCondition = (code: number, date: string | undefined) =>
+    condition(
+      code,
+      hours.some((hour) => hour.date === date && hour.code === code),
+    );
   const forecast = (day?.time ?? [])
     .slice(1)
     .map((date, offset): WeatherDay | null => {
@@ -232,22 +268,24 @@ export async function fetchWeather(
       const low = day?.temperature_2m_min?.[index];
       const high = day?.temperature_2m_max?.[index];
       if (typeof low !== 'number' || typeof high !== 'number') return null;
-      const code = day?.weather_code?.[index] ?? 0;
+      const code = day?.weather_code?.[index] ?? MISSING_WEATHER_CODE;
       return {
         date,
-        code,
-        description: describeWeather(code),
+        ...dailyCondition(code, date),
         lowC: Math.round(low),
         highC: Math.round(high),
         precipProbabilityMax: day?.precipitation_probability_max?.[index] ?? 0,
       };
     })
     .filter((entry): entry is WeatherDay => entry !== null);
-  const hourly = opts.hourly ? parseHourly(data.hourly) : undefined;
+  const today = dailyCondition(day?.weather_code?.[0] ?? MISSING_WEATHER_CODE, day?.time?.[0]);
+  const currentCondition =
+    cur.weather_code == null
+      ? today
+      : condition(cur.weather_code, cur.temperature_2m <= MAX_SNOW_CORROBORATION_TEMP_C);
   return {
     tempC: Math.round(cur.temperature_2m),
-    code: cur.weather_code ?? day?.weather_code?.[0] ?? 0,
-    description: describeWeather(cur.weather_code ?? day?.weather_code?.[0] ?? 0),
+    ...currentCondition,
     windKmh: Math.round(cur.wind_speed_10m ?? 0),
     humidity:
       typeof cur.relative_humidity_2m === 'number'
@@ -256,9 +294,13 @@ export async function fetchWeather(
     highC: Math.round(day?.temperature_2m_max?.[0] ?? cur.temperature_2m),
     lowC: Math.round(day?.temperature_2m_min?.[0] ?? cur.temperature_2m),
     precipProbabilityMax: day?.precipitation_probability_max?.[0] ?? 0,
+    ...(precipitationName(today.description) === 'precipitation' ||
+    precipitationName(currentCondition.description) === 'precipitation'
+      ? { dailyPrecipitationType: 'unspecified' as const }
+      : {}),
     forecast,
     ...(typeof data.timezone === 'string' ? { timezone: data.timezone } : {}),
-    ...(hourly === undefined ? {} : { hourly }),
+    ...(opts.hourly ? { hourly: hours } : {}),
   };
 }
 
@@ -514,11 +556,14 @@ export async function refreshAmbientSnapshot(
     }
     await deps.heartbeat?.();
 
+    const precipName = weather?.dailyPrecipitationType === 'unspecified' ? 'precipitation' : 'rain';
     const flags: Record<string, boolean> = {
       has_location: true,
       has_weather: weather !== null,
       raining_now: weather ? isWet(weather.code) : false,
-      raining_soon: weather ? weather.precipProbabilityMax >= RAIN_SOON_PROBABILITY : false,
+      raining_soon: weather
+        ? precipName === 'rain' && weather.precipProbabilityMax >= RAIN_SOON_PROBABILITY
+        : false,
     };
 
     const locationLine = formatLocationLine(ping, now) ?? '';
@@ -526,7 +571,7 @@ export async function refreshAmbientSnapshot(
     if (weather) {
       lines.push(
         `Weather there: ${weather.description}, ${weather.tempC}°C (today ${weather.lowC}–${weather.highC}°C, ` +
-          `${weather.precipProbabilityMax}% chance of rain, wind ${weather.windKmh} km/h` +
+          `${weather.precipProbabilityMax}% chance of ${precipName}, wind ${weather.windKmh} km/h` +
           (weather.humidity === undefined ? '' : `, humidity ${weather.humidity}%`) +
           ').' +
           (flags.raining_soon ? ' Rain is likely today — factor it into anything outdoors.' : ''),
@@ -539,7 +584,7 @@ export async function refreshAmbientSnapshot(
                 (day) =>
                   `${weekdayName(day.date)} ${day.lowC}–${day.highC}°C, ${day.description}` +
                   (day.precipProbabilityMax >= 30
-                    ? `, ${day.precipProbabilityMax}% chance of rain`
+                    ? `, ${day.precipProbabilityMax}% chance of ${precipitationName(day.description)}`
                     : ''),
               )
               .join('; ') +
