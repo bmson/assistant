@@ -11,6 +11,7 @@ import {
   messages,
   modelCalls,
   notChatAdmissionCancellationSql,
+  ownerActivityVisibilitySql,
   tasks,
   toolCalls,
 } from '@assistant/db';
@@ -24,6 +25,7 @@ import {
   decodeTaskTimelineCursor,
   encodeTaskTimelineCursor,
   estimatedCostOperationLocator,
+  needsYouTaskStatuses,
   type TaskTimelineKind,
   timelineTime,
 } from '@assistant/persistence';
@@ -35,8 +37,7 @@ export const terminalTaskStatuses = ['done', 'failed', 'cancelled'] as const;
 export type ActivityFilter = 'all' | 'needs-you' | 'working' | 'scheduled' | 'completed';
 
 function statusesForFilter(filter: ActivityFilter): string[] | undefined {
-  if (filter === 'needs-you')
-    return ['waiting_approval', 'waiting_budget', 'waiting_estimated_cost', 'needs_attention'];
+  if (filter === 'needs-you') return [...needsYouTaskStatuses];
   if (filter === 'working') return ['pending', 'running'];
   if (filter === 'scheduled') return ['sleeping', 'waiting_event'];
   if (filter === 'completed') return [...terminalTaskStatuses];
@@ -157,7 +158,7 @@ export async function getActivityStatus(db: Db, taskId: string): Promise<Activit
     .limit(1);
   if (!task) return null;
   const [pending] =
-    task.status === 'waiting_approval'
+    task.status === 'waiting_approval' || task.status === 'needs_attention'
       ? await db
           .select({ id: approvals.id })
           .from(approvals)
@@ -219,9 +220,7 @@ export async function listActivity(
       .from(tasks)
       .where(
         and(
-          eq(tasks.agentId, agent.id),
-          notChatAdmissionCancellationSql(),
-          sql`${tasks.trigger}->'payload'->>'canary' IS DISTINCT FROM 'true'`,
+          ownerActivityVisibilitySql(agent.id),
           input.archived ? isNotNull(tasks.archivedAt) : isNull(tasks.archivedAt),
           statuses ? inArray(tasks.status, statuses) : undefined,
         ),
@@ -241,7 +240,7 @@ export async function listActivity(
   ]);
 
   const waitingIds = rows
-    .filter((task) => task.status === 'waiting_approval')
+    .filter((task) => task.status === 'waiting_approval' || task.status === 'needs_attention')
     .map((task) => task.id);
   const pendingIds =
     waitingIds.length === 0
@@ -473,6 +472,7 @@ export interface TaskDetail {
   hasMoreTimeline: boolean;
   nextTimelineCursor?: string | null;
   activeGrant: AutonomyGrant | null;
+  hasPendingApproval: boolean;
   stuckWaiting: boolean;
 }
 
@@ -647,8 +647,9 @@ export async function getTaskDetail(
   const taskApprovals = rawApprovals.filter((row) => onPage('approval', row.id)).reverse();
   // A parked task whose approval is gone is stuck. The page carries only one
   // page of approvals now, so ask the table rather than the page.
-  const stuckWaiting =
-    task.status === 'waiting_approval' && !(await hasPendingApproval(db, taskId));
+  const pendingApproval =
+    (task.status === 'waiting_approval' || task.status === 'needs_attention') &&
+    (await hasPendingApproval(db, taskId));
   return {
     timezone: agent.timezone,
     task: snapshot,
@@ -696,7 +697,8 @@ export async function getTaskDetail(
     hasMoreTimeline,
     nextTimelineCursor,
     activeGrant: activeAutonomyGrant(task, Date.now()),
-    stuckWaiting,
+    hasPendingApproval: pendingApproval,
+    stuckWaiting: task.status === 'waiting_approval' && !pendingApproval,
   };
 }
 
@@ -785,6 +787,7 @@ export async function getTaskDetailWithRepository(
     hasMoreTimeline,
     nextTimelineCursor,
     activeGrant: activeAutonomyGrant({ trust: task.trust, autonomyGrant }, Date.now()),
+    hasPendingApproval: detail.hasPendingApproval,
     stuckWaiting: task.status === 'waiting_approval' && !detail.hasPendingApproval,
   };
 }

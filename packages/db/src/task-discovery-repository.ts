@@ -1,11 +1,34 @@
 import {
   estimatedCostOperationLocator,
+  needsYouTaskStatuses,
   type TaskDiscoveryRepository,
 } from '@assistant/persistence';
-import { and, count, desc, eq, inArray, isNotNull, lt, or, sql } from 'drizzle-orm';
+import { and, count, desc, eq, inArray, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
 import { notChatAdmissionCancellationSql } from './chat-admission-projection.js';
 import type { Db } from './client.js';
 import { approvals, tasks } from './schema.js';
+export function ownerActivityVisibilitySql(agentId: string) {
+  return and(
+    eq(tasks.agentId, agentId),
+    notChatAdmissionCancellationSql(),
+    sql`${tasks.trigger}->'payload'->>'canary' IS DISTINCT FROM 'true'`,
+  );
+}
+
+export async function countPostgresNeedsYouTasks(db: Db, agentId: string): Promise<number> {
+  const [total] = await db
+    .select({ value: count() })
+    .from(tasks)
+    .where(
+      and(
+        ownerActivityVisibilitySql(agentId),
+        isNull(tasks.archivedAt),
+        inArray(tasks.status, needsYouTaskStatuses),
+      ),
+    );
+  return Number(total?.value ?? 0);
+}
+
 export function createPostgresTaskDiscoveryRepository(db: Db): TaskDiscoveryRepository {
   return {
     driver: 'postgres',
@@ -35,9 +58,7 @@ export function createPostgresTaskDiscoveryRepository(db: Db): TaskDiscoveryRepo
         .from(tasks)
         .where(
           and(
-            eq(tasks.agentId, agentId),
-            notChatAdmissionCancellationSql(),
-            sql`${tasks.trigger}->'payload'->>'canary' IS DISTINCT FROM 'true'`,
+            ownerActivityVisibilitySql(agentId),
             input.after
               ? or(
                   lt(tasks.updatedAt, input.after.at),
@@ -56,9 +77,9 @@ export function createPostgresTaskDiscoveryRepository(db: Db): TaskDiscoveryRepo
         estimatedCostOperationId: estimatedCostOperationLocator(row.status, state),
       }));
       const waiting = selected
-        .filter((row) => row.status === 'waiting_approval')
+        .filter((row) => row.status === 'waiting_approval' || row.status === 'needs_attention')
         .map((row) => row.id);
-      const [archived, pending] = await Promise.all([
+      const [archived, pending, needsYouCount] = await Promise.all([
         db
           .select({ n: count() })
           .from(tasks)
@@ -75,11 +96,13 @@ export function createPostgresTaskDiscoveryRepository(db: Db): TaskDiscoveryRepo
               .from(approvals)
               .where(and(inArray(approvals.taskId, waiting), eq(approvals.status, 'pending')))
           : [],
+        input.includeNeedsYouCount ? countPostgresNeedsYouTasks(db, agentId) : undefined,
       ]);
       return {
         rows: selected,
         hasMore: rows.length > input.limit,
         archivedCount: Number(archived[0]?.n ?? 0),
+        needsYouCount,
         pendingApprovalTaskIds: pending.map((row) => row.taskId),
       };
     },

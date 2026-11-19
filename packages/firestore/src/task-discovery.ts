@@ -1,5 +1,6 @@
 import {
   estimatedCostOperationLocator,
+  isActivityCanary,
   isChatAdmissionCancellationProjection,
   type Records,
   type TaskDiscoveryRepository,
@@ -7,6 +8,7 @@ import {
 } from '@assistant/persistence';
 import { FieldPath } from '@google-cloud/firestore';
 import { assertPrivacyErasureFenceUnchanged, readPrivacyErasureFence } from './privacy-erasure.js';
+import { countFirestoreNeedsYouTasks } from './shell-status.js';
 import { decodeRecord, documentKey, type InstallationStore } from './store.js';
 
 const fields = [
@@ -85,10 +87,7 @@ export class FirestoreTaskDiscoveryRepository implements TaskDiscoveryRepository
         suppressed: isChatAdmissionCancellationProjection(task),
         agentId,
         type: task.type,
-        status:
-          trigger?.payload?.canary === true || trigger?.payload?.canary === 'true'
-            ? '__canary__'
-            : task.status,
+        status: isActivityCanary(trigger) ? '__canary__' : task.status,
         title: task.title,
         progress: task.progress,
         trust: task.trust,
@@ -104,12 +103,12 @@ export class FirestoreTaskDiscoveryRepository implements TaskDiscoveryRepository
       });
     }
     const owned = this.store.collection('tasks').where('agentId', '==', agentId);
-    const [all, current, pending] = await Promise.all([
+    const [all, current, pending, needsYouCount] = await Promise.all([
       owned.count().get(),
       owned.where('archivedAt', '==', null).count().get(),
       Promise.all(
         rows
-          .filter((row) => row.status === 'waiting_approval')
+          .filter((row) => row.status === 'waiting_approval' || row.status === 'needs_attention')
           .map(async (row) => {
             const records = await this.store
               .collection('approvals')
@@ -121,12 +120,14 @@ export class FirestoreTaskDiscoveryRepository implements TaskDiscoveryRepository
             return records.empty ? null : row.id;
           }),
       ),
+      input.includeNeedsYouCount ? countFirestoreNeedsYouTasks(owned, agentId) : undefined,
     ]);
     await assertPrivacyErasureFenceUnchanged(this.store, agentId, fence);
     return {
       rows,
       hasMore: snapshot.size > input.limit,
       archivedCount: all.data().count - current.data().count,
+      needsYouCount,
       pendingApprovalTaskIds: pending.filter((id): id is string => id !== null),
     };
   }

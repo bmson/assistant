@@ -55,15 +55,21 @@ export async function POST(request: Request): Promise<Response> {
     action?: unknown;
     operationId?: unknown;
   } | null;
-  if (config.PERSISTENCE_DRIVER === 'firestore' && body?.action !== 'archive-old') {
+  const staleAttention = body?.action === 'clear-stale-attention';
+  if (
+    config.PERSISTENCE_DRIVER === 'firestore' &&
+    body?.action !== 'archive-old' &&
+    !staleAttention
+  ) {
     return mobileJson(
       { error: 'Activity editing is unavailable in Firestore mode.' },
       { status: 503 },
     );
   }
-  if (body?.action !== 'archive-old') {
-    return mobileJson({ error: 'action must be archive-old' }, { status: 400 });
+  if (!body || (body.action !== 'archive-old' && !staleAttention)) {
+    return mobileJson({ error: 'Unsupported Activity action' }, { status: 400 });
   }
+  const scope = staleAttention ? 'stale-attention' : 'terminal';
   if (
     body.operationId !== undefined &&
     (typeof body.operationId !== 'string' || !/^[0-9a-f-]{36}$/i.test(body.operationId))
@@ -85,12 +91,13 @@ export async function POST(request: Request): Promise<Response> {
         config.FIRESTORE_AGENT_ID,
         30,
         body.operationId as string | undefined,
+        scope,
       );
       return mobileJson({ ok: true, ...progress });
     } finally {
       await store.db.terminate();
     }
   }
-  const progress = await archiveOldActivity(getDb());
+  const progress = await archiveOldActivity(getDb(), 30, scope);
   return mobileJson({ ok: true, ...progress });
 }

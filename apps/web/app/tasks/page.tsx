@@ -146,18 +146,32 @@ export default async function TasksPage({
                 </Link>
               ) : null}
               <form action={archiveOldTasks}>
+                {filter === 'needs-you' ? (
+                  <input type="hidden" name="scope" value="stale-attention" />
+                ) : null}
                 {archiveOperation ? (
                   <input type="hidden" name="operationId" value={archiveOperation} />
                 ) : null}
                 <SubmitButton pendingLabel="Archiving…">
                   <Archive className="size-3.5" aria-hidden="true" />
-                  {archiveOperation ? `Continue archiving (${archivedTotal ?? 0})` : 'Archive old'}
+                  {archiveOperation
+                    ? `Continue archiving (${archivedTotal ?? 0})`
+                    : filter === 'needs-you'
+                      ? 'Clear stale'
+                      : 'Archive old'}
                 </SubmitButton>
               </form>
             </>
           )
         }
       />
+
+      {!archived && filter === 'needs-you' ? (
+        <p className="mt-4 text-sm text-muted-foreground">
+          Clear stale archives items that have needed attention for over 30 days and have no pending
+          approval.
+        </p>
+      ) : null}
 
       {archivedTotal !== null ? (
         <p className="mt-4 text-sm text-muted-foreground" role="status">
@@ -275,7 +289,9 @@ export default async function TasksPage({
                       {/* The title already opens the task — a per-row "Open"
                           button restated the link as chrome. Only a real
                           state change earns a button here. */}
-                      {archived || terminal ? (
+                      {archived ||
+                      terminal ||
+                      (task.status === 'needs_attention' && !task.hasPendingApproval) ? (
                         <div className="col-start-2 flex items-center gap-2 sm:col-start-auto sm:justify-end">
                           {archived ? (
                             <form action={restoreTask.bind(null, task.id)}>

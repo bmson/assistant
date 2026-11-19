@@ -657,7 +657,9 @@ final class AppModel {
     var pendingApprovalCount: Int {
         overview?.approvals.pending.count ?? bootstrap?.shell.dashboard.pendingApprovals ?? 0
     }
-    var needsAttentionCount: Int { bootstrap?.shell.dashboard.needsAttention ?? 0 }
+    private var activityAttentionCount: (value: Int, readAt: Date)?
+    private var activityAttentionReadRevision = 0
+    var needsAttentionCount: Int { activityAttentionCount?.value ?? bootstrap?.shell.dashboard.needsAttention ?? 0 }
     var conversationId: String? {
         activeConversation?.conversation.id ?? bootstrap?.conversation.conversation.id
     }
@@ -1910,6 +1912,7 @@ final class AppModel {
 
     private func resetConnectedState(preserveCardFormRecoveryFence: Bool = false) {
         memoryCorrections.retire()
+        activityAttentionCount = nil
         phoneCalendarSyncRevision += 1
         phoneCalendarSyncTask?.cancel()
         phoneCalendarSyncTask = nil
@@ -2329,16 +2332,24 @@ final class AppModel {
         }
     }
 
-    func activityDiscoveryPage(archived: Bool, query: String, filter: String, cursor: String?) async -> ActivityList? {
+    func activityDiscoveryPage(
+        archived: Bool, query: String, filter: String, cursor: String?, reportFailure: Bool = true
+    ) async -> ActivityList? {
         guard let client else { return nil }
         let version = connectionVersion
+        let readsAttentionCount = !archived && filter == "needs-you" && cursor == nil
+        if readsAttentionCount { activityAttentionReadRevision += 1 }
+        let revision = activityAttentionReadRevision
         do {
             let page = try await client.activity(archived: archived, query: query, filter: filter, cursor: cursor)
-            guard connectionIsCurrent(client, version: version) else { return nil }
+            guard !Task.isCancelled, connectionIsCurrent(client, version: version) else { return nil }
+            if readsAttentionCount, revision == activityAttentionReadRevision, let count = page.needsYouCount {
+                activityAttentionCount = (count, Date())
+            }
             return page
         } catch {
-            guard connectionIsCurrent(client, version: version) else { return nil }
-            reportError(error)
+            guard !Task.isCancelled, connectionIsCurrent(client, version: version) else { return nil }
+            if reportFailure { reportError(error) }
             return nil
         }
     }
@@ -2392,7 +2403,12 @@ final class AppModel {
             async let goalsRefresh: Void = archivedGoals
                 ? self.refreshArchivedGoals(reportFailure: false)
                 : ()
-            _ = await (overviewRefresh, activityRefresh, goalsRefresh)
+            async let attentionRefresh: ActivityList? = archivedActivity
+                ? self.activityDiscoveryPage(
+                    archived: false, query: "", filter: "needs-you", cursor: nil, reportFailure: false
+                )
+                : nil
+            _ = await (overviewRefresh, activityRefresh, goalsRefresh, attentionRefresh)
         }
     }
 
@@ -2426,11 +2442,15 @@ final class AppModel {
         }
     }
 
-    func archiveOldActivity(operationId: String? = nil) async -> ArchiveOldActivityProgress? {
+    func archiveOldActivity(
+        operationId: String? = nil, staleAttention: Bool = false
+    ) async -> ArchiveOldActivityProgress? {
         guard let client else { return nil }
         errorMessage = nil
         do {
-            let progress = try await client.archiveOldActivity(operationId: operationId)
+            let progress = try await client.archiveOldActivity(
+                operationId: operationId, staleAttention: staleAttention
+            )
             reconcileAfterMutation(archivedActivity: true)
             return progress
         } catch {
@@ -5201,6 +5221,11 @@ final class AppModel {
         }
         if let client {
             edits.configureRecovery(scope: client.configuration.baseURL.absoluteString + "|" + response.identity.id)
+        }
+        // The shell is briefly cached. Let a recently read Activity count lead
+        // until a later bootstrap can carry a newer shell projection.
+        if let count = activityAttentionCount, Date().timeIntervalSince(count.readAt) >= 30 {
+            activityAttentionCount = nil
         }
         bootstrap = response
         applyMemoryHealth(response.shell.memoryHealth)
