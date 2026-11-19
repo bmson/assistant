@@ -547,7 +547,7 @@
     },
     "apps/web/app/api/release-probe/route.ts": {
       "methods": ["GET"],
-      "sha256": "f08508bf429df7d4b6faf68d4063ee8999fa061a53119bcc42b9f5455dba016d"
+      "sha256": "45f3a2cea29bbf177be478360d9a7f8ec3e2df49616318fbfd6252099177565f"
     },
     "apps/web/app/api/shell/status/route.ts": {
       "methods": ["GET"],
