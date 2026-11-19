@@ -40,7 +40,7 @@ export async function permitsLegacyDiscoveryProbe(
   const rpc = value as Record<string, unknown>;
   if (
     rpc.jsonrpc !== '2.0' ||
-    rpc.id !== id ||
+    (rpc.id !== id && rpc.id !== null && rpc.id !== 'server-error') ||
     Object.hasOwn(rpc, 'result') ||
     !rpc.error ||
     typeof rpc.error !== 'object' ||
@@ -48,9 +48,51 @@ export async function permitsLegacyDiscoveryProbe(
   )
     return false;
   const error = rpc.error as Record<string, unknown>;
-  // Unknown modern errors, invalid params, version/header/capability errors,
-  // and method-not-found never become permission to switch protocol eras.
+  function supportedLegacyVersion(requested: string, versions: string): boolean {
+    const supported = versions.split(', ');
+    return (
+      requested === '2026-07-28' &&
+      supported.includes('2025-11-25') &&
+      new Set(supported).size === supported.length &&
+      supported.every((version) => {
+        const parsed = Date.parse(`${version}T00:00:00Z`);
+        return (
+          Number.isFinite(parsed) &&
+          new Date(parsed).toISOString().slice(0, 10) === version &&
+          version <= '2025-11-25'
+        );
+      })
+    );
+  }
+  // Python SDK 1.30.0 uses this exact sentinel only for transport-level
+  // rejections before dispatch. It is not accepted for generic RPC errors.
+  if (rpc.id === 'server-error') {
+    if (error.code !== -32600 || typeof error.message !== 'string') return false;
+    if (error.message === 'Bad Request: Missing session ID') return true;
+    const unsupported =
+      /^Bad Request: Unsupported protocol version: (\d{4}-\d{2}-\d{2})\. Supported versions: (\d{4}-\d{2}-\d{2}(?:, \d{4}-\d{2}-\d{2})*)$/.exec(
+        error.message,
+      );
+    return (
+      !!unsupported?.[1] &&
+      !!unsupported[2] &&
+      supportedLegacyVersion(unsupported[1], unsupported[2])
+    );
+  }
+  // TypeScript SDK 1.32.2 uses null for these exact transport rejections.
+  if (error.code === -32000 && typeof error.message === 'string') {
+    if (error.message === 'Bad Request: Server not initialized') return true;
+    const unsupported =
+      /^Bad Request: Unsupported protocol version: (\d{4}-\d{2}-\d{2}) \(supported versions: (\d{4}-\d{2}-\d{2}(?:, \d{4}-\d{2}-\d{2})*)\)$/.exec(
+        error.message,
+      );
+    if (unsupported?.[1] && unsupported[2])
+      return supportedLegacyVersion(unsupported[1], unsupported[2]);
+  }
+  // Recognized modern errors and all unrelated/mismatching request ids still
+  // fail closed. Generic legacy evidence remains request-id matched only.
   return (
+    rpc.id === id &&
     (error.code === -32000 || error.code === -32600) &&
     typeof error.message === 'string' &&
     /^(?:server(?: is)? not initialized|initialization required)\.?$/i.test(error.message)
