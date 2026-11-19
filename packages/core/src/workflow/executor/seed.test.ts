@@ -163,8 +163,12 @@ describe('seedContext', () => {
     });
   });
 
-  it('keeps a complete new email request independent of an unresolved recipient clarification', async () => {
-    const freshRequest = 'Email Casey the launch notes: the venue is confirmed for Thursday.';
+  const independentRequests = [
+    'Email Casey the launch notes: the venue is confirmed for Thursday.',
+    'What is on my calendar tomorrow?',
+    'Check my inbox for delivery updates.',
+  ];
+  it.each(independentRequests)('keeps a new request independent: %s', async (freshRequest) => {
     seedHistory.mockResolvedValue([
       {
         id: 'anna-request',

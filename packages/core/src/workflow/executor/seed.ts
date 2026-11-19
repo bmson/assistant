@@ -92,7 +92,11 @@ async function precedingClarification(
     question: prompt.data.question,
     authorizedScopes: prompt.data.authorizedScopes,
     tainted: prompt.data.tainted,
-    answerStatus: clarificationAnswerStatus(currentText, prompt.data.question),
+    answerStatus: clarificationAnswerStatus(
+      currentText,
+      prompt.data.question,
+      prompt.data.ownerAuthoredText,
+    ),
   };
 }
 
