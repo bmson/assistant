@@ -151,7 +151,6 @@ Retained screenshots show the final focused states:
 - [New device key receipt](assets/web-experience-2026-10-02/security-new-device-key.png)
 - [Investigation request clipboard denial](assets/web-experience-2026-10-02/audit-copy-fallback.png)
 
-
 ## Retained product-page visual review, 3 October 2026
 
 The later UI review expands evidence to every browser page source. The application contains 34 `page.tsx` files: six reachable console pages, the `/` redirect to Settings, and 27 retained product routes that the current proxy redirects to Settings. Those retained sources remain closed. The [product fixture](../../apps/web/app/product-visual-fixture.test.tsx) calls 26 actual retained page components with typed synthetic projections; the remaining legacy person route is a redirect assertion. This is source-component visual coverage, not successful authenticated navigation to those URLs.

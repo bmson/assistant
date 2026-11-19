@@ -118,6 +118,7 @@ pnpm consumer:install $ARGS --runtime-config $DIR/runtime-config.json --build-im
 ```
 
 Expected:
+
 - Both images are built from the exact commit and pushed by digest to the customer's registry. The digests are saved as `$DIR/image-manifest-<sha>.json`.
 - `<install>-auth-secret` is created with one generated version; the value is never printed.
 - Web (`OWNER_AUTH_MODE=passkey`) and agent are deployed. Web is public; the agent is IAM-private.
@@ -138,6 +139,7 @@ pnpm consumer:install $ARGS $RUNTIME --issue-owner-claim --apply
 5. Confirm that the native app loads this new installation, then record pairing success and its version/build. Keep the recovery code separate from the device key. Record `t_claim` and pairing hands-on time separately from provisioning/build waits.
 
 Negative checks:
+
 - Open the same link again. Expect "invalid, expired, or already used".
 - Open `/security` in a private window. Expect owner sign-in.
 - Open `/chat` after sign-in. Expect the configured product-route denial; the conversation is in the native app.
@@ -157,6 +159,7 @@ pnpm consumer:install $ARGS $RUNTIME --verify --native-app-version <VERSION_BUIL
 ```
 
 Expected checks, all `ok: true`:
+
 - `native-app-installed` (operator confirms the actual version/build; distribution is not machine-verified)
 - `native-pairing` (operator confirms authenticated loading on that app)
 - `cloud-run-revisions`
@@ -240,6 +243,7 @@ pnpm consumer:uninstall ... --delete-data --confirm-installation $INSTALL --dele
 ```
 
 Afterwards confirm in the console:
+
 - no Cloud Run services, Scheduler jobs, or queues remain;
 - no `$INSTALL-*` service accounts remain;
 - with `--delete-data`, the database, the buckets (soft-deleted objects are billed for 7 days), and the Artifact Registry repository are gone.

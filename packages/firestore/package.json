@@ -18,8 +18,8 @@
   "dependencies": {
     "@assistant/config": "workspace:*",
     "@assistant/persistence": "workspace:*",
-    "@google-cloud/firestore": "^9.4.0",
-    "google-auth-library": "^10.9.1"
+    "@google-cloud/firestore": "^9.4.1",
+    "google-auth-library": "^11.3.4"
   },
   "devDependencies": {
     "@assistant/application": "workspace:*",

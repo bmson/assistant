@@ -228,7 +228,6 @@ The Firestore release runs no database step. Before it rolls out any revision, t
 2. A managed Firestore recovery point covers the pre-release state: point-in-time recovery, or a READY scheduled backup no older than `FIRESTORE_BACKUP_MAX_AGE_HOURS` (default 26).
 3. `pnpm firestore:indexes verify` matches the release's index manifest.
 
-
 ## Production cutover (2026-09-26)
 
 All 15 steps passed on release `1d2d062c`, and Firestore (`assistant-production`) has been authoritative since `switch-services` at about 23:37 UTC. The write-fence window, from `quiesce` to `switch-services`, ran from 19:38 to 23:37 UTC. It included a 30-minute drain proof (3 × 900 s), several retries, and the managed backup and restore.

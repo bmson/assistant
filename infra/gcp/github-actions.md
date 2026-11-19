@@ -141,7 +141,6 @@ logs and observed state before restoring it. Recovery is not automatic in that
 case. A receipt entry is removed only after a verified restoration; changed
 state or failed restoration leaves the private receipt for recovery.
 
-
 ## GitHub configuration
 
 Add these non-secret repository variables:
