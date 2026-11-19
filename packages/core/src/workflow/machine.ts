@@ -188,7 +188,7 @@ export async function sleepTask(
 export function completeTask(
   db: Db | TaskRepository,
   task: TaskLease,
-  outcome: { status: 'done' | 'failed' | 'cancelled'; progress?: string },
+  outcome: import('@assistant/persistence').TaskOutcome,
 ): Promise<boolean>;
 /** Administrative cancellation does not need an executor lease. */
 export function completeTask(
@@ -199,7 +199,7 @@ export function completeTask(
 export async function completeTask(
   db: Db | TaskRepository,
   taskOrId: TaskLease | string,
-  outcome: { status: 'done' | 'failed' | 'cancelled'; progress?: string },
+  outcome: import('@assistant/persistence').TaskOutcome,
 ): Promise<boolean> {
   return lifecycle(db).completeTask(taskOrId, outcome);
 }

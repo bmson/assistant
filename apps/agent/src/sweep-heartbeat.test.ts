@@ -2,6 +2,7 @@ import { loadConfig, resetConfigForTest } from '@assistant/config';
 import { createDb, createPostgresExecutionPersistence, schedules } from '@assistant/db';
 import { installModules, noopOwnerNotifier } from '@assistant/modules';
 import { ToolRegistry } from '@assistant/tools/registry';
+import { eq } from 'drizzle-orm';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   assertAllocatedTestDatabaseOwnership,
@@ -138,6 +139,18 @@ describe('independent scheduler health', () => {
       expect(await runPostgresSweep(deps, { clock })).toMatchObject({ failedSteps: [] });
       expect(await readPostgresSweepHealth(db, now)).toMatchObject({ state: 'healthy' });
       expect((await read()).status).toBe(200);
+      await db
+        .update(schedules)
+        .set({
+          enabled: true,
+          createdAt: new Date(now.getTime() - 27 * 3_600_000),
+        })
+        .where(eq(schedules.name, 'daily-briefing'));
+      const overdueBriefing = await read();
+      expect(overdueBriefing.status).toBe(503);
+      expect(await overdueBriefing.json()).toMatchObject({
+        health: { state: 'healthy', ok: false, briefing: { state: 'stale' } },
+      });
       expect(embed).not.toHaveBeenCalled();
     } finally {
       await db.$client.end();

@@ -7,6 +7,8 @@ import {
 } from '@assistant/firestore';
 import { eq, lte } from 'drizzle-orm';
 
+import { readFirestoreBriefingHealth, readPostgresBriefingHealth } from './briefing-watchdog.js';
+
 const HEARTBEAT_CURSOR = 'scheduler-sweep-heartbeat-v1';
 const STALE_MS = 30 * 60_000;
 const STEP_NAME = /^[a-zA-Z][a-zA-Z0-9_.-]{0,79}$/;
@@ -178,7 +180,14 @@ export async function readConfiguredSweepHealth(config: Config) {
       databaseId: config.FIRESTORE_DATABASE_ID,
     });
     try {
-      return await readFirestoreSweepHealth(store, config.FIRESTORE_AGENT_ID);
+      const clock = new Date();
+      const [sweep, briefing] = await Promise.all([
+        readFirestoreSweepHealth(store, config.FIRESTORE_AGENT_ID, clock),
+        readFirestoreBriefingHealth(store, config.FIRESTORE_AGENT_ID, clock).catch(
+          () => ({ ok: false, state: 'unavailable' }) as const,
+        ),
+      ]);
+      return { ...sweep, ok: sweep.ok && briefing.ok, briefing };
     } finally {
       await store.db.terminate();
     }
@@ -190,7 +199,14 @@ export async function readConfiguredSweepHealth(config: Config) {
     statementTimeoutMs: 5000,
   });
   try {
-    return await readPostgresSweepHealth(db);
+    const clock = new Date();
+    const [sweep, briefing] = await Promise.all([
+      readPostgresSweepHealth(db, clock),
+      readPostgresBriefingHealth(db, clock).catch(
+        () => ({ ok: false, state: 'unavailable' }) as const,
+      ),
+    ]);
+    return { ...sweep, ok: sweep.ok && briefing.ok, briefing };
   } finally {
     await db.$client.end();
   }

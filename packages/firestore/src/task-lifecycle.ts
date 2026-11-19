@@ -16,6 +16,7 @@ import {
   redactTerminalArrivalTask,
 } from '@assistant/persistence';
 import { Filter } from '@google-cloud/firestore';
+import { prepareFirestoreBriefingWatchdog } from './briefing-watchdog.js';
 import { createWakeIntent } from './outbox.js';
 import { decodeRecord, documentKey, encodeRecord } from './store.js';
 import { createTask } from './task-creation.js';
@@ -228,6 +229,32 @@ export class FirestoreTaskRepository
       ),
     );
   }
+  async recordAbortedBriefing(lease: TaskLease): Promise<void> {
+    await this.store.db.runTransaction(async (tx) => {
+      const snapshot = await tx.get(this.store.doc('tasks', lease.id));
+      if (!snapshot.exists) return;
+      const row = decodeRecord<Task>(snapshot.data());
+      const now = this.store.now();
+      if (
+        row.id !== lease.id ||
+        row.agentId !== lease.agentId ||
+        row.status !== 'running' ||
+        row.leaseToken !== lease.leaseToken ||
+        !row.lockedUntil ||
+        row.lockedUntil <= now
+      )
+        return;
+      const cursor = await prepareFirestoreBriefingWatchdog(
+        tx,
+        this.store,
+        row,
+        { kind: 'aborted' },
+        now,
+      );
+      if (cursor) tx.set(cursor.ref, cursor.data);
+    });
+  }
+
   async completeTask(task: TaskLease | string, outcome: TaskOutcome) {
     if (typeof task === 'string' && outcome.status !== 'cancelled')
       throw new Error('Administrative completion requires cancellation');
@@ -282,6 +309,17 @@ export class FirestoreTaskRepository
         row.externalEventId,
       );
 
+      const watchdog =
+        outcome.status === 'done' && outcome.briefingOutcome
+          ? await prepareFirestoreBriefingWatchdog(
+              tx,
+              this.store,
+              row,
+              outcome.briefingOutcome,
+              now,
+            )
+          : null;
+      if (watchdog) tx.set(watchdog.ref, watchdog.data);
       tx.update(
         taskRef,
         encodeRecord({

@@ -1,3 +1,4 @@
+import type { BriefingRunOutcome } from './briefing.js';
 import type { TaskLease, TaskLeaseRepository } from './contracts.js';
 import type { Records } from './records.js';
 import type { TaskCreateInput, TaskCreateResult } from './task-creation.js';
@@ -19,6 +20,7 @@ export interface ScheduledFollowUpInput {
 export interface TaskOutcome {
   status: 'done' | 'failed' | 'cancelled';
   progress?: string;
+  briefingOutcome?: BriefingRunOutcome;
 }
 export interface TaskBudgetIncrease {
   agentId: string;
@@ -52,6 +54,7 @@ export interface TaskRepository extends TaskLeaseRepository {
   parkForBudget(task: TaskLease, state: Record<string, unknown>, resumeAt: Date): Promise<boolean>;
   sleepTask(task: TaskLease, state: Record<string, unknown>, runAfter: Date): Promise<boolean>;
   completeTask(task: TaskLease | string, outcome: TaskOutcome): Promise<boolean>;
+  recordAbortedBriefing?(task: TaskLease): Promise<void>;
   markTaskNeedsAttention(task: TaskLease, progress: string): Promise<boolean>;
   parkForEvent(task: TaskLease): Promise<boolean>;
   markAttentionNotified(taskId: string): Promise<boolean>;
