@@ -43,7 +43,7 @@ describe('web installation proof', () => {
     const origin = 'http://127.0.0.1:3107';
     vi.stubEnv('NODE_ENV', 'development');
     vi.stubEnv('AUTH_DEV_BYPASS', 'true');
-    vi.stubEnv('ASSISTANT_QA_WEB_ORIGIN', origin);
+    vi.stubEnv('AUTH_URL', origin);
     vi.stubEnv('ASSISTANT_TEST_TARGET_TOKEN', target.token);
     vi.stubEnv('DATABASE_URL', target.databaseUrl);
     vi.stubEnv('TEST_DATABASE_URL', target.databaseUrl);

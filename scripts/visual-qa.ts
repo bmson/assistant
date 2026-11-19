@@ -1,8 +1,8 @@
 /**
  * Visual QA: screenshot every primary surface at desktop and phone widths.
  * Run against a dedicated QA dev server using the same allocated QA database.
- * Start the server with AUTH_DEV_BYPASS=true and the same QA origin and
- * allocator environment used for this command:
+ * Start the server with AUTH_DEV_BYPASS=true, AUTH_URL matching
+ * ASSISTANT_QA_WEB_ORIGIN, and the same allocator environment:
  *   pnpm tsx scripts/visual-qa.ts [baseUrl]
  * Output lands in /tmp/visual-qa/.
  *

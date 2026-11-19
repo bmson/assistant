@@ -21,16 +21,11 @@ function localQaProof(request: Request): string | undefined {
   if (process.env.NODE_ENV !== 'development') return;
   const nonce = request.headers.get('x-assistant-qa-nonce');
   const token = process.env.ASSISTANT_TEST_TARGET_TOKEN;
-  if (
-    !nonce ||
-    !/^[0-9a-f]{32}$/.test(nonce) ||
-    !token ||
-    new URL(request.url).origin !== process.env.ASSISTANT_QA_WEB_ORIGIN
-  )
-    return;
+  if (!nonce || !/^[0-9a-f]{32}$/.test(nonce) || !token) return;
   try {
     const config = loadConfig();
     if (
+      new URL(request.url).origin !== config.AUTH_URL ||
       !config.AUTH_DEV_BYPASS ||
       config.RESTORE_REHEARSAL ||
       config.PERSISTENCE_DRIVER !== 'postgres'
