@@ -4,7 +4,12 @@ import type { DispatchOutbox, TaskQueue } from '@assistant/persistence';
 export async function dispatchOutbox(
   outbox: DispatchOutbox,
   queue: TaskQueue,
-  options: { batch?: number; concurrency?: number; maxDurationMs?: number } = {},
+  options: {
+    batch?: number;
+    concurrency?: number;
+    maxDurationMs?: number;
+    ids?: readonly string[];
+  } = {},
 ) {
   const { batch = 50, concurrency = 4, maxDurationMs = 30_000 } = options;
   if (
@@ -21,7 +26,7 @@ export async function dispatchOutbox(
     throw new Error('Invalid dispatch bounds');
   const deadline = Date.now() + maxDurationMs;
   const signal = AbortSignal.timeout(maxDurationMs);
-  const ids = await outbox.due(batch);
+  const ids = options.ids ? options.ids.slice(0, batch) : await outbox.due(batch);
   const result = { delivered: 0, retried: 0, leaseLost: 0, errors: 0 };
   let cursor = 0;
   await Promise.all(

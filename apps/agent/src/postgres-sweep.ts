@@ -4,6 +4,7 @@ import {
   findDueTasks,
   resumeResolvedApprovalTasks,
 } from '@assistant/core';
+import { resumePostgresBudgetWakes } from '@assistant/db';
 import { type AgentDeps, agentServices } from './deps.js';
 import { executorDeps } from './executor-deps.js';
 import {
@@ -96,6 +97,11 @@ export async function runPostgresSweep(
   const budgetNotices = agent
     ? await step('emitBudgetNotices', () => emitBudgetNotices(deps.db, agent.id), [] as string[])
     : [];
+  const capChangeWakes = await step(
+    'resumeBudgetCapWakes',
+    async () => (await resumePostgresBudgetWakes(deps.db)).length,
+    0,
+  );
   const due = options.notifyDueTasks
     ? await step(
         'findDueTasks',
@@ -173,6 +179,7 @@ export async function runPostgresSweep(
     missionReportsRepaired,
     schedulesFired: fired.length,
     dueTasksNotified,
+    capChangeWakes,
     messagesEmbedded: embedded,
     budgetNotices: budgetNotices.length,
     ...moduleSteps,
