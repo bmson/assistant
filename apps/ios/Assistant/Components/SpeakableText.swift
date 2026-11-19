@@ -123,7 +123,7 @@ enum SpeakableText {
         case let .generated(generated):
             sentence = generatedCardSpeech(generated)
         case let .briefing(briefing):
-            sentence = spoken(briefing.lead)
+            sentence = join([spoken(briefing.lead), spoken(briefing.compactCoverage ?? "")])
         case let .route(route):
             sentence = join(["\(RouteCardView.duration(route.durationSeconds)) to \(spoken(route.destination.label))",
                              RouteCardView.distance(route.distanceMeters)])
@@ -144,7 +144,7 @@ enum SpeakableText {
             sentence = join([spoken(title), spoken(duration), spoken(detail ?? "")])
         case let .reminder(_, title, schedule, _, _):
             sentence = join([spoken(title), spoken(schedule)])
-        case let .proactiveAlert(_, _, _, title, summary, _, _, _):
+        case let .proactiveAlert(_, _, _, title, summary, _, _, _, _):
             sentence = join([spoken(title), spoken(summary)])
         case let .status(_, title, detail, _, _, _, _):
             sentence = join([spoken(title), spoken(detail)])

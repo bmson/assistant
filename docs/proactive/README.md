@@ -63,8 +63,8 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | A10 | Retire `morning-brief` in Firestore                                    | 0     | S    | —          | in review                                                     |
 | A11 | Email pipeline: verify #910, census, stall alert                       | 0     | M    | —          | in review (forwarded extraction, census and stall alerts)     |
 | A12 | Isolate QA from production; purge QA data                              | 1     | M    | —          | open                                                          |
-| A13 | Owner time zone in every card                                          | 0     | S    | —          | in review (time zones in calendar and briefing cards)         |
-| A14 | Brief calendar answers                                                 | 1     | M    | —          | open                                                          |
+| A13 | Owner time zone in every card                                          | 0     | S    | —          | in review (owner time in calendar, briefing and Pulse cards)  |
+| A14 | Brief calendar answers                                                 | 1     | M    | —          | in review (compact agenda and calendar recovery)              |
 | A15 | Each turn answers its own message                                      | 0     | M    | —          | in review (originating turns and independent read requests)   |
 | A16 | Weather plausibility                                                   | 0     | S    | —          | in review (hourly snow corroboration)                         |
 | A17 | Texts only for urgent items                                            | 0     | S    | —          | in review (urgent SMS quota and retry checks)                 |
@@ -91,7 +91,7 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | D4  | Leave-by with live traffic                                             | 3     | M    | B5, D1     | open                                                          |
 | D5  | Weather impact on outdoor events                                       | 3     | M    | B6, D1     | open                                                          |
 | D6  | Occasions and gifts                                                    | 3     | M    | C5, D1     | open                                                          |
-| D7  | Money: bills, renewals, unusual charges                                | 3     | M    | C2, C3     | open                                                          |
+| D7  | Money: bills, renewals, unusual charges                                | 3     | M    | C2, C3     | in progress (unpaid and paid bill replay)                     |
 | D8  | School: early dismissal, closures, breaks, forms                       | 3     | M    | C6, C7     | open                                                          |
 | D9  | Home and car: deliveries, maintenance                                  | 3     | S    | C2         | open                                                          |
 | D10 | Weekly reconnect suggestions                                           | 4     | S    | C8         | open                                                          |
@@ -119,7 +119,7 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | G2  | Health data minimization                                               | 4     | M    | —          | open                                                          |
 | G3  | Permissions live in policy, not memory                                 | 5     | S    | —          | open                                                          |
 | G4  | Household consent and visibility                                       | 5     | S    | B2         | open                                                          |
-| H1  | Golden-signal benchmark harness                                        | 3     | L    | —          | open                                                          |
+| H1  | Golden-signal benchmark harness                                        | 3     | L    | —          | in progress (S14, S16 and S17 on both drivers)                |
 | H2  | Weekly missed-signal audit                                             | 5     | M    | H1         | open                                                          |
 | H3  | Proactive telemetry                                                    | 5     | M    | —          | open                                                          |
 | H4  | Daily canary                                                           | 0     | S    | —          | in review (source checks and one daily health alert)          |

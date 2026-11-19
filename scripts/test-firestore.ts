@@ -102,6 +102,7 @@ const files = [
   'apps/agent/src/firestore-graph-jobs.test.ts',
   'apps/agent/src/firestore-pulse.test.ts',
   'apps/agent/src/proactive-replay.test.ts',
+  'apps/agent/src/proactive-replay-score.test.ts',
   'apps/agent/src/firestore-chat-segmentation.test.ts',
   'apps/agent/src/firestore-lookup-tools.test.ts',
   'apps/agent/src/firestore-push-notifier.test.ts',

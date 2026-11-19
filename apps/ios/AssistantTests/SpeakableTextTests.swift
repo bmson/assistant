@@ -149,6 +149,24 @@ final class SpeakableTextTests: XCTestCase {
         ])
     }
 
+    func testCalendarCardSpeaksItsCoverageRecoveryWithoutProse() {
+        let message = ChatMessage(
+            id: "compact-agenda",
+            role: .assistant,
+            parts: [.init(type: "data-card", data: .object([
+                "kind": .string("briefing"),
+                "id": .string("agenda"),
+                "presentation": .string("calendar-agenda"),
+                "lead": .string("No matching events were verified."),
+                "compactCoverage": .string("On the sharing iPhone, choose Sync now."),
+            ]))],
+            metadata: nil
+        )
+        let reply = SpeakableText.passages(for: message).joined(separator: " ")
+        XCTAssertTrue(reply.contains("No matching events were verified."))
+        XCTAssertTrue(reply.contains("On the sharing iPhone, choose Sync now."))
+    }
+
     func testSensitiveFactsAreNotSpoken() {
         let message = ChatMessage(
             id: "m4",

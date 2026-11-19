@@ -303,10 +303,13 @@ beforeAll(async () => {
     const expectedResearchHash = createHash('sha256')
       .update(await readFile(join(folder, '0139_research_assignment_state.sql')))
       .digest('hex');
-    const expectedFinalHash = createHash('sha256')
+    const expectedAccountingHash = createHash('sha256')
       .update(await readFile(join(folder, '0140_cost_event_accounted_at.sql')))
       .digest('hex');
-    expect(journal.entries.at(-1)?.tag).toBe('0140_cost_event_accounted_at');
+    const expectedFinalHash = createHash('sha256')
+      .update(await readFile(join(folder, '0141_bill_email_evidence.sql')))
+      .digest('hex');
+    expect(journal.entries.at(-1)?.tag).toBe('0141_bill_email_evidence');
     const [endpoint] = await client`
       SELECT hash FROM drizzle.__drizzle_migrations ORDER BY id DESC LIMIT 1`;
     expect(endpoint?.hash).toBe(expectedFinalHash);
@@ -317,13 +320,14 @@ beforeAll(async () => {
       SELECT hash,created_at::text AS "createdAt"
       FROM drizzle.__drizzle_migrations ORDER BY id`;
     expect(ledgerBeforeRerun).toHaveLength(journal.entries.length);
-    expect(ledgerBeforeRerun.slice(-7).map(({ hash }) => hash)).toEqual([
+    expect(ledgerBeforeRerun.slice(-8).map(({ hash }) => hash)).toEqual([
       expectedOwnerMemoryHash,
       expectedWitnessHash,
       expectedCalendarHash,
       expectedCostHash,
       expectedMcpHash,
       expectedResearchHash,
+      expectedAccountingHash,
       expectedFinalHash,
     ]);
     await client.end();

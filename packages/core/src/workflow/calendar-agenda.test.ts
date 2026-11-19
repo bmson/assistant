@@ -74,6 +74,56 @@ const items = (cards: ResponseCard[]) =>
   );
 
 describe('calendarAgendaCards', () => {
+  it('puts an ongoing verified event under the requested single day', () => {
+    const cards = calendarAgendaCards({
+      evidence: [evidence()],
+      events: [
+        event('multi-day trip', '2026-10-21', '2026-10-24', {
+          allDay: true,
+          calendarTimeZone: 'America/Los_Angeles',
+        }),
+        event('overnight', '2026-10-22T06:00:00Z', '2026-10-22T09:30:00Z'),
+        event('standup', '2026-10-22T16:00:00Z', '2026-10-22T16:30:00Z'),
+      ],
+      request: request(),
+    });
+    expect(cards).toHaveLength(1);
+    expect(cards[0]?.date).toContain('Thursday, Oct 22');
+    expect(items(cards)).toMatchObject([
+      { title: 'multi-day trip', note: expect.stringContaining('Started Wednesday, Oct 21') },
+      { title: 'overnight', note: expect.stringContaining('Started Wednesday, Oct 21') },
+      { title: 'standup' },
+    ]);
+  });
+
+  it('keeps the visible lead bounded and preserves source details in the text fallback', () => {
+    const title = 'A very long calendar name '.repeat(70).trim();
+    const cards = calendarAgendaCards({
+      evidence: [
+        evidence({
+          ok: true,
+          complete: false,
+          calendarsSearched: [title],
+          phoneCalendarCoverage: {
+            complete: false,
+            receivedAt: '2026-10-22T06:00:00.000Z',
+          },
+        }),
+      ],
+      events: [event('standup', '2026-10-22T16:00:00Z', '2026-10-22T16:30:00Z')],
+      request: request(),
+    });
+    const card = cards[0];
+    expect(card?.compactCoverage).toContain('More → iPhone calendars → Sync now');
+    expect(String(card?.lead).length + String(card?.compactCoverage).length).toBeLessThanOrEqual(
+      600,
+    );
+    const fallback = calendarAgendaSummary(cards);
+    expect(fallback).toContain(title);
+    expect(fallback).toContain('standup');
+    expect(fallback).toContain('2026-10-22T06:00:00.000Z');
+  });
+
   it('marks a complete final page complete and a dangling page partial', () => {
     const eventRows = [event('standup', '2026-10-22T16:00:00Z', '2026-10-22T16:30:00Z')];
     const complete = calendarAgendaCards({
@@ -101,7 +151,7 @@ describe('calendarAgendaCards', () => {
       request: request(),
     });
     expect(partial[0]).toMatchObject({ complete: false });
-    expect(partial[0]?.lead).toContain('Coverage is incomplete');
+    expect(partial[0]?.compactCoverage).toContain('Coverage is incomplete');
     expect(agenda(partial)[0]).toMatchObject({ complete: false });
   });
 
@@ -701,7 +751,7 @@ describe('calendarAgendaCards', () => {
       events: [],
       request: scoped,
     });
-    expect(denied[0]?.lead).toContain('Coverage is incomplete');
+    expect(denied[0]?.compactCoverage).toContain('Coverage is incomplete');
     expect(denied[0]?.lead).not.toContain('Which calendar should I use');
     expect(denied[0]?.lead).not.toContain('No events on');
   });

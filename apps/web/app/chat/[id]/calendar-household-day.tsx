@@ -195,9 +195,11 @@ export function CalendarHouseholdComparison({
 export function CalendarHouseholdSummary({
   value,
   index,
+  showCoverage = true,
 }: {
   value: unknown;
   index: CalendarHouseholdIndex;
+  showCoverage?: boolean;
 }) {
   const day = parseCalendarHouseholdDay(value);
   if (!day) return null;
@@ -208,26 +210,29 @@ export function CalendarHouseholdSummary({
   const pair = comparisonItems(comparison, index);
   const supportedQuestion =
     question && pair?.every((item) => calendarHouseholdItemHasAcceptedRSVP(item.details));
+  if (!showCoverage && !supportedQuestion) return null;
   return (
     <div className="mb-3 grid min-w-0 gap-3">
-      <section aria-label="Checked calendar coverage" className="grid min-w-0 gap-1">
-        <p className="text-sm font-medium text-strong [overflow-wrap:anywhere]">
-          {day.coverage.summary}
-        </p>
-        <p className="text-sm text-muted [overflow-wrap:anywhere]">
-          {day.coverage.freshnessSummary}
-        </p>
-        <Disclosure label="Sources and freshness">
-          <dl className="grid min-w-0 gap-3">
-            {displayEntries(day.coverage.details).map(({ value: detail, key }) => (
-              <div key={key} className="min-w-0 [overflow-wrap:anywhere]">
-                <dt className="text-sm font-medium text-strong">{detail.title}</dt>
-                <dd className="text-base text-muted">{detail.detail}</dd>
-              </div>
-            ))}
-          </dl>
-        </Disclosure>
-      </section>
+      {showCoverage ? (
+        <section aria-label="Checked calendar coverage" className="grid min-w-0 gap-1">
+          <p className="text-sm font-medium text-strong [overflow-wrap:anywhere]">
+            {day.coverage.summary}
+          </p>
+          <p className="text-sm text-muted [overflow-wrap:anywhere]">
+            {day.coverage.freshnessSummary}
+          </p>
+          <Disclosure label="Sources and freshness">
+            <dl className="grid min-w-0 gap-3">
+              {displayEntries(day.coverage.details).map(({ value: detail, key }) => (
+                <div key={key} className="min-w-0 [overflow-wrap:anywhere]">
+                  <dt className="text-sm font-medium text-strong">{detail.title}</dt>
+                  <dd className="text-base text-muted">{detail.detail}</dd>
+                </div>
+              ))}
+            </dl>
+          </Disclosure>
+        </section>
+      ) : null}
       {supportedQuestion && question ? (
         <section
           aria-label="Next question"
