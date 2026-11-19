@@ -131,6 +131,26 @@ describe('calendar agenda briefing', () => {
   const renderAgenda = (card: Record<string, unknown>) =>
     renderToStaticMarkup(<ResponseCards cards={[card]} timeZone="UTC" />);
 
+  it('shows one compact recovery line and keeps source details in a closed disclosure', () => {
+    const card = makeCard(1);
+    card.compactCoverage =
+      'Coverage is incomplete. On the sharing iPhone, open More → iPhone calendars → Sync now, then ask again.';
+    const sections = card.sections as Record<string, unknown>[];
+    const agenda = sections[0];
+    if (agenda) agenda.complete = false;
+    sections.push({
+      type: 'attention',
+      title: 'Calendar read coverage',
+      items: [{ title: 'iPhone coverage', detail: 'Snapshot was received at 8 AM.' }],
+    });
+    const html = renderAgenda(card);
+    expect(html.match(/Sync now/g)).toHaveLength(1);
+    expect(html).not.toContain('Some calendars could not be read');
+    expect(html).toContain('Calendar coverage details');
+    expect(html).toMatch(/<details[^>]*>.*Snapshot was received at 8 AM.*<\/details>/);
+    expect(html).not.toMatch(/<details[^>]*\sopen(?:[\s=>])/);
+  });
+
   it('keeps differing source titles and locations behind a disclosure rather than repeating the event', () => {
     const card = makeCard(1);
     const sections = card.sections as Record<string, unknown>[];

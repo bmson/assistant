@@ -771,7 +771,15 @@ function CalendarAgendaGroup({ title, items }: { title: string; items: Raw[] }) 
   );
 }
 
-function CalendarAgendaSection({ section, date }: { section: Raw; date: string }) {
+function CalendarAgendaSection({
+  section,
+  date,
+  showCoverage,
+}: {
+  section: Raw;
+  date: string;
+  showCoverage: boolean;
+}) {
   const items = recs(section.items).filter(validCalendarAgendaItem);
   const [showAll, setShowAll] = useState(false);
   const visibleItems = visibleCalendarAgendaItems(items, showAll);
@@ -819,7 +827,7 @@ function CalendarAgendaSection({ section, date }: { section: Raw; date: string }
           {showAll ? 'Show fewer' : `Show all ${items.length}`}
         </button>
       ) : null}
-      {section.complete === false ? (
+      {showCoverage && section.complete === false ? (
         <p className="mt-2 text-xs text-muted">
           Some calendars could not be read, so this may be incomplete.
         </p>
@@ -903,14 +911,36 @@ export function visibleCalendarAgendaItems(items: Raw[], showAll: boolean): Raw[
 }
 
 function CalendarAgendaCard({ data }: { data: Raw }) {
-  const sections = recs(data.sections).filter(validCalendarAgendaSection);
+  const compact = typeof data.compactCoverage === 'string';
+  const coverageSections: Raw[] = [];
+  const sections = recs(data.sections).filter((section) => {
+    if (!validCalendarAgendaSection(section)) return false;
+    if (
+      compact &&
+      section.type === 'attention' &&
+      ['Calendars not checked', 'Calendar read coverage'].includes(str(section.title))
+    ) {
+      coverageSections.push(section);
+      return false;
+    }
+    return true;
+  });
   const eventIndex = calendarHouseholdIndex(sections);
   return (
     <CardShell icon={CalendarDays} label={['Agenda', str(data.date)].filter(Boolean).join(' · ')}>
-      <CalendarHouseholdSummary value={data.householdDay} index={eventIndex} />
+      <CalendarHouseholdSummary
+        value={data.householdDay}
+        index={eventIndex}
+        showCoverage={!compact}
+      />
       {str(data.lead) ? (
         <p className="text-sm font-medium text-strong text-pretty [overflow-wrap:anywhere]">
           {str(data.lead)}
+        </p>
+      ) : null}
+      {str(data.compactCoverage) ? (
+        <p className="mt-1 text-sm text-muted [overflow-wrap:anywhere]">
+          {str(data.compactCoverage)}
         </p>
       ) : null}
       {sections.length ? (
@@ -918,7 +948,14 @@ function CalendarAgendaCard({ data }: { data: Raw }) {
           {sections.map((section) => {
             const key = str(section.id) || `${str(section.type)}:${str(section.title)}`;
             if (section.type === 'agenda')
-              return <CalendarAgendaSection key={key} section={section} date={str(data.date)} />;
+              return (
+                <CalendarAgendaSection
+                  key={key}
+                  section={section}
+                  date={str(data.date)}
+                  showCoverage={!compact}
+                />
+              );
             if (Object.hasOwn(section, 'overlaps') || typeof section.itemCount === 'number')
               return (
                 <CalendarAgendaAttention key={key} section={section} eventIndex={eventIndex} />
@@ -935,6 +972,16 @@ function CalendarAgendaCard({ data }: { data: Raw }) {
             return <BriefingList key={key} section={section} />;
           })}
         </div>
+      ) : null}
+      {coverageSections.length ? (
+        <details className="mt-3 min-w-0 text-xs text-muted">
+          <summary className={`w-fit cursor-pointer rounded-sm py-2 ${focusRing}`}>
+            Calendar coverage details
+          </summary>
+          {coverageSections.map((section) => (
+            <BriefingList key={str(section.title)} section={section} />
+          ))}
+        </details>
       ) : null}
     </CardShell>
   );
