@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
+  ASSISTANT_HEALTH_MONITOR_SCHEDULE,
   existingTaskResult,
   GOAL_SUPERSEDED_PROGRESS,
   GOAL_TASK_TERMINAL,
@@ -160,6 +161,53 @@ export class FirestoreScheduleRepository implements ScheduleRepository {
     // keeps reads compatible with installations where a schedule was removed
     // before its uniqueness fence was cleaned up.
     return null;
+  }
+
+  /** Advance the untouched managed health-monitor default without replacing the schedule. */
+  async updateDefaultHealthMonitorCadence(agentId: string, nextAt: Date): Promise<void> {
+    const definition = ASSISTANT_HEALTH_MONITOR_SCHEDULE;
+    const key = `assistant.schedule.${definition.name}`;
+    const isDefaultTemplate = (template: unknown) => {
+      if (!template || typeof template !== 'object') return false;
+      const fields = template as Record<string, unknown>;
+      return (
+        Object.keys(fields).length === 3 &&
+        fields.type === definition.taskTemplate.type &&
+        fields.job === definition.taskTemplate.job &&
+        fields.budgetUsdLimit === definition.taskTemplate.budgetUsdLimit
+      );
+    };
+
+    await this.store.db.runTransaction(async (tx) => {
+      const snapshot = await tx.get(scheduleQuery(this.store, agentId, definition.name));
+      const doc = snapshot.docs[0];
+      if (snapshot.size !== 1 || !doc) return;
+      const row = decodeSchedule(doc.data());
+      const seed = row.seedDefinition as { cron?: unknown; taskTemplate?: unknown } | null;
+      if (
+        !row.id ||
+        documentKey(row.id) !== doc.id ||
+        row.agentId !== agentId ||
+        row.name !== definition.name ||
+        row.enabled !== true ||
+        row.seedReviewRequired !== false ||
+        row.seedTemplateKey !== key ||
+        row.seedTemplateRevision !== definition.revision - 1 ||
+        row.cron !== definition.previousCron ||
+        seed?.cron !== definition.previousCron ||
+        !isDefaultTemplate(row.taskTemplate) ||
+        !isDefaultTemplate(seed.taskTemplate)
+      )
+        return;
+      await assertPrivacyErasureInactiveInTransaction(tx, this.store, agentId);
+      tx.update(doc.ref, {
+        cron: definition.cron,
+        seedTemplateRevision: definition.revision,
+        seedDefinition: { cron: definition.cron, taskTemplate: definition.taskTemplate },
+        nextRunAt: nextAt,
+        updatedAt: this.store.now(),
+      });
+    });
   }
 
   /**

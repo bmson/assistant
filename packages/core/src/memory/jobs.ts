@@ -21,6 +21,11 @@ import type { ModelRouter } from '../model-router/router.js';
 import { curiositySummary, runCuriosity } from '../proactive/curiosity.js';
 import type { ProactiveNotifier } from '../proactive/notify.js';
 import { pingOwner } from '../proactive/notify.js';
+import {
+  mailHealthWindow,
+  mailIntakeStallDetails,
+  sqlMailHealthCounts,
+} from '../proactive/pipeline-health.js';
 import { pulseSummary, runPulse } from '../proactive/pulse.js';
 import { fetchScoreboard, leagueByKey, type ScoreboardGame } from '../sports/index.js';
 import { runAnomalyScan } from '../workflow/anomaly.js';
@@ -527,7 +532,22 @@ export async function runCodeJob(
         { ...deps, ...(extraction ? { store: extraction } : {}) },
         { taskId: task.id },
       );
-      const pending = await pendingEmailExtractionCount(extraction ?? deps.db);
+      const window = mailHealthWindow(new Date());
+      const mailRead = extraction
+        ? deps.persistence?.assistantHealth?.observeMail?.(task.agentId, window)
+        : sqlMailHealthCounts(deps.db, task.agentId, window);
+      const [pending, intake] = await Promise.all([
+        pendingEmailExtractionCount(extraction ?? deps.db),
+        mailRead?.catch(() => null),
+      ]);
+      const intakeDetails = mailIntakeStallDetails(intake ?? undefined, 'extraction').map(
+        (detail) => `${detail} for over six hours`,
+      );
+      if (intake?.mailFreshIntake7d)
+        intakeDetails.push(`${intake.mailFreshIntake7d} still in intake within six hours`);
+      if (intake?.mailIntakeNeedsReview7d)
+        intakeDetails.push(`${intake.mailIntakeNeedsReview7d} in intake awaiting review`);
+      if (intake === null) intakeDetails.push('intake counts unavailable');
       return {
         // A backlog drains across runs rather than in one long job: report it
         // so a mailbox that is falling behind is visible in the task summary.
@@ -535,7 +555,10 @@ export async function runCodeJob(
         summary:
           `email extraction: ${r.saved} saved (${r.usable} recallable, ${r.quarantined} awaiting review), ` +
           `${r.duplicates} duplicate, ${r.occasionsSaved} occasion(s), from ${r.rowsVisited} message(s) ` +
-          `(${r.skippedLowImportance} routine), ${pending} still pending`,
+          `(${r.skippedLowImportance} routine), ${pending} still pending extraction` +
+          (intakeDetails.length
+            ? `; recent intake (last 7 days): ${intakeDetails.join(', ')}`
+            : ''),
       };
     }
     case 'graph.curiosity': {
@@ -877,7 +900,9 @@ export async function runCodeJob(
         done: true,
         summary: r.notified
           ? `health monitor: notified owner about ${r.signals.length} signal(s)`
-          : 'health monitor: no active signals',
+          : r.signals.length
+            ? `health monitor: ${r.signals.length} active signal(s), already reported`
+            : 'health monitor: no active signals',
       };
     }
     case 'watch.suggest': {

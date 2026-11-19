@@ -61,7 +61,7 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | A8  | Truthful "Needs you" count; archive needs_attention in Firestore       | 1     | M    | —          | in review (consistent counts and attention archival)          |
 | A9  | Firestore parity for every route the phone calls                       | 1     | M    | —          | in review (native route and method checks)                    |
 | A10 | Retire `morning-brief` in Firestore                                    | 0     | S    | —          | in review                                                     |
-| A11 | Email pipeline: verify #910, census, stall alert                       | 0     | M    | —          | in progress (cause fixed in #910)                             |
+| A11 | Email pipeline: verify #910, census, stall alert                       | 0     | M    | —          | in review (forwarded extraction, census and stall alerts)     |
 | A12 | Isolate QA from production; purge QA data                              | 1     | M    | —          | open                                                          |
 | A13 | Owner time zone in every card                                          | 0     | S    | —          | in review (time zones in calendar and briefing cards)         |
 | A14 | Brief calendar answers                                                 | 1     | M    | —          | open                                                          |

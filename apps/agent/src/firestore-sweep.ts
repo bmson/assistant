@@ -8,6 +8,7 @@ import {
   firestoreCodeJobUnavailable,
   getTaskQueue,
   isCodeJobEnabled,
+  nextRun,
   prepareGoalSession,
   purgeAgedHistory,
   purgeExpired,
@@ -22,7 +23,7 @@ import {
   FirestoreOutbox,
   FirestoreScheduleRepository,
 } from '@assistant/firestore';
-import type { TaskQueue } from '@assistant/persistence';
+import { ASSISTANT_HEALTH_MONITOR_SCHEDULE, type TaskQueue } from '@assistant/persistence';
 import { ensureAwarenessSchedule } from './awareness-schedule.js';
 import {
   type AgentDeps,
@@ -130,6 +131,13 @@ export async function runFirestoreSweep(
           deps.config.SELF_REPAIR_DAILY_LIMIT,
         );
       const scheduleRepository = new FirestoreScheduleRepository(store);
+      await step('updateDefaultHealthMonitorCadence', async () => {
+        await scheduleRepository.updateDefaultHealthMonitorCadence(
+          deps.config.FIRESTORE_AGENT_ID,
+          nextRun(ASSISTANT_HEALTH_MONITOR_SCHEDULE.cron, timezone, new Date()),
+        );
+        return 0;
+      });
       if (isCodeJobEnabled('briefing.compose') && !firestoreCodeJobUnavailable('briefing.compose'))
         await scheduleRepository.retireDefaultMorningBrief(deps.config.FIRESTORE_AGENT_ID);
       const fired = await runDueSchedules(scheduleRepository, timezone, {

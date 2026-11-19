@@ -3,11 +3,13 @@ import type {
   AssistantHealthObservations,
   AssistantHealthRepository,
   AssistantHealthSignal,
+  MailHealthWindow,
   Records,
 } from '@assistant/persistence';
 import type { DocumentSnapshot, QueryDocumentSnapshot } from '@google-cloud/firestore';
 import { FirestoreMessageRepository } from './messages.js';
 import { FirestoreOwnerNoticeRepository } from './owner-notices.js';
+import { FirestoreProactiveHealthRepository } from './proactive-health.js';
 import { decodeRecord, encodeRecord, type InstallationStore } from './store.js';
 
 type Alert = Records['assistantHealthAlerts'];
@@ -129,6 +131,11 @@ export class FirestoreAssistantHealthRepository implements AssistantHealthReposi
     };
   }
 
+  observeMail(agentId: string, window: MailHealthWindow) {
+    this.scope(agentId);
+    return new FirestoreProactiveHealthRepository(this.store).mailCounts(agentId, window);
+  }
+
   async claim({
     agentId,
     signals,
@@ -185,9 +192,9 @@ export class FirestoreAssistantHealthRepository implements AssistantHealthReposi
         }
         const row = decodeRecord<Alert>(doc.data());
         const due =
-          row.status !== 'open' ||
+          (!signal.notificationDueBefore && row.status !== 'open') ||
           row.lastNotifiedAt === null ||
-          row.lastNotifiedAt < renotifyBefore;
+          row.lastNotifiedAt < (signal.notificationDueBefore ?? renotifyBefore);
         tx.update(doc.ref, {
           detail: signal.detail,
           status: 'open',
