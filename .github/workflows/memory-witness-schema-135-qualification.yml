@@ -64,6 +64,8 @@ on:
       - "scripts/deny-test-egress.mjs"
 jobs:
   build:
+    outputs:
+      image-artifact: ${{ steps.image-artifact.outputs.name }}
     runs-on: ubuntu-24.04
     timeout-minutes: 200
     permissions:
@@ -418,11 +420,15 @@ jobs:
           path: ${{ runner.temp }}/memory-witness-141-builder-proof/
           retention-days: 7
           if-no-files-found: error
+      - name: Identify this build's image archive
+        id: image-artifact
+        if: always()
+        run: echo "name=memory-witness-141-images-${SOURCE_SHA}-run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
         if: always()
         timeout-minutes: 3
         with:
-          name: memory-witness-141-images-${{ github.event.pull_request.head.sha }}
+          name: ${{ steps.image-artifact.outputs.name }}
           path: ${{ runner.temp }}/memory-witness-141-proof/
           retention-days: 7
           if-no-files-found: error
@@ -458,7 +464,7 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         timeout-minutes: 3
         with:
-          name: memory-witness-141-images-${{ github.event.pull_request.head.sha }}
+          name: ${{ needs.build.outputs.image-artifact }}
           path: ${{ runner.temp }}/memory-witness-141-images
       - name: Load immutable local role image IDs
         timeout-minutes: 4

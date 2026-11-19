@@ -216,7 +216,7 @@ jobs:
             exit 1
           fi
           set +e
-          pnpm test:firestore
+          pnpm test:proactive-replay --firestore-suite
           assistant_test_status=$?
           set -e
           assistant_cleanup_receipt="$TMPDIR/recovery-fs-cleanup.json"
@@ -256,6 +256,15 @@ jobs:
       - name: Remove owned PostgreSQL service
         if: always()
         run: bash infra/ci/postgres-service.sh cleanup
+
+      - name: Preserve synthetic proactive replay scorecard
+        if: ${{ always() }}
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
+        with:
+          name: proactive-replay-${{ github.sha }}
+          path: .artifacts/proactive-replay/
+          include-hidden-files: true
+          if-no-files-found: warn
 
   build-smoke:
     runs-on: ubuntu-latest
