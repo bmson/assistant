@@ -1240,6 +1240,9 @@ export async function runPulse(
     );
     if (calendar && store.recordCalendarRecovery) {
       const observed = calendarChanges.flatMap((change, index) => {
+        // A shared phone snapshot is a cache. Reading it during the gap
+        // does not establish when its provider observed the event change.
+        if (change.calendarId.startsWith('iphone:')) return [];
         if (change.kind !== 'cancelled' && change.kind !== 'moved') return [];
         if (
           !isCalendarObservationDate(change.start) ||

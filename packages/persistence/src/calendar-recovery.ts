@@ -60,7 +60,9 @@ export function parseCalendarRecovery(
           (item) =>
             item &&
             (item.kind === 'cancelled' || item.kind === 'moved') &&
+            typeof item.moment === 'string' &&
             HASH.test(item.moment) &&
+            typeof item.event === 'string' &&
             HASH.test(item.event) &&
             (item.matchingFact === undefined ||
               (typeof item.matchingFact === 'string' && HASH.test(item.matchingFact))) &&

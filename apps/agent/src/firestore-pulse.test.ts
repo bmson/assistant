@@ -279,19 +279,19 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore pulse job', () 
       updatedAt: at(-1),
     });
     const moved = saved('moved');
+    const cached = { ...saved('cached'), calendarId: 'iphone:shared' };
     await put('calendarEventSnapshots', moved);
+    await put('calendarEventSnapshots', cached);
     await put('calendarEventSnapshots', saved('missing'));
     deps.calendarReader = async () => ({
       complete: false,
-      events: [
-        {
-          ...moved,
-          start: at(4).toISOString(),
-          end: at(5).toISOString(),
-          allDay: false,
-          calendar: 'Fixture',
-        },
-      ],
+      events: [moved, cached].map((event) => ({
+        ...event,
+        start: at(4).toISOString(),
+        end: at(5).toISOString(),
+        allDay: false,
+        calendar: 'Fixture',
+      })),
     });
     expect(await runJob()).toContain('calendar-moved delivered');
     const document = await store.doc('maintenanceCursors', calendarRecoveryCursor(agentId)).get();
