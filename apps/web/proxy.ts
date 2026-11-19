@@ -300,6 +300,7 @@ export function proxy(request: NextRequest) {
     (path === '/api/mobile/v1/activity' && request.method === 'GET') ||
     (path === '/api/mobile/v1/activity' && request.method === 'POST') ||
     (path === '/api/mobile/v1/activity/foreground' && request.method === 'POST') ||
+    (path === '/api/mobile/v1/proactive-health' && request.method === 'GET') ||
     (path === '/api/mobile/v1/location' && request.method === 'POST') ||
     (path === '/api/mobile/v1/calendars' &&
       ['GET', 'POST', 'PUT', 'DELETE'].includes(request.method)) ||

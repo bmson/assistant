@@ -127,6 +127,7 @@ describe('pulse v2 activation gate', () => {
       { admitNotice, momentKeys },
       {
         agentId: 'owner',
+        timeZone: 'UTC',
         now,
         observationFence: null,
         dailyCap: 6,

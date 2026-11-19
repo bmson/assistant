@@ -8,7 +8,8 @@ export { createPostgresApplicationConfirmationRepository } from './application-c
 export { createPostgresApprovalPolicyRepository } from './approval-policy-repository.js';
 export { createPostgresApprovalRepository } from './approval-repository.js';
 export { createPostgresAuditInvestigationRepository } from './audit-investigation-repository.js';
-export { readPostgresSavedBriefing } from './briefing-watchdog.js';
+export { readPostgresEmailBillStatus } from './bill-email-evidence.js';
+export { readPostgresBriefingHealth, readPostgresSavedBriefing } from './briefing-watchdog.js';
 export { resumePostgresBudgetWakes, updatePostgresBudgetCaps } from './budget-caps-repository.js';
 export { recordPostgresCalendarRecovery } from './calendar-recovery-repository.js';
 export { createPostgresCallSessionRepository } from './call-session-repository.js';
@@ -87,6 +88,7 @@ export {
   withPostgresPrivacyObservationFence,
 } from './privacy-erasure-repository.js';
 export { createPostgresPrivacyExportRepository } from './privacy-export-repository.js';
+export { createPostgresProactiveCanaryRepository } from './proactive-canaries.js';
 export { createPostgresProfileOverviewRepository } from './profile-full-overview-repository.js';
 export { createPostgresProfileLibraryRepository } from './profile-library-repository.js';
 export { createPostgresProfileMemoryHubRepository } from './profile-memory-hub-repository.js';

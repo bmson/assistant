@@ -138,6 +138,7 @@ enum AssistantRoute: String, Hashable, Identifiable, CaseIterable, Sendable {
     case skills
     case capabilities
     case settings
+    case noticing
     case costs
     case anomalies
     case improvements
@@ -3333,6 +3334,14 @@ final class AppModel {
             }
             return Task.isCancelled || isRequestCancellation(error) ? "The refresh could not be confirmed. Try again." : error.localizedDescription
         }
+    }
+
+    func loadNoticingHealth() async throws -> NoticingHealth {
+        guard let client else { throw APIError.invalidServerURL }
+        let version = connectionVersion
+        let result = try await client.proactiveHealth()
+        guard connectionIsCurrent(client, version: version) else { throw CancellationError() }
+        return result
     }
 
     func loadSituationPacks() async throws -> SituationOverview {

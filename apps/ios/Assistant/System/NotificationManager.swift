@@ -12,7 +12,7 @@ struct AssistantNotificationDestination: Equatable, Sendable {
     init?(userInfo: [AnyHashable: Any]) {
         guard let rawRoute = userInfo["route"] as? String,
               let route = AssistantRoute(rawValue: rawRoute) else { return nil }
-        self.route = route
+        self.route = route == .settings && userInfo["section"] as? String == "noticing" ? .noticing : route
         if let value = userInfo["agentId"] {
             guard let owner = value as? String, !owner.isEmpty, owner.count <= 128 else { return nil }
             agentID = owner

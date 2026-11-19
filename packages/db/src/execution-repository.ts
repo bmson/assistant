@@ -33,6 +33,7 @@ import { createPostgresNotificationsConversationRepository } from './notificatio
 import { createPostgresNudgePolicyRepository } from './nudge-policy-repository.js';
 import { createPostgresOwnerCardCompilationRepository } from './owner-card-compilation-repository.js';
 import { createPostgresOwnerContextRepository } from './owner-context-repository.js';
+import { createPostgresProactiveCanaryRepository } from './proactive-canaries.js';
 import { createPostgresRecallMetricsRepository } from './recall-metrics-repository.js';
 import { createPostgresRecallSurfacingRepository } from './recall-surfacing-repository.js';
 import { createPostgresSkillContextRepository } from './skill-context-repository.js';
@@ -46,6 +47,7 @@ import { createPostgresWatchRepository } from './watch-repository.js';
 export function createPostgresExecutionPersistence(db: Db): ExecutionPersistence {
   return {
     driver: 'postgres',
+    proactiveCanaries: createPostgresProactiveCanaryRepository(db),
     googleCalendarConnection: createPostgresGoogleCalendarConnectionRepository(db),
     conversationSearch: createPostgresConversationSearchRepository(db),
     tasks: createPostgresTaskRepository(db),
