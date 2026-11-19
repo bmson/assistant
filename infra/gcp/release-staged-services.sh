@@ -325,8 +325,14 @@ release_tag_url() {
 
 release_component_digest() {
   local component="$1" digest
-  digest="$(gcloud artifacts docker images describe "${IMAGE_ROOT}/${component}:${TAG}" \
-    --project "$PROJECT" --format='value(image_summary.digest)')" || return 1
+  if [[ -n "${RELEASE_PREBUILT_RUN_ID:-}" ]]; then
+    [[ "$IMAGE_ROOT" == us-west1-docker.pkg.dev/bmson-assistant/assistant ]] || return 1
+    [[ -n "${RELEASE_PREBUILT_IMAGES_PATH:-}" ]] || return 1
+    digest="$(node "${BASH_SOURCE[0]%/*}/verify-prebuilt-firestore.mjs" digest "$TAG" "$component")" || return 1
+  else
+    digest="$(gcloud artifacts docker images describe "${IMAGE_ROOT}/${component}:${TAG}" \
+      --project "$PROJECT" --format='value(image_summary.digest)')" || return 1
+  fi
   [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]] || {
     echo "  ${component}:${TAG} did not resolve to an immutable sha256 digest" >&2
     return 1
@@ -491,6 +497,14 @@ release_validate_basic_editor_context() {
   release_validate_basic_editor_preflight_context "$selected" "$source_sha"
 }
 
+# Reserved staged-release status: a cloud write was attempted, but its effect is unverified.
+RELEASE_STAGED_OBSERVATION_REQUIRED=75
+
+release_staged_observation_required() {
+  printf '  %s Keep delivery held and reconcile with GET-only readback before recovery.\n' "$1" >&2
+  return "$RELEASE_STAGED_OBSERVATION_REQUIRED"
+}
+
 release_staged_services() {
   local selected="${RELEASE_COMPONENTS:-agent,web}" traffic_tag_suffix staging_tag
   traffic_tag_suffix="$(release_traffic_tag_suffix)" || return $?
@@ -578,6 +592,9 @@ release_staged_services() {
     "${live_agent_api:-}" "${live_agent_schema_min:-}" "${live_agent_schema_max:-}" || return 1
   node "${BASH_SOURCE[0]%/*}/release-manifest.mjs" validate "$manifest_path" \
     "${live_agent_api:-}" "${live_agent_schema_min:-}" "${live_agent_schema_max:-}" || return 1
+  if [[ -n "${RELEASE_PREBUILT_RUN_ID:-}" ]]; then
+    node "${BASH_SOURCE[0]%/*}/verify-prebuilt-firestore.mjs" manifest "$TAG" "$manifest_path" || return 1
+  fi
   manifest_sha="$(node -e 'const x=JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8")); process.stdout.write(x.manifestDigest)' "$manifest_path")"
   echo "Release manifest ${manifest_sha}: ${selected}; web=${web_digest}${agent_digest:+, agent=${agent_digest}}"
 
@@ -650,27 +667,28 @@ release_staged_services() {
         --image "${IMAGE_ROOT}/agent@${agent_digest}" --no-traffic --revision-suffix "$suffix" \
         ${agent_secret_args[@]+"${agent_secret_args[@]}"} \
         --update-env-vars "$agent_candidate_env" --quiet; then
-        echo '  API 3 agent creation is unresolved. Keep delivery held and reconcile with reads before recovery.' >&2
-        return 1
+        release_staged_observation_required "Creation of paused API 3 agent revision ${candidate_agent} is unresolved." || return $?
       fi
-      staged_agent_json="$(release_service_json assistant-agent)" || return 1
-      release_verify_bootstrap_agent_route "$staged_agent_json" "$original_agent" "$candidate_agent" '' || return 1
-      revision_json="$(release_revision_json assistant-agent "$candidate_agent")" || return 1
+      if ! staged_agent_json="$(release_service_json assistant-agent)" ||
+         ! release_verify_bootstrap_agent_route "$staged_agent_json" "$original_agent" "$candidate_agent" '' ||
+         ! revision_json="$(release_revision_json assistant-agent "$candidate_agent")"; then
+        release_staged_observation_required "Creation of paused API 3 agent revision ${candidate_agent} could not be verified." || return $?
+      fi
       if [[ "$(release_service_env "$revision_json" ASSISTANT_RELEASE_SOURCE_SHA)" != "$TAG" ||
             "$(release_service_env "$revision_json" ASSISTANT_RELEASE_MANIFEST)" != "$manifest_sha" ||
             "$(release_service_env "$revision_json" ASSISTANT_RELEASE_WORKFLOW_RUN_ID)" != "$GITHUB_RUN_ID" ||
             "$(release_service_env "$revision_json" ASSISTANT_RELEASE_WORKFLOW_RUN_ATTEMPT)" != "$GITHUB_RUN_ATTEMPT" ||
             "$(release_service_env "$revision_json" ASSISTANT_RELEASE_WRITES_PAUSED)" != true ]]; then
-        echo '  The exact paused API 3 agent candidate could not be identified. Keep delivery held.' >&2
-        return 1
+        release_staged_observation_required "The identity of paused API 3 agent revision ${candidate_agent} could not be verified." || return $?
       fi
       if ! gcloud run services update-traffic assistant-agent --project "$PROJECT" --region "$REGION" \
         --update-tags "${staging_tag}=${candidate_agent}" --quiet; then
-        echo '  API 3 agent tag attachment is unresolved. Keep delivery held and reconcile with reads before recovery.' >&2
-        return 1
+        release_staged_observation_required "Attachment of API 3 agent tag ${staging_tag} to ${candidate_agent} is unresolved." || return $?
       fi
-      staged_agent_json="$(release_service_json assistant-agent)" || return 1
-      release_verify_bootstrap_agent_route "$staged_agent_json" "$original_agent" "$candidate_agent" "$staging_tag" || return 1
+      if ! staged_agent_json="$(release_service_json assistant-agent)" ||
+         ! release_verify_bootstrap_agent_route "$staged_agent_json" "$original_agent" "$candidate_agent" "$staging_tag"; then
+        release_staged_observation_required "Attachment of API 3 agent tag ${staging_tag} to ${candidate_agent} could not be verified." || return $?
+      fi
     else
       gcloud run services update assistant-agent --project "$PROJECT" --region "$REGION" \
         --image "${IMAGE_ROOT}/agent@${agent_digest}" --no-traffic --tag "$staging_tag" \

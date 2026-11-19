@@ -1,11 +1,13 @@
 /** The only API 1-to-3 exception is a reviewed, disabled Firestore pair. */
 import { readFileSync } from 'node:fs';
+import { protectedRecoveryReview } from '../infra/gcp/api3-recovery-proof.mjs';
 import { estimatedCostMetadataRead } from './estimated-cost-release-native-read.js';
 import { reviewedEstimatedCostReleaseProfile } from './estimated-cost-release-profile.js';
 import { verifyPreAuthEnvironment } from './owner-editor-release-inventory.js';
 import { verifyBootstrapRevisionTemplate } from './owner-release-bootstrap.js';
 import {
   type BootstrapReceipt,
+  bootstrapDigest,
   object,
   RUN_ROOT,
   reviewedCurrentEnvironment,
@@ -117,7 +119,7 @@ export function verifyDrainedApiTransition(
   }
 }
 
-async function main() {
+export async function verifyProductionApiTransition() {
   const env = process.env;
   verifyPreAuthEnvironment(env);
   check(env.GITHUB_EVENT_NAME === 'workflow_dispatch');
@@ -126,6 +128,7 @@ async function main() {
   check(env.RELEASE_COMPONENTS === 'agent,web');
   const current = reviewedCurrentEnvironment(env, env.IMAGE_TAG as string);
   check(current?.kind === 'disabled-bootstrap');
+  const recoveryReview = bootstrapDigest(protectedRecoveryReview(env, current.source));
   const profile = reviewedEstimatedCostReleaseProfile();
   check(profile?.mode === 'compatible-off' && !env.ESTIMATED_COST_DRAIN_PACKET_JSON);
   verifyTransitionCandidateContract(
@@ -151,17 +154,13 @@ async function main() {
   }
   const [agent, web] = await Promise.all([observe('agent'), observe('web')]);
   verifyDrainedApiTransition(current, { agent, web }, profile);
-  // Current-state qualification cannot authorize a cutover while a mixed
-  // parked pair still lacks a verified forward recovery.
-  process.stderr.write(
-    'Firestore API 1 to 3 production release is held pending mixed-state forward recovery qualification.\n',
-  );
-  process.exitCode = 1;
+  // The review must still be current and cover the same images after the provider reads.
+  check(bootstrapDigest(protectedRecoveryReview(env, current.source)) === recoveryReview);
 }
 
 if (process.argv[1]?.endsWith('/owner-release-api-transition.ts'))
   (process.argv.length === 2
-    ? main()
+    ? verifyProductionApiTransition()
     : Promise.reject(new Error('Unexpected transition arguments'))
   ).catch(() => {
     process.stderr.write('The reviewed drained Firestore API transition could not be verified.\n');

@@ -143,7 +143,7 @@ class DeliveryGuardTests(unittest.TestCase):
                 self.assertEqual(api.queue_state, "RUNNING")
                 self.assertTrue(all(state == "ENABLED" for state in api.scheduler_states.values()))
 
-    def test_basic5_run_finally_and_acquisition_error_keep_holds_without_certificate(self):
+    def test_basic5_uncertain_child_and_followup_restore_keep_holds_without_certificate(self):
         with tempfile.TemporaryDirectory() as runner_temp:
             identity = {
                 "RELEASE_BASIC5": "true",
@@ -166,8 +166,12 @@ class DeliveryGuardTests(unittest.TestCase):
                 with tempfile.TemporaryDirectory() as directory:
                     guard = self.make_guard(api, directory)
                     with self.assertRaisesRegex(guard_module.GuardError, "terminal certificate"):
-                        guard.execute(["true"])
+                        guard.execute(["bash", "-c", "exit 75"])
+                    self.assertTrue(guard.receipt_path.exists())
+                    with self.assertRaisesRegex(guard_module.GuardError, "terminal certificate"):
+                        self.make_guard(api, directory).restore()
                     self.assertEqual(api.queue_state, "PAUSED")
+                    self.assertTrue(all(state == "PAUSED" for state in api.scheduler_states.values()))
 
     def test_basic5_cancelled_child_keeps_delivery_holds_without_certificate(self):
         with tempfile.TemporaryDirectory() as runner_temp, tempfile.TemporaryDirectory() as directory:

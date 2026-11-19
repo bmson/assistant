@@ -35,6 +35,8 @@ jobs:
         run: node --test scripts/picomatch-hardening.node-test.mjs
       - name: Verify the bounded spending-approval release configuration
         run: node --test infra/gcp/estimated-cost-release-config.test.mjs
+      - name: Verify recovery review signatures and prebuilt image promotion
+        run: node --test infra/gcp/api3-recovery-proof.test.mjs
       # Narrow brace-expansion overrides retain the 1.x and 2.x CommonJS export
       # shapes required by ExcelJS > archiver > glob > minimatch 3. The document
       # processor XLSX round-trip regression exercises that compatibility path.

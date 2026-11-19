@@ -413,7 +413,15 @@ verify_released_templates() {
 
 # ── rollout ──────────────────────────────────────────────────────────────────
 if step "Verifying agent configuration" verify_agent_configuration; then
-  step "Staging, verifying, and promoting compatible services" release_staged_services || true
+  echo "── Staging, verifying, and promoting compatible services"
+  rollout_status=0
+  release_staged_services || rollout_status=$?
+  if [[ "$rollout_status" == "$RELEASE_STAGED_OBSERVATION_REQUIRED" ]]; then
+    echo 'Firestore release stopped for GET-only reconciliation. Preserve delivery holds and the release receipt. Do not rerun the release or restore delivery until the effect is reconciled.' >&2
+    exit "$rollout_status"
+  elif (( rollout_status )); then
+    record_failure "Staging, verifying, and promoting compatible services"
+  fi
 else
   record_failure "Service promotion skipped — agent configuration unverified"
 fi
@@ -433,7 +441,7 @@ if (( FAILURE_COUNT )); then
   echo "" >&2
   echo "Firestore release ${TAG} finished with ${FAILURE_COUNT} failed step(s):" >&2
   printf '%s' "$FAILURE_LIST" >&2
-  echo "Steps not listed above did complete — re-running this release is safe." >&2
+  echo "Review the failed steps and current release state before retrying." >&2
   exit 1
 fi
 

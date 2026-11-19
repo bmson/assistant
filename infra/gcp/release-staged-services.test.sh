@@ -27,6 +27,12 @@ def val(k):
 if a[:3]==['run','services','update-traffic']:
  with open(os.environ['STUB_ADMISSION_CALLS'],'a') as f: f.write('traffic:'+a[3]+':'+val('--to-revisions')+'\n')
 def save(): p.write_text(json.dumps(s))
+if a[:3]==['firestore','databases','describe']:
+ print('{"pointInTimeRecoveryEnablement":"POINT_IN_TIME_RECOVERY_ENABLED"}'); sys.exit(0)
+if a[:2]==['scheduler','jobs']:
+ if a[2]=='update':
+  with open(os.environ['STUB_RELEASE_CALLS'],'a') as f: f.write('scheduler-update:'+a[4]+'\n')
+ sys.exit(0)
 if a[:3]==['artifacts','docker','images']:
  image=a[4] if len(a)>4 else ''
  if os.getenv('FAIL_AGENT_BUILD')=='1' and '/agent:' in image: sys.exit(1)
@@ -45,6 +51,7 @@ if a[:3]==['run','jobs','update']:
 if a[:3]==['run','services','describe']:
  name=a[3]; svc=s[name]
  if '--format=json' in a:
+  if name=='assistant-agent' and os.getenv('FAIL_AGENT_TAG_READBACK')=='1' and any(stage['tag'] for stage in svc.get('staged',[])): sys.exit(1)
   traffic=[]
   for revision,pct in svc['traffic'].items():
    tags=[x for x in svc.get('tags',[]) if x['revision']==revision]
@@ -57,9 +64,11 @@ if a[:3]==['run','services','describe']:
   traffic += [{'revisionName':x['revision'],'tag':x['tag'],'percent':0,'url':f"https://{x['tag']}-{name}.example"} for x in svc.get('staged',[]) if x['tag']]
   latest=svc.get('staged',[])[-1] if svc.get('staged') else {'revision':svc['revision'],'image':'legacy-image'}
   print(json.dumps({'spec':{'template':{'spec':{'containers':[{'image':latest['image'],'env':[{'name':k,'value':v} for k,v in svc['env'].items()]}] }}},'status':{'latestCreatedRevisionName':latest['revision'],'url':f'https://{name}.example','traffic':traffic}})); sys.exit(0)
+ if 'env[].name' in ' '.join(a): print(';'.join(svc['env'])); sys.exit(0)
  if 'value(status.url)' in ' '.join(a): print(f'https://{name}.example'); sys.exit(0)
 if a[:3]==['run','revisions','describe']:
  revision=a[3]
+ if revision.startswith('assistant-agent-p-') and os.getenv('FAIL_AGENT_CREATE_READBACK')=='1': sys.exit(1)
  if os.getenv('FAIL_RESUME_DRAIN')=='1' and revision=='assistant-web-new2' and not any(x.get('revision')==revision for x in s['assistant-web'].get('staged',[])): sys.exit(1)
  for name,svc in s.items():
   if not isinstance(svc,dict): continue
@@ -93,6 +102,7 @@ if a[:3]==['run','services','update']:
    k,v=item.split('=',1); svc['env'][k]=v
  svc.setdefault('staged',[]).append({'revision':rev,'tag':val('--tag'),'image':val('--image'),'env':dict(svc['env'])}); svc.setdefault('revisions',{})[rev]={'env':dict(svc['env']),'image':val('--image')}; save()
  with open(os.environ['STUB_ADMISSION_CALLS'],'a') as f: f.write('stage:'+name+':'+val('--tag')+':'+svc['env'].get('ASSISTANT_RELEASE_WRITES_PAUSED','')+'\n')
+ if name=='assistant-agent' and os.getenv('FAIL_AGENT_CREATE_RESPONSE')=='1': sys.exit(1)
  if name=='assistant-web' and svc['env'].get('ASSISTANT_RELEASE_WRITES_PAUSED')=='false' and os.getenv('FAIL_RESUME_STAGE_UNCERTAIN')=='1': sys.exit(1)
  sys.exit(0)
 if a[:3]==['run','services','update-traffic']:
@@ -986,6 +996,66 @@ import json,sys
 s=json.load(open(sys.argv[1]))
 assert s['assistant-agent']['env']['MCP_OAUTH_ENABLED']=='false'
 PYCASE
+# Exercise the real Firestore wrapper and staging code with fake cloud commands.
+# Only the protected lifecycle subprocesses are replaced by the fixture helpers.
+WRAPPER_ROOT="$TEST_ROOT/firestore-wrapper"
+mkdir -p "$WRAPPER_ROOT"
+cp "$ROOT/release.sh" "$ROOT/release-firestore.sh" "$ROOT/release-staged-services.sh" "$WRAPPER_ROOT/"
+ln -s "$ROOT/release-persistence.sh" "$WRAPPER_ROOT/"
+for fixture in "$ROOT"/*.mjs "$ROOT/release-contracts.json"; do ln -s "$fixture" "$WRAPPER_ROOT/"; done
+declare -f release_basic_editor_forward_only release_capture_owned_web_tags \
+  release_initialize_basic_web_lifecycle release_wait_for_basic_web_operator_hold >>"$WRAPPER_ROOT/release-staged-services.sh"
+
+for failure in FAIL_AGENT_BUILD FAIL_AGENT_CREATE_RESPONSE FAIL_AGENT_CREATE_READBACK FAIL_AGENT_TAG_RESPONSE FAIL_AGENT_TAG_READBACK; do
+  reset_case; prepare_firestore_state
+  python3 - "$STUB_ROOT/state.json" <<'PYCASE'
+import json,sys
+p=sys.argv[1]; state=json.load(open(p))
+for role in ('agent','web'):
+    state['assistant-'+role]['env'].update(PERSISTENCE_DRIVER='firestore', FIRESTORE_DATABASE_ID='test-db')
+state['assistant-agent']['env'].update(dict.fromkeys(
+    'AGENT_URL BROWSER_JOB_NAME CLOUD_TASKS_QUEUE CODE_JOB_NAME FIRESTORE_AGENT_ID FIRESTORE_EMBEDDING_SPACE GCP_LOCATION GCP_PROJECT GMAIL_PUBSUB_TOPIC GMAIL_PUSH_SERVICE_ACCOUNT INTERNAL_AUTH_MODE INTERNAL_OIDC_AUDIENCE INTERNAL_OIDC_SERVICE_ACCOUNT OWNER_EMAIL PROCESSOR_DRIVER PROCESSOR_JOB_NAME PUBLIC_URL WORKSPACE_BUCKET'.split(),
+    'fixture'))
+open(p,'w').write(json.dumps(state))
+PYCASE
+  wrapper_status=0
+  # The dispatcher takes its target and run identity from the environment.
+  # Supply only fixture values, including when release.test.sh calls us from CI.
+  env -i PATH="$PATH" \
+    STUB_ROOT="$STUB_ROOT" STUB_RELEASE_CALLS="$STUB_RELEASE_CALLS" \
+    STUB_SERVICE_UPDATE_CALLS="$STUB_SERVICE_UPDATE_CALLS" STUB_ADMISSION_CALLS="$STUB_ADMISSION_CALLS" \
+    STUB_ADMISSION_COMMANDS="$STUB_ADMISSION_COMMANDS" \
+    GCP_PROJECT="$PROJECT" GCP_REGION="$REGION" ARTIFACT_REPOSITORY="$REPO" IMAGE_TAG="$TAG" \
+    GITHUB_ACTIONS="$GITHUB_ACTIONS" GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_REF="$GITHUB_REF" \
+    GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" GITHUB_WORKFLOW_REF="$GITHUB_WORKFLOW_REF" \
+    GITHUB_SHA="$GITHUB_SHA" GITHUB_WORKFLOW_SHA="$GITHUB_WORKFLOW_SHA" \
+    GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+    OWNER_RELEASE_BOOTSTRAP_RECEIPT="$OWNER_RELEASE_BOOTSTRAP_RECEIPT" \
+    OWNER_RELEASE_BOOTSTRAP_SHA256="$OWNER_RELEASE_BOOTSTRAP_SHA256" \
+    RELEASE_COMPONENTS="$RELEASE_COMPONENTS" RELEASE_PERSISTENCE_DRIVER="$RELEASE_PERSISTENCE_DRIVER" \
+    RELEASE_MANIFEST_PATH="$RELEASE_MANIFEST_PATH" SKIP_IMAGE_BUILD=true ASSISTANT_MODULES=none \
+    TEST_BASIC5_CAPABILITY=true "$failure=1" \
+    bash "$WRAPPER_ROOT/release.sh" >"$TEST_ROOT/wrapper.log" 2>&1 || wrapper_status=$?
+  if [[ "$failure" == FAIL_AGENT_BUILD ]]; then
+    [[ "$wrapper_status" == 1 && ! -s "$STUB_SERVICE_UPDATE_CALLS" ]] || { cat "$TEST_ROOT/wrapper.log"; fail 'pre-write rejection must remain an ordinary release failure'; }
+    grep -q 'failed step(s)' "$TEST_ROOT/wrapper.log" || { cat "$TEST_ROOT/wrapper.log"; fail 'missing ordinary failure report'; }
+    ! grep -q 'GET-only reconciliation' "$TEST_ROOT/wrapper.log" || fail 'pre-write image rejection was marked ambiguous'
+  else
+    [[ "$wrapper_status" == "$RELEASE_STAGED_OBSERVATION_REQUIRED" ]] || { cat "$TEST_ROOT/wrapper.log"; fail "$failure did not propagate the held status"; }
+    grep -q 'Preserve delivery holds and the release receipt' "$TEST_ROOT/wrapper.log" || fail "$failure lost held recovery instructions"
+    ! rg -q 'scheduler-update:|--remove-tags|--to-revisions' "$STUB_RELEASE_CALLS" || fail "$failure caused writes after uncertainty"
+    ! grep -q 'Refreshing internal scheduler OIDC' "$TEST_ROOT/wrapper.log" || fail "$failure reached Scheduler refresh"
+    [[ "$(wc -l <"$STUB_SERVICE_UPDATE_CALLS")" -eq 1 ]] || fail "$failure retried or staged web"
+    if [[ "$failure" == FAIL_AGENT_TAG_* ]]; then
+      grep -q -- '--update-tags' "$STUB_RELEASE_CALLS" || fail 'fixture must attempt the tag write'
+    else
+      [[ ! -s "$STUB_RELEASE_CALLS" ]] || fail "$failure proceeded to a tag write"
+    fi
+  fi
+  ! grep -qi 're-running this release is safe' "$TEST_ROOT/wrapper.log" || fail "$failure advertised a blind retry"
+  assert_old_traffic
+done
+
 reset_case; prepare_firestore_state
 if FAIL_AGENT_CREATE_WITH_OLD_TAG=1 release_staged_services >/dev/null 2>&1; then
   fail 'uncertain API 3 create must stop before tag attachment'
