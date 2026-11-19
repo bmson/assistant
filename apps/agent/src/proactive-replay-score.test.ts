@@ -13,6 +13,7 @@ const moment = {
   exactSource: true,
   elapsedMinutes: 8,
   durableCard: true,
+  durablePushAcknowledged: true,
   groundedCard: true,
 };
 const arrival: ReplayTick = {
@@ -103,9 +104,14 @@ describe('proactive replay scorer', () => {
     ).toMatchObject({ passed: false, delivered: 1, setupDeliveries: 1, setupMatches: 0 });
   });
 
-  it('keeps logical coverage independent from push acknowledgment', () => {
-    expect(
-      scoreReplayCase(fixture, [{ ...arrival, pushAcknowledged: false }, retry], {}),
-    ).toMatchObject({ passed: false, matched: 0.5, delivered: 1 });
+  it.each([
+    { ...arrival, pushAcknowledged: false },
+    { ...arrival, moments: [{ ...moment, durablePushAcknowledged: false }] },
+  ])('keeps logical coverage independent from missing push acknowledgment', (incomplete) => {
+    expect(scoreReplayCase(fixture, [incomplete, retry], {})).toMatchObject({
+      passed: false,
+      matched: 0.5,
+      delivered: 1,
+    });
   });
 });
