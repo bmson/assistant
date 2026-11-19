@@ -659,7 +659,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore atomic cost led
     expect((await costs.totals()).heldUsd).toBe(0.1);
   });
 
-  it('retains dispatched unknown usage as a hold and accepts one late actual after timeout', async () => {
+  it('retains dispatched unknown usage before the TTL and accepts one late actual', async () => {
     await store
       .doc('tasks', 'terminal-task')
       .set({ id: 'terminal-task', spentUsd: '0', budgetUsdLimit: '1', status: 'done' });
@@ -685,7 +685,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore atomic cost led
       requestId: 'generation-late',
     });
     now = new Date(now.getTime() + 121 * 60_000);
-    expect(await costs.releaseStale()).toEqual({ released: 0, markedUnknown: 0 });
+    expect(await costs.releaseStale(120, 500, 180)).toEqual({ released: 0, markedUnknown: 0 });
     expect((await costs.totals()).heldUsd).toBe(0.4);
     const reservationRef = store.doc('costReservations', reserved.reservationId);
     const taskRef = store.doc('tasks', 'terminal-task');

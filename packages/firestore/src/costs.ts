@@ -1000,8 +1000,10 @@ export class FirestoreCostRepository implements CostRepository {
     reservationId: string,
     actual: ReservationActual,
   ): Promise<boolean> {
+    const kind = reservation.get('reservationKind');
     if (
       reservation.get('source') !== 'model' ||
+      (kind !== undefined && kind !== 'attempt') ||
       reservation.get('costGrantId') != null ||
       !canCorrectModelAttemptEstimate(actual.evidence)
     )
