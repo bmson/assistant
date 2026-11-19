@@ -6,10 +6,10 @@ import {
 } from '@assistant/application/provider-billing';
 import { loadConfig } from '@assistant/config';
 import { assistantModuleMetas } from '@assistant/modules/meta';
-import { scheduleLabels } from '@/app/settings/labels';
 import { getAgentReadinessSource } from '@/lib/agent-readiness-source';
 import { capabilityStatus, getCapabilityDiagnostics } from '@/lib/capabilities';
 import { getFirestoreMobileWorkspace } from '@/lib/firestore-mobile-workspace';
+import { mobileAutomations } from '@/lib/mobile-automations';
 import { readMobileWorkspaceSection } from '@/lib/mobile-workspace-sections';
 import { getSelfRepairOverview } from '@/lib/self-repair-server';
 import {
@@ -331,17 +331,7 @@ export async function GET(request: Request): Promise<Response> {
               },
               // `label` carries the same human wording the web settings page shows,
               // so the phone never has to keep its own copy of the dictionaries.
-              schedules: settings.schedules
-                .filter((schedule) => !schedule.name.startsWith('reminder:'))
-                .map((schedule) => ({
-                  id: schedule.id,
-                  name: schedule.name,
-                  label: scheduleLabels[schedule.name] ?? null,
-                  cron: schedule.cron,
-                  enabled: schedule.enabled,
-                  nextRunAt: schedule.nextRunAt,
-                  lastRunAt: schedule.lastRunAt,
-                })),
+              schedules: mobileAutomations(settings.schedules),
               reminders: settings.reminders,
               policies: settings.policies.map((policy) =>
                 projectStandingApprovalPolicy(

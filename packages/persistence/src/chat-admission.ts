@@ -74,6 +74,37 @@ export function chatAdmissionPayload(task: Pick<Records['tasks'], 'trigger'>): {
   };
 }
 
+export type ChatReplyOrigin = { triggerMessageId: string; clientOperationId?: string };
+
+/** Immutable owner turn carried by queued work and direct replies. */
+export function chatReplyOrigin(
+  task: Pick<
+    Records['tasks'],
+    'agentId' | 'conversationId' | 'trigger' | 'trust' | 'type' | 'externalEventId'
+  >,
+): ChatReplyOrigin | undefined {
+  if (task.type !== 'chat_turn' || task.trust !== 'owner' || !task.conversationId) return;
+  const trigger = task.trigger as {
+    source?: unknown;
+    payload?: { triggerMessageId?: unknown };
+  } | null;
+  const messageId = trigger?.payload?.triggerMessageId;
+  if (trigger?.source !== 'chat' || typeof messageId !== 'string' || !UUID_RE.test(messageId))
+    return;
+  const admission = chatAdmissionPayload(task);
+  if (
+    admission?.triggerMessageId === messageId &&
+    UUID_RE.test(admission.clientOperationId) &&
+    task.externalEventId ===
+      chatAdmissionExternalEventId({
+        agentId: task.agentId,
+        conversationId: task.conversationId,
+        clientOperationId: admission.clientOperationId,
+      })
+  )
+    return { triggerMessageId: messageId, clientOperationId: admission.clientOperationId };
+  return { triggerMessageId: messageId };
+}
 export function withChatAdmissionPhase(
   trigger: unknown,
   phase: ChatAdmissionPhase,

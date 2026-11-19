@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { handleChatTurn } from '@assistant/application';
+import { getChatConversationView } from '@assistant/application/chat';
 import { loadConfig } from '@assistant/config';
 import { type ExecutorDeps, executeTask, type ModelRouter } from '@assistant/core';
 import type { Db } from '@assistant/db';
@@ -106,8 +107,8 @@ describe.skipIf(!enabled)('P02 Firestore queued owner-operation isolation', () =
     const persistence = createFirestoreExecutionPersistence(store, agentId, SPACE);
     const conversation = await chat.createConversation(agentId);
     const runConfig = config(agentId, store.installationId);
-    const requestA = 'Check my calendar for October 9.';
-    const requestB = 'Check my calendar for October 10.';
+    const requestA = 'Check my calendar for October 9, 2027.';
+    const requestB = 'Check my calendar for October 10, 2027.';
     const operationA = randomUUID();
     const operationB = randomUUID();
 
@@ -318,6 +319,7 @@ describe.skipIf(!enabled)('P02 Firestore queued owner-operation isolation', () =
     let workerAError: unknown;
     let workerBResult: Awaited<ReturnType<typeof executeTask>> | undefined;
     let durableBId: string | undefined;
+    let durableBText: string | undefined;
     try {
       workerA = runTask(
         acceptedA.taskId,
@@ -354,9 +356,11 @@ describe.skipIf(!enabled)('P02 Firestore queued owner-operation isolation', () =
       expect(assistantRows[0]).toMatchObject({
         id: expect.any(String),
         taskId: acceptedB.taskId,
-        text: REPLY_B,
+        text: expect.stringContaining('B planning review'),
       });
       durableBId = assistantRows[0]?.id;
+      durableBText = assistantRows[0]?.text;
+      expect(durableBText).not.toContain('A planning review');
       expect(
         whileAIsDelayed.some((row) => row.taskId === acceptedA.taskId && row.role === 'assistant'),
       ).toBe(false);
@@ -389,7 +393,7 @@ describe.skipIf(!enabled)('P02 Firestore queued owner-operation isolation', () =
         mergedWhileAIsDelayed
           .filter((row) => row.role === 'assistant')
           .flatMap((row) => row.parts.flatMap((part) => (part.type === 'text' ? [part.text] : []))),
-      ).toEqual([REPLY_A, REPLY_B]);
+      ).toEqual([REPLY_A, durableBText]);
     } finally {
       releaseA();
       if (workerA) {
@@ -422,9 +426,34 @@ describe.skipIf(!enabled)('P02 Firestore queued owner-operation isolation', () =
     expect(finalAssistants).toHaveLength(2);
     const finalA = finalAssistants.find((row) => row.taskId === acceptedA.taskId);
     const finalB = finalAssistants.find((row) => row.taskId === acceptedB.taskId);
-    expect(finalA).toMatchObject({ taskId: acceptedA.taskId, text: REPLY_A });
-    expect(finalB).toMatchObject({ id: durableBId, taskId: acceptedB.taskId, text: REPLY_B });
+    expect(finalA).toMatchObject({
+      taskId: acceptedA.taskId,
+      text: expect.stringContaining('A planning review'),
+    });
+    expect(finalA?.text).not.toContain('B planning review');
+    expect(finalB).toMatchObject({ id: durableBId, taskId: acceptedB.taskId, text: durableBText });
+    expect(
+      calendarCalls.map(({ eventId, args }) => [
+        eventId,
+        new Date(args.timeMin).toISOString(),
+        new Date(args.timeMax).toISOString(),
+      ]),
+    ).toEqual([
+      ['firestore-event-operation-a', '2027-10-09T00:00:00.000Z', '2027-10-10T00:00:00.000Z'],
+      ['firestore-event-operation-b', '2027-10-10T00:00:00.000Z', '2027-10-11T00:00:00.000Z'],
+    ]);
     expect(finalA?.id).not.toBe(finalB?.id);
+    const view = await getChatConversationView(chat, conversation.id, {});
+    for (const [message, receipt, operation] of [
+      [finalA, acceptedA, operationA],
+      [finalB, acceptedB, operationB],
+    ] as const) {
+      expect(view?.messages.find((row) => row.id === message?.id)?.metadata).toMatchObject({
+        taskId: receipt.taskId,
+        triggerMessageId: receipt.messageId,
+        clientOperationId: operation,
+      });
+    }
     expect((await persistence.tasks.getTask(acceptedA.taskId))?.status).toBe('done');
     expect((await persistence.tasks.getTask(acceptedB.taskId))?.status).toBe('done');
 

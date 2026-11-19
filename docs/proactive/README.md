@@ -65,7 +65,7 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | A12 | Isolate QA from production; purge QA data                              | 1     | M    | —          | open                                                          |
 | A13 | Owner time zone in every card                                          | 0     | S    | —          | in review (time zones in calendar and briefing cards)         |
 | A14 | Brief calendar answers                                                 | 1     | M    | —          | open                                                          |
-| A15 | Each turn answers its own message                                      | 0     | M    | —          | open                                                          |
+| A15 | Each turn answers its own message                                      | 0     | M    | —          | in review (task-bound chat and approval resume)               |
 | A16 | Weather plausibility                                                   | 0     | S    | —          | in review (hourly snow corroboration)                         |
 | A17 | Texts only for urgent items                                            | 0     | S    | —          | in review (urgent SMS quota and retry checks)                 |
 | B1  | Calendar connection health and warning                                 | 1     | S    | —          | open                                                          |
@@ -103,11 +103,11 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | E2  | Evening look-ahead as a code job                                       | 3     | M    | D1         | open                                                          |
 | E3  | Weekly review and monthly renewals                                     | 5     | S    | E1         | open                                                          |
 | E4  | Card actions                                                           | 3     | M    | —          | open                                                          |
-| E5  | Proactive settings and Noticing health card on iOS                     | 3     | M    | H4         | open                                                          |
+| E5  | Proactive settings and Noticing health card on iOS                     | 3     | M    | H4         | in progress (source and producer health on the phone)         |
 | E6  | Internal notices out of the owner's chats                              | 3     | S    | A4         | open                                                          |
 | E7  | Per-person and per-day views                                           | 4     | M    | C6         | open                                                          |
 | E8  | Actionable push notifications                                          | 4     | M    | E4         | open                                                          |
-| E9  | More shows only meaningful automations                                 | 3     | S    | A10        | open                                                          |
+| E9  | More shows only meaningful automations                                 | 3     | S    | A10        | in review (native Automations list)                           |
 | F1  | Tools: `memory.forget`, `contacts.update`, `occasions.update`/`delete` | 2     | M    | —          | open                                                          |
 | F2  | Routing: topic watches, digests, cancel and delete paths               | 2     | M    | —          | open                                                          |
 | F3  | Reply integrity                                                        | 2     | M    | A4         | open                                                          |
@@ -122,4 +122,4 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | H1  | Golden-signal benchmark harness                                        | 3     | L    | —          | open                                                          |
 | H2  | Weekly missed-signal audit                                             | 5     | M    | H1         | open                                                          |
 | H3  | Proactive telemetry                                                    | 5     | M    | —          | open                                                          |
-| H4  | Daily canary                                                           | 0     | S    | —          | open                                                          |
+| H4  | Daily canary                                                           | 0     | S    | —          | in review (source checks and one daily health alert)          |

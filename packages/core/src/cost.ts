@@ -30,6 +30,25 @@ export {
 
 import { DEFAULT_RATES, nextDailyReset, nextMonthlyReset } from '@assistant/persistence';
 
+export type DailyBudgetHoldHealth =
+  | 'within_limit'
+  | 'above_threshold'
+  | 'paused'
+  | 'uncapped'
+  | 'unavailable';
+
+export function classifyDailyBudgetHolds({
+  dailyHeldUsd: held,
+  dailyLimitUsd: cap,
+}: Pick<CostTotals, 'dailyHeldUsd' | 'dailyLimitUsd'>): DailyBudgetHoldHealth {
+  if (held === undefined || !Number.isFinite(held) || held < 0 || Number.isNaN(cap) || cap < 0)
+    return 'unavailable';
+  if (cap === Number.POSITIVE_INFINITY) return 'uncapped';
+  if (!Number.isFinite(cap)) return 'unavailable';
+  if (held > cap / 4) return 'above_threshold';
+  return cap === 0 ? 'paused' : 'within_limit';
+}
+
 type CostStore = Db | CostRepository;
 function costs(store: CostStore): CostRepository {
   return 'kind' in store && store.kind === 'cost-repository'

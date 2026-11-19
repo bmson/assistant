@@ -138,6 +138,7 @@ enum AssistantRoute: String, Hashable, Identifiable, CaseIterable, Sendable {
     case skills
     case capabilities
     case settings
+    case noticing
     case costs
     case anomalies
     case improvements
@@ -3335,6 +3336,14 @@ final class AppModel {
         }
     }
 
+    func loadNoticingHealth() async throws -> NoticingHealth {
+        guard let client else { throw APIError.invalidServerURL }
+        let version = connectionVersion
+        let result = try await client.proactiveHealth()
+        guard connectionIsCurrent(client, version: version) else { throw CancellationError() }
+        return result
+    }
+
     func loadSituationPacks() async throws -> SituationOverview {
         guard let client else { throw APIError.invalidServerURL }
         let version = connectionVersion
@@ -4477,7 +4486,8 @@ final class AppModel {
         beginSpeaking(streamID: streamID)
         // Recorded before the send, not after the receipt: backgrounding during
         // the stream is exactly the case this exists for, and at that point
-        // there is no taskId yet. Polling by cursor alone still finds the reply.
+        // there is no taskId yet. Polling binds any durable reply to this
+        // operation rather than treating another turn's answer as completion.
         resumableTurn = (taskId: nil, streamID: streamID)
         ordinaryTurn = OrdinaryTurn(
             token: turnToken,
@@ -5387,16 +5397,21 @@ final class AppModel {
         var finalStatus: String?
         var receivedCurrentReply = false
         var currentReplyMessageIDs = Set<String>()
-        let assistantMessageIDsAtStart = Set(messages.compactMap { message in
-            message.role == .assistant && !message.id.hasPrefix("stream-") ? message.id : nil
-        })
+        let operationId = ordinaryTurnToken.flatMap { token in
+            ordinaryTurn?.token == token ? ordinaryTurn?.operationId : nil
+        }
         func refreshCurrentReplyState() {
             currentReplyMessageIDs = Set(messages.compactMap { message in
                 guard isVisibleDurableAssistantReply(message) else { return nil }
+                let replyTaskId = message.metadata?["taskId"]?.string
+                let replyOperationId = message.metadata?["clientOperationId"]?.string
                 if let taskId {
-                    return message.metadata?["taskId"]?.string == taskId ? message.id : nil
+                    guard replyTaskId == taskId else { return nil }
+                    if let operationId, let replyOperationId, replyOperationId != operationId { return nil }
+                    return message.id
                 }
-                return !assistantMessageIDsAtStart.contains(message.id) ? message.id : nil
+                guard let operationId, replyOperationId == operationId, replyTaskId != nil else { return nil }
+                return message.id
             })
             receivedCurrentReply = !currentReplyMessageIDs.isEmpty
         }
@@ -5683,11 +5698,6 @@ final class AppModel {
                 $0.id.hasPrefix("local-") && $0.role == message.role && $0.text == message.text
             }) {
                 messages.remove(at: localIndex)
-            }
-            if message.role == .assistant {
-                messages.removeAll {
-                    $0.id.hasPrefix("stream-") && ($0.text == message.text || !$0.text.isEmpty)
-                }
             }
             messages.append(message)
         }

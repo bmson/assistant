@@ -7,6 +7,7 @@ import {
   proactivePings,
 } from '@assistant/db';
 import {
+  type CostRepository,
   EMAIL_EXTRACTION_ALWAYS_ELIGIBLE,
   EMAIL_EXTRACTION_EXCLUDED,
   EMAIL_EXTRACTION_MIN_IMPORTANCE,
@@ -32,6 +33,13 @@ import {
   or,
   sql,
 } from 'drizzle-orm';
+import { classifyDailyBudgetHolds, type DailyBudgetHoldHealth } from '../cost.js';
+
+export {
+  assessProactiveCanaries,
+  type ProactiveCanaries,
+  proactiveCanaryProblems,
+} from './canaries.js';
 
 /**
  * Is the proactive machinery actually alive?
@@ -308,4 +316,14 @@ export function proactiveWarnings(
     );
   }
   return warnings;
+}
+
+export async function dailyBudgetHoldHealth(
+  readTotals: CostRepository['totals'],
+): Promise<DailyBudgetHoldHealth> {
+  try {
+    return classifyDailyBudgetHolds(await readTotals());
+  } catch {
+    return 'unavailable';
+  }
 }

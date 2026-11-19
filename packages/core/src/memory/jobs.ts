@@ -210,6 +210,7 @@ export interface CodeJobOutcome {
   done: boolean;
   runAfter?: Date;
   summary: string;
+  pulseCompleted?: boolean;
   briefingOutcome?: import('@assistant/persistence').BriefingRunOutcome;
 }
 
@@ -586,6 +587,7 @@ export async function runCodeJob(
       return {
         done: true,
         summary: pulseSummary(await runPulse(deps, { taskId: task.id, agentId: task.agentId })),
+        pulseCompleted: true,
       };
     }
     case 'briefing.compose': {
@@ -891,12 +893,23 @@ export async function runCodeJob(
     }
     case 'health.monitor': {
       await deps.heartbeat?.();
-      const health = deps.persistence?.assistantHealth;
+      const persistence = deps.persistence;
+      const health = persistence?.assistantHealth;
       const r = await runAssistantHealthMonitor(
         {
           db: deps.db,
           heartbeat: deps.heartbeat,
           ...(health && deps.persistence ? { health, graphSync: deps.persistence.graphSync } : {}),
+          canaries: deps.persistence?.proactiveCanaries,
+          readTotals: persistence ? () => persistence.costs.totals() : undefined,
+          ownerTimeZone: persistence
+            ? async () => {
+                const owner = await persistence.executionContext.getAgent(task.agentId);
+                if (!owner) throw new Error('Health monitor owner unavailable');
+                return owner.timezone;
+              }
+            : undefined,
+          notifyOwner: deps.notifyOwner,
         },
         { agentId: task.agentId, taskId: task.id },
       );

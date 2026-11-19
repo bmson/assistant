@@ -138,6 +138,10 @@ final class StubURLProtocol: URLProtocol {
         }
     }
 
+    static func appendOutcome(_ outcome: Outcome, path: String) {
+        lock.withLock { pathOutcomes[path, default: []].append(outcome) }
+    }
+
     /// Parallel startup reads must not consume each other's response bodies.
     static func primeBootstrap(_ body: Data, overview: [Outcome] = [.success(status: 401, body: Data())],
                                queued: [Outcome] = []) {
@@ -866,6 +870,90 @@ final class APIClientRetryTests: XCTestCase {
         super.setUp()
         testCaseID = UUID().uuidString
         StubURLProtocol.beginTestCase(testCaseID)
+    }
+
+    func testHealthPushOpensNoticingForItsOwner() throws {
+        let destination = try XCTUnwrap(AssistantNotificationDestination(userInfo: [
+            "route": "settings", "section": "noticing", "agentId": "owner"
+        ]))
+        XCTAssertEqual(destination.route, .noticing)
+        XCTAssertTrue(destination.belongsTo(ownerID: "owner"))
+        XCTAssertFalse(destination.belongsTo(ownerID: "another-owner"))
+        XCTAssertEqual(AssistantNotificationDestination(userInfo: ["route": "settings"])?.route, .settings)
+    }
+
+    func testNoticingCanariesDistinguishSourcesFromSmsReservations() throws {
+        let checks = try JSONDecoder().decode(NoticingHealth.Canaries.self, from: Data(#"""
+        {
+          "pulse": {"state": "fresh", "observedAt": "2026-11-18T09:00:00.000Z"},
+          "googleCalendar": {"state": "configured_unverified"},
+          "phoneCalendar": {"state": "incomplete", "observedAt": "2026-11-18T09:00:00Z"},
+          "weather": {"state": "unavailable", "observedAt": "invalid timestamp"},
+          "urgentSms": {"state": "at_limit", "attempts": 3, "limit": 3}
+        }
+        """#.utf8))
+        XCTAssertEqual(checks.pulse.label, "Up to date")
+        XCTAssertEqual(checks.googleCalendar.label, "Configured, not verified")
+        XCTAssertNil(checks.googleCalendar.observationDate)
+        XCTAssertEqual(checks.phoneCalendar.label, "Capture incomplete, not verified")
+        let capture = try XCTUnwrap(checks.phoneCalendar.observationDate)
+        XCTAssertEqual(checks.pulse.observationDate, capture)
+        XCTAssertEqual(checks.weather.label, "Status unavailable")
+        XCTAssertNil(checks.weather.observationDate)
+        XCTAssertEqual(checks.urgentSms.label, "3 of 3 daily slots reserved")
+        XCTAssertNil(checks.urgentSms.observationDate)
+        let connection = try JSONDecoder().decode(NoticingHealth.Canary.self, from: Data(#"{"state":"connected"}"#.utf8))
+        XCTAssertEqual(connection.label, "Connection recorded")
+        XCTAssertNil(connection.observationDate)
+        let missing = try JSONDecoder().decode(NoticingHealth.Canary.self, from: Data(#"{"state":"missing"}"#.utf8))
+        XCTAssertEqual(missing.label, "Schedule missing")
+        XCTAssertNil(missing.observationDate)
+        let newState = try JSONDecoder().decode(NoticingHealth.Canary.self, from: Data(#"{"state":"future_state"}"#.utf8))
+        XCTAssertEqual(newState.label, "Status unavailable")
+    }
+
+    func testNoticingHealthDecodesBriefingStatus() throws {
+        let quiet = try JSONDecoder().decode(NoticingHealth.Briefing.self, from: Data(#"{"state":"quiet"}"#.utf8))
+        let stale = try JSONDecoder().decode(NoticingHealth.Briefing.self, from: Data(#"{"state":"stale","recordedAt":"2026-11-18T09:00:00.000Z"}"#.utf8))
+        XCTAssertEqual(quiet.label, "Checked, nothing to flag")
+        XCTAssertNil(quiet.observationDate)
+        XCTAssertEqual(stale.label, "Overdue")
+        XCTAssertNotNil(stale.observationDate)
+    }
+
+    func testNoticingHealthReadsStageCounts() async throws {
+        let body = #"{"mailReceived7d":4,"mailScored7d":3,"mailProcessed7d":1,"mailPendingOver6h7d":2,"mailAwaitingAdmissionOver6h7d":1,"momentsDelivered24h":1,"pingsHeld24h":0,"pushDevices":1,"warnings":[]}"#
+        StubURLProtocol.prime([.success(status: 200, body: Data(body.utf8))])
+        let health = try await makeClient().proactiveHealth()
+        XCTAssertEqual(health.mailReceived7d, 4)
+        XCTAssertEqual(health.mailPendingOver6h7d, 2)
+        XCTAssertEqual(health.mailAwaitingAdmissionOver6h7d, 1)
+        XCTAssertEqual(health.dailyBudgetHoldsLabel, "Status unavailable")
+        XCTAssertNil(health.lastMailDate)
+        XCTAssertEqual(StubURLProtocol.urls.first?.path, "/api/mobile/v1/proactive-health")
+        XCTAssertEqual(StubURLProtocol.attempts, ["GET"])
+    }
+
+    func testNoticingHealthDecodesBudgetStatusAndLastMailTime() throws {
+        let states = [
+            "within_limit": "At or below 25% of daily cap",
+            "above_threshold": "Over 25% of daily cap",
+            "paused": "Daily spending cap is zero",
+            "uncapped": "No daily cap",
+            "unavailable": "Status unavailable",
+            "future_state": "Status unavailable",
+        ]
+        for (wire, label) in states {
+            let health = try JSONDecoder().decode(NoticingHealth.self, from: Data(#"""
+            {
+              "dailyBudgetHolds":"\#(wire)", "lastMailAt":"2026-11-18T09:00:00Z",
+              "mailReceived7d":0, "mailScored7d":0, "mailProcessed7d":0, "mailPendingOver6h7d":0,
+              "momentsDelivered24h":0, "pingsHeld24h":0, "pushDevices":0, "warnings":[]
+            }
+            """#.utf8))
+            XCTAssertEqual(health.dailyBudgetHoldsLabel, label)
+            XCTAssertEqual(health.lastMailDate?.timeIntervalSince1970, 1_794_992_400)
+        }
     }
 
     override func tearDown() {
@@ -7249,6 +7337,63 @@ extension APIClientRetryTests {
                            "The old connection's reply must not clear the replacement connection's error")
             model.scenePhaseDidChange(.background)
         }
+    }
+
+    @MainActor
+    func testTasklessPollKeepsCurrentProvisionalReplyAcrossAnUnrelatedAnswer() async throws {
+        let model = try await notificationModel()
+        let statusPath = "/api/mobile/v1/chat/status"
+        let chatPath = "/api/mobile/v1/chat"
+        let provisionalText = "Partial answer for the current turn"
+        let delta = try JSONSerialization.data(withJSONObject: [
+            "type": "text-delta", "delta": provisionalText,
+        ])
+        let other = ChatMessage(id: "other-answer", role: .assistant,
+            parts: [.init(type: "text", text: "Answer from the older approved turn")])
+        let unrelated = ChatUpdates(taskStatus: nil, messages: [other], refreshed: [], superseded: nil,
+            nextCursor: nil, hasMore: false, activity: [])
+        StubURLProtocol.prime([], paths: [
+            chatPath: [.stream(body: Data("data: \(String(decoding: delta, as: UTF8.self))\n\n".utf8))],
+            statusPath: [.success(status: 200, body: try JSONEncoder().encode(unrelated))],
+            "/api/mobile/v1/overview": [.success(status: 200, body: try overviewBody(pending: []))],
+            "/api/mobile/v1/workspace": [.success(status: 401, body: Data())],
+        ])
+        model.send("My current request")
+        let firstDeadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while !model.messages.contains(where: { $0.id.hasPrefix("stream-") && $0.text == provisionalText }),
+              ContinuousClock.now < firstDeadline { await Task.yield() }
+        XCTAssertTrue(model.messages.contains(where: { $0.id.hasPrefix("stream-") && $0.text == provisionalText }))
+        let index = try XCTUnwrap(StubURLProtocol.urls.firstIndex(where: { $0.path == chatPath }))
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: StubURLProtocol.bodies[index]) as? [String: Any])
+        let operationId = try XCTUnwrap(body["clientOperationId"] as? String)
+        let current = ChatMessage(id: "current-answer", role: .assistant,
+            parts: [.init(type: "text", text: "Matching durable answer")],
+            metadata: [
+                "taskId": .string("33333333-3333-4333-8333-333333333333"),
+                "clientOperationId": .string(operationId),
+            ])
+        let matching = ChatUpdates(taskStatus: nil, messages: [current], refreshed: [], superseded: nil,
+            nextCursor: nil, hasMore: false, activity: [])
+        StubURLProtocol.appendOutcome(
+            .held(status: 200, body: try JSONEncoder().encode(matching)), path: statusPath
+        )
+        StubURLProtocol.appendStream(Data("data: [DONE]\n\n".utf8), operationId: operationId)
+        let secondDeadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while !StubURLProtocol.isHoldingResponse(path: statusPath),
+              ContinuousClock.now < secondDeadline { await Task.yield() }
+        XCTAssertTrue(StubURLProtocol.isHoldingResponse(path: statusPath))
+        XCTAssertTrue(model.isSending)
+        XCTAssertTrue(model.messages.contains(where: { $0.id == other.id }))
+        XCTAssertTrue(model.messages.contains(where: { $0.id.hasPrefix("stream-") && $0.text == provisionalText }))
+        StubURLProtocol.releaseHeldResponse(path: statusPath)
+
+        let settleDeadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while model.isSending, ContinuousClock.now < settleDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertFalse(model.isSending)
+        XCTAssertTrue(model.messages.contains(where: { $0.id == current.id }))
+        XCTAssertFalse(model.messages.contains(where: { $0.id.hasPrefix("stream-") }))
     }
 
     @MainActor
