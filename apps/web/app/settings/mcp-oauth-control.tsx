@@ -10,6 +10,12 @@ import {
 import { btnSm } from '@/lib/ui';
 import { ConfirmButton } from '@/lib/ui-client';
 
+class SignInHttpError extends Error {
+  constructor(readonly status: number) {
+    super('Tool sign-in status unavailable');
+  }
+}
+
 async function request<T>(path: string, method = 'GET', signal?: AbortSignal): Promise<T> {
   const response = await fetch(path, {
     method,
@@ -21,7 +27,7 @@ async function request<T>(path: string, method = 'GET', signal?: AbortSignal): P
       ? AbortSignal.any([signal, AbortSignal.timeout(30_000)])
       : AbortSignal.timeout(30_000),
   });
-  if (!response.ok) throw new Error('Tool sign-in status unavailable');
+  if (!response.ok) throw new SignInHttpError(response.status);
   return response.json() as Promise<T>;
 }
 
@@ -40,12 +46,15 @@ const checking = 'Sign-in is still being checked. Refresh its status before tryi
 const unknown = 'Couldn’t confirm the change. Check its status before trying again.';
 const statusUnavailable = 'Couldn’t load the saved sign-in status. Try again.';
 
-function outcomeNotice(outcome: McpOAuthFlow['outcome'], status: McpOAuthStatus, flowId: string) {
+type RecoveredOutcome = McpOAuthFlow['outcome'] | 'missing';
+
+function outcomeNotice(outcome: RecoveredOutcome, status: McpOAuthStatus, flowId: string) {
   switch (outcome) {
+    case 'missing':
     case 'authorized':
-      return status.grant === 'authorized' && status.grantGeneration === flowId
-        ? 'Sign-in confirmed.'
-        : unknown;
+      if (status.grant === 'authorized' && status.grantGeneration === flowId)
+        return 'Sign-in confirmed.';
+      return outcome === 'missing' ? 'This sign-in attempt is no longer available.' : unknown;
     case 'pending':
     case 'processing':
       return checking;
@@ -124,7 +133,16 @@ export function McpOAuthControl({
   }
 
   async function reconcile(signal: AbortSignal, flowId?: string) {
-    const outcome = flowId ? await readFlow(signal, flowId) : undefined;
+    let outcome: RecoveredOutcome | undefined;
+    if (flowId) {
+      try {
+        outcome = await readFlow(signal, flowId);
+      } catch (error) {
+        if (!(error instanceof SignInHttpError) || error.status !== 404 || signal.aborted)
+          throw error;
+        outcome = 'missing';
+      }
+    }
     const next = await readStatus(signal);
     if (outcome && flowId && !signal.aborted) {
       setNotice(outcomeNotice(outcome, next, flowId));

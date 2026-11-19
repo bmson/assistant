@@ -305,3 +305,72 @@ it('retains the parent disabled gate on status recovery', async () => {
   await act(async () => button('Check sign-in status')?.click());
   expect(fetch).toHaveBeenCalledTimes(1);
 });
+
+it.each([
+  ['authorized', flowId, true],
+  ['authorized', connectionId, false],
+  ['none', undefined, false],
+] as const)(
+  'recovers a missing attempt from its connection status (%s, %s)',
+  async (grant, grantGeneration, confirmed) => {
+    sessionStorage.setItem(key, flowId);
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json({}, { status: 404 }))
+      .mockResolvedValueOnce(
+        Response.json({ connectionId, signInAvailable: true, grant, grantGeneration }),
+      );
+    vi.stubGlobal('fetch', fetch);
+    await act(async () =>
+      root.render(<McpOAuthControl connectionId={connectionId} disabled={false} />),
+    );
+    expect(fetch.mock.calls.map(([url, options]) => [url, options.method])).toEqual([
+      [`${statusPath}/flow?flowId=${flowId}`, 'GET'],
+      [statusPath, 'GET'],
+    ]);
+    expect(sessionStorage.getItem(key)).toBeNull();
+    expect(container.textContent?.includes('Sign-in confirmed.')).toBe(confirmed);
+    expect(container.textContent?.includes('Tool sign-in authorized')).toBe(grant === 'authorized');
+    if (!confirmed)
+      expect(container.textContent).toContain('This sign-in attempt is no longer available.');
+  },
+);
+
+it('keeps the missing attempt recoverable when its saved status cannot be verified', async () => {
+  sessionStorage.setItem(key, flowId);
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(Response.json({}, { status: 404 }))
+    .mockResolvedValueOnce(
+      Response.json({
+        connectionId: flowId,
+        signInAvailable: true,
+        grant: 'authorized',
+        grantGeneration: flowId,
+      }),
+    );
+  vi.stubGlobal('fetch', fetch);
+  await act(async () =>
+    root.render(<McpOAuthControl connectionId={connectionId} disabled={false} />),
+  );
+  expect(fetch).toHaveBeenCalledTimes(2);
+  expect(sessionStorage.getItem(key)).toBe(flowId);
+  expect(container.textContent).toContain('Check sign-in status');
+  expect(container.textContent).not.toContain('Sign-in confirmed');
+});
+
+it.each([401, 503])(
+  'retains a saved attempt after status %i without treating it as missing',
+  async (status) => {
+    sessionStorage.setItem(key, flowId);
+    const fetch = vi.fn().mockResolvedValueOnce(Response.json({}, { status }));
+    vi.stubGlobal('fetch', fetch);
+    await act(async () =>
+      root.render(<McpOAuthControl connectionId={connectionId} disabled={false} />),
+    );
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(sessionStorage.getItem(key)).toBe(flowId);
+    expect(container.textContent).toContain('Check sign-in status');
+    expect(container.textContent).not.toContain('Sign-in confirmed');
+  },
+);
