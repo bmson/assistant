@@ -56,7 +56,7 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | A3  | Outage watchdog and "while I was away" digest                          | 0     | M    | H4         | open                                                          |
 | A4  | Stop mirroring secondary-chat replies into the primary chat            | 0     | M    | —          | open                                                          |
 | A5  | Checklist dedupe ignores trailing punctuation                          | 0     | S    | —          | open                                                          |
-| A6  | Guard against promises without a tool call                             | 2     | M    | —          | open                                                          |
+| A6  | Guard against promises without a tool call                             | 2     | M    | —          | in review (cancel and delete receipt checks)                  |
 | A7  | Self-repair cadence respects its daily limit                           | 0     | S    | —          | open                                                          |
 | A8  | Truthful "Needs you" count; archive needs_attention in Firestore       | 1     | M    | —          | open                                                          |
 | A9  | Firestore parity for every route the phone calls                       | 1     | M    | —          | open (estimated-cost routes admitted in #934)                 |
