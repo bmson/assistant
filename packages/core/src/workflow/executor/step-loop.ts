@@ -1021,6 +1021,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     if (!publicOnly && !restrictedChecklistResume && !requestedCardIntent(ownerText)) {
       const current = await evidence.taskEvidence({ agentId: task.agentId, taskId: task.id });
       const cards = responseCardsForFinal({
+        ownerTimeZone: requestTimeZone,
         evidence: current.map((row) => ({ ...row, fromCurrentTask: true })),
         readRequest,
         requestText: ownerText,
@@ -4891,6 +4892,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       const receipt = verifiedCurrentActionSummary(completed);
       const notice = `${receipt ? `${receipt}\n\n` : ''}I couldn't finish the reply. Check Activity for anything that already ran before trying again.`;
       const cards = responseCardsForFinal({
+        ownerTimeZone: requestTimeZone,
         evidence: completed,
         readRequest,
         requestText: latestUserText(rc.window),

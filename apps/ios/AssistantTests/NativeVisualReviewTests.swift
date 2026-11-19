@@ -1962,6 +1962,7 @@ final class NativeVisualReviewTests: XCTestCase {
         typealias Item = MessageResponseCard.BriefingCard.AgendaItem
         func item(_ id: String, day: String, location: String, note: String) -> Item {
             .init(id: id, day: day, time: day == "Unknown" ? "" : day == "All day" ? "All day" : "11:45 AM – 12:55 PM Pacific Time",
+                  start: nil, end: nil,
                   title: "A long event title that must remain readable while the clock changes position",
                   location: location, flag: "conflict", note: note, calendars: ["Work", "Personal"],
                   calendarLinks: [.init(label: "Open event", url: "https://calendar.google.com/event/\(id)")],
