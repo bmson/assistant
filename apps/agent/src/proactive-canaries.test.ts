@@ -516,7 +516,7 @@ for (const [driver, fixture] of [
               title: 'Assistant',
               body: 'Assistant needs attention. Open the app to review.',
               expiresAt: 0,
-              data: { route: 'chat', agentId: f.owner },
+              data: { route: 'settings', section: 'noticing', agentId: f.owner },
             }),
           );
 
