@@ -16,7 +16,11 @@ export const dynamic = 'force-dynamic';
  * the owner's data, so it stays outside isAuthed() on purpose.
  */
 export function GET(request: Request) {
-  const proof = localQaInstallationProof(request.url, request.headers.get('x-assistant-qa-nonce'));
+  // Next.js can normalize the loopback address in request.url to localhost.
+  const proof = localQaInstallationProof(
+    request.headers.get('host'),
+    request.headers.get('x-assistant-qa-nonce'),
+  );
   return Response.json(
     { ok: true, service: 'web', sha: process.env.BUILD_SHA ?? 'unknown' },
     {

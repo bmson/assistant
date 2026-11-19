@@ -37,7 +37,7 @@ export async function checkReadiness(db: Db): Promise<Readiness> {
 
 /** Issue a proof for the local QA harness only. This does not open a database connection. */
 export function localQaInstallationProof(
-  requestUrl: string,
+  requestHost: string | null,
   nonce: string | null,
 ): string | undefined {
   if (process.env.NODE_ENV !== 'development') return;
@@ -45,8 +45,13 @@ export function localQaInstallationProof(
   if (!nonce || !/^[0-9a-f]{32}$/.test(nonce) || !token) return;
   try {
     const config = loadConfig();
+    const origin = new URL(config.AUTH_URL);
     if (
-      new URL(requestUrl).origin !== config.AUTH_URL ||
+      origin.protocol !== 'http:' ||
+      (origin.hostname !== '127.0.0.1' && origin.hostname !== '[::1]') ||
+      !origin.port ||
+      config.AUTH_URL !== origin.origin ||
+      requestHost !== origin.host ||
       !config.AUTH_DEV_BYPASS ||
       config.RESTORE_REHEARSAL ||
       config.PERSISTENCE_DRIVER !== 'postgres'

@@ -50,11 +50,16 @@ describe('web installation proof', () => {
     vi.stubEnv('PERSISTENCE_DRIVER', 'postgres');
     vi.stubEnv('RESTORE_REHEARSAL', 'false');
     resetConfigForTest();
-    vi.stubGlobal('fetch', async (url: URL, options: RequestInit) =>
-      GET(new Request(url, options)),
-    );
+    vi.stubGlobal('fetch', async (url: URL, options: RequestInit) => {
+      const headers = new Headers(options.headers);
+      headers.set('host', url.host);
+      return GET(new Request(`http://localhost:${url.port}${url.pathname}`, { headers }));
+    });
 
     await expect(assertQaWebInstallation(origin, target)).resolves.toBeUndefined();
+    await expect(assertQaWebInstallation('http://127.0.0.1:3108', target)).rejects.toThrow(
+      /did not prove/,
+    );
     await expect(
       assertQaWebInstallation(origin, {
         ...target,
