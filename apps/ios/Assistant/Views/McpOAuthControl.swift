@@ -69,6 +69,7 @@ struct McpOAuthControl: View {
     @State private var generation = UUID()
 
     private enum Unverified: Error { case response }
+    private let statusUnavailable = "Couldn’t load the saved sign-in status. Try again."
     private let unknown = "Couldn’t confirm the change. Check its status before trying again."
 
     var body: some View {
@@ -79,7 +80,7 @@ struct McpOAuthControl: View {
             } else if status?.grant == .reauthorizationRequired {
                 Text("Tool sign-in needs attention").font(.subheadline.weight(.semibold))
             }
-            if status?.signInAvailable != false, pending == nil, !unconfirmed,
+            if status?.signInAvailable == true, pending == nil, !unconfirmed,
                 !providerAvailable
             {
                 action("Check browser sign-in") {
@@ -114,7 +115,7 @@ struct McpOAuthControl: View {
             }
             if pending != nil || unconfirmed {
                 action("Check sign-in status") {
-                    run { context, current in
+                    run(failureNotice: statusUnavailable) { context, current in
                         try await reconcile(context, flowId: pending, current: current)
                     }
                 }
@@ -156,7 +157,8 @@ struct McpOAuthControl: View {
                 try await reconcile(context, flowId: nil, current: current)
             } catch {
                 if accepts(context, current), !Task.isCancelled {
-                    notice = "Couldn’t check tool sign-in. Try Check browser sign-in."
+                    unconfirmed = true
+                    notice = statusUnavailable
                 }
             }
             if accepts(context, current) { busy = false }
@@ -207,8 +209,10 @@ struct McpOAuthControl: View {
         generation == current && isVisible && model.mcpSignInOptionsConnectionIsCurrent(context)
     }
 
-    private func run(_ work: @escaping (McpSignInOptionsRequestContext, UUID) async throws -> Void)
-    {
+    private func run(
+        failureNotice: String? = nil,
+        _ work: @escaping (McpSignInOptionsRequestContext, UUID) async throws -> Void
+    ) {
         guard !disabled, !busy, isVisible,
             let context = model.mcpSignInOptionsRequestContext(for: connection),
             model.mcpSignInOptionsConnectionIsCurrent(context)
@@ -220,7 +224,7 @@ struct McpOAuthControl: View {
             defer { if accepts(context, current) { busy = false } }
             do { try await work(context, current) } catch {
                 guard accepts(context, current) else { return }
-                notice = unknown
+                notice = failureNotice ?? unknown
                 providerAvailable = false
                 unconfirmed = true
             }

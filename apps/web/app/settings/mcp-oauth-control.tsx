@@ -38,6 +38,7 @@ const flowOutcomes: readonly McpOAuthFlow['outcome'][] = [
 
 const checking = 'Sign-in is still being checked. Refresh its status before trying again.';
 const unknown = 'Couldn’t confirm the change. Check its status before trying again.';
+const statusUnavailable = 'Couldn’t load the saved sign-in status. Try again.';
 
 function outcomeNotice(outcome: McpOAuthFlow['outcome'], status: McpOAuthStatus, flowId: string) {
   switch (outcome) {
@@ -153,7 +154,10 @@ export function McpOAuthControl({
         await reconcileOnMount(lifetime.signal, flowId);
       })
       .catch(() => {
-        if (!lifetime.signal.aborted) setUnconfirmed(true);
+        if (!lifetime.signal.aborted) {
+          setNotice(statusUnavailable);
+          setUnconfirmed(true);
+        }
       })
       .finally(() => {
         if (!lifetime.signal.aborted) {
@@ -164,7 +168,7 @@ export function McpOAuthControl({
     return () => lifetime.abort();
   }, [storageKey]);
 
-  async function run(action: (signal: AbortSignal) => Promise<void>) {
+  async function run(action: (signal: AbortSignal) => Promise<void>, failureNotice = unknown) {
     const signal = controller.current?.signal;
     if (!signal || signal.aborted || disabled || working.current) return;
     working.current = true;
@@ -174,7 +178,7 @@ export function McpOAuthControl({
       await action(signal);
     } catch {
       if (!signal.aborted) {
-        setNotice(unknown);
+        setNotice(failureNotice);
         setProviderAvailable(undefined);
         setUnconfirmed(true);
       }
@@ -186,8 +190,8 @@ export function McpOAuthControl({
     }
   }
 
-  if (!status && !pending) return null;
-  if (!status?.signInAvailable && (!status || status.grant === 'none') && !pending) return null;
+  if (!pending && !unconfirmed && (!status || (!status.signInAvailable && status.grant === 'none')))
+    return null;
 
   return (
     <div className="mt-3 grid gap-2 border-t border-edge pt-3">
@@ -250,7 +254,7 @@ export function McpOAuthControl({
             type="button"
             className={btnSm.outline}
             disabled={disabled || busy}
-            onClick={() => void run((signal) => reconcile(signal, pending))}
+            onClick={() => void run((signal) => reconcile(signal, pending), statusUnavailable)}
           >
             Check sign-in status
           </button>
