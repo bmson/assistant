@@ -57,6 +57,8 @@ The client follows each opaque cursor on the same endpoint, with one 20-second d
 pnpm exec vitest run packages/tools/src/mcp scripts/mcp-discover.test.ts
 ```
 
+Local interoperability runs on November 19, 2026 used published SDKs with synthetic tools. The command discovered tools from the TypeScript server 2.4.0 and Python SDK 2.3.0 using July 2026 discovery, including JSON and streaming responses. With `--allow-legacy`, it completed the November 2025 handshake and listed tools on stateful and stateless servers using TypeScript SDK 1.32.2 and Python SDK 1.30.0. These runs required no account or tool execution.
+
 Saved connections use the November 2025 transport. Modern tool execution and hosted-provider interoperability remain open before activating this revision for saved connections. See the [Streamable HTTP binding](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http), [pagination rules](https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/pagination), and [versioning rules](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning).
 
 ## Remaining Phase 3 work
