@@ -109,7 +109,7 @@ function makeRepositories() {
     record: async () => unexpected('costs.record'),
     reconcile: async () => unexpected('costs.reconcile'),
     release: async () => unexpected('costs.release'),
-    releaseStale: async () => 0,
+    releaseStale: async () => ({ released: 0, markedUnknown: 0 }),
   };
   const approvals: ApprovalRepository = {
     kind: 'approval-repository',

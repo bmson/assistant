@@ -171,6 +171,29 @@ export function nudgePolicyContract(
       expect((await evaluate('2026-08-26T08:00:00Z')).deliver).toBe(true);
     });
 
+    it('reuses the answer-ready reservation and checks quiet hours again before retry', async () => {
+      await f.setPrefs({ quietStartMin: 22 * 60, quietEndMin: 7 * 60, ambientDailyCap: 1 });
+      const evaluate = (channel: string, now: Date) =>
+        f.repository.evaluate(utcOwner(), { urgency: 'ambient', channel, now });
+      expect(await evaluate('answer-ready:one', MIDDAY)).toEqual({ deliver: true });
+      expect(await evaluate('answer-ready:one', minutesAfter(MIDDAY, 1))).toEqual({
+        deliver: true,
+      });
+      expect(await evaluate('answer-ready:one', LATE_NIGHT)).toEqual({
+        deliver: false,
+        reason: 'quiet-hours',
+      });
+      expect(await evaluate('answer-ready:two', LATE_NIGHT)).toEqual({
+        deliver: false,
+        reason: 'quiet-hours',
+      });
+      expect(await evaluate('answer-ready:two', minutesAfter(LATE_NIGHT, 8 * 60))).toEqual({
+        deliver: false,
+        reason: 'quiet-hours',
+      });
+      expect(await f.pings()).toHaveLength(2);
+    });
+
     it('reserves an ambient-cap slot atomically across concurrent producers', async () => {
       await f.setPrefs({ ambientDailyCap: 1 });
       const decisions = await Promise.all(

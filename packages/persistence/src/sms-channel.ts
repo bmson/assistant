@@ -1,3 +1,65 @@
+import { insideQuietHours, ownerLocalMinutes } from './nudge-policy.js';
+
+export type ProactiveSmsAttemptDecision =
+  | 'reserved'
+  | 'quiet-hours'
+  | 'proactive-sms-daily-cap'
+  | 'proactive-sms-already-reserved';
+
+type ProactiveSmsQuota = { day: string; attemptKeys: string[] };
+
+export function decideProactiveSmsAttempt(input: {
+  prior: string | null;
+  timeZone: string;
+  now: Date;
+  attemptKey: string;
+  prefs?: { quietStartMin: number | null; quietEndMin: number | null } | null;
+}): { decision: ProactiveSmsAttemptDecision; next?: string } {
+  if (!Number.isFinite(input.now.getTime())) throw new Error('Invalid SMS quota time');
+  if (!/^sms-attempt:[a-f0-9]{64}$/.test(input.attemptKey))
+    throw new Error('Invalid proactive SMS attempt key');
+  const window = input.prefs;
+  if (
+    window &&
+    [window.quietStartMin, window.quietEndMin].some(
+      (value) => value !== null && (!Number.isInteger(value) || value < 0 || value >= 24 * 60),
+    )
+  )
+    throw new Error('Invalid quiet hours for proactive SMS');
+  if (input.prefs && insideQuietHours(input.prefs, ownerLocalMinutes(input.timeZone, input.now)))
+    return { decision: 'quiet-hours' };
+  const day = new Intl.DateTimeFormat('en-CA', {
+    timeZone: input.timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(input.now);
+  const previous = input.prior === null ? null : (JSON.parse(input.prior) as ProactiveSmsQuota);
+  if (
+    previous !== null &&
+    (!/^\d{4}-\d{2}-\d{2}$/.test(previous.day) ||
+      !Array.isArray(previous.attemptKeys) ||
+      previous.attemptKeys.some(
+        (key) => typeof key !== 'string' || !/^sms-attempt:[a-f0-9]{64}$/.test(key),
+      ) ||
+      previous.attemptKeys.length > 3)
+  )
+    throw new Error('Invalid proactive SMS quota state');
+  // Backward clock or timezone changes cannot create another allowance.
+  if (previous && previous.day > day) return { decision: 'proactive-sms-daily-cap' };
+  const attemptKeys = previous?.day === day ? previous.attemptKeys : [];
+  if (attemptKeys.includes(input.attemptKey)) return { decision: 'proactive-sms-already-reserved' };
+  if (attemptKeys.length >= 3) return { decision: 'proactive-sms-daily-cap' };
+  return {
+    decision: 'reserved',
+    next: JSON.stringify({ day, attemptKeys: [...attemptKeys, input.attemptKey] }),
+  };
+}
+
+export function proactiveSmsQuotaName(agentId: string): string {
+  return `proactive-sms-attempt-quota:${agentId}`;
+}
+
 /** The SMS channel's own state: its rate ceiling, peer threads, and approval-code tool lookup. */
 export interface SmsUsageReconciliationClaim {
   eventId: string;
@@ -25,6 +87,12 @@ export interface SmsChannelRepository {
    * from the metered SMS cost events of the last hour and day.
    */
   underChannelLimit(now: Date): Promise<boolean>;
+  /** Atomically reserve one of the owner's three local-day unsolicited SMS attempts. */
+  reserveProactiveAttempt(
+    agentId: string,
+    attemptKey: string,
+    now: Date,
+  ): Promise<ProactiveSmsAttemptDecision>;
   /**
    * The conversation bound to this SMS peer, created with its binding on first
    * contact. Concurrent first messages converge on one conversation.

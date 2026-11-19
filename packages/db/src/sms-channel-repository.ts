@@ -1,11 +1,19 @@
-import type { SmsChannelRepository } from '@assistant/persistence';
+import {
+  decideProactiveSmsAttempt,
+  proactiveSmsQuotaName,
+  type SmsChannelRepository,
+} from '@assistant/persistence';
 import { and, eq, gte, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
+import { lockPostgresPrivacyObservationFence } from './privacy-erasure-repository.js';
 import {
+  agents,
   approvals,
   channelBindings,
   conversations,
   costEvents,
+  maintenanceCursors,
+  notificationPrefs,
   rateLimits,
   toolCalls,
 } from './schema.js';
@@ -34,6 +42,41 @@ export function createPostgresSmsChannelRepository(db: Db): SmsChannelRepository
         return false;
       if (limit.maxPerDay !== null && (await countSince('1 day')) >= limit.maxPerDay) return false;
       return true;
+    },
+    async reserveProactiveAttempt(agentId, attemptKey, now) {
+      return db.transaction(async (tx) => {
+        await lockPostgresPrivacyObservationFence(tx, agentId);
+        const name = proactiveSmsQuotaName(agentId);
+        const [owner] = await tx
+          .select({ timezone: agents.timezone })
+          .from(agents)
+          .where(eq(agents.id, agentId));
+        if (!owner) throw new Error('Proactive SMS quota owner is unavailable');
+        const [prefs] = await tx
+          .select()
+          .from(notificationPrefs)
+          .where(eq(notificationPrefs.agentId, agentId));
+        const [row] = await tx
+          .select({ cursor: maintenanceCursors.cursor })
+          .from(maintenanceCursors)
+          .where(eq(maintenanceCursors.name, name));
+        const result = decideProactiveSmsAttempt({
+          prior: row?.cursor ?? null,
+          timeZone: owner.timezone,
+          prefs,
+          attemptKey,
+          now,
+        });
+        if (result.next !== undefined)
+          await tx
+            .insert(maintenanceCursors)
+            .values({ name, cursor: result.next, updatedAt: now })
+            .onConflictDoUpdate({
+              target: maintenanceCursors.name,
+              set: { cursor: result.next, updatedAt: now },
+            });
+        return result.decision;
+      });
     },
     async conversationForPeer(agentId, peer, trust) {
       if (!peer) throw new Error('SMS peer is required');

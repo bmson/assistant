@@ -135,6 +135,7 @@ export async function purgeExpired(
   cache: number;
   memories: number;
   reservations: number;
+  reservationsMarkedUnknown: number;
   locations: number;
   dreamNotes: number;
   recallMetrics: number;
@@ -151,10 +152,20 @@ export async function purgeExpired(
         proactivePingRetentionDays: 90,
         auditRetentionDays: config.LLM_AUDIT_RETENTION_DAYS,
       }),
-      releaseStaleReservations(store.costs, 120, batch),
+      releaseStaleReservations(
+        store.costs,
+        120,
+        batch,
+        config.COST_UNKNOWN_MODEL_SETTLEMENT_TTL_MINUTES,
+      ),
       purgeStaleRecallMetrics(store.recallMetrics, 90, batch),
     ]);
-    return { ...purged, reservations, recallMetrics };
+    return {
+      ...purged,
+      reservations: reservations.released,
+      reservationsMarkedUnknown: reservations.markedUnknown,
+      recallMetrics,
+    };
   }
   const db = store as Db;
   // One bounded page per existing sweep. Replay expiry never means a write
@@ -189,7 +200,12 @@ export async function purgeExpired(
       .where(inArray(toolCache.cacheKey, expiredCache))
       .returning({ id: toolCache.cacheKey }),
     db.delete(memories).where(inArray(memories.id, expiredMemories)).returning({ id: memories.id }),
-    releaseStaleReservations(db, 120, batch),
+    releaseStaleReservations(
+      db,
+      120,
+      batch,
+      loadConfig().COST_UNKNOWN_MODEL_SETTLEMENT_TTL_MINUTES,
+    ),
     // Phase 15: location pings are transient — purge past the retention window.
     purgeStaleLocations(db, loadConfig().LOCATION_RETENTION_DAYS, batch),
     // Phase 20: dream notes are kept 7 days for inspection, then purged.
@@ -205,7 +221,8 @@ export async function purgeExpired(
   return {
     cache: cacheRows.length,
     memories: memoryRows.length,
-    reservations,
+    reservations: reservations.released,
+    reservationsMarkedUnknown: reservations.markedUnknown,
     locations,
     dreamNotes,
     recallMetrics,

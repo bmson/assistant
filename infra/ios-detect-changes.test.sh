@@ -17,6 +17,12 @@ for index in $(seq 1 3000); do
     printf '%s\n' 'apps/ios/Assistant/ChatView.swift'
   elif [ "$index" -eq 94 ] && [ "${MOCK_IOS_CHANGE:-true}" = helper ]; then
     printf '%s\n' 'infra/ios-detect-changes.sh'
+  elif [ "$index" -eq 95 ] && [ "${MOCK_IOS_CHANGE:-true}" = native-helper ]; then
+    printf '%s\n' 'infra/ios-native-controls.py'
+  elif [ "$index" -eq 96 ] && [ "${MOCK_IOS_CHANGE:-true}" = native-control ]; then
+    printf '%s\n' 'apps/ios/Assistant/Views/ApprovalsView.swift'
+  elif [ "$index" -eq 97 ] && [ "${MOCK_IOS_CHANGE:-true}" = native-host ]; then
+    printf '%s\n' 'apps/ios/AssistantUITestHost/FixtureApp.swift'
   else
     printf 'docs/review/path-%04d.md\n' "$index"
   fi
@@ -31,7 +37,7 @@ if [ "$fixture_bytes" -le 65536 ]; then
 fi
 
 run_filter() {
-  local event="$1" expect="$2" ios_change="${3:-true}"
+  local event="$1" expect="$2" ios_change="${3:-true}" native_expect="${4:-false}"
   : >"$TEMP_DIR/output"
   EVENT_NAME="$event" \
     BASE_SHA=base \
@@ -40,11 +46,15 @@ run_filter() {
     PATH="$TEMP_DIR/bin:$PATH" \
     bash "$SCRIPT_DIR/ios-detect-changes.sh"
   grep -Fx "ios=$expect" "$TEMP_DIR/output" >/dev/null
+  grep -Fx "native_controls=$native_expect" "$TEMP_DIR/output" >/dev/null
 }
 
 run_filter pull_request true
 run_filter pull_request false false
-run_filter pull_request true helper
+run_filter pull_request true helper true
+run_filter pull_request true native-helper true
+run_filter pull_request true native-control true
+run_filter pull_request true native-host true
 run_filter push true
 
 : >"$TEMP_DIR/output"

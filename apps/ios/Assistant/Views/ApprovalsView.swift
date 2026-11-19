@@ -85,7 +85,7 @@ struct ApprovalsView: View {
 
     private func approvalCard(_ item: PendingApproval) -> some View {
         Group {
-            if isLandscape {
+            if isLandscape && !usesAccessibilityLayout {
                 HStack(alignment: .top, spacing: 20) {
                     approvalDetails(item)
                     Divider()

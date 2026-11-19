@@ -3349,6 +3349,18 @@ final class APIModelsTests: XCTestCase {
         )
     }
 
+    func testWeatherDayKeepsPrecipitationUncertaintyWithClearCurrentSky() throws {
+        let data = #"{"days":[{"weekday":"Today","lowC":10,"highC":15,"precipPct":90,"description":"clear","symbol":"clear","precipitationType":"unspecified"}]}"#.data(using: .utf8)!
+        let payload = try JSONDecoder().decode([String: JSONValue].self, from: data)
+        let forecast = MessageResponseCard.WeatherForecast(data: payload)
+        let day = try XCTUnwrap(forecast.days.first)
+        XCTAssertEqual(day.description, "clear")
+        XCTAssertEqual(day.precipitationType, "unspecified")
+        XCTAssertEqual(WeatherPresentation.precipitationName(for: day), "precipitation")
+        let legacyRain = MessageResponseCard.WeatherForecast.Day(weekday: "Sat", lowC: 9, highC: 13, precipPct: 80, description: "light rain", symbol: "rain")
+        XCTAssertEqual(WeatherPresentation.precipitationName(for: legacyRain), "rain")
+    }
+
     func testWeatherCaptionNamesTheDayOnPerDayForecastCards() {
         let dayCard = [
             MessageResponseCard.WeatherDetail(label: "Day", value: "Saturday"),
