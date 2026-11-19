@@ -43,22 +43,39 @@ interface Signal {
   id: string;
   agentId: string;
   kind:
-    | 'appointment' | 'school-notice' | 'schedule-change' | 'bill' | 'renewal' | 'payment'
-    | 'delivery' | 'invitation' | 'rsvp' | 'gift-received' | 'occasion' | 'vehicle-service'
-    | 'travel' | 'weather' | 'news' | 'time-off' | 'commitment';
-  subjectPersonIds: string[];        // who it concerns (household roles in §3.2)
-  at?: string;                       // ISO instant the signal is about
-  dueAt?: string;                    // deadline, if any
+    | 'appointment'
+    | 'school-notice'
+    | 'schedule-change'
+    | 'bill'
+    | 'renewal'
+    | 'payment'
+    | 'delivery'
+    | 'invitation'
+    | 'rsvp'
+    | 'gift-received'
+    | 'occasion'
+    | 'vehicle-service'
+    | 'travel'
+    | 'weather'
+    | 'news'
+    | 'time-off'
+    | 'commitment';
+  subjectPersonIds: string[]; // who it concerns (household roles in §3.2)
+  at?: string; // ISO instant the signal is about
+  dueAt?: string; // deadline, if any
   window?: { start: string; end: string };
   placeId?: string | null;
   amount?: { value: string; currency: string } | null;
-  sourceRefs: Array<{ kind: 'email' | 'calendar' | 'contact' | 'health' | 'web' | 'owner'; id: string }>;
-  confidence: number;                // 0..1, from the extractor
+  sourceRefs: Array<{
+    kind: 'email' | 'calendar' | 'contact' | 'health' | 'web' | 'owner';
+    id: string;
+  }>;
+  confidence: number; // 0..1, from the extractor
   validFrom: string;
   validTo: string | null;
-  supersededBy: string | null;       // a later signal that closes or replaces this one
+  supersededBy: string | null; // a later signal that closes or replaces this one
   status: 'open' | 'resolved' | 'dismissed';
-  dedupeKey: string;                 // stable across re-extraction of the same fact
+  dedupeKey: string; // stable across re-extraction of the same fact
   createdAt: string;
   updatedAt: string;
 }
@@ -81,7 +98,7 @@ interface HouseholdRole {
 interface Place {
   agentId: string;
   id: string;
-  label: string;                     // "Home", "School A", "Work"
+  label: string; // "Home", "School A", "Work"
   kind: 'home' | 'school' | 'work' | 'venue' | 'medical' | 'other';
   lat: number;
   lng: number;
@@ -91,7 +108,7 @@ interface Place {
 interface SchoolCalendar {
   agentId: string;
   schoolId: string;
-  dismissal: { normal: string; early?: string; minimumDay?: string };   // owner-local "HH:mm"
+  dismissal: { normal: string; early?: string; minimumDay?: string }; // owner-local "HH:mm"
   breaks: Array<{ start: string; end: string; label: string }>;
   closures: Array<{ date: string; label: string }>;
   sourceCalendarId?: string | null;
@@ -118,15 +135,15 @@ Extends `PulseMomentKind` (`packages/core/src/proactive/pulse.ts:149-157`). Prod
 ```ts
 interface MomentCandidate {
   kind: MomentKind;
-  key: string;                         // stable: kind + subject + start (+ revision for moved events)
+  key: string; // stable: kind + subject + start (+ revision for moved events)
   subjectPersonIds: string[];
-  at: string;                          // the moment the candidate is about
-  consequence: 0 | 1 | 2 | 3;          // what happens if the owner misses it
-  urgency: number;                     // 0..1, from time to `at` and the lead policy
-  confidence: number;                  // 0..1, from signal confidence and source freshness
-  novelty: number;                     // 0..1, 0 when already said or already known
-  text: string;                        // verified facts only; a model may rewrite wording later
-  card: ProactiveCard;                 // with actions (E4)
+  at: string; // the moment the candidate is about
+  consequence: 0 | 1 | 2 | 3; // what happens if the owner misses it
+  urgency: number; // 0..1, from time to `at` and the lead policy
+  confidence: number; // 0..1, from signal confidence and source freshness
+  novelty: number; // 0..1, 0 when already said or already known
+  text: string; // verified facts only; a model may rewrite wording later
+  card: ProactiveCard; // with actions (E4)
   sourceRefs: Signal['sourceRefs'];
 }
 // score = consequence × urgency × confidence × novelty × ownerPreference(kind)
@@ -138,31 +155,31 @@ New kinds: `leave-by`, `conflict-proposal`, `change-digest`, `weather-impact`, `
 
 Lead-time policy (defaults; owner-tunable):
 
-| Kind | First mention | Reminder | Channel |
-|---|---|---|---|
-| `conflict-proposal` | as soon as detected, within 14 days | morning of | stack, then interrupt on the day |
-| `leave-by` | drive time + 10 min before | none | interrupt |
-| `school-day-change` | evening before (Sunday for a whole week) | morning of | stack |
-| `break-coverage` | 14 days before | 3 days before | weekly review, stack |
-| `occasion-lead` | 21 days (idea), 10 days (order) | 1 day, day of | weekly review, stack |
-| `gift-ship-by` | ship-by minus 3 days | ship-by day | stack |
-| `bill-due` | 3 days before due | due day | stack |
-| `renewal` | monthly digest | 3 days before | weekly review |
-| `delivery-today` | morning of | none | stack |
-| `weather-impact` | evening before | morning of | stack |
-| `change-digest` | within 1 hour of the change | none | interrupt when within 24 h, else stack |
-| `rsvp-pending` | 2 days after the invitation | 3 days before the deadline | stack |
+| Kind                | First mention                            | Reminder                   | Channel                                |
+| ------------------- | ---------------------------------------- | -------------------------- | -------------------------------------- |
+| `conflict-proposal` | as soon as detected, within 14 days      | morning of                 | stack, then interrupt on the day       |
+| `leave-by`          | drive time + 10 min before               | none                       | interrupt                              |
+| `school-day-change` | evening before (Sunday for a whole week) | morning of                 | stack                                  |
+| `break-coverage`    | 14 days before                           | 3 days before              | weekly review, stack                   |
+| `occasion-lead`     | 21 days (idea), 10 days (order)          | 1 day, day of              | weekly review, stack                   |
+| `gift-ship-by`      | ship-by minus 3 days                     | ship-by day                | stack                                  |
+| `bill-due`          | 3 days before due                        | due day                    | stack                                  |
+| `renewal`           | monthly digest                           | 3 days before              | weekly review                          |
+| `delivery-today`    | morning of                               | none                       | stack                                  |
+| `weather-impact`    | evening before                           | morning of                 | stack                                  |
+| `change-digest`     | within 1 hour of the change              | none                       | interrupt when within 24 h, else stack |
+| `rsvp-pending`      | 2 days after the invitation              | 3 days before the deadline | stack                                  |
 
 Horizons: candidates within 6 hours may interrupt; candidates within 14 days go to stacks. Calendar diffs cover 14 days (D2). A moved event gets a new key; a cancelled event closes its earlier moments.
 
 ## 5. Delivery
 
-| Urgency | Channels | Rules |
-|---|---|---|
-| `interrupt` | push; text only for approvals, failures and leave-now | min gap 60 min, at most 6 a day, never in the sleep window except approvals the owner is waiting on |
-| `ambient` | push (silent while the app is open), batched into the next stack | quiet hours, daily cap |
-| `digest` | morning stack (after wake), evening look-ahead (non-routine evenings only), weekly review (Sunday) | assembled in code; a model writes the lead line |
-| chat answer | the conversation it was asked in | no mirroring (A4), no text (A17) |
+| Urgency     | Channels                                                                                           | Rules                                                                                               |
+| ----------- | -------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `interrupt` | push; text only for approvals, failures and leave-now                                              | min gap 60 min, at most 6 a day, never in the sleep window except approvals the owner is waiting on |
+| `ambient`   | push (silent while the app is open), batched into the next stack                                   | quiet hours, daily cap                                                                              |
+| `digest`    | morning stack (after wake), evening look-ahead (non-routine evenings only), weekly review (Sunday) | assembled in code; a model writes the lead line                                                     |
+| chat answer | the conversation it was asked in                                                                   | no mirroring (A4), no text (A17)                                                                    |
 
 - The morning stack has 3–7 cards, each saying what changed, why it matters, and one next step.
 - Card actions (E4): Add to calendar, RSVP, Text spouse (approval), Snooze, Done, Not useful (with a reason). Actions route through existing tools and approvals; nothing outward happens without approval.

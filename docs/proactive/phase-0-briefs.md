@@ -131,7 +131,7 @@ Shared rules for every brief:
 **Remaining change.**
 1. **Verify after deploy.** Extraction reports more than 0 per run, and the backlog the audit measured drains. The owner runs this check in production; record only counts.
 2. **Census.** A read-only diagnostic (reuse the patterns of the existing census scripts in `scripts/`) that counts `emailIngest` rows by `pipelineStage`, `ingestMode`, `admittedSourceKind`, `scoreStatus`, age, and whether `extractedAt` is `null`, missing or set. Firestore `== null` queries never match a missing field.
-3. **Visible stalls.** The extraction pending counter (`packages/firestore/src/email-extraction.ts`, around `:323`) and its PostgreSQL twin report rows that are *not* readable, by stage, as `N stuck in <stage>` instead of `0 still pending`.
+3. **Visible stalls.** The extraction pending counter (`packages/firestore/src/email-extraction.ts`, around `:323`) and its PostgreSQL twin report rows that are _not_ readable, by stage, as `N stuck in <stage>` instead of `0 still pending`.
 4. **Alert.** A health warning when ingest continues but no row becomes readable for 6 hours (H4).
 
 **Tests.** Emulator and PostgreSQL tests: a row stuck in `scoring` past its lease is counted as stuck; a readable direct row is extracted once; the census counts every stage.

@@ -15,20 +15,20 @@ Prior work to read alongside this page: the [proactive awareness audit](../audit
 
 Seeded in `packages/db/src/seed.ts` (`scheduleSeed`, line 209); cron times are owner-local.
 
-| Schedule | Cron | Kind | What it does |
-|---|---|---|---|
-| `pulse` | `*/20 * * * *` | code job `pulse.check` | Proactive moments in the next 6 hours (§4.1) |
-| `ambient-refresh` | `*/30 * * * *` | code job `ambient.refresh` | Location and weather snapshot (§3.4) |
-| `daily-briefing` | `45 7 * * *` | code job `briefing.compose` | Deterministic morning briefing (§4.2) |
-| `life-awareness` | `0 11,17 * * *` | **model task**, $0.50 budget | Twice-daily cross-source review (§4.4). Added by #910 |
-| `tomorrow-check` | `30 19 * * *` | **model task** (prompt at `seed.ts:272`) | Evening look-ahead; relies on `gmail.search` and the ambient weather block |
-| `email-extraction` | `20 */4 * * *` | code job `email.extract` | Facts, dates and occasions from scored mail (§3.2) |
-| `memory-extraction` | `0 22 * * *` | code job `memory.extract` | Facts from the day's conversations |
-| `memory-consolidation` | `30 22 * * *` | code job `memory.consolidate` | Dedupe and resolve per entity |
-| `open-loop-sweep` | `35 */6 * * *` | code job `memory.sweep_loops` | Commitments and open loops |
-| `dream` | `30 0 * * *` | code job `dream.run` | Overnight reflection, "anticipations" with a 7-day TTL (`packages/core/src/workflow/dream.ts:46`) |
-| `self-repair` | `*/15 * * * *` | code job `self.repair` | Investigates failed tasks; see A7 for the real cadence |
-| others | | code jobs | graph sync, curiosity (one question a day), segmentation, anomaly scan, skill reflection, self-improve, self-maintain, health monitor |
+| Schedule               | Cron            | Kind                                     | What it does                                                                                                                          |
+| ---------------------- | --------------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `pulse`                | `*/20 * * * *`  | code job `pulse.check`                   | Proactive moments in the next 6 hours (§4.1)                                                                                          |
+| `ambient-refresh`      | `*/30 * * * *`  | code job `ambient.refresh`               | Location and weather snapshot (§3.4)                                                                                                  |
+| `daily-briefing`       | `45 7 * * *`    | code job `briefing.compose`              | Deterministic morning briefing (§4.2)                                                                                                 |
+| `life-awareness`       | `0 11,17 * * *` | **model task**, $0.50 budget             | Twice-daily cross-source review (§4.4). Added by #910                                                                                 |
+| `tomorrow-check`       | `30 19 * * *`   | **model task** (prompt at `seed.ts:272`) | Evening look-ahead; relies on `gmail.search` and the ambient weather block                                                            |
+| `email-extraction`     | `20 */4 * * *`  | code job `email.extract`                 | Facts, dates and occasions from scored mail (§3.2)                                                                                    |
+| `memory-extraction`    | `0 22 * * *`    | code job `memory.extract`                | Facts from the day's conversations                                                                                                    |
+| `memory-consolidation` | `30 22 * * *`   | code job `memory.consolidate`            | Dedupe and resolve per entity                                                                                                         |
+| `open-loop-sweep`      | `35 */6 * * *`  | code job `memory.sweep_loops`            | Commitments and open loops                                                                                                            |
+| `dream`                | `30 0 * * *`    | code job `dream.run`                     | Overnight reflection, "anticipations" with a 7-day TTL (`packages/core/src/workflow/dream.ts:46`)                                     |
+| `self-repair`          | `*/15 * * * *`  | code job `self.repair`                   | Investigates failed tasks; see A7 for the real cadence                                                                                |
+| others                 |                 | code jobs                                | graph sync, curiosity (one question a day), segmentation, anomaly scan, skill reflection, self-improve, self-maintain, health monitor |
 
 - `morning-brief` (`30 7 * * *`, a model task) was retired in the seed (`seed.ts:211-216`, "do not re-add this") but **is still enabled in the production Firestore schedules** (A10).
 - `maybeFireWakeBrief` (`packages/core/src/workflow/schedules.ts:689`) can start `daily-briefing` (`WAKE_BRIEF_SCHEDULE`, `:677`) on the first app open before the cron.
@@ -143,37 +143,37 @@ producer / executor
 
 Observed in production on Nov 18, 2026, unless marked as fixed in code since.
 
-| Symptom | Root cause | Item |
-|---|---|---|
-| Every non-critical task parked as `waiting_budget` at $0.00 spent; morning briefs missing for days | Holds exceed the daily cap (§6) | A1, A2 |
-| 2.6-day silent outage with no alert | No watchdog or canary | A3, H4 |
-| Replies from secondary chats appear in the primary chat | Dashboard leg mirrors task answers (§5) | A4 |
-| A text message for every background answer | Ambient answer-ready notices reach the SMS leg; nudge policy off by default | A17 |
-| Successful single actions reported "not completed" | Checklist dedupe (§7) | A5 |
-| "I'll delete it now", but no tool call is made | No promise-without-action guard | A6 |
-| Self-repair rows every minute | `apps/agent/src/repair-schedule.ts:42-52` sets `nextRunAt = now` while follow-ups exist | A7 |
-| Dashboard "Needs you" count differs from the list; archive returns 409 | `packages/application/src/dashboard.ts:27-30` counts every row; the list scans the newest 500; the archive path (`archiveActivityWithRepository`, called from `apps/web/app/api/mobile/v1/activity/[id]/route.ts:403`) refuses `needs_attention` with `no_longer_retriable` | A8 |
-| Phone screens get 503 | Proxy allowlist (§1); estimated-cost routes fixed in #934 | A9 |
-| Two morning briefs; one titled with its raw internal prompt and leaking internal notice text | Retired `morning-brief` still enabled in Firestore | A10 |
-| Email facts, dates and occasions never extracted (0 per run) | Readers required `complete` (§3.2). **Fixed in code by #910**; verify after deploy; stuck rows still invisible | A11 |
-| QA chats, people and memories in production | The QA harness can target the production installation | A12 |
-| UTC wall times in cards | §4.2 | A13 |
-| "What's on today?" answers of 20,000+ characters with the wrong day heading | Agenda renders every coverage row; multi-day events start their own day card | A14 |
-| A question answered with the answer to an earlier one | §7 | A15 |
-| "Heavy snow" at 8–13 °C | §3.4 | A16 |
-| No weather on most runs | Location-ping dependency (§3.4) | B5, B6 |
-| Changes beyond 6 hours never noticed | §4.1 | D2 |
-| Overlapping family appointments never alerted | Salience threshold (§4.1); no conflict moment | D1, D3 |
-| "Who is attending is not recorded" | §3.1 | C6 |
-| "Next two weeks" refused | §7 | F7 |
-| Invented or reassigned birthdays; duplicate occasions | Bad occasion data; since #910 only confirmed occasions reach the briefing | C4, C5 |
-| A paid bill still remembered as "to pay" | No evidence-based supersession | C3 |
-| A practice-time change classified as `security` | Prompt guidance **added in #910**; the taxonomy still lacks schedule-change and other life categories | C2 |
-| Email triage drafts a reply the thread no longer needs | Triage ignores thread state | C2, C3 |
-| A dictated email body rewritten | §7 | F4 |
-| News requests stop for approval | Taint gate on public reads (§3.3) | B7 |
-| A permission stored as a memory ("apply without review") | No policy surface for standing approvals | G3 |
-| Sensitive personal facts in unrelated answers | `packages/persistence/src/card-privacy.ts:12-23` filters secrets only, not topics | G1 |
+| Symptom                                                                                            | Root cause                                                                                                                                                                                                                                                                  | Item   |
+| -------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ |
+| Every non-critical task parked as `waiting_budget` at $0.00 spent; morning briefs missing for days | Holds exceed the daily cap (§6)                                                                                                                                                                                                                                             | A1, A2 |
+| 2.6-day silent outage with no alert                                                                | No watchdog or canary                                                                                                                                                                                                                                                       | A3, H4 |
+| Replies from secondary chats appear in the primary chat                                            | Dashboard leg mirrors task answers (§5)                                                                                                                                                                                                                                     | A4     |
+| A text message for every background answer                                                         | Ambient answer-ready notices reach the SMS leg; nudge policy off by default                                                                                                                                                                                                 | A17    |
+| Successful single actions reported "not completed"                                                 | Checklist dedupe (§7)                                                                                                                                                                                                                                                       | A5     |
+| "I'll delete it now", but no tool call is made                                                     | No promise-without-action guard                                                                                                                                                                                                                                             | A6     |
+| Self-repair rows every minute                                                                      | `apps/agent/src/repair-schedule.ts:42-52` sets `nextRunAt = now` while follow-ups exist                                                                                                                                                                                     | A7     |
+| Dashboard "Needs you" count differs from the list; archive returns 409                             | `packages/application/src/dashboard.ts:27-30` counts every row; the list scans the newest 500; the archive path (`archiveActivityWithRepository`, called from `apps/web/app/api/mobile/v1/activity/[id]/route.ts:403`) refuses `needs_attention` with `no_longer_retriable` | A8     |
+| Phone screens get 503                                                                              | Proxy allowlist (§1); estimated-cost routes fixed in #934                                                                                                                                                                                                                   | A9     |
+| Two morning briefs; one titled with its raw internal prompt and leaking internal notice text       | Retired `morning-brief` still enabled in Firestore                                                                                                                                                                                                                          | A10    |
+| Email facts, dates and occasions never extracted (0 per run)                                       | Readers required `complete` (§3.2). **Fixed in code by #910**; verify after deploy; stuck rows still invisible                                                                                                                                                              | A11    |
+| QA chats, people and memories in production                                                        | The QA harness can target the production installation                                                                                                                                                                                                                       | A12    |
+| UTC wall times in cards                                                                            | §4.2                                                                                                                                                                                                                                                                        | A13    |
+| "What's on today?" answers of 20,000+ characters with the wrong day heading                        | Agenda renders every coverage row; multi-day events start their own day card                                                                                                                                                                                                | A14    |
+| A question answered with the answer to an earlier one                                              | §7                                                                                                                                                                                                                                                                          | A15    |
+| "Heavy snow" at 8–13 °C                                                                            | §3.4                                                                                                                                                                                                                                                                        | A16    |
+| No weather on most runs                                                                            | Location-ping dependency (§3.4)                                                                                                                                                                                                                                             | B5, B6 |
+| Changes beyond 6 hours never noticed                                                               | §4.1                                                                                                                                                                                                                                                                        | D2     |
+| Overlapping family appointments never alerted                                                      | Salience threshold (§4.1); no conflict moment                                                                                                                                                                                                                               | D1, D3 |
+| "Who is attending is not recorded"                                                                 | §3.1                                                                                                                                                                                                                                                                        | C6     |
+| "Next two weeks" refused                                                                           | §7                                                                                                                                                                                                                                                                          | F7     |
+| Invented or reassigned birthdays; duplicate occasions                                              | Bad occasion data; since #910 only confirmed occasions reach the briefing                                                                                                                                                                                                   | C4, C5 |
+| A paid bill still remembered as "to pay"                                                           | No evidence-based supersession                                                                                                                                                                                                                                              | C3     |
+| A practice-time change classified as `security`                                                    | Prompt guidance **added in #910**; the taxonomy still lacks schedule-change and other life categories                                                                                                                                                                       | C2     |
+| Email triage drafts a reply the thread no longer needs                                             | Triage ignores thread state                                                                                                                                                                                                                                                 | C2, C3 |
+| A dictated email body rewritten                                                                    | §7                                                                                                                                                                                                                                                                          | F4     |
+| News requests stop for approval                                                                    | Taint gate on public reads (§3.3)                                                                                                                                                                                                                                           | B7     |
+| A permission stored as a memory ("apply without review")                                           | No policy surface for standing approvals                                                                                                                                                                                                                                    | G3     |
+| Sensitive personal facts in unrelated answers                                                      | `packages/persistence/src/card-privacy.ts:12-23` filters secrets only, not topics                                                                                                                                                                                           | G1     |
 
 ## 9. Observing production safely
 

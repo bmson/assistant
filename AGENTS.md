@@ -10,21 +10,21 @@ A self-hostable personal assistant: a continuing conversation backed by memory, 
 
 ## Layout
 
-| Path | What lives there |
-|---|---|
-| `apps/agent` | Composition root (`src/deps.ts`), executor, scheduler sweep, internal routes |
-| `apps/web` | Next.js HTTP adapter; the iPhone API is `app/api/mobile/v1`; `proxy.ts` is the Firestore-mode route allowlist. Read `apps/web/AGENTS.md` before changing Next.js code |
-| `apps/ios` | SwiftUI app (`Assistant.xcodeproj`, tests in `AssistantTests`); needs Xcode on macOS |
-| `packages/config` | Typed environment schema; every new setting goes here and in `.env.example` |
-| `packages/core` | Workflows, executor, schedules, proactive producers (`src/proactive`), memory, costs, model routing |
-| `packages/application` | UI-facing use cases and view models |
-| `packages/persistence` | Storage-free ports, record types and shared contract suites |
-| `packages/db` | PostgreSQL adapter: Drizzle schema, migrations, seed (`src/seed.ts` holds the default schedules) |
-| `packages/firestore` | Firestore adapter |
-| `packages/tools` | Tool registry, risk dispatcher, provider tools, question-regression harness |
-| `packages/modules` | Optional modules (google, sms, watches, …) and their hooks |
-| `workers/*` | Browser, code and document workers; never import the agent or the database |
-| `scripts/`, `infra/` | Operational scripts, deployment and CI infrastructure |
+| Path                   | What lives there                                                                                                                                                      |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `apps/agent`           | Composition root (`src/deps.ts`), executor, scheduler sweep, internal routes                                                                                          |
+| `apps/web`             | Next.js HTTP adapter; the iPhone API is `app/api/mobile/v1`; `proxy.ts` is the Firestore-mode route allowlist. Read `apps/web/AGENTS.md` before changing Next.js code |
+| `apps/ios`             | SwiftUI app (`Assistant.xcodeproj`, tests in `AssistantTests`); needs Xcode on macOS                                                                                  |
+| `packages/config`      | Typed environment schema; every new setting goes here and in `.env.example`                                                                                           |
+| `packages/core`        | Workflows, executor, schedules, proactive producers (`src/proactive`), memory, costs, model routing                                                                   |
+| `packages/application` | UI-facing use cases and view models                                                                                                                                   |
+| `packages/persistence` | Storage-free ports, record types and shared contract suites                                                                                                           |
+| `packages/db`          | PostgreSQL adapter: Drizzle schema, migrations, seed (`src/seed.ts` holds the default schedules)                                                                      |
+| `packages/firestore`   | Firestore adapter                                                                                                                                                     |
+| `packages/tools`       | Tool registry, risk dispatcher, provider tools, question-regression harness                                                                                           |
+| `packages/modules`     | Optional modules (google, sms, watches, …) and their hooks                                                                                                            |
+| `workers/*`            | Browser, code and document workers; never import the agent or the database                                                                                            |
+| `scripts/`, `infra/`   | Operational scripts, deployment and CI infrastructure                                                                                                                 |
 
 ## Commands
 
