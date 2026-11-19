@@ -54,7 +54,7 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | A1  | Reconcile cost holds; holds scoped to their period                     | 0     | L    | —          | open                                                          |
 | A2  | Wake parked work when caps change; honest parked notice                | 0     | M    | —          | open                                                          |
 | A3  | Outage watchdog and "while I was away" digest                          | 0     | M    | H4         | open                                                          |
-| A4  | Stop mirroring secondary-chat replies into the primary chat            | 0     | M    | —          | open                                                          |
+| A4  | Stop mirroring secondary-chat replies into the primary chat            | 0     | M    | —          | in review (private answer-ready push)                         |
 | A5  | Checklist dedupe ignores trailing punctuation                          | 0     | S    | —          | open                                                          |
 | A6  | Guard against promises without a tool call                             | 2     | M    | —          | open                                                          |
 | A7  | Self-repair cadence respects its daily limit                           | 0     | S    | —          | open                                                          |
