@@ -327,11 +327,11 @@
     },
     "apps/web/app/api/mobile/v1/mcp/[id]/route.ts": {
       "methods": ["DELETE", "POST"],
-      "sha256": "b4f198fdbc18e35be8b8aaa35832bc856c7208becb393c4cb1fae4286f011c09"
+      "sha256": "5b4d3571269e33fad9a7a9cf3673b46e60d4aeca21d326f59b2ec8e94a3a208e"
     },
     "apps/web/app/api/mobile/v1/mcp/route.ts": {
       "methods": ["GET", "POST"],
-      "sha256": "1130a6d2ac0a7c09c7ae23ddf999bb5c97c2c17f5649815670423b931c2ab84c"
+      "sha256": "92fcef6ed75028d4a0cfe931cbe7f2229b8d62cbdbc8a97563e9122b7ed2f603"
     },
     "apps/web/app/api/mobile/v1/memory/[id]/correction/[operationId]/apply/route.ts": {
       "methods": ["POST"],

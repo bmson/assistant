@@ -69,7 +69,7 @@ export async function POST(
           : null;
   if (!result)
     return mobileJson({ error: 'action must be refresh, enable, or disable' }, { status: 400 });
-  return 'error' in result
+  return !('status' in result)
     ? mobileJson({ error: result.error }, { status: 404 })
     : mobileJson(result);
 }
