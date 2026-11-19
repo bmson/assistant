@@ -107,3 +107,34 @@ export function budgetWakeScheduleIsCurrent(schedule: { taskTemplate: unknown; e
   } | null;
   return schedule.enabled && !template?.reminderCancelledAt && !template?.reminderDeliveredAt;
 }
+
+export interface BudgetWakeCursor {
+  scopes: Array<BudgetRetry['scope']>;
+  after: { updatedAt: string; id: string };
+}
+
+export function readBudgetWakeCursor(value: unknown): BudgetWakeCursor | null {
+  if (typeof value === 'string') {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      return null;
+    }
+  }
+  if (!value || typeof value !== 'object') return null;
+  const row = value as Partial<BudgetWakeCursor>;
+  if (
+    !Array.isArray(row.scopes) ||
+    row.scopes.length < 1 ||
+    row.scopes.length > 2 ||
+    row.scopes.some((scope) => scope !== 'daily' && scope !== 'monthly') ||
+    !row.after ||
+    typeof row.after.updatedAt !== 'string' ||
+    !Number.isFinite(Date.parse(row.after.updatedAt)) ||
+    typeof row.after.id !== 'string' ||
+    !row.after.id ||
+    row.after.id.length > 1500
+  )
+    return null;
+  return { scopes: [...new Set(row.scopes)], after: row.after };
+}

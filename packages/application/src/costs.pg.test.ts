@@ -9,6 +9,7 @@ import {
   createPostgresTaskRepository,
   type Db,
   modelCalls,
+  resumePostgresBudgetWakes,
   tasks,
 } from '@assistant/db';
 import { assertAllocatedTestTarget } from '@assistant/db/test-target';
@@ -512,6 +513,7 @@ describe('PostgreSQL owner cost settings wake', () => {
     const repository = createPostgresTaskRepository(db);
     const costs = createPostgresCostRepository(db);
     const ids = [randomUUID(), randomUUID(), randomUUID()];
+    const backlogIds = Array.from({ length: 110 }, () => randomUUID());
     const [eligible, overTaskCap, completed] = ids;
     if (!eligible || !overTaskCap || !completed) throw new Error('Missing test IDs');
     const [owner] = await db.select().from(agents).limit(1);
@@ -526,6 +528,17 @@ describe('PostgreSQL owner cost settings wake', () => {
           type: 'adhoc',
           trust: 'owner',
           budgetUsdLimit: id === overTaskCap ? '0.20' : '1.00',
+        })),
+      );
+      await db.insert(tasks).values(
+        backlogIds.map((id) => ({
+          id,
+          agentId: owner.id,
+          type: 'adhoc',
+          trust: 'owner',
+          status: 'waiting_budget',
+          updatedAt: new Date(0),
+          runAfter: new Date(Date.now() + 3_600_000),
         })),
       );
       const denial = await costs.reserve({ source: 'model', estimatedUsd: 0.3, taskId: eligible });
@@ -552,11 +565,15 @@ describe('PostgreSQL owner cost settings wake', () => {
       await repository.completeTask(completed, { status: 'cancelled' });
 
       const started = Date.now();
-      const results = await Promise.all([
-        updateBudgetCaps(db, { daily: '0.50' }),
-        updateBudgetCaps(db, { daily: '0.50' }),
+      expect(await updateBudgetCaps(db, { daily: '0.50' })).toEqual([]);
+      expect(await repository.getTask(eligible)).toMatchObject({ status: 'waiting_budget' });
+      const resumed = await Promise.all([
+        resumePostgresBudgetWakes(db),
+        resumePostgresBudgetWakes(db),
       ]);
-      expect(results.flat()).toEqual([{ id: eligible, queueGeneration: 2 }]);
+      expect(resumed.flat()).toEqual([{ id: eligible, queueGeneration: 2 }]);
+      expect(await resumePostgresBudgetWakes(db)).toEqual([]);
+      expect(await updateBudgetCaps(db, { daily: '0.50' })).toEqual([]);
       expect(await repository.getTask(overTaskCap)).toMatchObject({
         status: 'waiting_budget',
         queueGeneration: 1,
@@ -571,7 +588,7 @@ describe('PostgreSQL owner cost settings wake', () => {
       expect(claims.filter(Boolean)).toHaveLength(1);
       expect(Date.now() - started).toBeLessThan(60_000);
     } finally {
-      await db.delete(tasks).where(inArray(tasks.id, ids));
+      await db.delete(tasks).where(inArray(tasks.id, [...ids, ...backlogIds]));
       await db
         .update(budgets)
         .set({ limitUsd: original.limitUsd })

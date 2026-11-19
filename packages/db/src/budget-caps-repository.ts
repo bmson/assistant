@@ -1,20 +1,39 @@
 import {
   type BudgetCaps,
+  type BudgetRetry,
   budgetWakeScheduleId,
   budgetWakeScheduleIsCurrent,
   canWakeForBudget,
   readBudgetRetry,
+  readBudgetWakeCursor,
   storedLedgerUsdToMicros,
   storedTaskBudgetToMicros,
   storedUsdToMicros,
   type TaskWake,
 } from '@assistant/persistence';
-import { and, asc, eq, gt, inArray, isNull, sql, sum } from 'drizzle-orm';
+import { and, asc, eq, getTableColumns, gt, inArray, isNull, or, sql, sum } from 'drizzle-orm';
 import type { Db } from './client.js';
 import { costTotals, lockCostLedger } from './cost-repository.js';
 import { assertPostgresInstallationOwner } from './installation-owner.js';
 import { lockPostgresPrivacyObservationFence } from './privacy-erasure-repository.js';
-import { approvals, budgets, costReservations, schedules, tasks } from './schema.js';
+import {
+  approvals,
+  budgets,
+  costReservations,
+  maintenanceCursors,
+  schedules,
+  tasks,
+} from './schema.js';
+
+const cursorPrefix = 'budget-cap-wake:';
+export async function resumePostgresBudgetWakes(db: Db): Promise<TaskWake[]> {
+  const owner = await assertPostgresInstallationOwner(db);
+  const [cursor] = await db
+    .select({ name: maintenanceCursors.name })
+    .from(maintenanceCursors)
+    .where(eq(maintenanceCursors.name, cursorPrefix + owner));
+  return cursor ? updatePostgresBudgetCaps(db, {}) : [];
+}
 
 export function updatePostgresBudgetCaps(db: Db, values: BudgetCaps): Promise<TaskWake[]> {
   return db.transaction(async (tx) => {
@@ -23,6 +42,12 @@ export function updatePostgresBudgetCaps(db: Db, values: BudgetCaps): Promise<Ta
     await lockPostgresPrivacyObservationFence(tx, owner);
     await lockCostLedger(store);
     const prior = await costTotals(store);
+    const cursorName = cursorPrefix + owner;
+    const [cursor] = await tx
+      .select()
+      .from(maintenanceCursors)
+      .where(eq(maintenanceCursors.name, cursorName))
+      .for('update');
     for (const [scope, limitUsd] of Object.entries(values)) {
       await tx
         .update(budgets)
@@ -33,13 +58,19 @@ export function updatePostgresBudgetCaps(db: Db, values: BudgetCaps): Promise<Ta
     const dailyCap = values.daily === undefined ? prior.dailyLimitUsd : Number(values.daily);
     const monthlyCap =
       values.monthly === undefined ? prior.monthlyLimitUsd : Number(values.monthly);
-    const raised = new Set([
-      ...(dailyCap > prior.dailyLimitUsd ? ['daily'] : []),
-      ...(monthlyCap > prior.monthlyLimitUsd ? ['monthly'] : []),
-    ]);
-    if (!raised.size) return [];
+    const raised: BudgetRetry['scope'][] = [];
+    if (dailyCap > prior.dailyLimitUsd) raised.push('daily');
+    if (monthlyCap > prior.monthlyLimitUsd) raised.push('monthly');
+    const previousCursor = readBudgetWakeCursor(cursor?.cursor);
+    const scopes = new Set([...raised, ...(previousCursor?.scopes ?? [])]);
+    if (!scopes.size) {
+      if (cursor)
+        await tx.delete(maintenanceCursors).where(eq(maintenanceCursors.name, cursorName));
+      return [];
+    }
+    const after = raised.length ? undefined : previousCursor?.after;
     const rows = await tx
-      .select()
+      .select({ ...getTableColumns(tasks), cursorTime: sql<string>`${tasks.updatedAt}::text` })
       .from(tasks)
       .where(
         and(
@@ -47,17 +78,36 @@ export function updatePostgresBudgetCaps(db: Db, values: BudgetCaps): Promise<Ta
           eq(tasks.status, 'waiting_budget'),
           gt(tasks.runAfter, sql`now()`),
           isNull(tasks.archivedAt),
+          after
+            ? sql`(${tasks.updatedAt}, ${tasks.id}::text) > (${after.updatedAt}::timestamptz, ${after.id})`
+            : undefined,
         ),
       )
       .orderBy(asc(tasks.updatedAt), asc(tasks.id))
-      .limit(100)
-      .for('update');
-    const eligible = [];
+      .limit(101);
+    const page = rows.slice(0, 100);
+    const last = page.at(-1);
+    if (rows.length > 100 && last) {
+      const cursor = JSON.stringify({
+        scopes: [...scopes],
+        after: { updatedAt: last.cursorTime, id: last.id },
+      });
+      await tx
+        .insert(maintenanceCursors)
+        .values({ name: cursorName, cursor })
+        .onConflictDoUpdate({
+          target: maintenanceCursors.name,
+          set: { cursor, updatedAt: sql`now()` },
+        });
+    } else if (cursor) {
+      await tx.delete(maintenanceCursors).where(eq(maintenanceCursors.name, cursorName));
+    }
+    const eligible: TaskWake[] = [];
     const limitMicros = (usd: number) =>
       Number.isFinite(usd) ? storedUsdToMicros(usd) : Number.MAX_SAFE_INTEGER;
-    for (const row of rows) {
+    for (const row of page) {
       const retry = readBudgetRetry(row.state);
-      if (!retry || !raised.has(retry.scope)) continue;
+      if (!retry || !scopes.has(retry.scope)) continue;
       const [[taskHeld], pending] = await Promise.all([
         tx
           .select({ usd: sum(costReservations.estimatedUsd) })
@@ -97,7 +147,7 @@ export function updatePostgresBudgetCaps(db: Db, values: BudgetCaps): Promise<Ta
           taskCap: storedTaskBudgetToMicros(row.budgetUsdLimit),
         })
       )
-        eligible.push(row.id);
+        eligible.push({ id: row.id, queueGeneration: row.queueGeneration });
     }
     if (!eligible.length) return [];
     return tx
@@ -115,7 +165,13 @@ export function updatePostgresBudgetCaps(db: Db, values: BudgetCaps): Promise<Ta
         and(
           eq(tasks.agentId, owner),
           eq(tasks.status, 'waiting_budget'),
-          inArray(tasks.id, eligible),
+          gt(tasks.runAfter, sql`now()`),
+          isNull(tasks.archivedAt),
+          or(
+            ...eligible.map(({ id, queueGeneration }) =>
+              and(eq(tasks.id, id), eq(tasks.queueGeneration, queueGeneration)),
+            ),
+          ),
         ),
       )
       .returning({ id: tasks.id, queueGeneration: tasks.queueGeneration });

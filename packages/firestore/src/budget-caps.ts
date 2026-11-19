@@ -1,16 +1,20 @@
 import {
   type BudgetCapsRepository,
+  type BudgetRetry,
+  type BudgetWakeCursor,
   budgetWakeScheduleId,
   budgetWakeScheduleIsCurrent,
   canWakeForBudget,
   microsToUsd,
   type Records,
   readBudgetRetry,
+  readBudgetWakeCursor,
   storedLedgerUsdToMicros,
   storedTaskBudgetToMicros,
   type TaskWake,
   usdToMicros,
 } from '@assistant/persistence';
+import { FieldPath } from '@google-cloud/firestore';
 import { FirestoreCostRepository } from './costs.js';
 import { createWakeIntent } from './outbox.js';
 import { privacyErasureIsActive } from './privacy-erasure.js';
@@ -21,6 +25,12 @@ export class FirestoreBudgetCapsRepository implements BudgetCapsRepository {
   readonly kind = 'budget-caps-repository' as const;
 
   constructor(readonly store: InstallationStore) {}
+
+  async resumeWakes(agentId: string): Promise<TaskWake[]> {
+    if (!(await this.store.doc('coordination', `budget-cap-wake:${agentId}`).get()).exists)
+      return [];
+    return this.update(agentId, {});
+  }
 
   async update(
     agentId: string,
@@ -58,7 +68,8 @@ export class FirestoreBudgetCapsRepository implements BudgetCapsRepository {
 
       const policyRef = this.store.doc('coordination', 'budget-policy');
       const taskRef = this.store.doc('budgets', 'task_default');
-      const [policy, task] = await tx.getAll(policyRef, taskRef);
+      const cursorRef = this.store.doc('coordination', `budget-cap-wake:${agentId}`);
+      const [policy, task, pendingWake] = await tx.getAll(policyRef, taskRef, cursorRef);
       if (!policy?.exists) throw new Error('Budget policy must be initialized');
       microsToUsd(policy.get('dailyLimitMicros'));
       microsToUsd(policy.get('monthlyLimitMicros'));
@@ -82,21 +93,35 @@ export class FirestoreBudgetCapsRepository implements BudgetCapsRepository {
         values.monthly === undefined
           ? policy.get('monthlyLimitMicros')
           : usdToMicros(Number(values.monthly));
-      const raised = new Set([
-        ...(dailyCap > policy.get('dailyLimitMicros') ? ['daily'] : []),
-        ...(monthlyCap > policy.get('monthlyLimitMicros') ? ['monthly'] : []),
-      ]);
+      const raised: BudgetRetry['scope'][] = [];
+      if (dailyCap > policy.get('dailyLimitMicros')) raised.push('daily');
+      if (monthlyCap > policy.get('monthlyLimitMicros')) raised.push('monthly');
+      const previousCursor = readBudgetWakeCursor(pendingWake?.data());
+      const scopes = new Set([...raised, ...(previousCursor?.scopes ?? [])]);
+      const after = raised.length ? undefined : previousCursor?.after;
+      let continuation: BudgetWakeCursor | null = null;
       const wakes: TaskWake[] = [];
-      if (raised.size) {
+      if (scopes.size) {
+        const candidates = this.store
+          .collection('tasks')
+          .where('agentId', '==', agentId)
+          .where('status', '==', 'waiting_budget')
+          .orderBy('updatedAt')
+          .orderBy(FieldPath.documentId())
+          .limit(101);
         const parked = await tx.get(
-          this.store
-            .collection('tasks')
-            .where('agentId', '==', agentId)
-            .where('status', '==', 'waiting_budget')
-            .orderBy('updatedAt')
-            .limit(100),
+          after ? candidates.startAfter(new Date(after.updatedAt), after.id) : candidates,
         );
         if (!parked.empty) {
+          const page = parked.docs.slice(0, 100);
+          const last = page.at(-1);
+          if (parked.size > 100 && last) {
+            const updatedAt = decodeRecord<Date>(last.get('updatedAt'));
+            continuation = {
+              scopes: [...scopes],
+              after: { updatedAt: updatedAt.toISOString(), id: last.id },
+            };
+          }
           const [holds, day, month] = await tx.getAll(
             this.store.doc('coordination', 'budget-holds'),
             this.store.doc('budgetPeriods', `day:${now.toISOString().slice(0, 10)}`),
@@ -105,7 +130,7 @@ export class FirestoreBudgetCapsRepository implements BudgetCapsRepository {
           const held = holds?.get('heldMicros') ?? 0;
           microsToUsd(held);
           const period = await new FirestoreCostRepository(this.store).periodHolds(tx, now, held);
-          for (const doc of parked.docs) {
+          for (const doc of page) {
             const row = decodeRecord<Records['tasks']>(doc.data());
             const retry = readBudgetRetry(row.state);
             if (
@@ -117,7 +142,7 @@ export class FirestoreBudgetCapsRepository implements BudgetCapsRepository {
               !(row.runAfter instanceof Date) ||
               row.runAfter <= now ||
               !retry ||
-              !raised.has(retry.scope)
+              !scopes.has(retry.scope)
             )
               continue;
             const [taskHold, pending] = await Promise.all([
@@ -184,6 +209,8 @@ export class FirestoreBudgetCapsRepository implements BudgetCapsRepository {
         tx.update(policyRef, { ...policyUpdate, updatedAt: now });
       if (values.task_default !== undefined)
         tx.update(taskRef, { limitUsd: values.task_default, updatedAt: now });
+      if (continuation) tx.set(cursorRef, continuation);
+      else if (pendingWake?.exists) tx.delete(cursorRef);
       for (const wake of wakes) {
         tx.update(this.store.doc('tasks', wake.id), {
           status: 'pending',

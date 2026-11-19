@@ -3,6 +3,7 @@ import { dispatchBudgetWakes } from '@assistant/application/costs';
 import { resetConfigForTest } from '@assistant/config';
 import {
   createInstallationStore,
+  FirestoreBudgetCapsRepository,
   FirestoreCostRepository,
   FirestoreOutbox,
   FirestoreTaskRepository,
@@ -117,7 +118,21 @@ describe.skipIf(!localEmulator)(
       const resumeAt = new Date(Date.now() + 3_600_000);
       const parked: string[] = [];
       const durableApprovalId = randomUUID();
+      const legacyIds = Array.from({ length: 110 }, () => randomUUID());
       try {
+        const backlog = store.db.batch();
+        for (const id of legacyIds) {
+          backlog.set(store.doc('tasks', id), {
+            id,
+            agentId,
+            status: 'waiting_budget',
+            updatedAt: new Date(0),
+            queueGeneration: 0,
+            runAfter: resumeAt,
+            state: {},
+          });
+        }
+        await backlog.commit();
         const create = async (
           owner: string,
           checkpoint: Record<string, unknown> = {},
@@ -165,8 +180,16 @@ describe.skipIf(!localEmulator)(
         ).toMatchObject({ ok: false, budget: { scope: 'daily' } });
 
         const startedAt = Date.now();
-        const responses = await Promise.all([patch({ daily: '2' }), patch({ daily: '2' })]);
-        expect(responses.map(({ status }) => status)).toEqual([200, 200]);
+        expect((await patch({ daily: '2' })).status).toBe(200);
+        expect(await tasks.getTask(eligible)).toMatchObject({ status: 'waiting_budget' });
+        const resumes = new FirestoreBudgetCapsRepository(store);
+        const resumed = await Promise.all([
+          resumes.resumeWakes(agentId),
+          resumes.resumeWakes(agentId),
+        ]);
+        expect(resumed.flat()).toEqual([{ id: eligible, queueGeneration: 2 }]);
+        expect(await resumes.resumeWakes(agentId)).toEqual([]);
+        expect((await patch({ daily: '2' })).status).toBe(200);
         expect(await tasks.getTask(eligible)).toMatchObject({
           status: 'pending',
           queueGeneration: 2,
@@ -197,6 +220,9 @@ describe.skipIf(!localEmulator)(
         expect(Date.now() - startedAt).toBeLessThan(60_000);
       } finally {
         await store.doc('approvals', durableApprovalId).delete();
+        const backlog = store.db.batch();
+        for (const id of legacyIds) backlog.delete(store.doc('tasks', id));
+        await backlog.commit();
         for (const id of parked) {
           await store.doc('tasks', id).delete();
           for (const generation of [0, 1, 2])
