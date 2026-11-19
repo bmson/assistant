@@ -678,6 +678,7 @@ describe.skipIf(!localEmulator)(
         progress: expect.any(String),
         archivedAt: null,
         hasPendingApproval: false,
+        estimatedCostOperationId: null,
       });
       expect((await get(foreignId)).status).toBe(404);
       expect((await get(randomUUID())).status).toBe(404);
@@ -702,6 +703,7 @@ describe.skipIf(!localEmulator)(
         status: 'done',
         progress: 'Finished safely.',
         archivedAt: initial.toISOString(),
+        estimatedCostOperationId: null,
       });
       expect(Object.keys(liveProjection).sort()).toEqual(
         [
@@ -715,8 +717,37 @@ describe.skipIf(!localEmulator)(
           'hasPendingApproval',
           'hasActiveAutonomy',
           'stuckWaiting',
+          'estimatedCostOperationId',
         ].sort(),
       );
+      await store.doc('tasks', runningId).update({
+        status: 'waiting_estimated_cost',
+        archivedAt: null,
+        state: {
+          privateCheckpoint: 'must-not-be-returned',
+          estimatedCostApproval: {
+            status: 'pending',
+            operationId: 'exact-operation-1',
+            bindingDigest: 'must-not-be-returned',
+          },
+        },
+      });
+      const waiting = await (await get(runningId)).json();
+      expect(waiting).toMatchObject({
+        status: 'waiting_estimated_cost',
+        estimatedCostOperationId: 'exact-operation-1',
+      });
+      expect(Object.keys(waiting).sort()).toEqual(Object.keys(liveProjection).sort());
+      expect(JSON.stringify(waiting)).not.toContain('must-not-be-returned');
+      await store.doc('tasks', runningId).update({
+        state: { estimatedCostApproval: { status: 'pending', operationId: '../invalid' } },
+      });
+      const invalid = await (await get(runningId)).json();
+      expect(invalid).toMatchObject({
+        status: 'waiting_estimated_cost',
+        estimatedCostOperationId: null,
+      });
+      expect(Object.keys(invalid).sort()).toEqual(Object.keys(liveProjection).sort());
     });
 
     it('reports malformed owner status as unavailable without changing the task', async () => {

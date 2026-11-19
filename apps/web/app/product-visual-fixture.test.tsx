@@ -17,6 +17,7 @@ type RepairVisualState =
 
 const state = vi.hoisted(() => ({
   empty: false,
+  ownerDenied: false,
   path: '/goals',
   search: '',
   firestore: false,
@@ -288,10 +289,13 @@ const disabledActions = vi.hoisted(
     ),
 );
 vi.mock('@/auth', () => ({
-  requireOwner: async () => ({
-    user: { name: 'Synthetic owner', email: 'owner@example.test' },
-    formSessionScope: 'synthetic-owner-session',
-  }),
+  requireOwner: async () => {
+    if (state.ownerDenied) throw new Error('QA_REDIRECT:/signin');
+    return {
+      user: { name: 'Synthetic owner', email: 'owner@example.test' },
+      formSessionScope: 'synthetic-owner-session',
+    };
+  },
   isAuthed: async () => ({ user: { name: 'Synthetic owner', email: 'owner@example.test' } }),
   authMode: 'passkey',
 }));
@@ -835,6 +839,12 @@ const products: PageEntry[] = [
   { name: 'side-chat', route: `/chat/${visualId}`, module: './chat/[id]/page' },
   { name: 'chats', route: '/chat/all', module: './chat/all/page' },
   { name: 'costs', route: '/costs', module: './costs/page' },
+  {
+    name: 'spending-request',
+    route: `/costs/requests/${visualId}`,
+    module: './costs/requests/[operationId]/page',
+    empty: false,
+  },
   { name: 'documents', route: '/documents', module: './documents/page' },
   { name: 'goals', route: '/goals', module: './goals/page' },
   { name: 'import', route: '/import', module: './import/page' },
@@ -1003,10 +1013,16 @@ it.each(fixtureStates)(
     if (directory) process.stdout.write(`Rendering ${page.name}\n`);
     const { default: Page } = await import(page.module);
     const child = await Page({
-      params: Promise.resolve({ id: visualId }),
+      params: Promise.resolve({ id: visualId, operationId: visualId }),
       searchParams: Promise.resolve(page.query ?? {}),
     });
     const html = renderToString(await fixtureLayout(child));
+    if (page.productName === 'spending-request') {
+      expect(html).toContain('Review spending request');
+      expect(html).toContain('href="/costs"');
+      expect(html).toContain('Checking this request…');
+      expect(html).not.toMatch(/>Approve |>Decline</);
+    }
     if (page.productName === 'costs' && page.costMode === 'mixed') {
       expect(html).toContain('Run rate and service details');
       expect(html).toContain(
@@ -1079,7 +1095,19 @@ it.each(fixtureStates)(
   30_000,
 );
 
-it('accounts for all 35 source routes and asserts the legacy person redirect', async () => {
+it('requires an owner before rendering a spending request', async () => {
+  const { default: Page } = await import('./costs/requests/[operationId]/page');
+  state.ownerDenied = true;
+  try {
+    await expect(Page({ params: Promise.resolve({ operationId: visualId }) })).rejects.toThrow(
+      'QA_REDIRECT:/signin',
+    );
+  } finally {
+    state.ownerDenied = false;
+  }
+});
+
+it('accounts for all 36 source routes and asserts the legacy person redirect', async () => {
   const directory = process.env.PRODUCT_VISUAL_QA_DIR;
   const manifest: Array<Record<string, unknown>> = fixtureStates.map((page) => ({
     name: page.name,
@@ -1087,10 +1115,14 @@ it('accounts for all 35 source routes and asserts the legacy person redirect', a
     source: `apps/web/app/${page.module.slice(2)}.tsx`,
     state: page.chatState
       ? `${page.chatState}-recall-with-failed-stop`
-      : (page.repairState ?? (page.empty ? 'empty' : 'loaded')),
+      : page.productName === 'spending-request'
+        ? 'checking-request'
+        : (page.repairState ?? (page.empty ? 'empty' : 'loaded')),
     availability: page.route.startsWith('/chat')
       ? 'owner-chat-route'
-      : 'retained-product-redirected-by-proxy',
+      : page.productName === 'spending-request'
+        ? 'owner-spending-review-route'
+        : 'retained-product-redirected-by-proxy',
     evidence:
       'Actual source component with synthetic read dependencies; route admission and live account behavior are not exercised.',
     persistenceFixture:
@@ -1119,7 +1151,7 @@ it('accounts for all 35 source routes and asserts the legacy person redirect', a
           : [],
     );
   const all = pageFiles(path.resolve(process.cwd(), 'apps/web/app'));
-  expect(all).toHaveLength(35);
+  expect(all).toHaveLength(36);
   const rendered = new Set(
     products.map((entry) => path.resolve('apps/web/app', `${entry.module.slice(2)}.tsx`)),
   );
@@ -1147,7 +1179,7 @@ it('accounts for all 35 source routes and asserts the legacy person redirect', a
           reachableConsolePages: 6,
           reachableChatPages: 3,
           rootRedirect: '/settings',
-          retainedProductSourcePages: 24,
+          retainedProductSourcePages: 25,
           before: process.env.PRODUCT_VISUAL_QA_BEFORE === '1',
           pages: manifest,
         },

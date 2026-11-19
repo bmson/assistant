@@ -6,6 +6,7 @@ import {
   createDb,
   type Db,
   emailIngest,
+  emailObserverSources,
   memories,
   memoryTombstones,
   messages,
@@ -236,6 +237,56 @@ describe('ingestFactQuarantined', () => {
 });
 
 describe('runEmailIngestExtraction', () => {
+  it('reads an admitted automated source from its canonical body store on PostgreSQL', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    await withIsolatedEmailDatabase(async (scope) => {
+      const sourceId = randomUUID();
+      const channelMessageId = `gmail:${sourceId}`;
+      await scope.db.insert(emailObserverSources).values({
+        id: sourceId,
+        agentId: scope.agentId,
+        channelMessageId,
+        sourceKey: channelMessageId,
+        body: 'The owner has a confirmed dentist appointment on November 18, 2026 at 08:15.',
+      });
+      await scope.db.insert(emailIngest).values({
+        agentId: scope.agentId,
+        channelMessageId,
+        fromEmail: 'dentist@example.test',
+        subject: 'Appointment confirmed',
+        category: 'appointment',
+        importance: 2,
+        contentTrust: 'unknown',
+        authenticated: true,
+        ingestMode: 'direct',
+        pipelineStage: 'message_persisted',
+        scoreStatus: 'prepared',
+        admittedSourceKind: 'automated_source',
+        admittedSourceId: sourceId,
+        messagePersisted: false,
+      });
+      const result = await runEmailIngestExtraction({
+        db: scope.db,
+        router: scriptedRouter({
+          content: 'The owner has a dentist appointment on November 18, 2026 at 08:15.',
+          kind: 'fact',
+          category: 'knowledge',
+          subject: 'owner',
+          relationship: '',
+          domain: 'other',
+          importance: 3,
+          confidence: 0.9,
+          validFrom: '',
+        }),
+      });
+      expect(result.usable).toBe(1);
+      const [record] = await scope.db
+        .select()
+        .from(emailIngest)
+        .where(eq(emailIngest.channelMessageId, channelMessageId));
+      expect(record?.extractedAt).not.toBeNull();
+    });
+  });
   it('refuses to write vectors under a storage identity different from the active router space', async () => {
     const embed = vi.fn(async () => [new Array(1536).fill(0.01)]);
     const row = {
@@ -311,86 +362,92 @@ describe('runEmailIngestExtraction', () => {
     expect(embed).not.toHaveBeenCalled();
   });
 
-  it('makes owner logistics recallable and stamps the row', async (ctx) => {
-    if (!dbUp) return ctx.skip();
-    await withIsolatedEmailDatabase(async (scope) => {
-      const content = `The owner flies to Oslo on 1 September 2026 at 08:00 (${MARKER})`;
-      const row = await ingestRow(
-        {
-          category: 'travel',
-          importance: 4,
-          body: 'You depart 1 September at 08:00 from gate B12.',
-          id: 'flight',
-        },
-        scope,
-      );
+  it.for([1, 4])(
+    'makes owner logistics recallable even at importance %i and stamps the row',
+    async (importance, ctx) => {
+      if (!dbUp) return ctx.skip();
+      await withIsolatedEmailDatabase(async (scope) => {
+        const content = `The owner flies to Oslo on 1 September 2026 at 08:00 (${MARKER})`;
+        const row = await ingestRow(
+          {
+            category: 'travel',
+            importance,
+            body: 'You depart 1 September at 08:00 from gate B12.',
+            id: 'flight',
+          },
+          scope,
+        );
 
-      const result = await runEmailIngestExtraction({
-        db: scope.db,
-        router: scriptedRouter({
-          content,
-          kind: 'fact',
-          category: 'knowledge',
-          subject: 'owner',
-          relationship: '',
-          domain: 'other',
-          importance: 4,
-          confidence: 0.9,
-          validFrom: '',
-        }),
+        const result = await runEmailIngestExtraction({
+          db: scope.db,
+          router: scriptedRouter({
+            content,
+            kind: 'fact',
+            category: 'knowledge',
+            subject: 'owner',
+            relationship: '',
+            domain: 'other',
+            importance: 4,
+            confidence: 0.9,
+            validFrom: '',
+          }),
+        });
+        expect(result.usable).toBeGreaterThanOrEqual(1);
+
+        const [saved] = await scope.db.select().from(memories).where(eq(memories.content, content));
+        expect(saved).toBeDefined();
+        // The whole point: visible to memory.recall, which filters quarantined.
+        expect(saved?.quarantined).toBe(false);
+        expect(saved?.source).toBe('email-ingest');
+        expect(saved?.embeddingSpaceKey).toBe(embeddingSpaceIdentityKey(EMAIL_SPACE));
+        // Third-party mail is never a first-hand source, so confidence is capped.
+        expect(Number(saved?.confidence)).toBeLessThanOrEqual(0.8);
+
+        const [stamped] = await scope.db
+          .select()
+          .from(emailIngest)
+          .where(eq(emailIngest.id, row?.id ?? ''));
+        expect(stamped?.extractedAt).not.toBeNull();
       });
-      expect(result.usable).toBeGreaterThanOrEqual(1);
+    },
+  );
 
-      const [saved] = await scope.db.select().from(memories).where(eq(memories.content, content));
-      expect(saved).toBeDefined();
-      // The whole point: visible to memory.recall, which filters quarantined.
-      expect(saved?.quarantined).toBe(false);
-      expect(saved?.source).toBe('email-ingest');
-      expect(saved?.embeddingSpaceKey).toBe(embeddingSpaceIdentityKey(EMAIL_SPACE));
-      // Third-party mail is never a first-hand source, so confidence is capped.
-      expect(Number(saved?.confidence)).toBeLessThanOrEqual(0.8);
+  it.for([2, 4])(
+    'reviews personal mail at importance %i without treating third-party claims as confirmed',
+    async (importance, ctx) => {
+      if (!dbUp) return ctx.skip();
+      await withIsolatedEmailDatabase(async (scope) => {
+        const content = `Anna Testsdottir is moving to Bergen in September (${MARKER})`;
+        await ingestRow(
+          {
+            category: 'personal',
+            importance,
+            body: 'Just so you know, Anna is moving to Bergen in September.',
+            id: 'gossip',
+          },
+          scope,
+        );
 
-      const [stamped] = await scope.db
-        .select()
-        .from(emailIngest)
-        .where(eq(emailIngest.id, row?.id ?? ''));
-      expect(stamped?.extractedAt).not.toBeNull();
-    });
-  });
+        await runEmailIngestExtraction({
+          db: scope.db,
+          router: scriptedRouter({
+            content,
+            kind: 'fact',
+            category: 'knowledge',
+            subject: 'Anna Testsdottir',
+            relationship: 'friend',
+            domain: 'relationships',
+            importance: 3,
+            confidence: 0.9,
+            validFrom: '',
+          }),
+        });
 
-  it('quarantines a claim about a third party from the same mailbox', async (ctx) => {
-    if (!dbUp) return ctx.skip();
-    await withIsolatedEmailDatabase(async (scope) => {
-      const content = `Anna Testsdottir is moving to Bergen in September (${MARKER})`;
-      await ingestRow(
-        {
-          category: 'personal',
-          importance: 4,
-          body: 'Just so you know, Anna is moving to Bergen in September.',
-          id: 'gossip',
-        },
-        scope,
-      );
-
-      await runEmailIngestExtraction({
-        db: scope.db,
-        router: scriptedRouter({
-          content,
-          kind: 'fact',
-          category: 'knowledge',
-          subject: 'Anna Testsdottir',
-          relationship: 'friend',
-          domain: 'relationships',
-          importance: 3,
-          confidence: 0.9,
-          validFrom: '',
-        }),
+        const [saved] = await scope.db.select().from(memories).where(eq(memories.content, content));
+        expect(saved?.quarantined).toBe(true);
       });
-
-      const [saved] = await scope.db.select().from(memories).where(eq(memories.content, content));
-      expect(saved?.quarantined).toBe(true);
-    });
-  });
+    },
+  );
 
   it('screens exact duplicates before paying for embeddings', async (ctx) => {
     if (!dbUp) return ctx.skip();

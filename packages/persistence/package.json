@@ -6,6 +6,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./budget-caps": "./src/budget-caps.ts",
+    "./estimated-cost-approval": "./src/estimated-cost-approval.ts",
     "./situations": "./src/situations-schema.ts",
     "./testing": "./src/contract-suite.ts",
     "./artifact-path": "./src/artifact-path.ts",

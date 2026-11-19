@@ -1,0 +1,118 @@
+{
+  "actions": [],
+  "advisories": {
+    "1247486": {
+      "findings": [
+        {
+          "version": "16.4.3",
+          "paths": ["apps__web>next"]
+        }
+      ],
+      "found_by": null,
+      "deleted": null,
+      "references": "- https://github.com/vercel/next.js/security/advisories/GHSA-mfr8-8qww-v76h\n- https://github.com/vercel/next.js/commit/d605874e5a4b8b6b7dca1b6e07bcabb44d0e2e5b\n- https://github.com/vercel/next.js/releases/tag/v16.4.5\n- https://nextjs.org/blog/november-2026-security-release\n- https://github.com/advisories/GHSA-mfr8-8qww-v76h",
+      "created": "2026-11-16T18:51:22.000Z",
+      "id": 1247486,
+      "npm_advisory_id": null,
+      "overview": "Next.js applications with `'use cache'` can disclose cached data across root params when the same `'use cache'` function is called both directly during rendering and through `unstable_cache()`, and that function reads a root param. Root params are route parameters of the root layout, and applications commonly use them to scope data, for example per locale.\n\nDuring a cold process start, a cross-request deduplication race allowed an `unstable_cache()` call to join the in-flight fill of a concurrent direct call and receive its result, bypassing the root param check that would normally reject it. `unstable_cache()` then stored that result under a cache key without root params, so subsequent requests for other root param values received the same entry until it is revalidated or evicted. Cached data produced for one root param value is returned to requests for other values.\n\nExploitation requires the `unstable_cache()` request to arrive while the function's first fill after a process start is still in flight. Outside this race, the nesting already throws an error: `'use cache' inside unstable_cache() is unsupported`, and avoiding it is a complete workaround.",
+      "reported_by": null,
+      "title": "Next.js: Information disclosure across root params when a 'use cache' function is called through unstable_cache()",
+      "metadata": null,
+      "cves": ["CVE-2026-119790"],
+      "access": "public",
+      "severity": "moderate",
+      "module_name": "next",
+      "vulnerable_versions": ">=16.3.0 <=16.4.4",
+      "github_advisory_id": "GHSA-mfr8-8qww-v76h",
+      "recommendation": "Upgrade to version 16.4.5 or later",
+      "patched_versions": ">=16.4.5",
+      "updated": "2026-11-16T18:51:23.000Z",
+      "cvss": {
+        "score": 0,
+        "vectorString": null
+      },
+      "cwe": ["CWE-362"],
+      "url": "https://github.com/advisories/GHSA-mfr8-8qww-v76h"
+    },
+    "1247710": {
+      "findings": [
+        {
+          "version": "4.0.7",
+          "paths": [".>vitest>picomatch"]
+        }
+      ],
+      "found_by": null,
+      "deleted": null,
+      "references": "- https://nvd.nist.gov/vuln/detail/CVE-2026-112366\n- https://github.com/micromatch/picomatch/pull/194\n- https://github.com/micromatch/picomatch/blob/4.0.7/lib/parse.js#L287-L307\n- https://www.vulncheck.com/advisories/picomatch-through-4.0.7-redos-via-single-branch-repeated-extglob-patterns\n- https://github.com/advisories/GHSA-fc5q-39xc-vjpf",
+      "created": "2026-10-19T18:32:12.000Z",
+      "id": 1247710,
+      "npm_advisory_id": null,
+      "overview": "Picomatch through 4.0.7 contains a regular expression denial of service vulnerability that allows attackers to block the event loop by supplying single-branch repeated extglob patterns. Attackers can provide globs like +(*) or +(*a), which analyzeRepeatedExtglob in lib/parse.js skips, causing exponential backtracking against short crafted strings and denying service to Node.js applications.",
+      "reported_by": null,
+      "title": "picomatch vulnerable to ReDoS through single-branch repeated extglobs",
+      "metadata": null,
+      "cves": ["CVE-2026-112366"],
+      "access": "public",
+      "severity": "high",
+      "module_name": "picomatch",
+      "vulnerable_versions": "<=4.0.7",
+      "github_advisory_id": "GHSA-fc5q-39xc-vjpf",
+      "recommendation": "None",
+      "patched_versions": "<0.0.0",
+      "updated": "2026-11-17T15:56:44.000Z",
+      "cvss": {
+        "score": 7.5,
+        "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H"
+      },
+      "cwe": ["CWE-1333"],
+      "url": "https://github.com/advisories/GHSA-fc5q-39xc-vjpf"
+    },
+    "1247712": {
+      "findings": [
+        {
+          "version": "16.4.3",
+          "paths": ["apps__web>next"]
+        }
+      ],
+      "found_by": null,
+      "deleted": null,
+      "references": "- https://github.com/vercel/next.js/security/advisories/GHSA-vc7v-qv4w-wrv8\n- https://nvd.nist.gov/vuln/detail/CVE-2026-119351\n- https://github.com/vercel/next.js/commit/80c96ede21798d4ad54da12fe50d5b00a09b06e3\n- https://github.com/vercel/next.js/releases/tag/v16.4.5\n- https://nextjs.org/blog/november-2026-security-release\n- https://github.com/advisories/GHSA-vc7v-qv4w-wrv8",
+      "created": "2026-11-17T16:13:26.000Z",
+      "id": 1247712,
+      "npm_advisory_id": null,
+      "overview": "With Cache Components enabled, an outer `'use cache'` function can be keyed incorrectly even when its inner `'use cache'` call generates a fresh entry. If the inner function reads a root param (via `next/root-params`) and returns a value that still contains pending promises — for example an object with data that is ready immediately alongside slower data — React Flight delivers the ready portion to the outer function before the inner entry has finished publishing its root param dependencies. The outer function can then finish, and its cache entry is persisted under a key that omits that root param. The entry is written once and reused for all root param values, so a response for one root param value can serve content produced for a different value. Entries written this way can also ignore tag invalidation and cache lifetimes of the nested caches they consumed.\n\nWhat values are leaked cannot be attacker controlled. Which value's content is served depends only on which invocation wrote the entry first.\n\nThis is a variant of https://github.com/advisories/GHSA-h694-7cp9-m8p3 that the fix for that advisory does not cover: it does not require the inner call to be served from an existing entry, and it does not depend on a slow cache handler.",
+      "reported_by": null,
+      "title": "Next.js: Cache leak across root param values in nested 'use cache' functions via delayed inner stream metadata",
+      "metadata": null,
+      "cves": ["CVE-2026-119351"],
+      "access": "public",
+      "severity": "moderate",
+      "module_name": "next",
+      "vulnerable_versions": ">=16.2.0 <=16.4.4",
+      "github_advisory_id": "GHSA-vc7v-qv4w-wrv8",
+      "recommendation": "Upgrade to version 16.4.5 or later",
+      "patched_versions": ">=16.4.5",
+      "updated": "2026-11-17T16:13:27.000Z",
+      "cvss": {
+        "score": 0,
+        "vectorString": null
+      },
+      "cwe": ["CWE-362"],
+      "url": "https://github.com/advisories/GHSA-vc7v-qv4w-wrv8"
+    }
+  },
+  "muted": [],
+  "metadata": {
+    "vulnerabilities": {
+      "info": 0,
+      "low": 0,
+      "moderate": 2,
+      "high": 1,
+      "critical": 0
+    },
+    "dependencies": 797,
+    "devDependencies": 0,
+    "optionalDependencies": 0,
+    "totalDependencies": 797
+  }
+}

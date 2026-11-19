@@ -31,6 +31,10 @@ jobs:
           node-version: 26
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Verify the installed Picomatch hardening before its scoped advisory exception
+        run: node --test scripts/picomatch-hardening.node-test.mjs
+      - name: Verify the bounded spending-approval release configuration
+        run: node --test infra/gcp/estimated-cost-release-config.test.mjs
       # Narrow brace-expansion overrides retain the 1.x and 2.x CommonJS export
       # shapes required by ExcelJS > archiver > glob > minimatch 3. The document
       # processor XLSX round-trip regression exercises that compatibility path.
@@ -48,6 +52,7 @@ jobs:
         run: |
           PYTHONDONTWRITEBYTECODE=1 python3 infra/gcp/cleanup-current.test.py
           bash infra/gcp/verify-release-source.test.sh
+          bash infra/gcp/verify-release-source-workflow.test.sh
           bash infra/ci/install-postgres17.test.sh
           bash infra/ci/postgres-service.test.sh
           PYTHONDONTWRITEBYTECODE=1 python3 tests/test_ci_postgres_workflow.py
@@ -258,6 +263,11 @@ jobs:
     env:
       DATABASE_URL: postgres://assistant:assistant@localhost:5432/assistant
     steps:
+      - name: Reject main push reruns without BASIC5 acceptance
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.run_attempt != 1
+        run: |
+          echo "BASIC5 acceptance is restricted to the first main push attempt." >&2
+          exit 1
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Install PostgreSQL 17 and pgvector
         run: bash infra/ci/install-postgres17.sh

@@ -23,10 +23,7 @@ export interface GoalWorkLink {
   messageCursor: string;
 }
 
-type WorkGoal = Pick<
-  GoalRow,
-  'id' | 'title' | 'description' | 'targetDate' | 'researchAssignment'
->;
+type WorkGoal = Pick<GoalRow, 'id' | 'title' | 'description' | 'targetDate' | 'researchAssignment'>;
 
 function assertOrdinaryGoal(goal: Pick<GoalRow, 'researchAssignment'>): void {
   if (goal.researchAssignment)

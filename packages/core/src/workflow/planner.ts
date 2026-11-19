@@ -382,6 +382,10 @@ export async function planTask(
     return (await persistPlan(deps, task, plan, opts)) ? plan : null;
   }
 
+  // Preserve the existing bounded owner-reply carve-out through triage and planning.
+  const critical =
+    task.trust === 'owner' && (task.type === 'chat_turn' || task.type === 'sms_turn');
+
   // Only owner chat/SMS short-circuit as trivial. Email deliberately does NOT:
   // mis-classifying an actionable email as trivial would skip the plan, and
   // with it the forced first-step tool call, reviving the zero-tool-call path.
@@ -397,6 +401,7 @@ export async function planTask(
   ) {
     const triage = await deps.router.object<z.infer<typeof TrivialSchema>>('classify', {
       taskId: task.id,
+      critical,
       schema: TrivialSchema,
       system: 'Classify whether the latest owner message needs planning/tools or is trivial chat.',
       prompt: contextText,
@@ -414,6 +419,7 @@ export async function planTask(
   try {
     planned = await deps.router.object<Plan>('plan', {
       taskId: task.id,
+      critical,
       schema: PlanSchema,
       system: futureWatch
         ? [...system.split('\n'), ...futureWatchRequestGuidance(futureWatch)].join('\n')

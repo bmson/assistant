@@ -135,6 +135,20 @@ release_preflight_compatibility() {
   return 0
 }
 
+release_verify_bootstrap_agent_route() {
+  local snapshot="$1" old_revision="$2" candidate_revision="$3" candidate_tag="$4"
+  node -e '
+    const state=JSON.parse(process.argv[1]);
+    const [, , old, candidate, tag]=process.argv;
+    const rows=state.status?.traffic;
+    if (!Array.isArray(rows) || state.status.latestCreatedRevisionName!==candidate ||
+        rows.length!==(tag ? 2 : 1)) process.exit(1);
+    const oldRows=rows.filter(row=>row.revisionName===old && Number(row.percent)===100 && !row.tag);
+    const candidateRows=rows.filter(row=>row.revisionName===candidate && Number(row.percent??0)===0 && row.tag===tag);
+    if (oldRows.length!==1 || (tag && candidateRows.length!==1)) process.exit(1);
+  ' "$snapshot" "$old_revision" "$candidate_revision" "$candidate_tag"
+}
+
 release_traffic_map() {
   node -e '
     const s=JSON.parse(process.argv[1]); const rows=s.status?.traffic??[];
@@ -193,7 +207,7 @@ release_owner_web_tag_admission_command() {
   local mode="$1" source_sha="$2" manifest_path="$3" manifest_digest="$4" staging_tag="$5" native_phase="${6:-}"
   local repository_root
   case "$mode" in
-    --capture|--retire-after-paused|--verify-admission|--record-candidate|--record-resume|--native-init|--verify-native-hold|--certify-native-terminal|--accept-agent-ready|--bootstrap-restore|--bootstrap-hold|--bootstrap-agent-resume) ;;
+    --capture|--retire-after-paused|--verify-admission|--record-candidate|--record-resume|--native-init|--verify-native-hold|--certify-native-terminal|--accept-agent-ready|--bootstrap-restore|--bootstrap-hold|--bootstrap-agent-resume|--bootstrap-verify-paused-agent) ;;
     --native-phase)
       case "$native_phase" in createP|attachP|promoteP|createR|attachR|promoteR|closeP|restoreC|repauseP|closeR) ;; *) return 2 ;; esac
       ;;
@@ -207,6 +221,7 @@ release_owner_web_tag_admission_command() {
       OWNER_TAG_MANIFEST_DIGEST="$manifest_digest" \
       OWNER_TAG_STAGING_TAG="$staging_tag" \
       OWNER_NATIVE_PHASE="$native_phase" \
+      OWNER_BOOTSTRAP_DRAINED_API_TRANSITION="${RELEASE_DRAINED_API_TRANSITION:-false}" \
       OWNER_NATIVE_REVIEWED_AT="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" \
       pnpm exec tsx scripts/owner-web-tag-admission.ts "$mode"
   )
@@ -325,6 +340,31 @@ release_component_digest() {
   printf '%s' "$digest"
 }
 
+# Verify the tagged immutable candidate, not merely the mutable service template.
+release_verify_google_calendar_candidate() {
+  local service_json="$1" service="$2" tag="$3" revision candidate
+  [[ -n "${GOOGLE_CALENDAR_OAUTH_CALLBACK_URL:-}" ]] || return 0
+  revision="$(node -e 'const s=JSON.parse(process.argv[1]);const rows=(s.status?.traffic??[]).filter(x=>x.tag===process.argv[2]);if(rows.length!==1||!rows[0].revisionName)process.exit(2);process.stdout.write(rows[0].revisionName)' "$service_json" "$tag")" || return 1
+  candidate="$(release_revision_json "$service" "$revision")" || return 1
+  if [[ "$(release_service_env "$candidate" GOOGLE_CALENDAR_OAUTH_CALLBACK_URL)" != "$GOOGLE_CALENDAR_OAUTH_CALLBACK_URL" ]]; then
+    echo 'Candidate personal Calendar callback does not match the release configuration.' >&2
+    return 1
+  fi
+}
+
+release_verify_estimated_cost_candidate() {
+  local service_json="$1" service="$2" tag="$3" revision candidate
+  [[ -n "${ESTIMATED_COST_RELEASE_PROFILE_JSON:-}" ]] || return 0
+  revision="$(node -e 'const s=JSON.parse(process.argv[1]);const rows=(s.status?.traffic??[]).filter(x=>x.tag===process.argv[2]);if(rows.length!==1||!rows[0].revisionName)process.exit(2);process.stdout.write(rows[0].revisionName)' "$service_json" "$tag")" || return 1
+  candidate="$(release_revision_json "$service" "$revision")" || return 1
+  node "${BASH_SOURCE[0]%/*}/estimated-cost-release-config.mjs" --verify-revision <<<"$candidate"
+}
+
+release_verify_estimated_cost_forward_profile() {
+  [[ -n "${ESTIMATED_COST_RELEASE_PROFILE_JSON:-}" ]] || return 0
+  pnpm exec tsx scripts/estimated-cost-release-preflight.ts --verify
+}
+
 release_validate_worker_override() {
   case "${RELEASE_EMAIL_OBSERVER_WORKER_ENABLED:-}" in
     ''|true|false) return 0 ;;
@@ -411,6 +451,7 @@ release_basic_editor_forward_only() {
 release_validate_basic_editor_preflight_context() {
   local selected="$1" source_sha="$2" basic_editor
   basic_editor="$(release_basic_editor_forward_only)" || return 1
+  node "${BASH_SOURCE[0]%/*}/estimated-cost-release-config.mjs" --preflight || return 2
   if [[ -n "${OWNER_RELEASE_BOOTSTRAP_RECEIPT:-}" ]]; then release_reviewed_snapshot_kind "$source_sha" >/dev/null || return 2; fi
   [[ "$basic_editor" == true ]] || return 0
   case "$selected" in full|agent,web|web,agent) selected=agent,web ;; esac
@@ -467,9 +508,11 @@ release_staged_services() {
   local agent_before='' web_before='' agent_old_traffic='' web_old_traffic=''
   local agent_owned_tags='' web_owned_tags='' agent_serving_revision='' web_serving_revision=''
   local agent_candidate_url='' web_candidate_url='' agent_promotion_attempted=false web_promotion_attempted=false
+  local web_peer_probe=/api/release-probe paused_agent_revision staged_api3_bootstrap=false
   local live_agent_json live_agent_api live_agent_schema_driver live_agent_schema_min live_agent_schema_max
 
   release_validate_worker_override || return $?
+  node "${BASH_SOURCE[0]%/*}/google-calendar-release-config.mjs" || return $?
 
   case "$selected" in
     full|agent,web|web,agent) selected='agent,web' ;;
@@ -478,6 +521,10 @@ release_staged_services() {
   esac
   if [[ "$selected" == web && "${RELEASE_SCHEMA_UNCHANGED:-false}" != true ]]; then
     echo 'web-only release requires RELEASE_SCHEMA_UNCHANGED=true' >&2
+    return 2
+  fi
+  if [[ -n "${GOOGLE_CALENDAR_OAUTH_CALLBACK_URL:-}" && "$selected" != agent,web ]]; then
+    echo 'Personal Calendar configuration requires a paired agent,web release.' >&2
     return 2
   fi
   release_read_contract || return 1
@@ -493,6 +540,9 @@ release_staged_services() {
   fi
   if [[ "$selected" == agent,web && "$RELEASE_STORAGE_DRIVER" == firestore ]]; then
     web_writes_paused=true
+  fi
+  if [[ "$bootstrap_disabled" == true && "$RELEASE_AGENT_API" == 3 && "$RELEASE_WEB_API" == 3 ]]; then
+    staged_api3_bootstrap=true
   fi
 
   web_digest="$(release_component_digest web)" || return 1
@@ -540,6 +590,12 @@ release_staged_services() {
     agent_old_traffic="$(release_traffic_map "$agent_before")" || return 1
     agent_owned_tags="$(release_owned_tags_on_traffic "$agent_before")" || return 1
   fi
+  # Source-bound provider declarations must be refreshed deliberately. Inherit
+  # neither a stale source manifest nor a flag that the new image cannot bind.
+  node "${BASH_SOURCE[0]%/*}/estimated-cost-release-config.mjs" --require-profile <<<"$web_before" || return 1
+  if [[ "$selected" == agent,web ]]; then
+    node "${BASH_SOURCE[0]%/*}/estimated-cost-release-config.mjs" --require-profile <<<"$agent_before" || return 1
+  fi
 
   # BASIC5 may only admit writes after the exact pre-release web aliases have
   # been captured for the paired Firestore transition.
@@ -566,14 +622,64 @@ release_staged_services() {
     if [[ "$basic_editor_forward_only" == true ]]; then
       agent_candidate_env="${agent_candidate_env},ASSISTANT_RELEASE_SOURCE_SHA=${TAG},ASSISTANT_RELEASE_WORKFLOW_RUN_ID=${GITHUB_RUN_ID},ASSISTANT_RELEASE_WORKFLOW_RUN_ATTEMPT=${GITHUB_RUN_ATTEMPT},ASSISTANT_RELEASE_WRITES_PAUSED=${bootstrap_disabled}"
     fi
+    if [[ "$staged_api3_bootstrap" == true ]]; then
+      agent_candidate_env="${agent_candidate_env},MCP_OAUTH_ENABLED=false"
+    fi
     if [[ -n "$worker_env_override" ]]; then
       agent_candidate_env="${agent_candidate_env},EMAIL_OBSERVER_WORKER_ENABLED=${worker_env_override}"
     fi
-    gcloud run services update assistant-agent --project "$PROJECT" --region "$REGION" \
-      --image "${IMAGE_ROOT}/agent@${agent_digest}" --no-traffic --tag "$staging_tag" \
-      --update-env-vars "$agent_candidate_env" --quiet || return 1
+    if [[ -n "${GOOGLE_CALENDAR_OAUTH_CALLBACK_URL:-}" ]]; then
+      agent_candidate_env="${agent_candidate_env},GOOGLE_CALENDAR_OAUTH_CALLBACK_URL=${GOOGLE_CALENDAR_OAUTH_CALLBACK_URL}"
+    fi
+    local agent_secret_args=()
+    if [[ -n "${ESTIMATED_COST_RELEASE_PROFILE_JSON:-}" ]]; then
+      release_verify_estimated_cost_forward_profile || return 1
+      local cost_agent_plan
+      cost_agent_plan="$(node "${BASH_SOURCE[0]%/*}/estimated-cost-release-config.mjs" --agent-plan "$agent_candidate_env" <<<"$agent_before")" || return 1
+      agent_candidate_env="$(jq -er '.envArgument' <<<"$cost_agent_plan")" || return 1
+      agent_secret_args=(--update-secrets "$(jq -er '.secretArgument' <<<"$cost_agent_plan")")
+    fi
     local staged_agent_json
-    staged_agent_json="$(release_service_json assistant-agent)" || return 1
+    if [[ "$staged_api3_bootstrap" == true ]]; then
+      # Leave the disabled original untagged even when a create response is lost.
+      # Only attach an alias to the exact named paused revision after readback.
+      local suffix="p-${traffic_tag_suffix}-${TAG:0:8}" original_agent candidate_agent revision_json
+      candidate_agent="assistant-agent-${suffix}"
+      original_agent="$(release_serving_revision "$agent_before")" || return 1
+      if ! gcloud run services update assistant-agent --project "$PROJECT" --region "$REGION" \
+        --image "${IMAGE_ROOT}/agent@${agent_digest}" --no-traffic --revision-suffix "$suffix" \
+        ${agent_secret_args[@]+"${agent_secret_args[@]}"} \
+        --update-env-vars "$agent_candidate_env" --quiet; then
+        echo '  API 3 agent creation is unresolved. Keep delivery held and reconcile with reads before recovery.' >&2
+        return 1
+      fi
+      staged_agent_json="$(release_service_json assistant-agent)" || return 1
+      release_verify_bootstrap_agent_route "$staged_agent_json" "$original_agent" "$candidate_agent" '' || return 1
+      revision_json="$(release_revision_json assistant-agent "$candidate_agent")" || return 1
+      if [[ "$(release_service_env "$revision_json" ASSISTANT_RELEASE_SOURCE_SHA)" != "$TAG" ||
+            "$(release_service_env "$revision_json" ASSISTANT_RELEASE_MANIFEST)" != "$manifest_sha" ||
+            "$(release_service_env "$revision_json" ASSISTANT_RELEASE_WORKFLOW_RUN_ID)" != "$GITHUB_RUN_ID" ||
+            "$(release_service_env "$revision_json" ASSISTANT_RELEASE_WORKFLOW_RUN_ATTEMPT)" != "$GITHUB_RUN_ATTEMPT" ||
+            "$(release_service_env "$revision_json" ASSISTANT_RELEASE_WRITES_PAUSED)" != true ]]; then
+        echo '  The exact paused API 3 agent candidate could not be identified. Keep delivery held.' >&2
+        return 1
+      fi
+      if ! gcloud run services update-traffic assistant-agent --project "$PROJECT" --region "$REGION" \
+        --update-tags "${staging_tag}=${candidate_agent}" --quiet; then
+        echo '  API 3 agent tag attachment is unresolved. Keep delivery held and reconcile with reads before recovery.' >&2
+        return 1
+      fi
+      staged_agent_json="$(release_service_json assistant-agent)" || return 1
+      release_verify_bootstrap_agent_route "$staged_agent_json" "$original_agent" "$candidate_agent" "$staging_tag" || return 1
+    else
+      gcloud run services update assistant-agent --project "$PROJECT" --region "$REGION" \
+        --image "${IMAGE_ROOT}/agent@${agent_digest}" --no-traffic --tag "$staging_tag" \
+        ${agent_secret_args[@]+"${agent_secret_args[@]}"} \
+        --update-env-vars "$agent_candidate_env" --quiet || return 1
+      staged_agent_json="$(release_service_json assistant-agent)" || return 1
+    fi
+    release_verify_google_calendar_candidate "$staged_agent_json" assistant-agent "$staging_tag" || return 1
+    release_verify_estimated_cost_candidate "$staged_agent_json" assistant-agent "$staging_tag" || return 1
     agent_candidate_url="$(release_tag_url "$staged_agent_json" "$staging_tag")" || return 1
     release_wait_http "$agent_candidate_url" /ready true ready || return 1
   fi
@@ -581,6 +687,9 @@ release_staged_services() {
   web_candidate_env="ASSISTANT_RELEASE_API_CONTRACT=${RELEASE_WEB_API},ASSISTANT_RELEASE_AGENT_API_MIN=${RELEASE_WEB_PEER_MIN},ASSISTANT_RELEASE_AGENT_API_MAX=${RELEASE_WEB_PEER_MAX},ASSISTANT_RELEASE_SCHEMA_DRIVER=${RELEASE_STORAGE_DRIVER},ASSISTANT_RELEASE_SCHEMA_MIN=${RELEASE_WEB_SCHEMA_MIN},ASSISTANT_RELEASE_SCHEMA_MAX=${RELEASE_WEB_SCHEMA_MAX},ASSISTANT_RELEASE_SCHEMA_VERSION=${RELEASE_SCHEMA_VERSION},ASSISTANT_RELEASE_MANIFEST=${manifest_sha},ASSISTANT_RELEASE_WRITES_PAUSED=${web_writes_paused}"
   if [[ "$basic_editor_forward_only" == true ]]; then
     web_candidate_env="${web_candidate_env},ASSISTANT_RELEASE_WORKFLOW_RUN_ID=${GITHUB_RUN_ID},ASSISTANT_RELEASE_WORKFLOW_RUN_ATTEMPT=${GITHUB_RUN_ATTEMPT},ASSISTANT_RELEASE_SOURCE_SHA=${TAG}"
+  fi
+  if [[ -n "${GOOGLE_CALENDAR_OAUTH_CALLBACK_URL:-}" ]]; then
+    web_candidate_env="${web_candidate_env},GOOGLE_CALENDAR_OAUTH_CALLBACK_URL=${GOOGLE_CALENDAR_OAUTH_CALLBACK_URL}"
   fi
   if [[ "$basic_editor_forward_only" == true ]]; then
     release_run_basic_web_phase createP "$TAG" "$manifest_path" "$manifest_sha" "$staging_tag" || return 1
@@ -595,6 +704,8 @@ release_staged_services() {
     release_run_basic_web_phase attachP "$TAG" "$manifest_path" "$manifest_sha" "$staging_tag" || return 1
     staged_web_json="$(release_service_json assistant-web)" || return 1
   fi
+  release_verify_google_calendar_candidate "$staged_web_json" assistant-web "$staging_tag" || return 1
+  release_verify_estimated_cost_candidate "$staged_web_json" assistant-web "$staging_tag" || return 1
   if [[ "$basic_editor_forward_only" == true ]]; then
     release_record_owned_web_tag candidate "$TAG" "$manifest_path" "$manifest_sha" "$staging_tag" || {
       echo '  could not record the freshly observed paused web candidate; refusing to promote it.' >&2
@@ -606,8 +717,13 @@ release_staged_services() {
   # Persistence readiness and the secret-safe web-to-agent canary both run
   # against the no-traffic candidate before any user traffic moves.
   release_wait_http "$web_candidate_url" /api/ready true ready || return 1
-  release_wait_http "$web_candidate_url" /api/release-probe true ready || return 1
-  release_wait_http "$web_candidate_url" /api/release-probe "$web_writes_paused" writesPaused || return 1
+  if [[ "$staged_api3_bootstrap" == true ]]; then
+    paused_agent_revision="$(node -e 'const s=JSON.parse(process.argv[1]); const rows=(s.status?.traffic??[]).filter(t=>t.tag===process.argv[2]); if(rows.length!==1||!rows[0].revisionName)process.exit(2); process.stdout.write(rows[0].revisionName)' "$staged_agent_json" "$staging_tag")" || return 1
+    release_bootstrap_scaling --bootstrap-verify-paused-agent agent "$paused_agent_revision" "$TAG" "$manifest_path" "$manifest_sha" "$staging_tag" || return 1
+    web_peer_probe='/api/release-probe?peer=staged'
+  fi
+  release_wait_http "$web_candidate_url" "$web_peer_probe" true ready || return 1
+  release_wait_http "$web_candidate_url" "$web_peer_probe" "$web_writes_paused" writesPaused || return 1
   # Cloud Run Jobs do not support traffic tags. Update their templates only
   # after both service candidates pass readiness, remember the old image, and
   # restore those templates if any later promotion check fails.
@@ -633,6 +749,7 @@ release_staged_services() {
       old_image="$(release_job_image "$description")"
       [[ -n "$old_image" ]] || { release_restore_jobs || true; return 1; }
       new_image="${IMAGE_ROOT}/${worker}@${digest}"
+      release_verify_estimated_cost_forward_profile || { release_restore_jobs || true; return 1; }
       RELEASE_CHANGED_JOBS="${RELEASE_CHANGED_JOBS}${job}|${old_image}"$'\n'
       if ! gcloud run jobs update "$job" --project "$PROJECT" --region "$REGION" \
         --image "$new_image" --service-account "$service_account" --quiet; then
@@ -681,8 +798,8 @@ release_staged_services() {
       fi
       if [[ "$promoted_ok" == true ]] && ! release_wait_http "$live_web_url" /api/health "$TAG" sha; then promoted_ok=false; fi
       if [[ "$promoted_ok" == true ]] && ! release_wait_http "$live_web_url" /api/ready true ready; then promoted_ok=false; fi
-      if [[ "$promoted_ok" == true ]] && ! release_wait_http "$live_web_url" /api/release-probe true ready; then promoted_ok=false; fi
-      if [[ "$promoted_ok" == true ]] && ! release_wait_http "$live_web_url" /api/release-probe "$web_writes_paused" writesPaused; then promoted_ok=false; fi
+      if [[ "$promoted_ok" == true ]] && ! release_wait_http "$live_web_url" "$web_peer_probe" true ready; then promoted_ok=false; fi
+      if [[ "$promoted_ok" == true ]] && ! release_wait_http "$live_web_url" "$web_peer_probe" "$web_writes_paused" writesPaused; then promoted_ok=false; fi
       if [[ "$promoted_ok" == true && "$web_writes_paused" == true && "$bootstrap_disabled" != true ]] && ! release_drain_web_inflight "$web_before"; then promoted_ok=false; fi
       if [[ "$promoted_ok" == true && "$basic_editor_forward_only" == true ]] &&
          ! release_retire_captured_web_tags "$TAG" "$manifest_path" "$manifest_sha" "$staging_tag"; then
@@ -693,7 +810,6 @@ release_staged_services() {
   fi
 
   if [[ "$promoted_ok" == true && "$bootstrap_disabled" == true ]]; then
-    local paused_agent_revision
     paused_agent_revision="$(node -e 'const s=JSON.parse(process.argv[1]); const rows=(s.status?.traffic??[]).filter(t=>t.tag===process.argv[2]); if(rows.length!==1||!rows[0].revisionName)process.exit(2); process.stdout.write(rows[0].revisionName)' "$staged_agent_json" "$staging_tag")" || promoted_ok=false
     if [[ "$promoted_ok" == true ]]; then
       # The successor's zero-percent tag is reachable before promotion. Seal
@@ -702,6 +818,8 @@ release_staged_services() {
       if ! release_bootstrap_scaling --bootstrap-agent-resume agent "$paused_agent_revision" "$TAG" "$manifest_path" "$manifest_sha" "$staging_tag"; then
         promoted_ok=false
       elif ! staged_agent_json="$(release_service_json assistant-agent)"; then
+        promoted_ok=false
+      elif ! release_verify_estimated_cost_candidate "$staged_agent_json" assistant-agent "$staging_tag"; then
         promoted_ok=false
       elif ! node -e '
         const s=JSON.parse(process.argv[1]), old=process.argv[2], tag=process.argv[3];
@@ -727,10 +845,14 @@ release_staged_services() {
       promoted_ok=false
     else
       agent_serving_revision="$staged_agent_revision"
+      if ! release_verify_estimated_cost_forward_profile; then
+        promoted_ok=false
+      else
       agent_promotion_attempted=true
       if ! gcloud run services update-traffic assistant-agent \
         --project "$PROJECT" --region "$REGION" --to-revisions "${staged_agent_revision}=100" --quiet; then
         promoted_ok=false
+      fi
       fi
       if [[ "$promoted_ok" == true && "$bootstrap_disabled" == true ]]; then
         bootstrap_agent_attempted=true
@@ -744,8 +866,10 @@ release_staged_services() {
       fi
       if [[ "$promoted_ok" == true ]] && ! release_wait_http "$live_web_url" /api/health "$TAG" sha; then promoted_ok=false; fi
       if [[ "$promoted_ok" == true ]] && ! release_wait_http "$live_web_url" /api/ready true ready; then promoted_ok=false; fi
-      if [[ "$promoted_ok" == true ]] && ! release_wait_http "$live_web_url" /api/release-probe true ready; then promoted_ok=false; fi
-      if [[ "$promoted_ok" == true ]] && ! release_wait_http "$live_web_url" /api/release-probe "$web_writes_paused" writesPaused; then promoted_ok=false; fi
+      local canonical_probe=/api/release-probe
+      if [[ "$staged_api3_bootstrap" == true ]]; then canonical_probe='/api/release-probe?peer=canonical'; fi
+      if [[ "$promoted_ok" == true ]] && ! release_wait_http "$live_web_url" "$canonical_probe" true ready; then promoted_ok=false; fi
+      if [[ "$promoted_ok" == true ]] && ! release_wait_http "$live_web_url" "$canonical_probe" "$web_writes_paused" writesPaused; then promoted_ok=false; fi
       if [[ "$promoted_ok" == true && "$web_writes_paused" == true ]]; then
         if [[ "$basic_editor_forward_only" == true ]] &&
            ! release_accept_basic_web_agent_ready "$TAG" "$manifest_path" "$manifest_sha" "$staging_tag"; then

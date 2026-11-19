@@ -47,7 +47,11 @@ function evaluate(expression: string, values: Record<string, unknown>, success =
     JSON.stringify(values[m] ?? ''),
   );
   text = text.replace(/\balways\(\)/g, 'true').replace(/\bsuccess\(\)/g, String(success));
-  if (/[^\s()=!&|]/.test(text.replace(/"(?:[^"\\]|\\.)*"/g, '').replace(/\b(?:true|false)\b/g, '')))
+  if (
+    /[^\s()=!&|]/.test(
+      text.replace(/"(?:[^"\\]|\\.)*"/g, '').replace(/\b(?:true|false|[0-9]+)\b/g, ''),
+    )
+  )
     throw new Error('Unsupported expression');
   // Trusted source expression with every context value replaced by a JSON literal.
   return Boolean(Function(`"use strict";return (${text})`)());
@@ -137,6 +141,7 @@ describe('default-off workflow isolation for the read-only qualification', () =>
       'github.event_name': 'workflow_run',
       'inputs.native_web_qualification': '',
       'github.event.workflow_run.conclusion': 'success',
+      'github.event.workflow_run.run_attempt': 1,
       'github.event.workflow_run.event': 'push',
       'github.event.workflow_run.head_repository.full_name': 'bmson/assistant',
       'github.repository': 'bmson/assistant',
@@ -144,6 +149,19 @@ describe('default-off workflow isolation for the read-only qualification', () =>
     });
     expect(evaluate(condition('plan'), values)).toBe(true);
     expect(evaluate(condition('native_web_qualification'), values)).toBe(false);
+  });
+  it('refuses a successful CI rerun even when only another job was rerun', () => {
+    const values = context({
+      'github.event_name': 'workflow_run',
+      'inputs.native_web_qualification': '',
+      'github.event.workflow_run.conclusion': 'success',
+      'github.event.workflow_run.run_attempt': 2,
+      'github.event.workflow_run.event': 'push',
+      'github.event.workflow_run.head_repository.full_name': 'bmson/assistant',
+      'github.repository': 'bmson/assistant',
+      'github.event.workflow_run.head_branch': 'main',
+    });
+    expect(evaluate(condition('plan'), values)).toBe(false);
   });
   it('allows only source setup, the probe, and one fixed redacted report upload in the qualifier job', () => {
     const job = jobs.get('native_web_qualification') ?? '';
@@ -187,6 +205,9 @@ describe('same-workflow recovery build isolation', () => {
     expect(image).toContain('registryManifestDigest:$digest');
     expect(image).toContain('sbomSha256:$sbomSha256');
     expect(image).toContain('ref="${IMAGE_ROOT}/${IMAGE_NAME}@${digest}"');
+    expect(image).toMatch(
+      /name: Install Cosign\n\s+uses: sigstore\/cosign-installer@[^\n]+\n\s+with:\n\s+cosign-release: v3\.1\.3/,
+    );
     expect(image).toContain(
       'cosign sign --yes --bundle "sbom/${IMAGE_NAME}-signature.sigstore.json" "$ref"',
     );

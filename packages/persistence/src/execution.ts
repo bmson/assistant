@@ -30,6 +30,7 @@ import type { ExecutionEvidenceRepository } from './execution-evidence.js';
 import type { ExecutionJobRepository } from './execution-jobs.js';
 import type { GeneratedCardRepository } from './generated-cards.js';
 import type { GoalRuntimeRepository } from './goals.js';
+import type { GoogleCalendarConnectionRepository } from './google-calendar-connection.js';
 import type { GraphCuriosityRepository } from './graph-curiosity.js';
 import type { GraphDateBackfillRepository } from './graph-date-backfill.js';
 import type { GraphRecallRepository } from './graph-recall.js';
@@ -73,6 +74,7 @@ import type { WatchRepository } from './watches.js';
 /** One store supplies every migrated executor operation. Remaining domain ports are separate. */
 export interface ExecutionPersistence {
   readonly driver: 'postgres' | 'firestore';
+  readonly googleCalendarConnection?: GoogleCalendarConnectionRepository;
   readonly tasks: TaskRepository;
   readonly costs: CostRepository;
   readonly messages: MessageRepository;

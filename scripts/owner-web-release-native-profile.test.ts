@@ -1,5 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { estimatedCostReleaseEnvironment } from '../infra/gcp/estimated-cost-release-config.mjs';
+import { syntheticImage } from './fixtures/owner-image-resolution.synthetic.js';
+import { registerImageResolution } from './owner-release-image-resolution.js';
 import {
   type Context,
   captureLifecycle,
@@ -99,6 +102,117 @@ function project(service: Obj, revision: Obj, context: Context) {
 }
 
 describe('sanitized native current web profile compatibility', () => {
+  it.each(['P', 'R'] as const)('pins MCP sign-in off for disabled API 3 web %s', (role) => {
+    const service = clone(fixture.service);
+    const context = contextFor(service);
+    context.releaseEnv.ASSISTANT_RELEASE_API_CONTRACT = '3';
+    context.releaseEnv.MCP_OAUTH_ENABLED = 'false';
+    service.template.containers[0].env.push({ name: 'MCP_OAUTH_ENABLED', value: 'true' });
+    const planned = creationTemplate(service.template, context, role) as Obj;
+    expect(
+      planned.containers[0].env.filter((value: Obj) => value.name === 'MCP_OAUTH_ENABLED'),
+    ).toEqual([{ name: 'MCP_OAUTH_ENABLED', value: 'false' }]);
+    context.releaseEnv.MCP_OAUTH_ENABLED = 'true';
+    expect(() => creationTemplate(service.template, context, role)).toThrow();
+  });
+  it.each(['P', 'R'] as const)(
+    'binds the cost manifest to the actual provider version for %s',
+    (role) => {
+      const service = clone(fixture.service),
+        revision = clone(fixture.revision);
+      for (const container of [service.template.containers[0], revision.containers[0]]) {
+        container.env.push(
+          { name: 'GCP_PROJECT', value: 'bmson-assistant' },
+          { name: 'ASSISTANT_WORKSPACE_ID', value: 'synthetic-cost-installation' },
+          { name: 'FIRESTORE_AGENT_ID', value: 'synthetic-owner' },
+          {
+            name: 'OPENROUTER_API_KEY',
+            valueSource: { secretKeyRef: { secret: 'existing-openrouter', version: 'latest' } },
+          },
+        );
+      }
+      const context = contextFor(service, revision);
+      context.estimatedCost = {
+        format: 1,
+        mode: 'enable',
+        source: context.source,
+        projectId: 'bmson-assistant',
+        installationId: 'synthetic-cost-installation',
+        ownerId: 'synthetic-owner',
+        providerSecret: 'existing-openrouter',
+        providerVersion: '31',
+        reviewedAt: '2026-11-18T09:00:00.000Z',
+        expiresAt: '2026-11-18T09:30:00.000Z',
+        baselineReceiptSha256: 'b'.repeat(64),
+        writersReceiptSha256: 'c'.repeat(64),
+        drainReceiptSha256: 'd'.repeat(64),
+      };
+      Object.assign(context.releaseEnv, estimatedCostReleaseEnvironment(context.estimatedCost));
+      const before = project(service, revision, context),
+        oldTemplate = clone(before.template),
+        planned = creationTemplate(before.template, context, role) as Obj,
+        candidate = releaseIdentity(context, role),
+        next = clone(service),
+        candidateRevision = clone(revision);
+      expect(before.template).toEqual(oldTemplate);
+      const pinned = planned.containers[0].env.find(
+        (entry: Obj) => entry.name === 'OPENROUTER_API_KEY',
+      );
+      expect(pinned.valueSource.secretKeyRef).toEqual({
+        secret: 'existing-openrouter',
+        version: '31',
+      });
+      candidateRevision.name = `${WEB_SERVICE}/revisions/${candidate.revision}`;
+      candidateRevision.service = 'assistant-web';
+      for (const key of TEMPLATE_FIELDS)
+        if (key !== 'revision' && planned[key] !== undefined)
+          candidateRevision[key] = clone(planned[key]);
+      next.latestReadyRevision = next.latestCreatedRevision = candidate.revision;
+      next.template = clone(planned);
+      next.traffic[0].revision =
+        next.trafficStatuses[0].revision = `${WEB_SERVICE}/revisions/${candidate.revision}`;
+      const revisions = { [canonical]: revision, [candidate.revision]: candidateRevision };
+      expect(
+        projectNativeWebSnapshot(next, revisions, context).revisions[candidate.revision]
+          ?.templateSha256,
+      ).toBe(digest(planned));
+      pinned.valueSource.secretKeyRef.version = 'latest';
+      candidateRevision.containers = clone(planned.containers);
+      expect(() => projectNativeWebSnapshot(next, revisions, context)).toThrow();
+      pinned.valueSource.secretKeyRef.version = '31';
+      candidateRevision.containers = clone(planned.containers);
+      candidateRevision.containers[0].env.find(
+        (entry: Obj) => entry.name === 'ESTIMATED_COST_APPROVAL_ENABLED',
+      ).value = 'false';
+      expect(() => projectNativeWebSnapshot(next, revisions, context)).toThrow();
+    },
+  );
+
+  it('projects an index parent with raw child hashes and rejects unrelated drift', () => {
+    const { service, revision, context } = prepareCurrentProfile();
+    const image = syntheticImage('web', 'current-profile');
+    service.template.containers[0].image = image.image;
+    revision.containers[0].image = image.childImage;
+    revision.containerStatuses = image.revision.containerStatuses;
+    const expectedTemplate = revisionTemplate(revision, canonical);
+    expectedTemplate.containers = [{ ...revision.containers[0], image: image.image }];
+    const binding = context.currentBinding;
+    if (!binding) throw new Error('Fixture current binding missing');
+    binding.proof.image = image.image;
+    binding.proof.templateSha256 = digest(expectedTemplate);
+    binding.serviceSha256 = digest(service);
+    binding.revisionSha256 = digest(revision);
+    const before = JSON.stringify({ service, revision });
+    expect(() => project(service, revision, context)).toThrow();
+    registerImageResolution(image.image, image.parentBytes, image.childBytes);
+    const snapshot = project(service, revision, context);
+    expect(snapshot.revisions[canonical]?.image).toBe(image.image);
+    expect(snapshot.revisions[canonical]?.templateSha256).toBe(digest(expectedTemplate));
+    expect(snapshot.template).toEqual(expectedTemplate);
+    expect(JSON.stringify({ service, revision })).toBe(before);
+    expect(() => project(service, { ...revision, timeout: '1s' }, context)).toThrow();
+    expect(() => project(service, { ...revision, containerStatuses: [] }, context)).toThrow();
+  });
   it('labels fixture as synthetic and retains the two source URL hashes in response order', () => {
     expect(fixture.fixtureKind).toBe('SYNTHETIC_SANITIZED_NATIVE_PROFILE_SHAPE_ONLY');
     expect(fixture.sourceCaptureMetadata.sourceUrlsSha256InResponseOrder).toEqual([
@@ -108,6 +222,21 @@ describe('sanitized native current web profile compatibility', () => {
     expect(fixture.service.urls).toEqual([canonicalUrl, serviceRootUrl]);
     expect(fixture.revision.service).toBe('assistant-web');
     expect(fixture.revision.name).toBe(`${WEB_SERVICE}/revisions/${canonical}`);
+  });
+
+  it('keeps native projection stable across sshEnabled absent/false and rejects true drift', () => {
+    const { service, revision, context } = prepareCurrentProfile();
+    const before = JSON.stringify(service);
+    const absent = { ...service };
+    delete absent.sshEnabled;
+    const explicit = { ...absent, sshEnabled: false };
+    expect(project(absent, revision, context)).toEqual(project(explicit, revision, context));
+    expect(JSON.stringify(service)).toBe(before);
+    expect(project({ ...absent, sshEnabled: true }, revision, context).stableConfigSha256).not.toBe(
+      project(absent, revision, context).stableConfigSha256,
+    );
+    for (const value of [null, 0, 'false'])
+      expect(() => project({ ...absent, sshEnabled: value }, revision, context)).toThrow('held');
   });
 
   it('projects and captures the reviewed current service URLs and defaulted container name', () => {
@@ -376,8 +505,10 @@ describe('sanitized native current web profile compatibility', () => {
   it.each(['P', 'R'] as const)(
     'rejects provider-default container-name normalization for new %s service revisions',
     (role) => {
-      const { service, revision, context } = prepareCurrentProfile(),
-        current = project(service, revision, context),
+      const { service, revision, context } = prepareCurrentProfile();
+      context.releaseEnv.GOOGLE_CALENDAR_OAUTH_CALLBACK_URL =
+        'https://bot.bmson.com/api/oauth/google-calendar/callback';
+      const current = project(service, revision, context),
         planned = creationTemplate(current.template, context, role),
         candidate = releaseIdentity(context, role),
         next = clone(service),
@@ -400,6 +531,23 @@ describe('sanitized native current web profile compatibility', () => {
       const native = { [canonical]: revision, [candidate.revision]: candidateRevision };
       const valid = projectNativeWebSnapshot(clone(next), native, context);
       expect(valid.revisions[candidate.revision]?.templateSha256).toBe(digest(planned));
+
+      const candidateEnv = candidateRevision.containers[0].env;
+      candidateRevision.containers[0].env = candidateEnv.filter(
+        (entry: Obj) => entry.name !== 'GOOGLE_CALENDAR_OAUTH_CALLBACK_URL',
+      );
+      expect(() => projectNativeWebSnapshot(next, native, context)).toThrow(
+        'Native release validation held',
+      );
+      candidateRevision.containers[0].env = candidateEnv.map((entry: Obj) =>
+        entry.name === 'GOOGLE_CALENDAR_OAUTH_CALLBACK_URL'
+          ? { ...entry, value: 'https://other.example.com/api/oauth/google-calendar/callback' }
+          : entry,
+      );
+      expect(() => projectNativeWebSnapshot(next, native, context)).toThrow(
+        'Native release validation held',
+      );
+      candidateRevision.containers[0].env = candidateEnv;
 
       delete next.template.containers[0].name;
       expect(() => projectNativeWebSnapshot(next, native, context)).toThrow(

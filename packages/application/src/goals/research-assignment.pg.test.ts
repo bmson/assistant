@@ -1,6 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { getAgent } from '@assistant/core/chat';
-import { agents, createDb, goals, schedules, tasks } from '@assistant/db';
+import {
+  agents,
+  createDb,
+  createPostgresResearchAssignmentRepository,
+  goals,
+  schedules,
+  tasks,
+} from '@assistant/db';
 import { assertAllocatedTestTarget } from '@assistant/db/test-target';
 import { createResearchAssignment } from '@assistant/persistence';
 import { count, eq } from 'drizzle-orm';
@@ -37,7 +44,8 @@ describe('PostgreSQL research-only assignment lifecycle', () => {
     let foreignAgentId: string | null = null;
     let foreignGoalId: string | null = null;
     try {
-      const created = await createResearchAssignmentRecord(db, {
+      const repository = createPostgresResearchAssignmentRepository(db, (await getAgent(db)).id);
+      const created = await createResearchAssignmentRecord(repository, {
         outcome: 'Synthetic gardening gift research',
         recipientName: 'Synthetic recipient',
         interests: ['gardening'],
@@ -98,7 +106,7 @@ describe('PostgreSQL research-only assignment lifecycle', () => {
         researchAssignment: foreignAssignment,
       });
       await expect(
-        editResearchAssignmentRecord(db, foreignGoalId, { outcome: 'Unauthorized change' }),
+        editResearchAssignmentRecord(repository, foreignGoalId, { outcome: 'Unauthorized change' }),
       ).rejects.toThrow('Research assignment not found');
       const [foreignReadback] = await db
         .select({ researchAssignment: goals.researchAssignment })
@@ -124,41 +132,47 @@ describe('PostgreSQL research-only assignment lifecycle', () => {
           },
         ],
       };
-      await recordResearchAssignmentOptionsRecord(db, goalId, resultInput);
+      await recordResearchAssignmentOptionsRecord(repository, goalId, resultInput);
       const secondSameBrief = {
         ...resultInput,
         expectedResultRevision: 1,
       };
-      await recordResearchAssignmentOptionsRecord(db, goalId, secondSameBrief);
-      await editResearchAssignmentRecord(db, goalId, { outcome: 'Updated synthetic research' });
-      await editResearchAssignmentRecord(db, goalId, { exclusions: ['synthetic exclusion'] });
-      await expect(recordResearchAssignmentOptionsRecord(db, goalId, resultInput)).rejects.toThrow(
-        'brief changed',
-      );
+      await recordResearchAssignmentOptionsRecord(repository, goalId, secondSameBrief);
+      await editResearchAssignmentRecord(repository, goalId, {
+        outcome: 'Updated synthetic research',
+      });
+      await editResearchAssignmentRecord(repository, goalId, {
+        exclusions: ['synthetic exclusion'],
+      });
+      await expect(
+        recordResearchAssignmentOptionsRecord(repository, goalId, resultInput),
+      ).rejects.toThrow('brief changed');
       const currentResultInput = {
         ...resultInput,
         expectedBriefRevision: 3,
         expectedResultRevision: 2,
       };
-      await recordResearchAssignmentOptionsRecord(db, goalId, currentResultInput);
+      await recordResearchAssignmentOptionsRecord(repository, goalId, currentResultInput);
       await expect(
-        recordResearchAssignmentOptionsRecord(db, goalId, currentResultInput),
+        recordResearchAssignmentOptionsRecord(repository, goalId, currentResultInput),
       ).rejects.toThrow('result changed');
 
-      const acceptanceAssignment = await createResearchAssignmentRecord(db, {
+      const acceptanceAssignment = await createResearchAssignmentRecord(repository, {
         outcome: 'Synthetic acceptance counter research',
         completionCondition: 'Owner accepts the shortlist',
         now,
       });
       acceptanceGoalId = acceptanceAssignment.goalId;
-      await editResearchAssignmentRecord(db, acceptanceGoalId, { outcome: 'Edited once' });
-      await editResearchAssignmentRecord(db, acceptanceGoalId, { exclusions: ['synthetic'] });
-      await recordResearchAssignmentOptionsRecord(db, acceptanceGoalId, {
+      await editResearchAssignmentRecord(repository, acceptanceGoalId, { outcome: 'Edited once' });
+      await editResearchAssignmentRecord(repository, acceptanceGoalId, {
+        exclusions: ['synthetic'],
+      });
+      await recordResearchAssignmentOptionsRecord(repository, acceptanceGoalId, {
         expectedBriefRevision: 3,
         expectedResultRevision: null,
         options: resultInput.options,
       });
-      await acceptResearchAssignmentShortlist(db, acceptanceGoalId, 1);
+      await acceptResearchAssignmentShortlist(repository, acceptanceGoalId, 1);
       const [acceptedReadback] = await db
         .select({ researchAssignment: goals.researchAssignment })
         .from(goals)
@@ -187,7 +201,11 @@ describe('PostgreSQL research-only assignment lifecycle', () => {
         ),
       ).toBe(0);
 
-      await reopenResearchAssignmentRecord(db, goalId, new Date('2026-11-07T18:00:00.000Z'));
+      await reopenResearchAssignmentRecord(
+        repository,
+        goalId,
+        new Date('2026-11-07T18:00:00.000Z'),
+      );
       const [reopened] = await db
         .select({ assignment: goals.researchAssignment })
         .from(goals)

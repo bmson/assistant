@@ -1835,6 +1835,18 @@ function calendarOverlapSummary(
       start: stringField(event, 'start'),
       end: stringField(event, 'end'),
       calendar: stringField(event, 'calendar'),
+      ...(stringField(event, 'calendarTimeZone')
+        ? { calendarTimeZone: stringField(event, 'calendarTimeZone') }
+        : {}),
+      ...(stringField(event, 'organizer') ? { organizer: stringField(event, 'organizer') } : {}),
+      ...(Array.isArray(event.attendees)
+        ? {
+            attendees: event.attendees.filter(
+              (value): value is string => typeof value === 'string',
+            ),
+          }
+        : {}),
+      ...(Array.isArray(event.links) ? { links: event.links } : {}),
       allDay: event.allDay === true,
       ...(stringField(event, 'eventId') ? { eventId: stringField(event, 'eventId') } : {}),
       ...(stringField(event, 'calendarId') ? { calendarId: stringField(event, 'calendarId') } : {}),
@@ -1974,11 +1986,11 @@ function calendarOverlapSummary(
         }
         continue;
       }
-      const relationship = calendarRelationship(left.projected, right.projected);
+      const relationship = calendarRelationship(left.projected, right.projected, zone);
       // Arrival/start records can be one event. Similar phone listings are
       // reported as uncertain copies, never as personal conflicts.
       if (relationship === 'compatible_time_roles') continue;
-      if (relationship === 'probable_duplicate') {
+      if (relationship === 'probable_duplicate' || relationship === 'possible_duplicate') {
         overlapPairCount += 1;
         unconfirmedAttendanceCount += 1;
         if (formattedDetails < MAX_FORMATTED_OVERLAP_DETAILS) {
@@ -1990,7 +2002,7 @@ function calendarOverlapSummary(
             ? `${shortDate(new Date(start).toISOString(), zone)} ${request.compactCalendarBriefing ? compactClock(start, zone) : overlapClock(start, zone)}–${request.compactCalendarBriefing ? compactClock(end, zone) : overlapClock(end, zone)}`
             : `${intervalDateTime(new Date(start).toISOString(), zone)} – ${intervalDateTime(new Date(end).toISOString(), zone)}`;
           notes.push(
-            `- Possible copies **${overlapLabel}**: ${left.projected.calendar || 'Calendar'} · ${left.projected.summary} + ${right.projected.calendar || 'Calendar'} · ${right.projected.summary}. Both entries stay visible; check the invitations to confirm.`,
+            `- ${relationship === 'possible_duplicate' ? 'Possibly the same event' : 'Possible copies'} **${overlapLabel}**: ${left.projected.calendar || 'Calendar'} · ${left.projected.summary} + ${right.projected.calendar || 'Calendar'} · ${right.projected.summary}. Both entries stay visible; check the invitations to confirm before treating this as a scheduling conflict.`,
           );
         }
         continue;

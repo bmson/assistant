@@ -38,6 +38,18 @@ on:
         default: "off"
         type: choice
         options: ["off", read_only]
+      google_calendar_oauth_callback_url:
+        description: Optional personal Calendar OAuth callback (HTTPS, /api/oauth/google-calendar/callback); empty preserves existing configuration
+        required: false
+        type: string
+      estimated_cost_release_profile:
+        description: Reviewed nonsecret paired spending-approval profile; numeric existing secret version and exact-source proof bindings
+        required: false
+        type: string
+      estimated_cost_drain_packet:
+        description: Reviewed small native writer/drain packet for spending-approval activation; empty for compatible OFF
+        required: false
+        type: string
       bootstrap_snapshot:
         description: Reviewed current disabled snapshot and prior closure/drain/recovery bindings (default off)
         required: false
@@ -115,6 +127,7 @@ jobs:
       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
        (inputs.native_web_qualification == '' || inputs.native_web_qualification == 'off')) ||
       (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.run_attempt == 1 &&
        github.event.workflow_run.event == 'push' &&
        github.event.workflow_run.head_repository.full_name == github.repository &&
        github.event.workflow_run.head_branch == 'main')
@@ -159,6 +172,8 @@ jobs:
           BREAK_GLASS: ${{ inputs.break_glass }}
           BOOTSTRAP_SNAPSHOT: ${{ inputs.bootstrap_snapshot }}
           BOOTSTRAP_SNAPSHOT_SHA256: ${{ inputs.bootstrap_snapshot_sha256 }}
+          ESTIMATED_COST_RELEASE_PROFILE_JSON: ${{ inputs.estimated_cost_release_profile }}
+          ESTIMATED_COST_DRAIN_PACKET_JSON: ${{ inputs.estimated_cost_drain_packet }}
         run: bash infra/gcp/verify-build-only-context.sh
       # Manual releases use the same exact-source gate as automatic releases.
       # The explicit, audited break-glass input is only for a deliberate
@@ -384,7 +399,9 @@ jobs:
             '{format:1,image:$image,registryManifestDigest:$digest,source:$source,localImageId:$localImageId,sbomSha256:$sbomSha256,workflowRef:$workflowRef,workflowSha:$workflowSha,runId:$runId,runAttempt:$runAttempt}' \
             > "sbom/${IMAGE_NAME}-build-receipt.json"
       - name: Install Cosign
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: v3.1.3
       - name: Sign the image and attach its SBOM attestation
         run: |
           IMAGE_ROOT="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT}/${ARTIFACT_REPOSITORY}"
@@ -428,6 +445,9 @@ jobs:
       CURRENT_ONLY_CLEANUP: ${{ vars.CURRENT_ONLY_CLEANUP }}
       OWNER_RELEASE_BOOTSTRAP_RECEIPT: ${{ inputs.bootstrap_snapshot }}
       OWNER_RELEASE_BOOTSTRAP_SHA256: ${{ inputs.bootstrap_snapshot_sha256 }}
+      GOOGLE_CALENDAR_OAUTH_CALLBACK_URL: ${{ inputs.google_calendar_oauth_callback_url }}
+      ESTIMATED_COST_RELEASE_PROFILE_JSON: ${{ inputs.estimated_cost_release_profile }}
+      ESTIMATED_COST_DRAIN_PACKET_JSON: ${{ inputs.estimated_cost_drain_packet }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -458,6 +478,11 @@ jobs:
           REPO="$ARTIFACT_REPOSITORY"
           TAG="$IMAGE_TAG"
           release_validate_basic_editor_preflight_context "$RELEASE_COMPONENTS" "$TAG"
+          node infra/gcp/google-calendar-release-config.mjs
+          if [[ -n "${GOOGLE_CALENDAR_OAUTH_CALLBACK_URL:-}" && "$RELEASE_COMPONENTS" != agent,web ]]; then
+            echo 'Personal Calendar configuration requires a paired agent,web release.' >&2
+            exit 2
+          fi
       - run: pnpm install --frozen-lockfile
       - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
@@ -530,6 +555,20 @@ jobs:
           path: owner-editor-release-inventory.json
           if-no-files-found: ignore
           retention-days: 14
+      - name: Install the fixed signature verifier for the reviewed spending profile
+        if: inputs.estimated_cost_release_profile != ''
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: v3.1.3
+          install-dir: ${{ runner.temp }}/estimated-cost-cosign
+      - name: Verify actual spending profile prerequisites before delivery guard mutations
+        if: inputs.estimated_cost_release_profile != '' || steps.release_path.outputs.basic5 == 'true'
+        env:
+          IMAGE_TAG: ${{ needs.plan.outputs.sha }}
+          RELEASE_COMPONENTS: ${{ needs.plan.outputs.components }}
+          GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          GCP_DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+        run: pnpm exec tsx scripts/estimated-cost-release-preflight.ts
       - name: Stage existing GitHub read capability for exact creation proof only
         if: steps.release_path.outputs.firestore_pair == 'true'
         env:
@@ -543,6 +582,14 @@ jobs:
         env:
           OWNER_TAG_RELEASE_SOURCE: ${{ needs.plan.outputs.sha }}
         run: pnpm exec tsx scripts/owner-web-release-operator-hold.ts --wait
+      - name: Check live Firestore pair compatibility before delivery guard mutations
+        if: steps.release_path.outputs.firestore_pair == 'true'
+        env:
+          IMAGE_TAG: ${{ needs.plan.outputs.sha }}
+          RELEASE_COMPONENTS: ${{ needs.plan.outputs.components }}
+          GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          GCP_DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+        run: bash infra/gcp/release-firestore.sh --compatibility-check-only
       - name: Release Firestore pair with delivery guard
         if: steps.release_path.outputs.firestore_pair == 'true'
         env:
@@ -630,6 +677,18 @@ jobs:
           path: ${{ runner.temp }}/owner-web-tag-barrier.json
           if-no-files-found: ignore
           retention-days: 90
+      - name: Archive bounded disabled-bootstrap agent successor evidence
+        if: always() && steps.release_path.outputs.firestore_pair == 'true'
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        with:
+          name: owner-bootstrap-agent-successor-${{ needs.plan.outputs.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/owner-bootstrap-agent-paused-peer.json
+            ${{ runner.temp }}/owner-bootstrap-agent-successor-attempted.json
+            ${{ runner.temp }}/owner-bootstrap-agent-successor-unknown.json
+            ${{ runner.temp }}/owner-bootstrap-agent-successor-observed_exact_successor.json
+          if-no-files-found: ignore
+          retention-days: 14
       - name: Keep only the current deployment
         if: vars.CURRENT_ONLY_CLEANUP == 'true'
         run: >-

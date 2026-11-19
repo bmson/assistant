@@ -48,7 +48,13 @@ export interface ReserveCostInput {
 
 export type ReserveOutcome =
   | { ok: true; reservationId: string }
-  | { ok: false; reason: string; resumeAt: Date };
+  | {
+      ok: false;
+      reason: string;
+      resumeAt: Date;
+      /** Present only for an actual configured budget ceiling, not a replay or storage error. */
+      budget?: { scope: 'daily' | 'monthly' | 'task'; nextAttemptMicros: number };
+    };
 
 export interface ReservationActual {
   evidence?: CostEvidence;
@@ -78,6 +84,16 @@ export interface CostRepository {
   reserve(input: ReserveCostInput): Promise<ReserveOutcome>;
   /** Durably mark the one provider dispatch before network work begins. False means already dispatched/closed. */
   beginAttempt(reservationId: string, metadata: CostAttemptMetadata): Promise<boolean>;
+  /** Server-only grant primitives; each implementation independently checks durable authority. */
+  drawEstimatedCostGrant?(
+    input: import('./estimated-cost-approval.js').EstimatedCostGrantDraw,
+  ): Promise<import('./estimated-cost-approval.js').EstimatedCostGrantDrawResult>;
+  beginEstimatedCostGrantAttempt?(
+    input: import('./estimated-cost-approval.js').EstimatedCostGrantAttempt,
+  ): Promise<boolean>;
+  parkEstimatedCostGrantRenewal?(
+    input: import('./estimated-cost-approval.js').EstimatedCostGrantRenewal,
+  ): Promise<boolean>;
   /** Keep the estimate as a held liability when a paid result or metering is uncertain. */
   markAttemptUnknown(
     reservationId: string,

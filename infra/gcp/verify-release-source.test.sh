@@ -15,19 +15,31 @@ MOCK_GH
 chmod +x "$tmp/gh"
 
 cat >"$tmp/passed.json" <<JSON
-{"workflow_runs":[{"head_sha":"$sha","head_branch":"main","event":"push","conclusion":"success"}]}
+{"workflow_runs":[{"head_sha":"$sha","head_branch":"main","event":"push","run_attempt":1,"conclusion":"success"}]}
 JSON
 PATH="$tmp:$PATH" RELEASE_SHA="$sha" GITHUB_REPOSITORY=test/assistant GH_TOKEN=test \
   MOCK_RUNS="$tmp/passed.json" bash "$ROOT/verify-release-source.sh" >/dev/null
 
 cat >"$tmp/wrong-source.json" <<JSON
-{"workflow_runs":[{"head_sha":"$sha","head_branch":"feature","event":"push","conclusion":"success"}]}
+{"workflow_runs":[{"head_sha":"$sha","head_branch":"feature","event":"push","run_attempt":1,"conclusion":"success"}]}
 JSON
 if PATH="$tmp:$PATH" RELEASE_SHA="$sha" GITHUB_REPOSITORY=test/assistant GH_TOKEN=test \
   MOCK_RUNS="$tmp/wrong-source.json" bash "$ROOT/verify-release-source.sh" >/dev/null 2>&1; then
   echo "non-main CI must not authorize a manual release" >&2
   exit 1
 fi
+
+# A successful rerun can have skipped BASIC5, regardless of which job was rerun.
+for attempt in 2 null; do
+  cat >"$tmp/unqualified.json" <<JSON
+{"workflow_runs":[{"head_sha":"$sha","head_branch":"main","event":"push","run_attempt":$attempt,"conclusion":"success"}]}
+JSON
+  if PATH="$tmp:$PATH" RELEASE_SHA="$sha" GITHUB_REPOSITORY=test/assistant GH_TOKEN=test \
+    MOCK_RUNS="$tmp/unqualified.json" bash "$ROOT/verify-release-source.sh" >/dev/null 2>&1; then
+    echo "rerun or missing attempt metadata must not authorize a manual release" >&2
+    exit 1
+  fi
+done
 
 if RELEASE_SHA="$sha" GITHUB_REPOSITORY=test/assistant BREAK_GLASS=true \
   bash "$ROOT/verify-release-source.sh" >/dev/null 2>&1; then

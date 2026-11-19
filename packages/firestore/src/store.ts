@@ -1,5 +1,9 @@
 import { Buffer } from 'node:buffer';
 import {
+  type EstimatedCostRuntimeProviderSource,
+  validateEstimatedCostRuntimeProviderSource,
+} from '@assistant/persistence';
+import {
   type CollectionReference,
   type DocumentData,
   type DocumentReference,
@@ -144,7 +148,17 @@ export class InstallationStore {
     readonly now: () => Date = () => new Date(),
     readonly projectId?: string,
     readonly databaseId = '(default)',
+    readonly estimatedCostProviderSource?: Readonly<EstimatedCostRuntimeProviderSource>,
   ) {
+    if (estimatedCostProviderSource) {
+      validateEstimatedCostRuntimeProviderSource(estimatedCostProviderSource);
+      if (
+        estimatedCostProviderSource.installationId !== installationId ||
+        estimatedCostProviderSource.projectId !== projectId
+      )
+        throw new Error('Estimated cost provider source scope mismatch');
+      this.estimatedCostProviderSource = Object.freeze({ ...estimatedCostProviderSource });
+    }
     this.root = db.collection('installations').doc(documentKey(installationId));
     retryEmulatorTransactions(db);
   }
@@ -165,6 +179,8 @@ export function createInstallationStore(input: {
   databaseId?: string;
   /** Optional operator auth client, forwarded through Firestore's GAPIC settings. */
   authClient?: AuthClient;
+  /** Only deployment-qualified, nonsecret provider provenance from trusted composition. */
+  estimatedCostProviderSource?: EstimatedCostRuntimeProviderSource;
 }): InstallationStore {
   if (!input.projectId) throw new Error('Firestore requires a project ID');
   const settings = {
@@ -178,5 +194,6 @@ export function createInstallationStore(input: {
     undefined,
     input.projectId,
     input.databaseId ?? '(default)',
+    input.estimatedCostProviderSource,
   );
 }

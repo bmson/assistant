@@ -103,10 +103,7 @@ export class FirestoreResearchAssignmentRepository {
     );
   }
 
-  async recordOptions(
-    goalId: string,
-    input: ResearchAssignmentOptionsSubmission,
-  ) {
+  async recordOptions(goalId: string, input: ResearchAssignmentOptionsSubmission) {
     return this.mutate(goalId, (assignment, now) =>
       recordResearchAssignmentOptions(assignment, input, now),
     );

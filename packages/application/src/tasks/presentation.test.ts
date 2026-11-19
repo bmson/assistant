@@ -99,4 +99,56 @@ describe('owner-facing Activity progress', () => {
       expect(projection).not.toHaveProperty('conversationId');
     }
   });
+  it('includes a parked spending operation in the default activity list without checkpoint contents', async () => {
+    const task = {
+      id: 'task',
+      agentId: 'owner',
+      conversationId: null,
+      externalEventId: null,
+      type: 'chat_turn',
+      status: 'waiting_estimated_cost',
+      title: 'Request',
+      progress: '',
+      trust: 'owner',
+      spentUsd: '0',
+      budgetUsdLimit: '1',
+      updatedAt: new Date(),
+      archivedAt: null,
+      autonomyGrant: null,
+      trigger: {},
+      state: {
+        privateDraft: 'private-data',
+        estimatedCostApproval: {
+          operationId: 'op-123',
+          status: 'pending',
+          bindingDigest: 'private-binding',
+        },
+      },
+    } satisfies ActivityTaskRecord;
+    let requestedStatuses: string[] | undefined;
+    const repository: TaskActivityRepository = {
+      kind: 'task-activity-repository',
+      async getStatus() {
+        return { task, hasPendingApproval: false };
+      },
+      async list(_owner, input) {
+        requestedStatuses = input.statuses;
+        return { tasks: [task], archivedCount: 0, pendingApprovalTaskIds: [] };
+      },
+    };
+    const result = await listActivityWithRepository(repository, 'owner', {
+      archived: false,
+      filter: 'needs-you',
+    });
+    expect(requestedStatuses).toContain('waiting_estimated_cost');
+    expect(result.items[0]).toMatchObject({
+      status: 'waiting_estimated_cost',
+      estimatedCostOperationId: 'op-123',
+    });
+    expect(JSON.stringify(result)).not.toContain('private-data');
+    expect(JSON.stringify(result)).not.toContain('private-binding');
+    expect(await getActivityStatusWithRepository(repository, 'owner', 'task')).toMatchObject({
+      estimatedCostOperationId: 'op-123',
+    });
+  });
 });

@@ -9,6 +9,7 @@ import {
   deterministicMigrationCompare,
   embeddingSpaceIdentityKey,
   findCardForm,
+  googleCalendarConnectionAfterMigration,
   type MigrationBundle,
   type MigrationRecord,
   type MigrationTarget,
@@ -465,6 +466,10 @@ function materialize(
   const data = Object.fromEntries(
     Object.entries(record.data).map(([key, value]) => [key, deserializeMigrationValue(value)]),
   );
+  if (record.table === 'mcp_connections') delete data.oauthState;
+  if (record.table === 'google_calendar_connections') {
+    data.state = googleCalendarConnectionAfterMigration(data.state, String(data.agentId));
+  }
   const vector = record.data.embedding as { $assistantMigration?: unknown } | undefined;
   if (
     vector &&

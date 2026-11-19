@@ -22,7 +22,10 @@ export { FirestoreContactLookupRepository } from './contact-lookup.js';
 export { conversationDocument, repairConversationProjectionPage } from './conversation-document.js';
 export { FirestoreConversationSearchRepository } from './conversation-search.js';
 export { FirestoreConversationSegmentationRepository } from './conversation-segmentation.js';
-export { FirestoreCostRepository } from './costs.js';
+export {
+  createFirestoreEstimatedCostApprovalRepository,
+  FirestoreCostRepository,
+} from './costs.js';
 export { FirestoreDeviceTokenRepository } from './device-tokens.js';
 export { FirestoreDocumentCatalogRepository } from './document-catalog.js';
 export { FirestoreDocumentDeletionRepository } from './document-deletion.js';
@@ -34,6 +37,11 @@ export { FirestoreDreamRepository } from './dream.js';
 export { FirestoreEmailAttachmentCustodyRepository } from './email-attachment-custody.js';
 export { FirestoreEmailExtractionRepository } from './email-extraction.js';
 export { FirestoreEmailSyncRepository } from './email-sync.js';
+export * from './estimated-cost-baseline-provision.js';
+export {
+  createFirestoreEstimatedCostQuotePreparer,
+  createFirestoreEstimatedCostTurnParking,
+} from './estimated-cost-preparer.js';
 export { createFirestoreExecutionPersistence } from './execution.js';
 export { FirestoreExecutionContextRepository } from './execution-context.js';
 export { FirestoreExecutionEvidenceRepository } from './execution-evidence.js';
@@ -43,6 +51,7 @@ export { FirestoreGoalMutationRepository } from './goal-mutations.js';
 export { FirestoreGoalProgressRepository } from './goal-progress.js';
 export { FirestoreGoalRuntimeRepository } from './goal-runtime.js';
 export { FirestoreGoalReadRepository } from './goals.js';
+export * from './google-calendar-connections.js';
 export { FirestoreGraphCuriosityRepository } from './graph-curiosity.js';
 export { FirestoreGraphDateBackfillRepository } from './graph-date-backfill.js';
 export { FirestoreGraphRecallRepository } from './graph-recall.js';
@@ -66,6 +75,7 @@ export {
   FirestoreMcpConnectionMutationRepository,
   FirestoreMcpConnectionReadRepository,
 } from './mcp-connections.js';
+export * from './mcp-oauth-repository.js';
 export { embeddingSpaceKey, FirestoreMemoryRepository } from './memory.js';
 export { FirestoreMemoryConsolidationRepository } from './memory-consolidation.js';
 export { FirestoreMemoryEmbeddingRefreshRepository } from './memory-embedding-refresh.js';

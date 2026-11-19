@@ -26,12 +26,26 @@ struct RootView: View {
         }
 #if DEBUG
         .onConnectionGeometry(.rootAvailable)
+        .environment(\.dynamicTypeSize, localPendingReview && ProcessInfo.processInfo.environment["ASSISTANT_PENDING_SPENDING_LARGE_TEXT"] == "1" ? .accessibility3 : dynamicTypeSize)
+        .onChange(of: model.bootstrap?.identity.id, initial: true) { _, identity in
+            guard identity != nil, localPendingReview,
+                  let name = ProcessInfo.processInfo.environment["ASSISTANT_PENDING_SPENDING_REVIEW"],
+                  let route = AssistantRoute(rawValue: name), [.costs, .activity].contains(route) else { return }
+            model.present(route)
+        }
 #endif
         // Scoreboard cards anywhere below re-read live games through this.
         .environment(\.liveScoreboard) { [model] leagues in
             await model.liveScoreboard(leagues: leagues)
         }
     }
+
+#if DEBUG
+    private var localPendingReview: Bool {
+        URLComponents(string: model.serverURL)?.host == "127.0.0.1"
+            && ProcessInfo.processInfo.environment["ASSISTANT_PENDING_SPENDING_REVIEW"] != nil
+    }
+#endif
 
     private func rootContent(
         safeAreaTopInset: CGFloat,
@@ -85,6 +99,8 @@ struct RootView: View {
                                     PersonCardScreen(personId: id)
                                 case .peopleConnections:
                                     PeopleConnectionsScreen()
+                                case let .estimatedCostApproval(operationID):
+                                    EstimatedCostReviewScreen(operationID: operationID)
                                 }
                             }
                     }

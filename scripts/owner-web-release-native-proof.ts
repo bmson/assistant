@@ -1,4 +1,19 @@
-import { disabled, retiredCurrentCondition } from './owner-release-current-snapshot.js';
+import {
+  type EstimatedCostReleaseProfile,
+  estimatedCostReleaseEnvironment,
+  verifyEstimatedCostProvider,
+} from '../infra/gcp/estimated-cost-release-config.mjs';
+import { googleCalendarReleaseCallback } from '../infra/gcp/google-calendar-release-config.mjs';
+import {
+  disabled,
+  retiredCurrentCondition,
+  retiredCurrentRevisionCondition,
+} from './owner-release-current-snapshot.js';
+import { revisionWithRequestedImage } from './owner-release-image-resolution.js';
+import {
+  matchesNativeServiceDigest,
+  nativeServiceDefaults,
+} from './owner-release-native-service-defaults.js';
 /** Unwired raw-response projection. No IO, credentials or supplied-proof acceptance. */
 
 import {
@@ -66,23 +81,49 @@ function template(value: unknown): Obj {
   requireNative(Object.keys(t).every((k) => (TEMPLATE_FIELDS as readonly string[]).includes(k)));
   return t;
 }
-function environment(r: Obj): Record<string, string> {
+function environment(
+  r: Obj,
+  expectedCallback?: string,
+  estimatedCost?: EstimatedCostReleaseProfile,
+  requireMcpOff = false,
+): Record<string, string> {
   const containers = r.containers;
   requireNative(Array.isArray(containers) && containers.length === 1);
   const env = nativeObject(containers[0]).env;
   requireNative(Array.isArray(env) && env.length <= 256);
   const result: Record<string, string> = {},
     seen = new Set<string>();
+  if (estimatedCost) verifyEstimatedCostProvider(env, estimatedCost);
+  const budgetEnv = estimatedCost ? estimatedCostReleaseEnvironment(estimatedCost) : {};
   for (const e of env) {
     const entry = nativeObject(e),
       name = text(entry.name, /^[A-Za-z_][A-Za-z0-9_]{0,127}$/);
     requireNative(!seen.has(name));
     seen.add(name);
+    if (Object.hasOwn(budgetEnv, name)) {
+      requireNative(
+        Object.keys(entry).sort().join(',') === 'name,value' && entry.value === budgetEnv[name],
+      );
+      result[name] = budgetEnv[name] as string;
+    }
+    if (name === 'GOOGLE_CALENDAR_OAUTH_CALLBACK_URL' && expectedCallback !== undefined) {
+      requireNative(Object.keys(entry).sort().join(',') === 'name,value');
+      const callback = googleCalendarReleaseCallback(entry.value);
+      requireNative(callback !== undefined);
+      result[name] = callback;
+    }
+    if (name === 'MCP_OAUTH_ENABLED' && requireMcpOff) {
+      requireNative(
+        Object.keys(entry).sort().join(',') === 'name,value' && entry.value === 'false',
+      );
+      result[name] = 'false';
+    }
     if (name.startsWith('ASSISTANT_RELEASE_')) {
       requireNative(Object.keys(entry).sort().join(',') === 'name,value');
       result[name] = text(entry.value, /^[A-Za-z0-9_.:-]{1,128}$/);
     }
   }
+  requireNative(!requireMcpOff || result.MCP_OAUTH_ENABLED === 'false');
   return result;
 }
 function revisionProof(raw: unknown, name: string, c: Context): NativeProof {
@@ -96,7 +137,7 @@ function revisionProof(raw: unknown, name: string, c: Context): NativeProof {
       const v = nativeObject(condition);
       return (
         v.state === 'CONDITION_SUCCEEDED' ||
-        (reviewedCurrent?.preclosed && retiredCurrentCondition(v))
+        (reviewedCurrent?.preclosed && retiredCurrentRevisionCondition(v))
       );
     }),
   );
@@ -111,11 +152,16 @@ function revisionProof(raw: unknown, name: string, c: Context): NativeProof {
       (r.service === WEB_SERVICE || r.service === 'assistant-web') &&
       ready.length === 1 &&
       (ready[0]?.state === 'CONDITION_SUCCEEDED' ||
-        (reviewedCurrent?.preclosed && retiredCurrentCondition(ready[0] as Obj))) &&
+        (reviewedCurrent?.preclosed && retiredCurrentRevisionCondition(ready[0] as Obj))) &&
       (r.reconciling === undefined || r.reconciling === false),
   );
   const uid = text(r.uid, /^[A-Za-z0-9-]{1,128}$/),
-    env = environment(r),
+    env = environment(
+      r,
+      name === c.canonical ? undefined : c.releaseEnv.GOOGLE_CALENDAR_OAUTH_CALLBACK_URL,
+      name === c.canonical ? undefined : c.estimatedCost,
+      name !== c.canonical && c.releaseEnv.MCP_OAUTH_ENABLED === 'false',
+    ),
     pin = HISTORICAL_WEB_TAGS.find((p) => p.revision === name && p.revision === c.canonical);
   let image: string,
     source: string,
@@ -169,9 +215,10 @@ function revisionProof(raw: unknown, name: string, c: Context): NativeProof {
   }
   requireNative(env.ASSISTANT_RELEASE_WRITES_PAUSED === String(paused));
   immutableWebRevision(r, name, image, paused);
+  const semantic = revisionWithRequestedImage(r, image);
   const projected: Obj = {};
   for (const key of TEMPLATE_FIELDS)
-    if (key !== 'revision' && r[key] !== undefined) projected[key] = r[key];
+    if (key !== 'revision' && semantic[key] !== undefined) projected[key] = semantic[key];
   projected.revision = name;
   if (reviewedCurrent)
     requireNative(digest(template(projected)) === reviewedCurrent.proof.templateSha256);
@@ -248,10 +295,14 @@ const OUTPUT = new Set([
   'etag',
   'template',
 ]);
+function stableConfiguration(raw: unknown) {
+  return Object.fromEntries(Object.entries(nativeObject(raw)).filter(([k]) => !OUTPUT.has(k)));
+}
 export function nativeStableConfigurationDigest(raw: unknown) {
-  return digest(
-    Object.fromEntries(Object.entries(nativeObject(raw)).filter(([k]) => !OUTPUT.has(k))),
-  );
+  return digest(nativeServiceDefaults(stableConfiguration(raw)));
+}
+export function matchesNativeStableConfigurationDigest(raw: unknown, expected: string) {
+  return matchesNativeServiceDigest(stableConfiguration(raw), expected, digest);
 }
 /** Bind the reviewed current provider default without changing either raw capture. */
 function currentSemanticTemplate(

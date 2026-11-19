@@ -1,5 +1,7 @@
 import { resumeAdmittedChatTask } from '@assistant/application';
+import { estimatedCostApprovalEnabled } from '@assistant/config';
 import { executeTask } from '@assistant/core';
+import { estimatedCostGrantContextForTask } from '@assistant/core/model-router';
 import {
   createPostgresApplicationChatPersistence,
   createPostgresLocationPingRepository,
@@ -103,13 +105,19 @@ export async function executeAgentTask(deps: AgentDeps, taskId: string, generati
             );
           })()
         : createPostgresApplicationChatPersistence(deps.db);
-    const status = await resumeAdmittedChatTask(lease, {
-      config: deps.config,
-      router: deps.router,
-      chat,
-      ...(deps.config.PERSISTENCE_DRIVER === 'postgres' ? { db: deps.db } : {}),
-      persistence: deps.persistence,
-    });
+    const grant = estimatedCostGrantContextForTask(
+      lease,
+      estimatedCostApprovalEnabled(deps.config) ? deps.config.ASSISTANT_WORKSPACE_ID : '',
+    );
+    const resume = () =>
+      resumeAdmittedChatTask(lease, {
+        config: deps.config,
+        router: deps.router,
+        chat,
+        ...(deps.config.PERSISTENCE_DRIVER === 'postgres' ? { db: deps.db } : {}),
+        persistence: deps.persistence,
+      });
+    const status = await (grant ? deps.router.withEstimatedCostGrant(grant, resume) : resume());
     return { outcome: 'admission_recovered' as const, status };
   }
   // Module-declared deterministic handlers claim their trigger kinds.

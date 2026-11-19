@@ -1,3 +1,7 @@
+import {
+  createImageResolutionReader,
+  verifyRevisionImage,
+} from './owner-release-image-resolution.js';
 /** Protected, GET-only observations. Never authorizes traffic or maintenance. */
 
 import { execFile } from 'node:child_process';
@@ -282,8 +286,13 @@ const allowedEnv = new Set([
   'PERSISTENCE_DRIVER',
   'FIRESTORE_DATABASE_ID',
   'ASSISTANT_RELEASE_SHA',
+  'ASSISTANT_RELEASE_SOURCE_SHA',
   'RELEASE_SHA',
   'ASSISTANT_RELEASE_API_CONTRACT',
+  'ASSISTANT_RELEASE_AGENT_API_MIN',
+  'ASSISTANT_RELEASE_AGENT_API_MAX',
+  'ASSISTANT_RELEASE_WEB_API_MIN',
+  'ASSISTANT_RELEASE_WEB_API_MAX',
   'ASSISTANT_RELEASE_SCHEMA_DRIVER',
   'ASSISTANT_RELEASE_SCHEMA_MIN',
   'ASSISTANT_RELEASE_SCHEMA_MAX',
@@ -340,9 +349,20 @@ function strictServiceFacts(raw: unknown, service: 'agent' | 'web') {
     env.ASSISTANT_RELEASE_SCHEMA_DRIVER !== 'firestore' ||
     env.ASSISTANT_RELEASE_SCHEMA_MIN !== '1' ||
     env.ASSISTANT_RELEASE_SCHEMA_MAX !== '1' ||
-    env.ASSISTANT_RELEASE_API_CONTRACT !== '1'
+    !['1', '3'].includes(env.ASSISTANT_RELEASE_API_CONTRACT ?? '')
   )
     throw new Error('wrong persistence');
+  if (env.ASSISTANT_RELEASE_API_CONTRACT === '3') {
+    const peer = service === 'web' ? 'AGENT' : 'WEB';
+    if (
+      env[`ASSISTANT_RELEASE_${peer}_API_MIN`] !== '3' ||
+      env[`ASSISTANT_RELEASE_${peer}_API_MAX`] !== '3' ||
+      env.ASSISTANT_RELEASE_SCHEMA_VERSION !== '1' ||
+      !/^[a-f0-9]{64}$/.test(env.ASSISTANT_RELEASE_MANIFEST ?? '') ||
+      !/^[a-f0-9]{40}$/.test(env.ASSISTANT_RELEASE_SOURCE_SHA ?? '')
+    )
+      throw new Error('wrong API 3 peer contract');
+  }
   if (!Array.isArray(value.trafficStatuses) || value.trafficStatuses.length !== 1)
     throw new Error('ambiguous traffic');
   const traffic = record(value.trafficStatuses[0]);
@@ -374,6 +394,7 @@ export async function collectInventory(
   observeEditor?: (target: EditorMetadataTarget) => Promise<unknown>,
   mark: InventoryStageMarker = () => undefined,
   current?: BootstrapReceipt,
+  resolveImage?: (image: string) => Promise<void>,
 ) {
   mark('source_manifest');
   const { groups } = verifyManifest(manifest);
@@ -435,10 +456,11 @@ export async function collectInventory(
       revision.name !== `${RUN_ROOT}/services/assistant-${service}/revisions/${facts.revision}` ||
       !Array.isArray(revision.containers) ||
       revision.containers.length !== 1 ||
-      record(revision.containers[0]).image !== facts.image ||
       revision.serviceAccount !== facts.account
     )
       throw new Error('serving revision mismatch');
+    if (record(revision.containers[0]).image !== facts.image) await resolveImage?.(facts.image);
+    verifyRevisionImage(revision, facts.image);
     if (current)
       verifyCurrentSnapshot(
         current.services[service],
@@ -475,6 +497,23 @@ export async function collectInventory(
       observedRevisionHash: hash(JSON.stringify(revision)),
     });
   }
+  if (
+    services[0]?.nonsecretReleaseConfig.ASSISTANT_RELEASE_API_CONTRACT !==
+    services[1]?.nonsecretReleaseConfig.ASSISTANT_RELEASE_API_CONTRACT
+  )
+    throw new Error('mixed Firestore API contracts');
+  if (
+    services[0]?.nonsecretReleaseConfig.ASSISTANT_RELEASE_API_CONTRACT === '3' &&
+    services[0]?.nonsecretReleaseConfig.ASSISTANT_RELEASE_MANIFEST !==
+      services[1]?.nonsecretReleaseConfig.ASSISTANT_RELEASE_MANIFEST
+  )
+    throw new Error('mixed Firestore release manifests');
+  if (
+    services[0]?.nonsecretReleaseConfig.ASSISTANT_RELEASE_API_CONTRACT === '3' &&
+    services[0]?.nonsecretReleaseConfig.ASSISTANT_RELEASE_SOURCE_SHA !==
+      services[1]?.nonsecretReleaseConfig.ASSISTANT_RELEASE_SOURCE_SHA
+  )
+    throw new Error('mixed Firestore release sources');
   mark('editor_metadata');
   const firstTarget = editorTargets[0];
   const editorReadiness =
@@ -778,6 +817,7 @@ async function main(mark: InventoryStageMarker) {
       ),
     mark,
     current,
+    createImageResolutionReader(token.trim(), fetch, started + 60000),
   );
   mark('receipt_serialization');
   const output = JSON.stringify({

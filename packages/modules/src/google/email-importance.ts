@@ -158,6 +158,8 @@ const SYSTEM = [
   'LOW (1-2): marketing and sales (even with "ends soon" or "last chance"), newsletters, surveys and feedback requests, social and community notifications, vendor product announcements, policy or terms updates, and anything purely informational.',
   'Several notices from different companies about the same thing the owner just did (linking an account, a sign-in, a purchase) are routine confirmations, not an incident.',
   'Extract every specific date the message commits the owner to, with what happens then. Only dates actually stated — never inferred or invented. Add dateEvidence as an exact short quote that supports the date, time, and role.',
+  'Resolve a stated month/day or relative date against the supplied message received time, never your training year or today when reading old mail. Preserve an explicit year. For a yearless date use the nearby occurrence consistent with the stated weekday and message context; if that is ambiguous, omit the date rather than guess. A season label such as 26/27 is not an explicit event year.',
+  'A school, family or sports notice is not a security incident merely because it is automated or contains an account/login footer. Use security only for an actual sign-in, credential/account change, fraud or security event described by the message.',
   'For each date, label dateRole as event_start, event_end, previous_event_start, payment_due, cancellation_deadline, refund_expected, other, or unknown. Keep a free-cancellation-by date as cancellation_deadline; it does NOT cancel the booking. Preserve a source-local civilDate exactly when the email states a date without a time, and sourceTimeZone only when explicitly stated in the supporting quote. Use precision=date for a date with no time, datetime when a time is stated, and unknown when unclear.',
   'For booking/appointment lifecycle use confirmed only for an explicit booking/confirmation, cancelled only for an explicit cancellation already in effect, rescheduled only for a completed change, tentative only when explicitly provisional, and unknown otherwise. A possible/free cancellation deadline is not cancelled. Only set bookingIdentity to an exact booking/reference code printed in this message; never derive identity from sender, title, or date. statusEvidence must be an exact short quote from the email that supports its lifecycle label.',
   'For category=security, securityEvidence may contain only values printed explicitly in the message. Include an exact evidenceQuote supporting the notice. Do not invent providerIncidentRef, affectedAccount, eventAt, device, location, or recoveryCopyOf. Use recoveryCopyOf only when this message explicitly identifies the earlier incident/reference it reproduces.',
@@ -268,6 +270,7 @@ export function fallbackImportance(input: {
 }
 
 export interface ScoreEmailInput {
+  receivedAt?: Date;
   from: string;
   subject: string;
   body: string;
@@ -308,6 +311,7 @@ export async function scoreEmailImportanceOutcome(
       schema: EmailImportanceSchema,
       system: SYSTEM,
       prompt: [
+        `Message received at: ${(input.receivedAt ?? new Date()).toISOString()}`,
         `From: ${input.from}`,
         `Subject: ${input.subject}`,
         input.authenticated ? 'Sender identity: verified' : 'Sender identity: NOT verified',

@@ -1,0 +1,4 @@
+
+> @assistant/web@0.0.1 typecheck /Users/baldvinsmarason/.codex/worktrees/ai-calendar-server-release/assistant/apps/web
+> tsc --noEmit
+

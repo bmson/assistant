@@ -1,6 +1,7 @@
 import type { ModelConnectionRepository } from '@assistant/persistence';
 import { asc, eq, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
+import { lockCostLedger } from './cost-repository.js';
 import { modelConnections } from './schema.js';
 
 export function createPostgresModelConnectionRepository(db: Db): ModelConnectionRepository {
@@ -18,16 +19,19 @@ export function createPostgresModelConnectionRepository(db: Db): ModelConnection
         enabled: input.enabled,
         ...(input.apiKeyEncrypted !== undefined ? { apiKeyEncrypted: input.apiKeyEncrypted } : {}),
       };
-      const [row] = await db
-        .insert(modelConnections)
-        .values(values)
-        .onConflictDoUpdate({
-          target: modelConnections.id,
-          set: { ...values, lastError: null, updatedAt: sql`now()` },
-        })
-        .returning();
-      if (!row) throw new Error('Model connection was not saved');
-      return row;
+      return db.transaction(async (tx) => {
+        await lockCostLedger(tx as unknown as Db);
+        const [row] = await tx
+          .insert(modelConnections)
+          .values(values)
+          .onConflictDoUpdate({
+            target: modelConnections.id,
+            set: { ...values, lastError: null, updatedAt: sql`now()` },
+          })
+          .returning();
+        if (!row) throw new Error('Model connection was not saved');
+        return row;
+      });
     },
     async setEnabled(id, enabled) {
       const rows = await db

@@ -63,16 +63,73 @@ describe.each(['firestore', 'postgres'])('mobile administration in %s mode', (dr
       ).toBe(410);
     }
   });
+  it('admits read-only spending review pages with one valid operation ID', () => {
+    config.PERSISTENCE_DRIVER = driver;
+    const base = 'https://assistant.test/costs/requests';
+    for (const id of ['A', 'request_9-abc', 'x'.repeat(128)]) {
+      for (const method of ['GET', 'HEAD']) {
+        const response = proxy(new NextRequest(`${base}/${id}`, { method }));
+        expect(response.headers.get('x-middleware-next')).toBe('1');
+      }
+    }
+    for (const suffix of ['', '/bad%2Fid', '/bad.id', `/${'x'.repeat(129)}`, '/request-1/extra']) {
+      const response = proxy(new NextRequest(`${base}${suffix}`));
+      expect(response.status).toBe(307);
+      expect(response.headers.get('location')).toBe('https://assistant.test/settings');
+    }
+    for (const method of ['POST', 'PATCH', 'DELETE', 'OPTIONS']) {
+      const response = proxy(new NextRequest(`${base}/request-1`, { method }));
+      expect(response.status).toBe(410);
+      expect(response.headers.get('x-middleware-next')).toBeNull();
+    }
+  });
+  it('admits the declared estimated cost API methods in both client namespaces', () => {
+    config.PERSISTENCE_DRIVER = driver;
+    for (const prefix of ['/api/chat', '/api/mobile/v1/chat']) {
+      const base = `https://assistant.test${prefix}/estimated-cost`;
+      for (const [path, methods] of [
+        ['/overview', ['GET']],
+        ['/quote?operationId=request-1', ['GET', 'POST']],
+        ['/decision?operationId=request-1&decisionId=decision-1', ['GET', 'POST']],
+      ] as const) {
+        for (const method of methods) {
+          const response = proxy(new NextRequest(`${base}${path}`, { method }));
+          expect(response.headers.get('x-middleware-next')).toBe('1');
+        }
+      }
+      if (driver === 'firestore') {
+        for (const [path, method] of [
+          ['/overview', 'POST'],
+          ['/quote', 'HEAD'],
+          ['/decision', 'DELETE'],
+          ['/quote/request-1', 'GET'],
+          ['/decision/extra', 'POST'],
+          ['/overview-extra', 'GET'],
+        ]) {
+          const response = proxy(new NextRequest(`${base}${path}`, { method }));
+          expect(response.status).toBe(503);
+          expect(response.headers.get('x-middleware-next')).toBeNull();
+        }
+      }
+    }
+  });
   it('keeps Costs behind the earlier release-pause and restore-rehearsal fences', () => {
     config.PERSISTENCE_DRIVER = driver;
     for (const fence of ['pause', 'rehearsal']) {
       config.ASSISTANT_RELEASE_WRITES_PAUSED = fence === 'pause';
       config.RESTORE_REHEARSAL = fence === 'rehearsal';
       try {
-        for (const method of ['GET', 'POST', 'HEAD', 'DELETE']) {
-          const response = proxy(new NextRequest('https://assistant.test/costs', { method }));
-          expect(response.status).toBe(503);
-          expect(response.headers.get('x-middleware-next')).toBeNull();
+        for (const path of [
+          '/costs',
+          '/costs/requests/request-1',
+          '/api/chat/estimated-cost/overview',
+          '/api/mobile/v1/chat/estimated-cost/decision',
+        ]) {
+          for (const method of ['GET', 'POST', 'HEAD', 'DELETE']) {
+            const response = proxy(new NextRequest(`https://assistant.test${path}`, { method }));
+            expect(response.status).toBe(503);
+            expect(response.headers.get('x-middleware-next')).toBeNull();
+          }
         }
       } finally {
         config.ASSISTANT_RELEASE_WRITES_PAUSED = false;

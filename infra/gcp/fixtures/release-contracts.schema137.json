@@ -1,0 +1,104 @@
+{
+  "format": 1,
+  "storageSchemaVersion": {
+    "firestore": 1
+  },
+  "components": {
+    "agent": {
+      "apiContract": 1,
+      "peerApi": {
+        "min": 1,
+        "max": 1
+      },
+      "schema": {
+        "postgres": {
+          "min": 137,
+          "max": 137
+        },
+        "firestore": {
+          "min": 1,
+          "max": 1
+        }
+      }
+    },
+    "web": {
+      "apiContract": 1,
+      "peerApi": {
+        "min": 1,
+        "max": 1
+      },
+      "schema": {
+        "postgres": {
+          "min": 137,
+          "max": 137
+        },
+        "firestore": {
+          "min": 1,
+          "max": 1
+        }
+      },
+      "ownerEditorV1": [
+        "create_person",
+        "update_person_identity",
+        "add_family_relationship",
+        "correct_owner_family_relationship",
+        "correct_owner_memory",
+        "remove_owner_memory",
+        "create_owner_memory",
+        "remove_person",
+        "remove_owner_family_relationship"
+      ]
+    },
+    "browser": {
+      "apiContract": 1,
+      "peerApi": {
+        "min": 1,
+        "max": 1
+      },
+      "schema": {
+        "postgres": {
+          "min": 137,
+          "max": 137
+        },
+        "firestore": {
+          "min": 1,
+          "max": 1
+        }
+      }
+    },
+    "code": {
+      "apiContract": 1,
+      "peerApi": {
+        "min": 1,
+        "max": 1
+      },
+      "schema": {
+        "postgres": {
+          "min": 137,
+          "max": 137
+        },
+        "firestore": {
+          "min": 1,
+          "max": 1
+        }
+      }
+    },
+    "processor": {
+      "apiContract": 1,
+      "peerApi": {
+        "min": 1,
+        "max": 1
+      },
+      "schema": {
+        "postgres": {
+          "min": 137,
+          "max": 137
+        },
+        "firestore": {
+          "min": 1,
+          "max": 1
+        }
+      }
+    }
+  }
+}

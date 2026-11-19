@@ -1,5 +1,5 @@
 {
-  "id": "fa4f5dee-1c14-4150-a3cc-856135b55ec7",
+  "id": "19a6d314-a32e-4681-a172-9f85a5d9516e",
   "prevId": "3b690e15-e329-4a51-bf7b-8aab59b41802",
   "version": "7",
   "dialect": "postgresql",
@@ -5940,12 +5940,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
-        },
-        "research_assignment": {
-          "name": "research_assignment",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {
@@ -15456,6 +15450,52 @@
           "value": "\"writing_samples\".\"register\" IN ('email_professional','email_casual','sms','chat')"
         }
       },
+      "isRLSEnabled": false
+    },
+    "public.google_calendar_connections": {
+      "name": "google_calendar_connections",
+      "schema": "",
+      "columns": {
+        "agent_id": {
+          "name": "agent_id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "state": {
+          "name": "state",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "google_calendar_connections_agent_id_agents_id_fk": {
+          "name": "google_calendar_connections_agent_id_agents_id_fk",
+          "tableFrom": "google_calendar_connections",
+          "tableTo": "agents",
+          "columnsFrom": [
+            "agent_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
       "isRLSEnabled": false
     }
   },

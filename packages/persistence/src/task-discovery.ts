@@ -4,6 +4,7 @@ import type { ActivityTaskRecord } from './task-activity.js';
 export class TaskDiscoveryInputError extends Error {}
 
 export type TaskDiscoveryRow = Omit<ActivityTaskRecord, 'trigger'> & {
+  estimatedCostOperationId?: string | null;
   createdAt: Date | null;
   conversationId: string | null;
   source: string;
@@ -11,6 +12,24 @@ export type TaskDiscoveryRow = Omit<ActivityTaskRecord, 'trigger'> & {
   /** Internal scan row that advances Firestore pagination but is never projected. */
   suppressed?: boolean;
 };
+/** The checkpoint is only a locator; the review endpoint authorizes and reads the request. */
+export function estimatedCostOperationLocator(status: string, state: unknown): string | null {
+  if (
+    status !== 'waiting_estimated_cost' ||
+    !state ||
+    typeof state !== 'object' ||
+    Array.isArray(state)
+  )
+    return null;
+  const marker = (state as Record<string, unknown>).estimatedCostApproval;
+  if (!marker || typeof marker !== 'object' || Array.isArray(marker)) return null;
+  const { operationId, status: markerStatus } = marker as Record<string, unknown>;
+  return markerStatus === 'pending' &&
+    typeof operationId === 'string' &&
+    /^[A-Za-z0-9_-]{1,128}$/.test(operationId)
+    ? operationId
+    : null;
+}
 export interface TaskDiscoveryCursor {
   at: Date;
   id: string;
@@ -148,7 +167,7 @@ export function matchesTaskDiscovery(row: TaskDiscoveryRow, input: TaskDiscovery
     return false;
   const statuses =
     input.filter === 'needs-you'
-      ? ['waiting_approval', 'waiting_budget', 'needs_attention']
+      ? ['waiting_approval', 'waiting_budget', 'waiting_estimated_cost', 'needs_attention']
       : input.filter === 'working'
         ? ['pending', 'running']
         : input.filter === 'scheduled'

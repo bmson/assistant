@@ -7,7 +7,10 @@ import type {
 import type { ResolvedReadIntent } from './active-read-intent.js';
 import { calendarAgendaCards, calendarAgendaScopedEvidence } from './calendar-agenda.js';
 import { calendarSourceDateLabel, calendarWindowMembership } from './calendar-read-window.js';
-import { canonicalOccurrenceGroups } from './calendar-relationship.js';
+import {
+  canonicalOccurrenceGroups,
+  presentationOccurrenceGroups,
+} from './calendar-relationship.js';
 import { safeCalendarSourceUrl, safeVideoMeetingUrl } from './calendar-source-link.js';
 import type { LiveLookup } from './live-lookup.js';
 import type { PersonalReadRequest } from './read-intent.js';
@@ -104,6 +107,39 @@ function calendarOccurrenceSource(event: RecordValue): CalendarOccurrenceSource 
     ...(string(event.calendar) ? { calendar: string(event.calendar) } : {}),
     ...(string(event.calendarTimeZone) ? { calendarTimeZone: string(event.calendarTimeZone) } : {}),
     ...(string(event.organizer) ? { organizer: string(event.organizer) } : {}),
+    ...(Array.isArray(event.attendees) ? { attendees: strings(event.attendees) } : {}),
+    ...(Array.isArray(event.attendeeDetails)
+      ? {
+          attendeeDetails: event.attendeeDetails.flatMap((value) => {
+            const attendee = record(value);
+            return string(attendee?.email)
+              ? [
+                  {
+                    email: string(attendee?.email),
+                    ...(string(attendee?.displayName)
+                      ? { displayName: string(attendee?.displayName) }
+                      : {}),
+                  },
+                ]
+              : [];
+          }),
+        }
+      : {}),
+    ...(Array.isArray(event.links)
+      ? {
+          links: event.links.flatMap((value) => {
+            const link = record(value);
+            const video = safeVideoMeetingUrl(string(link?.url));
+            const videoIdentity = video ? new URL(video) : undefined;
+            if (videoIdentity) {
+              videoIdentity.search = '';
+              videoIdentity.hash = '';
+            }
+            const url = safeCalendarSourceUrl(string(link?.url)) ?? videoIdentity?.href;
+            return url ? [{ url, type: string(link?.type), label: string(link?.label) }] : [];
+          }),
+        }
+      : {}),
     ...(string(event.eventId) ? { eventId: string(event.eventId) } : {}),
     ...(string(event.iCalUID) ? { iCalUID: string(event.iCalUID) } : {}),
     ...(string(event.recurringEventId) ? { recurringEventId: string(event.recurringEventId) } : {}),
@@ -271,12 +307,27 @@ export function calendarResponseCards(
           )
       : [];
   });
-  const groups = canonicalOccurrenceGroups(events) as EventGroup[];
+  const groups = presentationOccurrenceGroups(events, request?.timeZone) as EventGroup[];
   return groups
     .map((group) => {
+      const probableMatch = canonicalOccurrenceGroups(group).length > 1;
+      // Keep the earliest source time visible (it may include pre-event time).
+      // This is a display grouping only: provider identity and write authority stay separate.
+      if (probableMatch)
+        group = [...group].sort(
+          (a, b) => Date.parse(string(a.start)) - Date.parse(string(b.start)),
+        ) as EventGroup;
       const event = group[0];
       const start = string(event.start);
-      const end = string(event.end);
+      // Similar copies may disagree slightly at either boundary. Preserve the whole occupied span.
+      const lastEnding = probableMatch
+        ? group.reduce(
+            (latest, entry) =>
+              Date.parse(string(entry.end)) > Date.parse(string(latest.end)) ? entry : latest,
+            event,
+          )
+        : event;
+      const end = string(lastEnding.end);
       const allDayValues = new Set(
         group.map(
           (entry) => entry.allDay === true || /^\d{4}-\d{2}-\d{2}$/.test(string(entry.start)),
@@ -384,27 +435,30 @@ export function calendarResponseCards(
       return {
         kind: 'calendar-event' as const,
         id: `calendar-${group.map((entry) => `${string(entry.calendarId)}:${string(entry.eventId)}`).join('|')}`,
-        title: titleDiffers
-          ? `Calendar titles differ: ${group
-              .map(
-                (entry) =>
-                  `${string(entry.calendar) || string(entry.calendarId) || 'Calendar'}: ${string(entry.summary) || 'Untitled event'}`,
-              )
-              .join(' · ')}`
-          : string(event.summary) || 'Untitled event',
-        start: timeDiffers ? '' : start,
-        end: timeDiffers ? '' : end,
-        time: timeDiffers
-          ? 'Time differs by calendar source'
-          : eventTypeDiffers
-            ? 'Time unavailable'
-            : allDay
-              ? request?.timeWindow
-                ? `All day · ${calendarSourceDateLabel(event)}`
-                : 'All day'
-              : windowMembership === 'source-date-only'
-                ? `Local time unresolved · ${start || 'start unavailable'} – ${end || 'end unavailable'}`
-                : calendarTimeRange(start, end, request?.timeZone),
+        ...(probableMatch ? { probableMatch: true } : {}),
+        title:
+          titleDiffers && !probableMatch
+            ? `Calendar titles differ: ${group
+                .map(
+                  (entry) =>
+                    `${string(entry.calendar) || string(entry.calendarId) || 'Calendar'}: ${string(entry.summary) || 'Untitled event'}`,
+                )
+                .join(' · ')}`
+            : string(event.summary) || 'Untitled event',
+        start: timeDiffers && !probableMatch ? '' : start,
+        end: timeDiffers && !probableMatch ? '' : end,
+        time:
+          timeDiffers && !probableMatch
+            ? 'Time differs by calendar source'
+            : eventTypeDiffers
+              ? 'Time unavailable'
+              : allDay
+                ? request?.timeWindow
+                  ? `All day · ${calendarSourceDateLabel(event)}`
+                  : 'All day'
+                : windowMembership === 'source-date-only'
+                  ? `Local time unresolved · ${start || 'start unavailable'} – ${end || 'end unavailable'}`
+                  : calendarTimeRange(start, end, request?.timeZone),
         allDay,
         ...(options?.includeUnresolvedDates ? { windowMembership } : {}),
         ...(!canonicalValuesDiffer('calendarTimeZone') && string(event.calendarTimeZone)
@@ -442,7 +496,10 @@ export function calendarResponseCards(
             ? 'reference'
             : 'unspecified',
         sourceVariants: group.map(calendarOccurrenceSource),
-        location: locationDiffers ? 'Location differs by calendar source' : string(event.location),
+        location:
+          locationDiffers && !probableMatch
+            ? 'Location differs by calendar source'
+            : string(event.location),
         attendees: Array.isArray(event.attendees)
           ? event.attendees
               .filter((value): value is string => typeof value === 'string')

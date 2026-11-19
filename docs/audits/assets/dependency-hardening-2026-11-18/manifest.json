@@ -1,0 +1,52 @@
+{
+  "scope": "Local Next16.4.5 upgrade and exact Picomatch4.0.7 repeated-extglob compilation restriction. No production action.",
+  "sourceSha256": {
+    "apps/web/package.json": "9d2f78dde81a899842ac3af61f6a0b99b333bf48674659691d577e97c7dcef31",
+    "package.json": "5a357344085cd5d4063220c31198db97df001ee67fa22a4b85e1a79069f47fbd",
+    "pnpm-workspace.yaml": "1805d806005d5d8151b77ad44098f1a82a39b7ecfb2aa97c504d677f8bcbdd96",
+    "pnpm-lock.yaml": "7e79e1a18b4c45bdb9ad3548d5269757677a57c46898202a6b0cf670b1e3bb58",
+    "patches/picomatch@4.0.7.patch": "f615c03a5e48b398155c785b1a4dbad69c0adf31442d9d5e5c22e96951762c1a",
+    "scripts/picomatch-hardening.node-test.mjs": "a2d1c7577f41ef10e5d62136c07ac4413300c8d6650e06bf8907d11ac30b53ee",
+    ".github/workflows/ci.yml": "9d39a295c67beac78386a5fc1e42b28d52a56024ecfb62f267f075dacaec50db",
+    ".github/workflows/memory-witness-schema-135-qualification.yml": "3cafcf774396ca9bb800463ab050e43b61016dd3746d932b530e1849fcc78d0d",
+    "infra/docker/agent.Dockerfile": "bbf71db2b01572eb7e0e9c59b4d1ab63e645d6bbec0d83077b1ce00d9441fb69",
+    "infra/docker/web.Dockerfile": "0ee5dc0fdbd3b470c829cf5a67f0d4cfecdbd02e8ff9daeda665bdec092e3a4e",
+    "infra/docker/browser-job.Dockerfile": "8ffa31c1ca62c264d80944f6bb6fb35d2b670bb0a332ca8ab8fe56418e157d2c",
+    "infra/docker/code-runner.Dockerfile": "886cc64023d1d5d13ab2af90bf60490c04a1fa877315f2156ac5b7a27e9d8cdd",
+    "infra/docker/document-processor.Dockerfile": "c2c8756cca6396cb94f31c75a90d397046ff78ddd6365876818d91b1e4f51400",
+    "infra/docker/migrate.Dockerfile": "b034db377eaf6ca38df82435f96023ace180fd13be6433b47b614ea2e19bece7"
+  },
+  "assetsSha256": {
+    "frozen-install.txt": "30af855b525b374af365228b6b9094d699dd00bf5ada7465bb73ee8e6e310fc8",
+    "original-audit.json": "73c29e7329a7088d38f82c6485c9f8d83f1b90bed2366fab3b21e6437fdb3607",
+    "patched-audit.json": "0cf670f1de6853ad6df9585f5a846e04a6447b8941d7d5a9f073a41d1abb93d3",
+    "picomatch-regression-final.txt": "889943de063c2c04fff63def6530759f567b0df0991e5b1c1c3e06c63ec8ccbc",
+    "picomatch-regression-initial.txt": "317966cd094c970eac6d34213fc45b59d0d525089d83c254bafc96d064c1ecb1",
+    "vitest.txt": "d3ad0109b544f32a5b9bdd479ff25ee416c79fa0bd7b6993289b616949c86fdc",
+    "web-typecheck.txt": "f901b55f0f6c4f285ed84e0eb05dcb8d23b66507763ecaafdf7f16e11d7923bc"
+  },
+  "results": {
+    "installedRegressionChecksPassed": 6,
+    "focusedVitestChecksPassed": 49,
+    "webTypecheck": "passed",
+    "frozenInstall": "passed",
+    "auditExitCode": 0,
+    "auditExemption": "GHSA-fc5q-39xc-vjpf",
+    "auditMetadataStillCountsOneHighFinding": true
+  },
+  "limits": [
+    "Repeated plus/star extglobs are intentionally unsupported.",
+    "Arbitrary regex strings and caller-built parse states are outside mitigation.",
+    "Raw noextglob inputs retain upstream behavior and must remain trusted.",
+    "Production dependency graph is source/lock evidence, not deployed artifact absence.",
+    "Fresh CI and image qualification are still required."
+  ],
+  "regressionProof": "picomatch-regression-final.txt",
+  "assetWhitespaceChanges": {
+    "original-audit.json": {
+      "originalSha256": "b7d666a38a8be46b1f8b5b01015ab7b8728c0ccdaae989b8cfcd93d3b8ea4dff",
+      "formattedSha256": "73c29e7329a7088d38f82c6485c9f8d83f1b90bed2366fab3b21e6437fdb3607",
+      "meaningUnchanged": true
+    }
+  }
+}

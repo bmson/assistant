@@ -13,6 +13,7 @@ import type { OwnerMemoryWriteWitness } from './owner-memory-write-witness.js';
 import type { OwnerCallActionGrantUsage } from './phone-call-owner-action-grant.js';
 
 export interface Records {
+  googleCalendarConnections: { agentId: string; state: unknown; updatedAt: Date };
   ownerEditorOperations: OwnerEditorOperationRecord;
   ownerCallGrantOperations: OwnerCallGrantOperation;
   ownerCallGrantOperationSlots: OwnerCallGrantOperationSlot;
@@ -136,6 +137,7 @@ export interface Records {
     status: string;
     endpoint: string;
     bearerTokenEncrypted: string | null;
+    oauthState?: unknown;
     enabled: boolean;
     serverName: string | null;
     serverVersion: string | null;
@@ -795,7 +797,55 @@ export interface Records {
     reconciledAt: Date | null;
     attemptStartedAt: Date | null;
     attemptMetadata: unknown | null;
+    reservationKind: string;
+    costGrantId: string | null;
     unknownReason: string | null;
+  };
+  estimatedCostRequests: {
+    operationId: string;
+    installationId: string;
+    ownerId: string;
+    taskId: string;
+    requestFingerprint: string;
+    bindingDigest: string;
+    sourceBinding: unknown;
+    state: string;
+    quote: unknown;
+    baseline: unknown;
+    createdAt: Date;
+    updatedAt: Date;
+  };
+  estimatedCostBaselines: {
+    installationId: string;
+    ownerId: string;
+    digest: string;
+    rows: unknown;
+    createdAt: Date;
+  };
+  estimatedCostQuoteRequests: {
+    quoteRequestId: string;
+    operationId: string;
+    requestDigest: string;
+    quoteId: string;
+    quoteVersion: string;
+    createdAt: Date;
+  };
+  estimatedCostDecisions: {
+    decisionId: string;
+    operationId: string;
+    bodyDigest: string;
+    receipt: unknown;
+    createdAt: Date;
+  };
+  estimatedCostGrants: {
+    id: string;
+    operationId: string;
+    quoteId: string;
+    escrowReservationId: string;
+    allowanceMicros: number;
+    consumedMicros: number;
+    expiresAt: Date;
+    createdAt: Date;
   };
   rateTable: { updatedAt: Date; unit: string; unitPriceUsd: string; key: string };
   budgets: {

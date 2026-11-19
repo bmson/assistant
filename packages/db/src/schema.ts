@@ -171,6 +171,8 @@ export const mcpConnections = pgTable(
     endpoint: text('endpoint').notNull(),
     /** AES-GCM payload for the optional bearer token; never expose this field. */
     bearerTokenEncrypted: text('bearer_token_encrypted'),
+    /** Versioned OAuth state, separate from the manual bearer credential. */
+    oauthState: jsonb('oauth_state'),
     /** ready | checking | authorization_required | error | disabled */
     status: text('status').notNull().default('checking'),
     enabled: boolean('enabled').notNull().default(true),
@@ -603,7 +605,7 @@ export const tasks = pgTable(
     ),
     check(
       'tasks_status_check',
-      sql`${t.status} IN ('pending','running','waiting_approval','waiting_event','sleeping','waiting_budget','done','failed','needs_attention','cancelled')`,
+      sql`${t.status} IN ('pending','running','waiting_approval','waiting_event','sleeping','waiting_budget','waiting_estimated_cost','done','failed','needs_attention','cancelled')`,
     ),
     check('tasks_trust_check', sql`${t.trust} IN ('owner','known','unknown','assistant')`),
     check(
@@ -2162,6 +2164,8 @@ export const costReservations = pgTable(
     actualUsd: numeric('actual_usd', { precision: 10, scale: 6 }),
     attemptStartedAt: timestamp('attempt_started_at', { withTimezone: true }),
     attemptMetadata: jsonb('attempt_metadata'),
+    reservationKind: text('reservation_kind').notNull().default('attempt'),
+    costGrantId: uuid('cost_grant_id'),
     unknownReason: text('unknown_reason'),
     description: text('description').notNull().default(''),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
@@ -2172,10 +2176,75 @@ export const costReservations = pgTable(
       'cost_reservations_status_check',
       sql`${t.status} IN ('held','dispatching','unknown','reconciled','released')`,
     ),
+    check('cost_reservations_kind_check', sql`${t.reservationKind} IN ('attempt','escrow')`),
     index('cost_reservations_status_idx').on(t.status, t.createdAt),
     index('cost_reservations_task_idx').on(t.taskId, t.status),
   ],
 );
+
+/** Request-scoped spending authority; feature remains disabled until all writers understand it. */
+export const estimatedCostRequests = pgTable('estimated_cost_requests', {
+  operationId: text('operation_id').primaryKey(),
+  installationId: text('installation_id').notNull(),
+  ownerId: text('owner_id').notNull(),
+  taskId: uuid('task_id')
+    .notNull()
+    .references(() => tasks.id),
+  requestFingerprint: text('request_fingerprint').notNull(),
+  bindingDigest: text('binding_digest').notNull(),
+  sourceBinding: jsonb('source_binding').notNull(),
+  state: text('state').notNull(),
+  quote: jsonb('quote').notNull(),
+  baseline: jsonb('baseline').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+/** Durable identity for quote preparation retries; a refresh never mints twice. */
+export const estimatedCostQuoteRequests = pgTable('estimated_cost_quote_requests', {
+  quoteRequestId: text('quote_request_id').primaryKey(),
+  operationId: text('operation_id')
+    .notNull()
+    .references(() => estimatedCostRequests.operationId),
+  requestDigest: text('request_digest').notNull(),
+  quoteId: text('quote_id').notNull(),
+  quoteVersion: text('quote_version').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+/** Frozen before activation; digest is SHA-256 of JSON.stringify(sorted canonical rows). */
+export const estimatedCostBaselines = pgTable('estimated_cost_baselines', {
+  installationId: text('installation_id').primaryKey(),
+  ownerId: text('owner_id').notNull(),
+  digest: text('digest').notNull(),
+  rows: jsonb('rows').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const estimatedCostDecisions = pgTable('estimated_cost_decisions', {
+  decisionId: text('decision_id').primaryKey(),
+  operationId: text('operation_id')
+    .notNull()
+    .references(() => estimatedCostRequests.operationId),
+  bodyDigest: text('body_digest').notNull(),
+  receipt: jsonb('receipt').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const estimatedCostGrants = pgTable('estimated_cost_grants', {
+  id: uuid('id').primaryKey(),
+  operationId: text('operation_id')
+    .notNull()
+    .references(() => estimatedCostRequests.operationId),
+  quoteId: text('quote_id').notNull(),
+  escrowReservationId: uuid('escrow_reservation_id')
+    .notNull()
+    .references(() => costReservations.id),
+  allowanceMicros: bigint('allowance_micros', { mode: 'number' }).notNull(),
+  consumedMicros: bigint('consumed_micros', { mode: 'number' }).notNull().default(0),
+  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
 
 /** Unit prices for non-model spend (model costs come from OpenRouter usage.cost). */
 export const rateTable = pgTable('rate_table', {
@@ -3702,4 +3771,13 @@ export const calendarAccounts = pgTable('calendar_accounts', {
   scopes: jsonb('scopes').$type<string[]>().notNull(),
   lastError: text('last_error'),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull(),
+});
+
+/** Optional personal Calendar consent, credential, and single-use flow fence. */
+export const googleCalendarConnections = pgTable('google_calendar_connections', {
+  agentId: uuid('agent_id')
+    .primaryKey()
+    .references(() => agents.id, { onDelete: 'cascade' }),
+  state: jsonb('state').notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });

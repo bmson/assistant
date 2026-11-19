@@ -140,6 +140,7 @@ export interface ExecutorDeps {
   /** Firestore-backed import and voice-ingest lifecycle selected by the Firestore agent composition. */
   importJobRepository?: ImportJobRepository;
   router: ModelRouter;
+  estimatedCostInstallationId?: string;
   dispatcher: DispatcherPort;
   /** Workspace file store — required only for code jobs that read archives (imports). */
   workspace?: WorkspaceReader;

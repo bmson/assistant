@@ -1,6 +1,7 @@
 // biome-ignore-all lint/style/noNonNullAssertion: Synthetic wire fixtures explicitly populate referenced fields.
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { syntheticImage } from './fixtures/owner-image-resolution.synthetic.js';
 import {
   type BootstrapReceipt,
   bootstrapDigest,
@@ -10,8 +11,10 @@ import {
   restoreScaling,
   reviewedBootstrap,
   verifiedRestoreReceipts,
+  verifyBootstrapRevisionTemplate,
   verifyCurrentSnapshot,
 } from './owner-release-bootstrap.js';
+import { registerImageResolution } from './owner-release-image-resolution.js';
 
 const source = 'a'.repeat(40),
   manifest = 'b'.repeat(64),
@@ -113,6 +116,248 @@ function fixture(role: 'agent' | 'web' = 'web') {
   };
 }
 describe('reviewed current snapshot and bootstrap restoration', () => {
+  it.each(['agent', 'web'] as const)(
+    'binds %s index resolution without weakening raw hashes or template drift checks',
+    (role) => {
+      const f = fixture(role),
+        image = syntheticImage(role, 'bootstrap');
+      f.service.template.containers[0]!.image = image.image;
+      const native = {
+        ...f.native,
+        containers: [{ ...f.native.containers[0], name: `${role}-1`, image: image.childImage }],
+        containerStatuses: image.revision.containerStatuses,
+      };
+      const before = JSON.stringify(native);
+      expect(() =>
+        verifyBootstrapRevisionTemplate(
+          f.service.name,
+          f.service.template,
+          native,
+          f.expected.revision,
+        ),
+      ).toThrow();
+      registerImageResolution(image.image, image.parentBytes, image.childBytes);
+      expect(() =>
+        verifyBootstrapRevisionTemplate(
+          f.service.name,
+          f.service.template,
+          native,
+          f.expected.revision,
+        ),
+      ).not.toThrow();
+      const b = {
+        ...f.receipt.services[role],
+        service: f.service.name,
+        uid: f.service.uid,
+        revision: f.expected.revision,
+        image: image.image,
+        serviceSha256: bootstrapDigest(f.service),
+        revisionSha256: bootstrapDigest(native),
+      };
+      expect(() => verifyCurrentSnapshot(b, f.service, native, false)).not.toThrow();
+      expect(() =>
+        verifyCurrentSnapshot(b, f.service, { ...native, uid: 'changed' }, false),
+      ).toThrow();
+      for (const changed of [
+        { ...native, timeout: '60s' },
+        { ...native, maxInstanceRequestConcurrency: 99 },
+      ])
+        expect(() =>
+          verifyBootstrapRevisionTemplate(
+            f.service.name,
+            f.service.template,
+            changed,
+            f.expected.revision,
+          ),
+        ).toThrow();
+      expect(JSON.stringify(native)).toBe(before);
+    },
+  );
+  it.each(['agent', 'web'] as const)(
+    'accepts exact %s full and provider-shaped revision identities without mutating raw evidence',
+    (role) => {
+      const f = fixture(role);
+      const templateBefore = JSON.stringify(f.service.template);
+      const revisionBefore = JSON.stringify(f.native);
+      expect(() =>
+        verifyBootstrapRevisionTemplate(
+          f.service.name,
+          f.service.template,
+          f.native,
+          f.expected.revision,
+        ),
+      ).not.toThrow();
+
+      const providerRevision = clone(f.native);
+      providerRevision.service = `assistant-${role}`;
+      (providerRevision.containers[0] as Record<string, unknown>).name = `${role}-1`;
+      const providerTemplate = clone(f.service.template);
+      const providerRevisionHash = bootstrapDigest(providerRevision);
+      const providerTemplateHash = bootstrapDigest(providerTemplate);
+      expect(() =>
+        verifyBootstrapRevisionTemplate(
+          f.service.name,
+          providerTemplate,
+          providerRevision,
+          f.expected.revision,
+        ),
+      ).not.toThrow();
+      expect(bootstrapDigest(providerRevision)).toBe(providerRevisionHash);
+      expect(bootstrapDigest(providerTemplate)).toBe(providerTemplateHash);
+      expect(JSON.stringify(f.service.template)).toBe(templateBefore);
+      expect(JSON.stringify(f.native)).toBe(revisionBefore);
+    },
+  );
+  it.each(['agent', 'web'] as const)(
+    'rejects wrong %s resource identity and every non-name template difference',
+    (role) => {
+      const f = fixture(role);
+      const badRevision = (change: (r: Record<string, unknown>) => void) => {
+        const r = clone(f.native) as Record<string, unknown>;
+        change(r);
+        return r;
+      };
+      const cases: Array<[string, Record<string, unknown>]> = [
+        [
+          'wrong project',
+          badRevision((r) => (r.name = String(r.name).replace('bmson-assistant', 'other-project'))),
+        ],
+        [
+          'wrong region',
+          badRevision((r) => (r.name = String(r.name).replace('us-west1', 'us-east1'))),
+        ],
+        [
+          'wrong service parent',
+          badRevision(
+            (r) => (r.name = String(r.name).replace(`assistant-${role}`, 'assistant-other')),
+          ),
+        ],
+        [
+          'wrong revision',
+          badRevision(
+            (r) => (r.name = String(r.name).replace(f.expected.revision, 'assistant-wrong')),
+          ),
+        ],
+        ['wrong short service', badRevision((r) => (r.service = 'assistant-other'))],
+        [
+          'wrong container name',
+          badRevision(
+            (r) => ((r.containers as Array<Record<string, unknown>>)[0]!.name = 'other-1'),
+          ),
+        ],
+        [
+          'multiple containers',
+          badRevision(
+            (r) =>
+              (r.containers = [...(r.containers as unknown[]), ...(r.containers as unknown[])]),
+          ),
+        ],
+      ];
+      for (const [label, revision] of cases) {
+        expect(
+          () =>
+            verifyBootstrapRevisionTemplate(
+              f.service.name,
+              f.service.template,
+              revision,
+              f.expected.revision,
+            ),
+          label,
+        ).toThrow();
+      }
+
+      const mutations: Array<[string, (t: Record<string, unknown>) => void]> = [
+        [
+          'image',
+          (t) => ((t.containers as Array<Record<string, unknown>>)[0]!.image = 'other-image'),
+        ],
+        ['environment', (t) => ((t.containers as Array<Record<string, unknown>>)[0]!.env = [])],
+        ['timeout', (t) => (t.timeout = '301s')],
+        ['other template field', (t) => (t.maxInstanceRequestConcurrency = 80)],
+        [
+          'explicit conflicting container name',
+          (t) => ((t.containers as Array<Record<string, unknown>>)[0]!.name = 'other-1'),
+        ],
+      ];
+      for (const [label, mutate] of mutations) {
+        const template = clone(f.service.template) as Record<string, unknown>;
+        mutate(template);
+        expect(
+          () =>
+            verifyBootstrapRevisionTemplate(
+              f.service.name,
+              template,
+              f.native,
+              f.expected.revision,
+            ),
+          label,
+        ).toThrow();
+      }
+
+      const providerRevision = clone(f.native);
+      providerRevision.service = `assistant-${role}`;
+      (providerRevision.containers[0] as Record<string, unknown>).name = `${role}-1`;
+      const providerDrift: Array<[string, (r: Record<string, unknown>) => void]> = [
+        [
+          'provider image drift',
+          (r) => ((r.containers as Array<Record<string, unknown>>)[0]!.image = 'other-image'),
+        ],
+        [
+          'provider environment drift',
+          (r) => ((r.containers as Array<Record<string, unknown>>)[0]!.env = []),
+        ],
+        ['provider timeout drift', (r) => (r.timeout = '301s')],
+        ['provider other field drift', (r) => (r.maxInstanceRequestConcurrency = 80)],
+      ];
+      for (const [label, mutate] of providerDrift) {
+        const revision = clone(providerRevision) as Record<string, unknown>;
+        mutate(revision);
+        expect(
+          () =>
+            verifyBootstrapRevisionTemplate(
+              f.service.name,
+              f.service.template,
+              revision,
+              f.expected.revision,
+            ),
+          label,
+        ).toThrow();
+      }
+      const conflictingTemplate = clone(f.service.template) as Record<string, unknown>;
+      (conflictingTemplate.containers as Array<Record<string, unknown>>)[0]!.name = 'other-1';
+      expect(() =>
+        verifyBootstrapRevisionTemplate(
+          f.service.name,
+          conflictingTemplate,
+          providerRevision,
+          f.expected.revision,
+        ),
+      ).toThrow();
+    },
+  );
+  it('rejects a malformed provider-shaped preflight before recording intent or PATCHing', async () => {
+    const f = fixture('web');
+    const revision = clone(f.native);
+    revision.service = 'assistant-web';
+    (revision.containers[0] as Record<string, unknown>).name = 'web-1';
+    revision.timeout = '301s';
+    const calls: string[] = [];
+    const io = {
+      now: () => 0,
+      sleep: async () => {},
+      recordIntent: async () => {
+        calls.push('intent');
+      },
+      request: async (url: string, options: { method: string }) => {
+        calls.push(`${options.method}:${url.includes('/revisions/') ? 'revision' : 'service'}`);
+        return new Response(JSON.stringify(url.includes('/revisions/') ? revision : f.service), {
+          headers: { 'content-type': 'application/json' },
+        });
+      },
+    };
+    await expect(restoreScaling(io, f.receipt, 'web', f.expected)).rejects.toThrow();
+    expect(calls).toEqual(['GET:service', 'GET:revision']);
+  });
   it('requires exact reviewed source/digest and prior closure/drain/recovery references, not empty tags as drain evidence', () => {
     const f = fixture();
     expect(reviewedBootstrap(f.receipt, bootstrapDigest(f.receipt), source)).toEqual(f.receipt);
@@ -152,6 +397,62 @@ describe('reviewed current snapshot and bootstrap restoration', () => {
     for (const changed of changes)
       expect(() => verifyCurrentSnapshot(b, changed, f.native)).toThrow();
   });
+  it('accepts the retained retired resource condition only for a closed stable current revision', () => {
+    const f = fixture(),
+      s = clone(f.service);
+    delete (s.traffic[0] as { tag?: string }).tag;
+    delete (s.trafficStatuses[0] as { tag?: string }).tag;
+    // Condition fields from the retained Cloud Run v2 retired profile; no provider identifiers.
+    const conditions = [
+      { type: 'Ready', state: 'CONDITION_SUCCEEDED', revisionReason: 'RETIRED' },
+      { type: 'Active', state: 'CONDITION_FAILED', revisionReason: 'RETIRED' },
+      { type: 'ResourcesAvailable', state: 'CONDITION_RECONCILING', revisionReason: 'RETIRED' },
+      { type: 'TrafficShutDown', state: 'CONDITION_SUCCEEDED' },
+      { type: 'ContainerReady', state: 'CONDITION_SUCCEEDED' },
+      { type: 'ContainerHealthy', state: 'CONDITION_SUCCEEDED' },
+    ];
+    const revision = { ...f.native, conditions, reconciling: false };
+    const binding = (service: typeof s, native: typeof revision) => ({
+      ...f.receipt.services.web,
+      revision: f.expected.revision,
+      image: f.expected.image,
+      serviceSha256: bootstrapDigest(service),
+      revisionSha256: bootstrapDigest(native),
+    });
+    expect(() => verifyCurrentSnapshot(binding(s, revision), s, revision)).not.toThrow();
+    expect(() => verifyCurrentSnapshot(binding(s, revision), s, revision, false)).toThrow();
+    const activeService = { ...s, scaling: { scalingMode: 'AUTOMATIC', manualInstanceCount: 0 } };
+    expect(() =>
+      verifyCurrentSnapshot(binding(activeService, revision), activeService, revision),
+    ).toThrow();
+    const changingService = { ...s, reconciling: true };
+    expect(() =>
+      verifyCurrentSnapshot(binding(changingService, revision), changingService, revision),
+    ).toThrow();
+    const changingRevision = { ...revision, reconciling: true };
+    expect(() =>
+      verifyCurrentSnapshot(binding(s, changingRevision), s, changingRevision),
+    ).toThrow();
+    for (const invalid of [
+      { type: 'Ready', state: 'CONDITION_RECONCILING', revisionReason: 'RETIRED' },
+      { type: 'Active', state: 'CONDITION_RECONCILING', revisionReason: 'RETIRED' },
+      { type: 'ContainerHealthy', state: 'CONDITION_RECONCILING', revisionReason: 'RETIRED' },
+      { type: 'ResourcesAvailable', state: 'CONDITION_RECONCILING', revisionReason: 'OTHER' },
+      { type: 'ResourcesAvailable', state: 'CONDITION_UNKNOWN', revisionReason: 'RETIRED' },
+    ]) {
+      const changed = { ...revision, conditions: [...conditions, invalid] };
+      expect(() => verifyCurrentSnapshot(binding(s, changed), s, changed)).toThrow();
+    }
+    const terminal = {
+      ...s,
+      terminalCondition: {
+        type: 'ResourcesAvailable',
+        state: 'CONDITION_RECONCILING',
+        revisionReason: 'RETIRED',
+      },
+    };
+    expect(() => verifyCurrentSnapshot(binding(terminal, revision), terminal, revision)).toThrow();
+  });
   it.each(['agent', 'web'] as const)(
     'restores only positively promoted new %s revision with strict real readiness',
     (role) => {
@@ -161,6 +462,12 @@ describe('reviewed current snapshot and bootstrap restoration', () => {
         etag: f.service.etag,
         scaling: f.receipt.services[role].automaticScaling,
       });
+      const providerShapedRevision = clone(f.native);
+      providerShapedRevision.service = `assistant-${role}`;
+      (providerShapedRevision.containers[0] as Record<string, unknown>).name = `${role}-1`;
+      expect(() =>
+        planScalingRestore(f.receipt, role, f.service, providerShapedRevision, f.expected),
+      ).not.toThrow();
       expect(() =>
         planScalingRestore(
           f.receipt,
@@ -171,6 +478,15 @@ describe('reviewed current snapshot and bootstrap restoration', () => {
               { ...f.service.trafficStatuses[0], revision: `assistant-${role}-old` },
             ],
           },
+          f.native,
+          f.expected,
+        ),
+      ).toThrow();
+      expect(() =>
+        planScalingRestore(
+          f.receipt,
+          role,
+          { ...f.service, uid: 'different-service-uid' },
           f.native,
           f.expected,
         ),
@@ -271,6 +587,59 @@ describe('reviewed current snapshot and bootstrap restoration', () => {
     expect(calls).toEqual(['intent', 'patch', 'intent']);
     expect(records).toMatchObject([{ outcome: 'attempted' }, { outcome: 'unknown' }]);
   });
+  it.each([true, false])(
+    'preserves raw scaling receipts across sshEnabled default flaps (before explicit=%s)',
+    async (explicit) => {
+      const f = fixture();
+      let current: Record<string, unknown> = {
+        ...clone(f.service),
+        ...(explicit ? { sshEnabled: false } : {}),
+      };
+      const original = clone(current);
+      // The action-time reread may use the opposite default representation from its raw pin.
+      const pin = bootstrapDigest(explicit ? f.service : { ...f.service, sshEnabled: false });
+      const records: Record<string, unknown>[] = [];
+      let writes = 0;
+      const io = {
+        now: () => 0,
+        sleep: async () => {},
+        recordIntent: async (value: unknown) => {
+          records.push(value as Record<string, unknown>);
+        },
+        request: async (url: string, opt: { method: string; body?: string }) => {
+          if (opt.method === 'PATCH') {
+            writes++;
+            const body = JSON.parse(opt.body ?? 'null');
+            current = {
+              ...current,
+              scaling: body.scaling,
+              etag: 'etag-3',
+              generation: '3',
+              observedGeneration: '3',
+            };
+            if (explicit) delete current.sshEnabled;
+            else current.sshEnabled = false;
+            return new Response(
+              JSON.stringify({
+                name: 'projects/bmson-assistant/locations/us-west1/operations/op-1',
+                done: true,
+                response: { name: current.name },
+              }),
+            );
+          }
+          return new Response(JSON.stringify(url.includes('/revisions/') ? f.native : current));
+        },
+      };
+      const result = await restoreScaling(io, f.receipt, 'web', f.expected, false, undefined, pin);
+      expect(writes).toBe(1);
+      expect(result.before).toEqual(original);
+      expect(records[0]?.beforeSha256).toBe(bootstrapDigest(original));
+      expect(records[1]?.afterSha256).toBe(bootstrapDigest(result.after));
+      expect(records[1]?.outcome).toBe('completed');
+      expect(bootstrapDigest(result.before)).not.toBe(bootstrapDigest(result.after));
+    },
+  );
+
   it('restores captured automatic scaling with an etag-only scaling mask and preserves every other setting', async () => {
     const f = fixture();
     let current = clone(f.service);
@@ -406,10 +775,14 @@ describe('paused agent and atomic immutable unpaused successor', () => {
     alias.traffic.push({ ...alias.traffic[0]!, tag: 'old-unpaused-alias', percent: 0 });
     expect(() => preparePausedAgentResume(f.receipt, alias, f.native, f.expected)).toThrow();
   });
-  it.each(['success', 'unknown', 'failed-startup'] as const)(
+  it.each(['success', 'unknown', 'failed-startup', 'provider-shaped'] as const)(
     'one atomic template+same-tag create handles %s without in-place unpause or blind retry',
     async (mode) => {
       const f = pausedFixture();
+      if (mode === 'provider-shaped') {
+        f.native.service = 'assistant-agent';
+        (f.native.containers[0] as Record<string, unknown>).name = 'agent-1';
+      }
       let service = clone(f.service),
         successor: unknown;
       let writes = 0;
@@ -446,10 +819,13 @@ describe('paused agent and atomic immutable unpaused successor', () => {
               observedGeneration: '3',
             };
             const { revision: _r, ...spec } = body.template;
+            const successorContainers = clone(body.template.containers);
+            if (mode === 'provider-shaped') successorContainers[0].name = 'agent-1';
             successor = {
               ...spec,
               name: `${name}/revisions/${newName}`,
-              service: name,
+              service: mode === 'provider-shaped' ? 'assistant-agent' : name,
+              containers: successorContainers,
               uid: 'different-new-uid',
               conditions: [
                 {

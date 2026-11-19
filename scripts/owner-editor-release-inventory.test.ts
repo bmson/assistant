@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { syntheticImage } from './fixtures/owner-image-resolution.synthetic.js';
 import {
   allowedUrl,
   BASIC_EDITOR_COMMANDS,
@@ -26,6 +27,7 @@ import {
   bootstrapDigest,
   reviewedBootstrap,
 } from './owner-release-current-snapshot.js';
+import { registerImageResolution } from './owner-release-image-resolution.js';
 
 const manifest = readFileSync(
   new URL('./fixtures/owner-editor-release-indexes.json', import.meta.url),
@@ -729,10 +731,15 @@ describe('protected read-only release inventory', () => {
   });
   it.each([
     'bound',
+    'bound-api3',
+    'mixed-api',
+    'mixed-api3-manifests',
+    'mixed-api3-sources',
     'bound-local586',
     'bound-disabled-wif',
     'bound-disabled-local',
     'unbound',
+    'bound-index',
     'mismatched',
     'revision-mismatch',
   ] as const)('collects and redacts editor target state: %s', async (mode) => {
@@ -741,6 +748,11 @@ describe('protected read-only release inventory', () => {
       ownerId: '11111111-1111-4111-8111-111111111111',
     };
     let observations = 0;
+    const images = {
+      agent: syntheticImage('agent', 'inventory'),
+      web: syntheticImage('web', 'inventory'),
+    };
+    const resolved: string[] = [];
     const spec = JSON.parse(manifest.toString()) as {
       indexes: Array<{
         collectionGroup: string;
@@ -820,8 +832,38 @@ describe('protected read-only release inventory', () => {
           .replaceAll('assistant-agent', `assistant-${component}`)
           .replaceAll('/agent@', `/${component}@`),
       ) as ReturnType<typeof service>;
+      if (
+        mode === 'bound-api3' ||
+        mode === 'mixed-api3-manifests' ||
+        mode === 'mixed-api3-sources' ||
+        (mode === 'mixed-api' && component === 'agent')
+      ) {
+        const env = svc.template.containers[0]?.env;
+        const api = env?.find((entry) => entry.name === 'ASSISTANT_RELEASE_API_CONTRACT');
+        if (!api || !env) throw new Error('missing API fixture');
+        api.value = '3';
+        const peer = component === 'agent' ? 'WEB' : 'AGENT';
+        env.push(
+          { name: `ASSISTANT_RELEASE_${peer}_API_MIN`, value: '3' },
+          { name: `ASSISTANT_RELEASE_${peer}_API_MAX`, value: '3' },
+          { name: 'ASSISTANT_RELEASE_SCHEMA_VERSION', value: '1' },
+          {
+            name: 'ASSISTANT_RELEASE_SOURCE_SHA',
+            value: (mode === 'mixed-api3-sources' && component === 'web' ? 'b' : 'a').repeat(40),
+          },
+          {
+            name: 'ASSISTANT_RELEASE_MANIFEST',
+            value: (mode === 'mixed-api3-manifests' && component === 'web' ? 'b' : 'a').repeat(64),
+          },
+        );
+      }
       const traffic = svc.trafficStatuses[0];
       if (!traffic) throw new Error('missing fake traffic fixture');
+      if (mode === 'bound-index') {
+        const container = svc.template.containers[0];
+        if (!container) throw new Error('Synthetic container missing');
+        container.image = images[component].image;
+      }
       if (mode.startsWith('bound-disabled'))
         Object.assign(svc, {
           uid: `${component}-uid`,
@@ -855,6 +897,18 @@ describe('protected read-only release inventory', () => {
         return {
           name: `${svc.name}/revisions/${traffic.revision}`,
           ...svc.template,
+          ...(mode === 'bound-index'
+            ? {
+                containers: [
+                  {
+                    ...svc.template.containers[0],
+                    name: `${component}-1`,
+                    image: images[component].childImage,
+                  },
+                ],
+                containerStatuses: images[component].revision.containerStatuses,
+              }
+            : {}),
           ...(mode.startsWith('bound-disabled')
             ? {
                 uid: `${component}-revision-uid`,
@@ -947,6 +1001,17 @@ describe('protected read-only release inventory', () => {
       current = reviewedBootstrap(raw, bootstrapDigest(raw), raw.source);
       calls.length = 0;
     }
+    if (mode === 'mixed-api' || mode === 'mixed-api3-manifests' || mode === 'mixed-api3-sources') {
+      await expect(collectInventory(read, manifest, now, lists, observe)).rejects.toThrow(
+        mode === 'mixed-api'
+          ? 'mixed Firestore API contracts'
+          : mode === 'mixed-api3-manifests'
+            ? 'mixed Firestore release manifests'
+            : 'mixed Firestore release sources',
+      );
+      expect(observations).toBe(0);
+      return;
+    }
     const result = await collectInventory(
       read,
       manifest,
@@ -955,7 +1020,14 @@ describe('protected read-only release inventory', () => {
       mode === 'bound-disabled-local' ? undefined : observe,
       undefined,
       current,
+      async (image) => {
+        resolved.push(image);
+        const f = Object.values(images).find((candidate) => candidate.image === image);
+        if (!f) throw new Error('Unexpected image requested');
+        registerImageResolution(image, f.parentBytes, f.childBytes);
+      },
     );
+    expect(resolved).toEqual(mode === 'bound-index' ? [images.agent.image, images.web.image] : []);
     if (current) {
       expect(
         result.services.every(
