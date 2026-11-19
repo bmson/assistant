@@ -78,7 +78,7 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | B8  | HealthKit sleep and activity (opt-in)                                  | 4     | L    | G2         | open                                                          |
 | B9  | Mail coverage and ingest health                                        | 1     | M    | A11        | open                                                          |
 | C1  | Typed `signals` store                                                  | 2     | L    | —          | open                                                          |
-| C2  | Email taxonomy v2 and extractors                                       | 2     | L    | A11, C1    | in review (authenticated practice-change mail)                 |
+| C2  | Email taxonomy v2 and extractors                                       | 2     | L    | A11, C1    | in review (#910, plus authenticated practice-change evidence) |
 | C3  | Close obligations by evidence                                          | 2     | M    | C1, C2     | open                                                          |
 | C4  | People cleanup                                                         | 1     | M    | —          | open                                                          |
 | C5  | Rebuild occasions                                                      | 1     | M    | C4         | open (#910: only confirmed occasions surface)                 |
