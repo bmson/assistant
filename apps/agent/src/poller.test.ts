@@ -13,6 +13,7 @@ const firestoreMaintenanceReady = vi.hoisted(() => vi.fn());
 const runDueSchedules = vi.hoisted(() => vi.fn());
 const renotifyStalledApprovals = vi.hoisted(() => vi.fn(async () => 0));
 const notifyApproval = vi.hoisted(() => vi.fn(async () => {}));
+const recordPostgresSweepHeartbeat = vi.hoisted(() => vi.fn(async () => {}));
 const runFirestoreSweep = vi.hoisted(() => vi.fn(async () => ({ ready: true, report: {} })));
 
 vi.mock('@assistant/core', () => ({
@@ -32,6 +33,7 @@ vi.mock('@assistant/core', () => ({
   runDueSchedules,
 }));
 vi.mock('./firestore-sweep.js', () => ({ runFirestoreSweep }));
+vi.mock('./sweep-heartbeat.js', () => ({ recordPostgresSweepHeartbeat }));
 vi.mock('./task-runner.js', () => ({ executeAgentTask }));
 vi.mock('./executor-deps.js', () => ({
   executorDeps: () => ({ notifyApproval, notifyOwner: vi.fn() }),
@@ -77,6 +79,7 @@ beforeEach(() => {
   renotifyStalledApprovals.mockReset();
   notifyApproval.mockReset();
   runFirestoreSweep.mockClear();
+  recordPostgresSweepHeartbeat.mockClear();
   findDueTasks.mockResolvedValue([]);
   executeAgentTask.mockResolvedValue({ outcome: 'done' });
   firestoreMaintenanceReady.mockResolvedValue(true);
@@ -241,6 +244,13 @@ describe('startPoller', () => {
       dueTasksNotified: 1,
     });
     expect(notifyTask).toHaveBeenCalledWith('ready-task', 2);
+    expect(recordPostgresSweepHeartbeat).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.any(Date),
+      expect.any(Date),
+      ['getAgent'],
+      ['repairMissionReports', 'runDueSchedules', 'emitBudgetNotices'],
+    );
     expect(sweepStep).toHaveBeenCalledTimes(3);
   });
 

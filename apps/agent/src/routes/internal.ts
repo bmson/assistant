@@ -116,6 +116,18 @@ internal.post('/model-probe/vertex', async (c) => {
   }
 });
 
+internal.get('/sweep/health', async (c) => {
+  c.header('cache-control', 'no-store');
+  try {
+    const { readConfiguredSweepHealth } = await import('../sweep-heartbeat.js');
+    const health = await readConfiguredSweepHealth(loadConfig());
+    return c.json({ health }, health.ok ? 200 : 503);
+  } catch {
+    console.error('Unable to read scheduler sweep heartbeat');
+    return c.json({ health: { ok: false, state: 'unavailable' } }, 503);
+  }
+});
+
 internal.post('/sweep', async (c) => {
   const deps = buildDeps();
   if (deps.config.PERSISTENCE_DRIVER === 'firestore') {

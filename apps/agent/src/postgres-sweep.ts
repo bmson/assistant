@@ -6,12 +6,15 @@ import {
 } from '@assistant/core';
 import { type AgentDeps, agentServices } from './deps.js';
 import { executorDeps } from './executor-deps.js';
+import { recordPostgresSweepHeartbeat } from './sweep-heartbeat.js';
 
 /** Shared by the local poller and HTTP scheduler; owner reads cannot abort independent maintenance. */
 export async function runPostgresSweep(
   deps: AgentDeps,
-  options: { notifyDueTasks?: boolean } = {},
+  options: { notifyDueTasks?: boolean; clock?: () => Date } = {},
 ) {
+  const clock = options.clock ?? (() => new Date());
+  const startedAt = clock();
   const {
     backfillMessageEmbeddings,
     emitBudgetNotices,
@@ -133,6 +136,11 @@ export async function runPostgresSweep(
       0,
     );
   }
+  await step(
+    'recordSweepHeartbeat',
+    () => recordPostgresSweepHeartbeat(deps.db, startedAt, clock(), failedSteps, skippedSteps),
+    undefined,
+  );
   return {
     expiredApprovalsWoke: woken.length,
     expiredSuggestions,
