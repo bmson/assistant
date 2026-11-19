@@ -3834,10 +3834,17 @@ describe('golden tasks', () => {
     // The runtime owns private reads, so it retries exactly once without ever
     // letting the scripted model fill the gap with remembered or guessed events.
     expect(result.toolNames).toEqual(['calendar.list_events', 'calendar.list_events']);
-    const agenda = JSON.stringify(await responseCardsForTask(result.taskId));
-    expect(agenda).toContain(
-      'Couldn’t load the requested calendar. Please retry the calendar lookup.',
-    );
+    expect(await responseCardsForTask(result.taskId)).toMatchObject([
+      {
+        kind: 'briefing',
+        presentation: 'calendar-agenda',
+        lead: 'Couldn’t load the requested calendar.',
+        compactCoverage:
+          'Coverage is incomplete. Check the source details and retry the calendar lookup.',
+        complete: false,
+        accompaniesProse: false,
+      },
+    ]);
     expect(result.finalText).not.toContain('Done.');
 
     const [check] = await db
