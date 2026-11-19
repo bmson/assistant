@@ -5,13 +5,13 @@
     "packages/config/src/index.ts": "563c98374b32afdf42eab148f4ac891cd0ecc0925387f7cc18b84ef208bd4381",
     "apps/agent/src/deps.ts": "6d04e93fb589b84b4e279c6f47e72b426c46c2376d600e5a51790c325092813d",
     "apps/agent/src/index.ts": "bc65b1a16ba83c6351a74e2c071189fb4288d5d3ec2c4425accc185da77fe6ab",
-    "apps/web/lib/server.ts": "2d6ebc1cb3244e1c0c0847f5f9d221e10d5fd6b77270e3fa148c7b5bef8ab821",
+    "apps/web/lib/server.ts": "0fa1eb96ba79ea28983cbf55b593132c56803d889cf44d8f605d88faa3665cc6",
     "apps/web/proxy.ts": "2bd4b31f35537ca7c61e030470792422b957687a0a345838bcbec111a21bbaae",
-    "packages/db/drizzle/meta/_journal.json": "0641de27b704f13a1cbeddca9b19f5be1270b1abd380695150b84ec34415cfe7",
-    "infra/gcp/release-contracts.json": "fc09b6cb5cc2c74ca9e7bf33b9be9ed11c0b7e20062fd2052e4dc5ad5864f75d"
+    "packages/db/drizzle/meta/_journal.json": "1298534f57c4f7d30773af0fcceac2210ce367bc54e2bdd982c7f77ed3ff096a",
+    "infra/gcp/release-contracts.json": "ece3a6603b419d386e83d9ae8a4936cc6cac137d7f31922b85e7e7f5e556845b"
   },
-  "latestPostgresMigration": "0138_mcp_oauth_state",
-  "postgresSchemaVersion": 138,
+  "latestPostgresMigration": "0139_research_assignment_state",
+  "postgresSchemaVersion": 139,
   "releaseContracts": {
     "agent": {
       "apiContract": 3,
@@ -20,8 +20,8 @@
         "max": 3
       },
       "postgresSchema": {
-        "min": 138,
-        "max": 138
+        "min": 139,
+        "max": 139
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -32,8 +32,8 @@
         "max": 3
       },
       "postgresSchema": {
-        "min": 138,
-        "max": 138
+        "min": 139,
+        "max": 139
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -44,8 +44,8 @@
         "max": 1
       },
       "postgresSchema": {
-        "min": 138,
-        "max": 138
+        "min": 139,
+        "max": 139
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -56,8 +56,8 @@
         "max": 1
       },
       "postgresSchema": {
-        "min": 138,
-        "max": 138
+        "min": 139,
+        "max": 139
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -68,8 +68,8 @@
         "max": 1
       },
       "postgresSchema": {
-        "min": 138,
-        "max": 138
+        "min": 139,
+        "max": 139
       },
       "currentPostgresSchemaCompatible": true
     }
