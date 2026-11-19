@@ -580,6 +580,54 @@ describe('owner intent provenance', () => {
     expect(intent.authorizedScopes).toContain('external_send');
   });
 
+  it.each([
+    ['What is on my calendar tomorrow?', 'private_read'],
+    ['Check my inbox for delivery updates.', 'private_read'],
+    ['What bills are in my inbox this week?', 'private_read'],
+    ['What is the latest news about rail fares?', 'external_read'],
+    ['What is the weather in Oslo tomorrow?', 'external_read'],
+  ] as const)(
+    'keeps a standalone read independent of a pending clarification: %s',
+    (text, scope) => {
+      const originalRequest = 'Email the agenda to the planning group.';
+      const question = 'Which recipient should receive it?';
+      const answerStatus = clarificationAnswerStatus(text, question, originalRequest);
+      const intent = latestOwnerIntent([{ role: 'user', content: text }], {
+        trust: 'owner',
+        clarificationContinuation: {
+          sourceTaskId: 'old-send',
+          ownerAuthoredText: originalRequest,
+          question,
+          authorizedScopes: ['external_send'],
+          tainted: false,
+          answerStatus,
+        },
+      });
+      expect(answerStatus).toBe('unrelated');
+      expect(intent.ownerAuthoredText).toBe(text);
+      expect(intent.authorizedScopes).toContain(scope);
+      expect(intent).toEqual(
+        latestOwnerIntent([{ role: 'user', content: text }], { trust: 'owner' }),
+      );
+    },
+  );
+
+  it.each([
+    ['Use planning@example.test.', 'Which recipient?', 'Email the notes to the planning group.'],
+    [
+      '"What is on my calendar tomorrow?"',
+      'What should the email say?',
+      'Email the notes to the planning group.',
+    ],
+    ['On my work calendar.', 'Which calendar?', 'What is on my schedule tomorrow?'],
+    ['What about Friday?', 'Which day?', 'Check my calendar for an open half hour.'],
+    ['Check my work calendar.', 'Which calendar?', 'What is on my schedule tomorrow?'],
+    ['Oslo.', 'Which city?', 'What is the weather tomorrow?'],
+    ['What is the weather in Oslo tomorrow?', 'Which city?', 'What is the weather tomorrow?'],
+  ])('keeps a slot answer in its original request: %s', (text, question, originalRequest) => {
+    expect(clarificationAnswerStatus(text, question, originalRequest)).toBe('answer');
+  });
+
   it('admits a directly requested application while retaining quotation and negation boundaries', () => {
     expect(
       extractOwnerIntent({ trust: 'owner', text: 'Apply to Acme using my resume.' })

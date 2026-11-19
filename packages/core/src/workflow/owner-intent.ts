@@ -228,6 +228,7 @@ export function isSelfContainedTextTransformation(
 export function clarificationAnswerStatus(
   value: string,
   clarificationQuestion?: string,
+  originalRequest?: string,
 ): ClarificationContinuation['answerStatus'] {
   const text = value.trim().replace(/^\[The owner added this while the task was paused:\]\s*/i, '');
   if (!text || text.length > 2_000 || /^\?+$/.test(text)) return 'unrelated';
@@ -245,7 +246,18 @@ export function clarificationAnswerStatus(
   if (/^(?:by the way|separately|unrelated|new question|different topic|also,)\b/i.test(text))
     return 'unrelated';
   if (isCompleteEmailRequestAfterRecipientQuestion(text, clarificationQuestion)) return 'unrelated';
+  if (clarificationQuestion && originalRequest !== undefined) {
+    const readKind = standaloneReadKind(text);
+    if (readKind && readKind !== standaloneReadKind(originalRequest)) return 'unrelated';
+  }
   return 'answer';
+}
+
+/** A complete read can establish a new request without borrowing prior context. */
+function standaloneReadKind(text: string) {
+  if (hasUnmatchedQuote(text)) return undefined;
+  const turn = [{ role: 'user', content: splitQuoted(text).authored }];
+  return detectPersonalReadRequest(turn)?.kind ?? detectLiveLookup(turn)?.kind;
 }
 
 function isCompleteEmailRequestAfterRecipientQuestion(
