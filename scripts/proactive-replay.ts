@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { replayCases } from '../apps/agent/src/proactive-replay-cases.js';
 import type { ScoredReplayCase } from '../apps/agent/src/proactive-replay-score.js';
 
 const host = process.env.FIRESTORE_EMULATOR_HOST;
@@ -17,6 +18,24 @@ function sourceSnapshot() {
   if (revision.status !== 0 || status.status !== 0) return null;
   return { revision: revision.stdout.trim(), clean: status.stdout.length === 0 };
 }
+
+const documentedScenarios = Array.from(
+  readFileSync(new URL('../docs/proactive/golden-signals.md', import.meta.url), 'utf8').matchAll(
+    /^\|\s*(S\d{2})\s*\|\s*([^|]+)\|/gm,
+  ),
+  ([, id, signal]) => ({ id: id as string, signal: (signal as string).trim() }),
+);
+const expectedReplayIds = Object.values(replayCases).map(({ id }) => id);
+const documentedIds = new Set(documentedScenarios.map(({ id }) => id));
+const implementedIds = new Set<string>(
+  expectedReplayIds.filter((id) => !id.startsWith('CONTROL-')),
+);
+if (
+  documentedScenarios.length === 0 ||
+  documentedIds.size !== documentedScenarios.length ||
+  [...implementedIds].some((id) => !documentedIds.has(id))
+)
+  throw new Error('The replay cases must match unique IDs in the golden-signal scenario table.');
 
 const sourceAtStart = sourceSnapshot();
 const evidenceDir = mkdtempSync(join(tmpdir(), 'assistant-proactive-replay-'));
@@ -61,7 +80,9 @@ try {
     const matched = sum('matched') - sum('setupMatches');
     return {
       adapter,
-      passed: cases.length > 0 && cases.every(({ passed }) => passed),
+      passed:
+        cases.length === expectedReplayIds.length &&
+        expectedReplayIds.every((id) => cases.some((entry) => entry.id === id && entry.passed)),
       score: {
         matched,
         expected,
@@ -73,6 +94,24 @@ try {
       cases,
     };
   });
+  const scenarios = documentedScenarios.map(({ id, signal }) => ({
+    id,
+    signal,
+    drivers: adapters.map(({ adapter, cases }) => {
+      if (!implementedIds.has(id)) return { adapter, status: 'unimplemented' };
+      const evidence = cases.find((entry) => entry.id === id);
+      if (!evidence) return { adapter, status: 'awaiting-evidence' };
+      return { adapter, status: 'covered', result: evidence.passed ? 'pass' : 'fail' };
+    }),
+  }));
+  const coverage = {
+    documentedScenarios: documentedScenarios.length,
+    implementedScenarios: implementedIds.size,
+    scenariosWithEvidenceOnBothDrivers: scenarios.filter(({ drivers }) =>
+      drivers.every(({ status }) => status === 'covered'),
+    ).length,
+    scenarios,
+  };
   const sourceAtEnd = sourceSnapshot();
   const source = {
     revision: sourceAtStart?.revision ?? null,
@@ -87,10 +126,12 @@ try {
     join(outputDir, 'benchmark-result.json'),
     `${JSON.stringify(
       {
-        version: 1,
+        version: 2,
         source,
         scope,
-        passed,
+        executedSubsetPassed: passed,
+        coverage,
+        productionRecall: 'unmeasured',
         adapters,
       },
       null,
@@ -110,9 +151,26 @@ try {
           : ' (local edits or revision change).')
       : 'Source revision unavailable.',
     '',
-    'The channel score reflects the fake push acknowledgment. The S14 due setup and generic control are scored separately from benchmark precision and recall. This is a three-case slice of docs/proactive/golden-signals.md.',
+    'The channel score reflects the fake push acknowledgment. The S14 due setup and generic control are scored separately from the executed subset’s precision and recall.',
     '',
+    '## Golden-signal coverage',
+    '',
+    `${coverage.implementedScenarios} of ${coverage.documentedScenarios} documented scenarios have executable fixtures. ${coverage.scenariosWithEvidenceOnBothDrivers} of ${coverage.documentedScenarios} have evidence on both drivers in this run. Overall benchmark recall and precision require full coverage. Production recall remains unmeasured.`,
+    '',
+    '| ID | Signal | PostgreSQL | Firestore |',
+    '| --- | --- | --- | --- |',
   ];
+  for (const { id, signal, drivers } of coverage.scenarios) {
+    const statuses = drivers.map(({ status, result }) =>
+      status === 'covered'
+        ? `Covered (${result})`
+        : status === 'awaiting-evidence'
+          ? 'Awaiting evidence'
+          : 'Unimplemented',
+    );
+    markdown.push(`| ${id} | ${signal} | ${statuses.join(' | ')} |`);
+  }
+  markdown.push('');
   for (const adapter of adapters) {
     const percent = (value: number | null) =>
       value === null ? '—' : `${(value * 100).toFixed(1)}%`;

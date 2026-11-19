@@ -132,7 +132,7 @@ S14 tests quiet; S19 tests both an action and restraint; S23 checks data. The re
 
 With a local PostgreSQL test server and the Firestore emulator running, set `TEST_DATABASE_URL` to the loopback PostgreSQL connection and `FIRESTORE_EMULATOR_HOST` to the emulator address. Run `pnpm test:proactive-replay`. The command writes a Markdown scorecard and JSON evidence in `.artifacts/proactive-replay/`.
 
-The current slice measures timely delivery for S16 and S17 and suppression after payment for S14. It reads durable cards and acknowledgments from a simulated push service. S14 first establishes that the unpaid bill could be delivered. That setup and the generic-mail control are excluded from the recall and precision denominators. The other scenarios await executable fixtures.
+The current slice measures timely delivery for S16 and S17 and suppression after payment for S14. It reads durable cards and acknowledgments from a simulated push service. S14 first establishes that the unpaid bill could be delivered. That setup and the generic-mail control are excluded from the recall and precision denominators. The scorecard lists every scenario in the table above for each driver, and reports the full coverage denominator separately from executed-subset scores. A covered case has replay evidence with a pass or fail result. An implemented case without evidence is awaiting evidence. The remaining scenarios are unimplemented. Production recall remains unmeasured.
 
 ## Adding scenarios (H2)
 
