@@ -53,6 +53,7 @@ import { FirestoreNudgePolicyRepository } from './nudge-policy.js';
 import { FirestoreOwnerCardCompilationRepository } from './owner-card-compilation.js';
 import { FirestoreOwnerContextRepository } from './owner-context.js';
 import { FirestoreOwnerNoticeRepository, firestoreOwnerNotices } from './owner-notices.js';
+import { createFirestoreProactiveCanaryRepository } from './proactive-canaries.js';
 import { FirestorePulseRepository } from './pulse.js';
 import { FirestoreRecallMetricsRepository } from './recall-metrics.js';
 import { FirestoreRecallSurfacingRepository } from './recall-surfacing.js';
@@ -86,6 +87,7 @@ export function createFirestoreExecutionPersistence(
   const situationDecisionContext = new FirestoreSituationToolRepository(store, agentId);
   return {
     driver: 'firestore',
+    proactiveCanaries: createFirestoreProactiveCanaryRepository(store),
     googleCalendarConnection: createFirestoreGoogleCalendarConnectionRepository(store),
     conversationSearch: new FirestoreConversationSearchRepository(store, capturedEmbeddingSpace),
     tasks: new FirestoreTaskRepository(store),

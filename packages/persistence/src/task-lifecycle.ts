@@ -21,6 +21,7 @@ export interface TaskOutcome {
   status: 'done' | 'failed' | 'cancelled';
   progress?: string;
   briefingOutcome?: BriefingRunOutcome;
+  pulseCompleted?: boolean;
 }
 export interface TaskBudgetIncrease {
   agentId: string;

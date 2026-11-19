@@ -103,7 +103,7 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | E2  | Evening look-ahead as a code job                                       | 3     | M    | D1         | open                                                          |
 | E3  | Weekly review and monthly renewals                                     | 5     | S    | E1         | open                                                          |
 | E4  | Card actions                                                           | 3     | M    | —          | open                                                          |
-| E5  | Proactive settings and Noticing health card on iOS                     | 3     | M    | H4         | open                                                          |
+| E5  | Proactive settings and Noticing health card on iOS                     | 3     | M    | H4         | in progress (source and producer health on the phone)         |
 | E6  | Internal notices out of the owner's chats                              | 3     | S    | A4         | open                                                          |
 | E7  | Per-person and per-day views                                           | 4     | M    | C6         | open                                                          |
 | E8  | Actionable push notifications                                          | 4     | M    | E4         | open                                                          |
@@ -122,4 +122,4 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | H1  | Golden-signal benchmark harness                                        | 3     | L    | —          | open                                                          |
 | H2  | Weekly missed-signal audit                                             | 5     | M    | H1         | open                                                          |
 | H3  | Proactive telemetry                                                    | 5     | M    | —          | open                                                          |
-| H4  | Daily canary                                                           | 0     | S    | —          | open                                                          |
+| H4  | Daily canary                                                           | 0     | S    | —          | in review (source checks and one daily health alert)          |

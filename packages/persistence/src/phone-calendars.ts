@@ -208,6 +208,25 @@ function formatCoverageTime(value: string, timeZone: string): string | null {
   }
 }
 
+/** Assess which selected calendars were actually present and complete, independently of freshness. */
+export function phoneCalendarSourceCoverage(
+  snapshot: PhoneCalendarSnapshot,
+  calendarIds?: string[],
+) {
+  const wanted = new Set(
+    calendarIds?.map((id) => id.replace(/^iphone:/, '')) ??
+      snapshot.calendars.map((calendar) => calendar.id),
+  );
+  const sources = snapshot.sourceAvailability?.filter((source) => wanted.has(source.calendarId));
+  const narrowed = calendarIds !== undefined && wanted.size < snapshot.calendars.length;
+  const sourceComplete = sources
+    ? sources.length === wanted.size &&
+      sources.every((source) => source.status === 'available' && source.complete) &&
+      (snapshot.complete !== false || narrowed)
+    : snapshot.complete !== false;
+  return { sources, sourceComplete };
+}
+
 export function phoneCalendarCoverage(
   snapshot: PhoneCalendarSnapshot,
   timeMin?: string,
@@ -222,17 +241,7 @@ export function phoneCalendarCoverage(
     Number.isFinite(effective) &&
     effective <= now.getTime() + 5 * 60_000 &&
     now.getTime() - effective <= 30 * 60_000;
-  const wanted = new Set(
-    calendarIds?.map((id) => id.replace(/^iphone:/, '')) ??
-      snapshot.calendars.map((calendar) => calendar.id),
-  );
-  const sources = snapshot.sourceAvailability?.filter((source) => wanted.has(source.calendarId));
-  const narrowed = calendarIds !== undefined && wanted.size < snapshot.calendars.length;
-  const sourceComplete = sources
-    ? sources.length === wanted.size &&
-      sources.every((source) => source.status === 'available' && source.complete) &&
-      (snapshot.complete !== false || narrowed)
-    : snapshot.complete !== false;
+  const { sources, sourceComplete } = phoneCalendarSourceCoverage(snapshot, calendarIds);
   const complete = fresh && sourceComplete && !snapshot.truncated;
   const covered = Boolean(
     timeMin &&

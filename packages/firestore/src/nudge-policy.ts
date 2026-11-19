@@ -44,7 +44,7 @@ export class FirestoreNudgePolicyRepository implements NudgePolicyRepository {
     const channel = opts.channel ?? 'out-of-band';
     const answerReady = channel.startsWith('answer-ready:');
     const watchdog = channel.startsWith('watchdog-outage:');
-    const recheck = answerReady || watchdog;
+    const recheck = answerReady || watchdog || channel.startsWith('health-canary:');
     const stable = recheck || channel.startsWith('curiosity-nudge:');
     const id = recheck
       ? stableNudgePingId(agent.id, channel)

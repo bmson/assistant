@@ -191,6 +191,11 @@ describe('owner-facing SMS pings are budget-critical', () => {
     ).resolves.toEqual({
       legs: [{ channel: 'sms', status: 'skipped', reason: 'push-only-notice' }],
     });
+    await expect(
+      notifyOwnerBySms(deps, { purpose: 'health-canary', text: 'Synthetic health signal' }),
+    ).resolves.toEqual({
+      legs: [{ channel: 'sms', status: 'skipped', reason: 'push-only-notice' }],
+    });
     await expect(notifyOwnerBySms(deps, { text: 'Private unsolicited message' })).resolves.toEqual({
       legs: [{ channel: 'sms', status: 'skipped', reason: 'unsolicited-sms-category-not-allowed' }],
     });

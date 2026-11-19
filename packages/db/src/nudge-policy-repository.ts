@@ -20,7 +20,7 @@ export function createPostgresNudgePolicyRepository(db: Db): NudgePolicyReposito
       const channel = opts.channel ?? 'out-of-band';
       const answerReady = channel.startsWith('answer-ready:');
       const watchdog = channel.startsWith('watchdog-outage:');
-      const recheck = answerReady || watchdog;
+      const recheck = answerReady || watchdog || channel.startsWith('health-canary:');
       const id = recheck
         ? stableNudgePingId(agent.id, channel)
         : channel.startsWith('curiosity-nudge:')

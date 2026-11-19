@@ -305,6 +305,27 @@ const watchdog = {
   text: 'Synthetic private detail',
 };
 
+it('opens the owner’s Noticing screen without exposing the health finding', async () => {
+  const { deps, send, rows } = channel();
+  await notifyOwnerByPush(
+    { ...deps, admitHealthCanary: async () => ({ deliver: true }) },
+    {
+      purpose: 'health-canary',
+      deliveryKey: 'health-canary:2026-01-12',
+      conversationId,
+      taskId,
+      text: 'Synthetic private health finding',
+    },
+  );
+  expect(send).toHaveBeenCalledOnce();
+  expect(send).toHaveBeenCalledWith(
+    expect.objectContaining({
+      data: { route: 'settings', section: 'noticing', agentId: 'owner' },
+    }),
+  );
+  expect(JSON.stringify([...rows.values()])).not.toContain('Synthetic private health finding');
+});
+
 describe('watchdog push policy', () => {
   it('holds an initial watchdog during quiet hours and never sends its private detail', async () => {
     const { deps, send, rows } = channel();

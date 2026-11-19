@@ -138,6 +138,7 @@ export * from './practice-change-mail.js';
 export * from './privacy-erasure.js';
 export * from './privacy-export.js';
 export * from './proactive-awareness.js';
+export * from './proactive-canaries.js';
 export * from './proactive-health.js';
 export * from './profile-contact-identity.js';
 export * from './profile-library.js';

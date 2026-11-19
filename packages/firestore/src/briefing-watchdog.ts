@@ -3,12 +3,16 @@ import {
   briefingCursorName,
   briefingMessageKey,
   createBriefingWatchdogRecord,
+  DAILY_BRIEFING,
+  evaluateBriefingWatchdog,
   type Records,
   readBriefingWatchdogRecord,
   savedBriefingMatches,
   shouldReplaceBriefingWatchdog,
 } from '@assistant/persistence';
 import type { Transaction } from '@google-cloud/firestore';
+import { assertFirestoreInstallationOwner } from './installation-owner.js';
+import { FirestoreScheduleRepository } from './schedules.js';
 import { decodeRecord, documentKey, type InstallationStore } from './store.js';
 
 export async function prepareFirestoreBriefingWatchdog(
@@ -83,4 +87,31 @@ export async function readFirestoreSavedBriefing(
     conversationId: message.conversationId,
     createdAt: message.createdAt,
   };
+}
+
+export async function readFirestoreBriefingHealth(
+  store: InstallationStore,
+  agentId: string,
+  clock = store.now(),
+) {
+  await assertFirestoreInstallationOwner(store, agentId);
+  const migration = await store.doc('coordination', 'migration').get();
+  if (migration.exists && migration.get('status') !== 'active')
+    return { ok: false, state: 'inactive' } as const;
+  const schedule = await new FirestoreScheduleRepository(store).getByName(agentId, DAILY_BRIEFING);
+  return evaluateBriefingWatchdog({
+    scope: `firestore:${store.installationId}`,
+    owner: agentId,
+    schedule,
+    clock,
+    async cursor(name) {
+      const row = await store.doc('maintenanceCursors', name).get();
+      return row.get('cursor');
+    },
+    async task(id) {
+      const row = await store.doc('tasks', id).get();
+      return row.exists ? decodeRecord<Records['tasks']>(row.data()) : null;
+    },
+    saved: (taskId, messageId) => readFirestoreSavedBriefing(store, agentId, taskId, messageId),
+  });
 }

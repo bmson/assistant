@@ -11,7 +11,14 @@ export type OwnerNoticePurpose =
   | 'answer-ready'
   | 'task-attention'
   | 'leave-now'
-  | 'watchdog-outage';
+  | 'watchdog-outage'
+  | 'health-canary';
+
+export const HEALTH_CANARY_PUSH_TEXT = 'Assistant needs attention. Open the app to review.';
+
+export function healthCanaryDeliveryDay(key: string): string | null {
+  return /^health-canary:(\d{4}-\d{2}-\d{2})$/.exec(key)?.[1] ?? null;
+}
 
 export const WATCHDOG_OUTAGE_TEXT = {
   sweep: 'Scheduled checks have been unavailable for at least 30 minutes.',
