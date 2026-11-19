@@ -229,12 +229,11 @@ it.skipIf(!imagesReceipt)(
         SELECT usd::text,accounted_at AS "accountedAt"
         FROM cost_events WHERE id=${legacyCostEventId}`;
       expect(legacyCostEvent).toEqual({ usd: '0.123000', accountedAt: null });
-      const [billEvidence] = await client`
-        SELECT is_nullable AS nullable, data_type AS type,
-               to_regclass('public.email_ingest_bill_identity_idx') IS NOT NULL AS indexed
+      const [costAccountingColumn] = await client`
+        SELECT is_nullable AS nullable, data_type AS type
         FROM information_schema.columns WHERE table_schema='public'
-          AND table_name='email_ingest' AND column_name='bill_evidence'`;
-      expect(billEvidence).toEqual({ nullable: 'YES', type: 'jsonb', indexed: true });
+          AND table_name='cost_events' AND column_name='accounted_at'`;
+      expect(costAccountingColumn).toEqual({ nullable: 'YES', type: 'timestamp with time zone' });
       const [legacyMcpConnection] = await client`
         SELECT status, enabled, bearer_token_encrypted AS "bearerTokenEncrypted", oauth_state AS "oauthState"
         FROM mcp_connections WHERE id=${legacyMcpId} AND agent_id=${owner}`;

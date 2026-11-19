@@ -51,6 +51,11 @@ test('forward qualification retains populated data through the 0135 to 0140 tail
       "expect(legacyCostEvent).toEqual({ usd: '0.123000', accountedAt: null })",
     ),
   );
+  assert.ok(
+    qualification.includes(
+      "expect(costAccountingColumn).toEqual({ nullable: 'YES', type: 'timestamp with time zone' })",
+    ),
+  );
   assert.ok(qualification.includes("'estimated_cost_grants'"));
   assert.ok(qualification.includes("'estimated_cost_quote_requests'"));
   assert.ok(qualification.includes('witnessIsSqlNull: true'));
