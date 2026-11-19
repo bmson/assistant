@@ -1,13 +1,21 @@
 import { randomUUID } from 'node:crypto';
 import {
   assertPostgresInstallationOwner,
+  createPostgresNotificationOutboxRepository,
   createPostgresPulseAdmissionRepository,
   emailBookingOccurrences,
   emailIngest,
   messages,
   proactiveMoments,
 } from '@assistant/db';
-import { FirestorePulseRepository } from '@assistant/firestore';
+import {
+  FirestoreNotificationOutboxRepository,
+  FirestorePulseRepository,
+} from '@assistant/firestore';
+import {
+  type NotificationOutboxRepository,
+  sendNotificationOutboxLeg,
+} from '@assistant/persistence';
 import { describe, expect, it, vi } from 'vitest';
 import { disposeStore, emulatorStore } from '../../../packages/firestore/src/test-store.js';
 import { createIsolatedTestDatabase } from './isolated-test-database.fixture.js';
@@ -26,6 +34,14 @@ import {
   publishSweepOutage,
 } from './sweep-recovery.js';
 
+import {
+  recordFirestoreWatchdogEpisode,
+  recordPostgresWatchdogEpisode,
+  type WatchdogEpisode,
+  type WatchdogObservation,
+  watchdogObservation,
+} from './watchdog-episode.js';
+
 const start = new Date('2026-11-18T08:00:00Z');
 const end = new Date('2026-11-18T11:00:00Z');
 const between = new Date('2026-11-18T09:30:00Z');
@@ -35,7 +51,9 @@ type Alert = Parameters<typeof publishSweepOutage>[3];
 interface Fixture {
   read(at: Date): Promise<{ state: string }>;
   record(at: Date, failed?: string[]): Promise<SweepRecovery | undefined>;
-  alert(notify: Alert): Promise<string>;
+  alert(episode: WatchdogEpisode, notify: Alert): Promise<string>;
+  episode(observation: WatchdogObservation, at: Date): Promise<WatchdogEpisode | null>;
+  push(provider: () => void): Alert;
   publish(recovery: SweepRecovery): Promise<{ status: string }>;
   acknowledge(recovery: SweepRecovery): Promise<void>;
   seed(): Promise<void>;
@@ -43,11 +61,49 @@ interface Fixture {
   close(): Promise<void>;
 }
 
+function durablePush(
+  repo: NotificationOutboxRepository,
+  agentId: string,
+  provider: () => void,
+): Alert {
+  return async ({ deliveryKey, urgency, text }) => {
+    expect(urgency).toBe('interrupt');
+    return sendNotificationOutboxLeg(
+      repo,
+      {
+        agentId,
+        deliveryKey,
+        legKey: 'push:fixture-device',
+        adapter: 'push',
+        destination: { device: 'fixture-device' },
+        payload: { text },
+        now: between,
+      },
+      async () => {
+        provider();
+        return { status: 'delivered' };
+      },
+    );
+  };
+}
+
 function records(agentId: string) {
   const mail = [
     { channelMessageId: 'gmail:cancel', subject: 'Saturday booking', importance: 1 },
     { channelMessageId: 'gmail:move', subject: 'Tuesday booking', importance: 1 },
     { channelMessageId: 'gmail:reported', subject: 'Important notice', importance: 5 },
+    { channelMessageId: 'gmail:secret', subject: 'Door code ABC123', importance: 5 },
+    {
+      channelMessageId: 'gmail:token',
+      subject: 'Access https://example.invalid/reset?token=sensitive-token',
+      importance: 5,
+    },
+    {
+      channelMessageId: 'gmail:identity',
+      subject: 'Hotel changed — qr62xx',
+      dates: [{ bookingIdentity: 'QR62XX' }],
+      importance: 5,
+    },
     {
       channelMessageId: 'gmail:old',
       subject: 'Previous important notice',
@@ -97,14 +153,17 @@ async function postgres(): Promise<Fixture> {
   return {
     read: (at) => readPostgresSweepHealth(db, at),
     record: (at, failed = []) => recordPostgresSweepHeartbeat(db, at, at, failed, []),
-    alert: (notify) =>
+    alert: (episode, notify) =>
       publishSweepOutage(
         createPostgresPulseAdmissionRepository(db),
         agentId,
-        start.toISOString(),
+        episode,
         notify,
         between,
       ),
+    episode: (observation, at) => recordPostgresWatchdogEpisode(db, agentId, observation, at),
+    push: (provider) =>
+      durablePush(createPostgresNotificationOutboxRepository(db), agentId, provider),
     publish: (recovery) => publishPostgresSweepRecovery(db, recovery, end),
     acknowledge: (recovery) => acknowledgePostgresSweepRecovery(db, recovery),
     async seed() {
@@ -131,14 +190,11 @@ async function firestore(): Promise<Fixture> {
   return {
     read: (at) => readFirestoreSweepHealth(store, agentId, at),
     record: (at, failed = []) => recordFirestoreSweepHeartbeat(store, agentId, at, at, failed, []),
-    alert: (notify) =>
-      publishSweepOutage(
-        new FirestorePulseRepository(store),
-        agentId,
-        start.toISOString(),
-        notify,
-        between,
-      ),
+    alert: (episode, notify) =>
+      publishSweepOutage(new FirestorePulseRepository(store), agentId, episode, notify, between),
+    episode: (observation, at) => recordFirestoreWatchdogEpisode(store, agentId, observation, at),
+    push: (provider) =>
+      durablePush(new FirestoreNotificationOutboxRepository(store, agentId), agentId, provider),
     publish: (recovery) => publishFirestoreSweepRecovery(store, agentId, recovery, end),
     acknowledge: (recovery) => acknowledgeFirestoreSweepRecovery(store, recovery),
     async seed() {
@@ -174,14 +230,17 @@ for (const [driver, fixture] of [
           expect(await f.record(start)).toBeUndefined();
           expect((await f.read(new Date(start.getTime() + 1_799_999))).state).toBe('healthy');
           expect((await f.read(new Date(start.getTime() + 1_800_000))).state).toBe('stale');
-          const notify = vi.fn(async (_input: Parameters<Alert>[0]) => undefined);
-          expect((await Promise.all([f.alert(notify), f.alert(notify)])).sort()).toEqual([
-            'already-said',
-            'persisted',
-          ]);
-          expect(notify).toHaveBeenCalledExactlyOnceWith(
-            expect.objectContaining({ urgency: 'interrupt' }),
+          const episode = await f.episode(
+            { kind: 'stale', reason: 'sweep', sweepCompletedAt: start.toISOString() },
+            between,
           );
+          if (!episode) throw new Error('Missing sweep outage episode');
+          const provider = vi.fn();
+          const push = f.push(provider);
+          expect(
+            (await Promise.all([f.alert(episode, push), f.alert(episode, push)])).sort(),
+          ).toEqual(['already-said', 'persisted']);
+          expect(provider).toHaveBeenCalledOnce();
 
           // The first returning sweep fails. A later healthy pass retains the
           // original gap while concurrent digest attempts race at publication.
@@ -209,9 +268,66 @@ for (const [driver, fixture] of [
               'From the authenticated mail available for that period:',
               '- Booking cancellation · Saturday booking',
               '- Booking rescheduled · Tuesday booking',
+              '- Important mail · Hotel changed — [hidden]',
               '- Important mail · Important notice',
+              '- Important mail · [hidden]',
+              '- Important mail · [hidden]',
             ].join('\n'),
           );
+        } finally {
+          await f.close();
+        }
+      },
+      90_000,
+    );
+    it.skipIf(driver === 'Firestore' && !process.env.FIRESTORE_EMULATOR_HOST)(
+      'replays durable push after a briefing-only outage and dedupes an overlapping sweep outage',
+      async () => {
+        const f = await fixture();
+        try {
+          for (const state of ['disabled', 'awaiting_first_run']) {
+            expect(watchdogObservation({ state: 'healthy', briefing: { state } })).toEqual({
+              kind: 'recovered',
+            });
+          }
+          const observation = watchdogObservation({
+            state: 'healthy',
+            briefing: { state: 'stale' },
+          });
+          if (!observation) throw new Error('Missing briefing outage observation');
+          const episode = await f.episode(observation, start);
+          if (!episode) throw new Error('Missing briefing outage episode');
+          expect(episode.reason).toBe('briefing');
+          const interrupted = vi.fn(async () => {
+            throw new Error('Stopped before preparing push');
+          });
+          await expect(f.alert(episode, interrupted)).rejects.toThrow(
+            'Stopped before preparing push',
+          );
+          expect((await f.saved()).messages).toHaveLength(1);
+
+          const both = watchdogObservation({
+            state: 'stale',
+            completedAt: start.toISOString(),
+            briefing: { state: 'stale' },
+          });
+          if (!both) throw new Error('Missing overlapping outage observation');
+          expect(await f.episode(both, between)).toEqual(episode);
+          const provider = vi.fn();
+          const push = f.push(provider);
+          expect(await f.alert(episode, push)).toBe('already-said');
+          expect(await f.alert(episode, push)).toBe('already-said');
+          expect(provider).toHaveBeenCalledOnce();
+          expect(await f.episode(observation, between)).toEqual(episode);
+          expect((await f.saved()).messages).toEqual([
+            'The daily briefing is overdue. No scheduled briefing has completed within 26 hours.',
+          ]);
+
+          expect(await f.episode({ kind: 'recovered' }, end)).toBeNull();
+          expect(await f.episode(observation, between)).toBeNull();
+          const again = await f.episode(observation, new Date(end.getTime() + 1000));
+          expect(again?.key).toBeDefined();
+          expect(again?.key).not.toBe(episode.key);
         } finally {
           await f.close();
         }

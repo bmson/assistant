@@ -12,8 +12,10 @@ import {
   type InstallationStore,
 } from '@assistant/firestore';
 import { emailIngestReadable, type Records } from '@assistant/persistence';
+import { publicCardText } from '@assistant/persistence/card-privacy';
 import { and, desc, eq, gt, inArray, lte } from 'drizzle-orm';
 import type { SweepRecovery } from './sweep-heartbeat.js';
+import type { WatchdogEpisode } from './watchdog-episode.js';
 
 const SOURCE_LIMIT = 500;
 const DIGEST_LIMIT = 6;
@@ -58,7 +60,24 @@ export function composeSweepRecovery(recovery: SweepRecovery, mail: Mail[], book
   const seenThreads = new Set<string>();
   const lines: string[] = [];
   for (const row of items) {
-    const subject = row.subject.replace(/\s+/g, ' ').trim().slice(0, 160);
+    const dates = (Array.isArray(row.dates) ? row.dates : []) as Array<{
+      bookingIdentity?: unknown;
+    } | null>;
+    const codes = dates.flatMap((date) =>
+      typeof date?.bookingIdentity === 'string' && date.bookingIdentity.length >= 3
+        ? [date.bookingIdentity]
+        : [],
+    );
+    const raw = row.subject.replace(/\s+/g, ' ').trim();
+    // Use each exact subject spelling for known booking codes before the shared
+    // card redactor runs. Provider casing can differ from the extracted value.
+    const subjectCodes = codes.flatMap((code) => {
+      const escaped = code.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return raw.match(new RegExp(escaped, 'gi')) ?? [];
+    });
+    const subject = publicCardText(raw, subjectCodes)
+      ?.replace(/https?:\/\/[^\s<>]+/gi, '[link hidden]')
+      .slice(0, 160);
     if (!subject) continue;
     const thread = row.providerThreadId ?? row.channelMessageId;
     if (seenThreads.has(thread)) continue;
@@ -184,37 +203,38 @@ export function publishFirestoreSweepRecovery(
   });
 }
 
-const OUTAGE_TEXT = 'Scheduled checks have been unavailable for at least 30 minutes.';
+const OUTAGE_TEXT = {
+  sweep: 'Scheduled checks have been unavailable for at least 30 minutes.',
+  briefing: 'The daily briefing is overdue. No scheduled briefing has completed within 26 hours.',
+};
 
 export async function publishSweepOutage(
   admission: Admission,
   agentId: string,
-  lastCompletedAt: string,
+  episode: WatchdogEpisode,
   notify: (input: {
     text: string;
-    conversationId: string;
+    conversationId: null;
     urgency: 'interrupt';
     deliveryKey: string;
   }) => Promise<unknown>,
   now = new Date(),
 ) {
-  const key = `watchdog-outage:${Date.parse(lastCompletedAt)}`;
+  const { key, reason } = episode;
+  const text = OUTAGE_TEXT[reason];
   const observationFence = await admission.observationFence(agentId);
   const result = await admission.admitNotice({
     agentId,
     now,
     observationFence,
     pacing: { gapSince: now, windowSince: now, dailyCap: 0 },
-    moment: { kind: 'watchdog-outage', key, summary: 'Scheduled checks unavailable' },
-    notice: { text: OUTAGE_TEXT, extraParts: [] },
+    moment: { kind: 'watchdog-outage', key, summary: text },
+    notice: { text, extraParts: [] },
   });
-  if (result.status === 'persisted') {
-    await notify({
-      text: OUTAGE_TEXT,
-      conversationId: result.conversationId,
-      urgency: 'interrupt',
-      deliveryKey: key,
-    });
+  if (result.status === 'persisted' || result.status === 'already-said') {
+    // Persisted notices can outlive a crash before the first push attempt.
+    // The per-device outbox claims this stable key and handles safe retries.
+    await notify({ text, conversationId: null, urgency: 'interrupt', deliveryKey: key });
   }
   return result.status;
 }

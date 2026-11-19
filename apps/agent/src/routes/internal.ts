@@ -134,29 +134,51 @@ internal.get('/sweep/health', async (c) => {
 internal.post('/sweep/watchdog', async (c) => {
   c.header('cache-control', 'no-store');
   const { readConfiguredSweepHealth } = await import('../sweep-heartbeat.js');
+  const { recordFirestoreWatchdogEpisode, recordPostgresWatchdogEpisode, watchdogObservation } =
+    await import('../watchdog-episode.js');
   try {
     const config = loadConfig();
+    const observedAt = new Date();
     const health = await readConfiguredSweepHealth(config);
-    if (health.state === 'stale') {
+    const observation = watchdogObservation(health);
+    if (observation) {
       try {
         const deps = buildDeps();
         const { publishSweepOutage } = await import('../sweep-recovery.js');
-        const notify = (input: Parameters<Parameters<typeof publishSweepOutage>[3]>[0]) =>
-          deps.outOfBandNotifier.notifyOwner(input);
+        // This is an interrupt and bypasses ambient pacing. Only phone legs
+        // use the existing durable per-device key here, since chat is already saved.
+        const notify: Parameters<typeof publishSweepOutage>[3] = (input) =>
+          deps.modules.ownerNotifier.notifyOwner(input);
         if (config.PERSISTENCE_DRIVER === 'firestore') {
+          const store = deps.firestoreStore;
           const pulse = deps.persistence?.pulse;
-          if (pulse && (await firestoreMaintenanceReady(deps)))
-            await publishSweepOutage(pulse, config.FIRESTORE_AGENT_ID, health.completedAt, notify);
+          if (store && pulse && (await firestoreMaintenanceReady(deps))) {
+            const owner = config.FIRESTORE_AGENT_ID;
+            const episode = await recordFirestoreWatchdogEpisode(
+              store,
+              owner,
+              observation,
+              observedAt,
+            );
+            if (episode) await publishSweepOutage(pulse, owner, episode, notify);
+          }
         } else {
           const { assertPostgresInstallationOwner, createPostgresPulseAdmissionRepository } =
             await import('@assistant/db');
           const owner = await assertPostgresInstallationOwner(deps.db);
-          await publishSweepOutage(
-            createPostgresPulseAdmissionRepository(deps.db),
+          const episode = await recordPostgresWatchdogEpisode(
+            deps.db,
             owner,
-            health.completedAt,
-            notify,
+            observation,
+            observedAt,
           );
+          if (episode)
+            await publishSweepOutage(
+              createPostgresPulseAdmissionRepository(deps.db),
+              owner,
+              episode,
+              notify,
+            );
         }
       } catch {
         console.error('Unable to publish scheduler watchdog alert');
