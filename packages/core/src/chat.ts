@@ -67,6 +67,7 @@ export function assistantMessageParts(
     turnFailed?: TurnFailureReason;
     cues?: Cue[];
     responseCards?: Record<string, unknown>[];
+    replyOrigin?: import('@assistant/persistence').ChatReplyOrigin;
   },
 ): unknown[] {
   // A reply carrying [break] cues persists as one TEXT part per bubble, split
@@ -78,6 +79,7 @@ export function assistantMessageParts(
   if (opts?.responseCards?.length) {
     for (const card of opts.responseCards) parts.push({ type: 'data-card', data: card });
   }
+  if (opts?.replyOrigin) parts.push({ type: 'data-turn-origin', data: opts.replyOrigin });
   if (recall && recall.length > 0) parts.push({ type: 'recall', sources: recall });
   // Structured marker (parts are jsonb — no migration): the chat UI styles the
   // message as an honesty-check system notice instead of assistant prose.

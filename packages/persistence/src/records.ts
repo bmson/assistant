@@ -1,3 +1,4 @@
+import type { BillEmailEvidence } from './bill-email-evidence.js';
 import type { CalendarAccount } from './calendar-accounts.js';
 import type { DocumentExtractionMetadata } from './document-extraction-metadata.js';
 /** Portable record shapes. PostgreSQL compatibility is checked by records.test.ts.
@@ -961,6 +962,7 @@ export interface Records {
       evidenceQuote?: string;
     } | null;
     securityIncidentId: string | null;
+    billEvidence: BillEmailEvidence | null;
     obligationStatus: string;
     obligationVersion: number;
     obligationDecision: string | null;

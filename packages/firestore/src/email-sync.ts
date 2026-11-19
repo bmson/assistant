@@ -722,6 +722,7 @@ export class FirestoreEmailSyncRepository implements EmailSyncRepository {
       const now = this.store.now();
       const row: Records['emailIngest'] = {
         ...input,
+        billEvidence: null,
         id,
         createdAt: now,
         updatedAt: now,
@@ -808,6 +809,7 @@ export class FirestoreEmailSyncRepository implements EmailSyncRepository {
       const now = this.store.now();
       const row: Records['emailIngest'] = {
         ...input,
+        billEvidence: null,
         id,
         createdAt: now,
         updatedAt: now,
@@ -2461,6 +2463,7 @@ export class FirestoreEmailSyncRepository implements EmailSyncRepository {
       const now = this.store.now();
       const row: Records['emailIngest'] = {
         ...input,
+        billEvidence: null,
         mailbox: input.mailbox ?? '',
         providerMessageId: input.providerMessageId ?? null,
         ingestMode: input.ingestMode ?? 'forwarded',

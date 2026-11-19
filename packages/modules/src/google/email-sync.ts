@@ -29,7 +29,11 @@ import type {
   Records,
   RecoverableDirectIngest,
 } from '@assistant/persistence';
-import { emailAttachmentManifestDigest, extractPracticeChangeMail } from '@assistant/persistence';
+import {
+  emailAttachmentManifestDigest,
+  extractBillEmailEvidence,
+  extractPracticeChangeMail,
+} from '@assistant/persistence';
 import {
   collectGmailAttachments,
   extractGmailText,
@@ -1658,7 +1662,17 @@ async function processDirectAdmission(
             practiceOwner.timezone,
           )
         : null;
-    const deterministicNoModel = practiceChange !== null || bulkByHeaders(input.message.payload);
+    const billEvidence =
+      !practiceChange && receivedAt && ['owner', 'known'].includes(contentTrust)
+        ? extractBillEmailEvidence({
+            agentId: input.agentId,
+            issuer: input.from,
+            body: input.text,
+            provenance: input.provenance,
+          })
+        : null;
+    const deterministicNoModel =
+      practiceChange !== null || billEvidence !== null || bulkByHeaders(input.message.payload);
     const claimed = await sync.claimIngestScore(
       input.agentId,
       record.id,
@@ -1671,30 +1685,31 @@ async function processDirectAdmission(
       record = (await sync.ingestRecord(input.channelMessageId)) ?? record;
     } else {
       await input.lease?.assertCurrent();
-      const outcome = practiceChange
-        ? {
-            kind: 'score' as const,
-            outcome: 'deterministic_no_model' as const,
-            score: {
-              category: 'appointment' as const,
-              importance: 4,
-              actionable: true,
-              reason: 'Explicit practice move and field from authenticated sender-authored text.',
-              dates: [practiceChange],
-              cardCandidate: false,
-              nextStep: undefined,
-              securityEvidence: null,
-            },
-          }
-        : await scoreEmailImportanceOutcome(deps.router, {
-            from: input.from,
-            receivedAt: gmailReceivedAt(input.message) ?? new Date(),
-            subject: input.subject,
-            body: input.text,
-            ...(input.message.payload ? { payload: input.message.payload } : {}),
-            contentTrust,
-            authenticated: input.authenticated,
-          });
+      const outcome =
+        practiceChange || billEvidence
+          ? {
+              kind: 'score' as const,
+              outcome: 'deterministic_no_model' as const,
+              score: {
+                category: practiceChange ? ('appointment' as const) : ('financial' as const),
+                importance: billEvidence?.kind === 'paid-in-full' ? 3 : 4,
+                actionable: billEvidence?.kind !== 'paid-in-full',
+                reason: 'Explicit evidence in authenticated sender-authored text.',
+                dates: practiceChange ? [practiceChange] : [],
+                cardCandidate: false,
+                nextStep: undefined,
+                securityEvidence: null,
+              },
+            }
+          : await scoreEmailImportanceOutcome(deps.router, {
+              from: input.from,
+              receivedAt: gmailReceivedAt(input.message) ?? new Date(),
+              subject: input.subject,
+              body: input.text,
+              ...(input.message.payload ? { payload: input.message.payload } : {}),
+              contentTrust,
+              authenticated: input.authenticated,
+            });
       await input.lease?.assertCurrent();
       if (outcome.kind === 'budget_blocked') {
         await sync.markIngestScoreBudgetBlocked(
@@ -1715,6 +1730,7 @@ async function processDirectAdmission(
         cardCandidate: outcome.score.cardCandidate === true,
         nextStep: outcome.score.nextStep ?? null,
         securityEvidence: outcome.score.securityEvidence ?? null,
+        ...(billEvidence ? { billEvidence } : {}),
       } satisfies PreparedEmailScore;
       if (outcome.kind === 'fallback_unknown') {
         await sync.prepareIngestScoreFallbackUnknown(

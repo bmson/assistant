@@ -4,8 +4,13 @@ import type {
   BriefingRepository,
   Records,
 } from '@assistant/persistence';
-import { emailIngestReadable, practiceChangeFromMail } from '@assistant/persistence';
+import {
+  admittedBillEmailEvidence,
+  emailIngestReadable,
+  practiceChangeFromMail,
+} from '@assistant/persistence';
 import type { QueryDocumentSnapshot } from '@google-cloud/firestore';
+import { readFirestoreEmailBillStatus } from './bill-email-evidence.js';
 import { FirestoreOccasionToolRepository } from './occasion-tools.js';
 import { FirestoreOwnerContextRepository } from './owner-context.js';
 import { decodeRecord, documentKey, type InstallationStore } from './store.js';
@@ -43,7 +48,7 @@ export class FirestoreBriefingRepository implements BriefingRepository {
   ): Promise<BriefingInputs> {
     const [mail, bookings, attention, pending, goalDeltas, watchHits, occasions, commitments] =
       await Promise.all([
-        this.mail(agentId, window.since),
+        this.mail(agentId, window.since, window.now),
         this.bookings(agentId),
         this.attention(agentId, window.since, window.attentionLimit),
         this.pending(agentId, window.now, window.pendingLimit),
@@ -71,7 +76,7 @@ export class FirestoreBriefingRepository implements BriefingRepository {
     });
   }
 
-  private async mail(agentId: string, since: Date): Promise<BriefingMail[]> {
+  private async mail(agentId: string, since: Date, now: Date): Promise<BriefingMail[]> {
     const rows: Array<BriefingMail & { createdAt: Date }> = [];
     let cursor: QueryDocumentSnapshot | undefined;
     while (rows.length < MAIL_SCAN_LIMIT) {
@@ -86,6 +91,14 @@ export class FirestoreBriefingRepository implements BriefingRepository {
       for (const doc of page.docs) {
         const row = owned<Records['emailIngest']>(doc, agentId);
         if (!row || !(row.createdAt instanceof Date) || !emailIngestReadable(row)) continue;
+        const bill = admittedBillEmailEvidence(row);
+        if (bill?.kind === 'paid-in-full') continue;
+        if (
+          bill?.kind === 'invoice' &&
+          !row.obligationDecision &&
+          (await readFirestoreEmailBillStatus(this.store, agentId, bill, now)).kind !== 'due'
+        )
+          continue;
         if (practiceChangeFromMail(row)) {
           const prior = await this.store
             .collection('proactiveMoments')
