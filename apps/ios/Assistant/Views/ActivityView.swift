@@ -1393,7 +1393,7 @@ struct ActivityView: View {
                     onSubmit: { loadDiscovery(reset: true) }
                 )
                 archiveProgressStatus
-                if !items.isEmpty { activitySummary }
+                if !filteredItems.isEmpty || (visibleNeedsYouCount ?? 0) > 0 { activitySummary }
 
                 activityRows
                 if showsSecurityReviews, let securityReviewController {
@@ -1629,14 +1629,26 @@ struct ActivityView: View {
             selection: $filter, label: { $0.rawValue })
     }
 
+    private var visibleNeedsYouCount: Int? {
+        guard !showingArchived, filter == .needsYou,
+              discoveryQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return discovery?.needsYouCount
+    }
+
     private var activitySummary: some View {
-        let summary = ActivityVisualSummary(statuses: items.map(\.displayStatus))
+        let shown = filteredItems
+        let summary = ActivityVisualSummary(statuses: shown.map(\.displayStatus))
         let colors: [Color] = [AssistantTheme.warning(for: colorScheme),
             AssistantTheme.accent(for: colorScheme), AssistantTheme.inkMuted(for: colorScheme),
             AssistantTheme.success(for: colorScheme).opacity(0.4), AssistantTheme.errorInk(for: colorScheme), .secondary]
         return AssistantFlowLayout(spacing: 12) {
-            Text("\(items.count) \(items.count == 1 ? "task" : "tasks")")
-                .foregroundStyle(AssistantTheme.ink(for: colorScheme))
+            if let total = visibleNeedsYouCount, total > shown.count {
+                Text("Showing \(shown.count) of \(total) tasks")
+                    .foregroundStyle(AssistantTheme.ink(for: colorScheme))
+            } else {
+                Text("\(shown.count) \(shown.count == 1 ? "task" : "tasks")")
+                    .foregroundStyle(AssistantTheme.ink(for: colorScheme))
+            }
             ForEach(Array(summary.counts.enumerated()), id: \.offset) { index, count in
                 if count > 0 {
                     HStack(spacing: 5) {

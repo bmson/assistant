@@ -640,9 +640,9 @@ final class AppModel {
     var pendingApprovalCount: Int {
         overview?.approvals.pending.count ?? bootstrap?.shell.dashboard.pendingApprovals ?? 0
     }
-    private var activityAttentionCount: Int?
+    private var activityAttentionCount: (value: Int, readAt: Date)?
     private var activityAttentionReadRevision = 0
-    var needsAttentionCount: Int { activityAttentionCount ?? bootstrap?.shell.dashboard.needsAttention ?? 0 }
+    var needsAttentionCount: Int { activityAttentionCount?.value ?? bootstrap?.shell.dashboard.needsAttention ?? 0 }
     var conversationId: String? {
         activeConversation?.conversation.id ?? bootstrap?.conversation.conversation.id
     }
@@ -2327,7 +2327,7 @@ final class AppModel {
             let page = try await client.activity(archived: archived, query: query, filter: filter, cursor: cursor)
             guard !Task.isCancelled, connectionIsCurrent(client, version: version) else { return nil }
             if readsAttentionCount, revision == activityAttentionReadRevision, let count = page.needsYouCount {
-                activityAttentionCount = count
+                activityAttentionCount = (count, Date())
             }
             return page
         } catch {
@@ -5204,6 +5204,11 @@ final class AppModel {
         }
         if let client {
             edits.configureRecovery(scope: client.configuration.baseURL.absoluteString + "|" + response.identity.id)
+        }
+        // The shell is briefly cached. Let a recently read Activity count lead
+        // until a later bootstrap can carry a newer shell projection.
+        if let count = activityAttentionCount, Date().timeIntervalSince(count.readAt) >= 30 {
+            activityAttentionCount = nil
         }
         bootstrap = response
         applyMemoryHealth(response.shell.memoryHealth)
