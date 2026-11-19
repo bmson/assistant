@@ -23,12 +23,16 @@ import {
   type ExecutionPersistence,
   isCalendarObservationDate,
   notificationDeliveryKey,
+  ownerLocalDay,
+  PULSE_BILL_DISCOVERY_LIMIT,
   type PulseCalendarSnapshot,
   type PulseEmailSourceFence,
   type PulseMail,
   type PulseNoticeOutcome,
   type PulseRepository,
   practiceChangeFromMail,
+  pulseBillDueThrough,
+  pulseBillMailCandidate,
   pulseDailyCap,
 } from '@assistant/persistence';
 import {
@@ -848,6 +852,7 @@ export function mailMoment(
   }
   if (row.billInvoice) {
     const invoice = row.billInvoice;
+    const overdue = invoice.dueDate < ownerLocalDay(timeZone, now);
     const amount = new Intl.NumberFormat('en-US', {
       style: 'currency',
       currency: invoice.currency,
@@ -868,7 +873,7 @@ export function mailMoment(
         kind: 'proactive-alert',
         id: invoiceKey,
         category: 'email',
-        urgencyLabel: 'Bill due',
+        urgencyLabel: overdue ? 'Bill overdue' : 'Bill due',
         title: `Invoice ${invoice.invoiceId}`,
         summary: `${amount} due on ${due}.`,
         details: [
@@ -1007,6 +1012,7 @@ export function calendarSnapshotForDelivery(input: {
 
 /** The pulse's reads and ledger on PostgreSQL: the same queries as before the port. */
 export function postgresPulseRepository(db: Db): PulseRepository {
+  const isThreadHead = sql`NOT EXISTS (SELECT 1 FROM ${emailIngest} newer WHERE newer.agent_id = ${emailIngest.agentId} AND newer.provider_thread_id = ${emailIngest.providerThreadId} AND (COALESCE(newer.provider_received_at, newer.created_at), COALESCE(newer.provider_message_id, newer.channel_message_id)) > (COALESCE(${emailIngest.providerReceivedAt}, ${emailIngest.createdAt}), COALESCE(${emailIngest.providerMessageId}, ${emailIngest.channelMessageId})))`;
   return {
     kind: 'pulse-repository',
     async deliveredSince(agentId, since) {
@@ -1084,6 +1090,45 @@ export function postgresPulseRepository(db: Db): PulseRepository {
         );
     },
     billStatus: (agentId, invoice, now) => readPostgresEmailBillStatus(db, agentId, invoice, now),
+    async dueBillMail(agentId, input) {
+      if (input.limit <= 0) return [];
+      const dueDate = sql`${emailIngest.billEvidence}->>'dueDate'`;
+      const rows = await db
+        .select()
+        .from(emailIngest)
+        .where(
+          and(
+            eq(emailIngest.agentId, agentId),
+            eq(emailIngest.actionable, true),
+            eq(emailIngest.authenticated, true),
+            emailIngestReadableSql(),
+            gte(emailIngest.importance, input.minImportance),
+            lte(emailIngest.createdAt, input.ingestedBy),
+            isNotNull(emailIngest.providerThreadId),
+            isNull(emailIngest.securityIncidentId),
+            isNull(emailIngest.obligationDecision),
+            inArray(emailIngest.obligationStatus, ['unknown', 'open']),
+            sql`${emailIngest.billEvidence}->>'kind' = 'invoice' AND (${dueDate}) <= ${input.dueThrough}`,
+            sql`NOT EXISTS (SELECT 1 FROM ${proactiveMoments} WHERE ${proactiveMoments.agentId} = ${emailIngest.agentId} AND ${proactiveMoments.momentKey} = 'bill-due:' || (${emailIngest.billEvidence}->>'identity'))`,
+            isThreadHead,
+          ),
+        )
+        .orderBy(desc(dueDate), desc(emailIngest.id))
+        .limit(PULSE_BILL_DISCOVERY_LIMIT);
+      const candidates: PulseMail[] = [];
+      for (const row of rows) {
+        const candidate = pulseBillMailCandidate(row, input);
+        if (!candidate) continue;
+        if (
+          (await readPostgresEmailBillStatus(db, agentId, candidate.billInvoice, input.now))
+            .kind !== 'due'
+        )
+          continue;
+        candidates.push(candidate);
+        if (candidates.length >= input.limit) break;
+      }
+      return candidates;
+    },
     async actionableMail(agentId, input) {
       const practiceMarker = sql`(${emailIngest.ingestMode} = 'direct' AND ${emailIngest.authenticated} = true AND ${emailIngest.admittedSourceId} IS NOT NULL AND ${emailIngest.hasExternalOrUnknown} = false AND ${emailIngest.dates} @> '[{"kind":"practice-change"}]'::jsonb)`;
       if (input.limit <= 0) return [];
@@ -1147,9 +1192,9 @@ export function postgresPulseRepository(db: Db): PulseRepository {
               or(lte(emailIngest.createdAt, input.until), practiceMarker),
               sql`(${emailIngest.securityIncidentId} IS NULL OR (${securityIncidents.id} IS NOT NULL AND NOT (${securityIncidents.decisionRevision} = ${securityIncidents.revision} AND ${securityIncidents.disposition} IN ('expected','dismissed'))))`,
               sql`NOT EXISTS (SELECT 1 FROM ${securityIncidentAttention} WHERE ${securityIncidentAttention.agentId} = ${emailIngest.agentId} AND ${securityIncidentAttention.incidentId} = ${emailIngest.securityIncidentId} AND ${securityIncidentAttention.revision} = ${securityIncidents.revision})`,
-              sql`NOT EXISTS (SELECT 1 FROM ${proactiveMoments} WHERE ${proactiveMoments.agentId} = ${emailIngest.agentId} AND ${proactiveMoments.momentKey} = CASE WHEN ${emailIngest.securityIncidentId} IS NOT NULL THEN 'security-incident:' || ${emailIngest.securityIncidentId} || ':r' || ${securityIncidents.revision}::text WHEN ${emailIngest.billEvidence}->>'kind' = 'invoice' AND ${emailIngest.obligationDecision} IS NULL THEN 'bill-due:' || (${emailIngest.billEvidence}->>'identity') ELSE 'mail-action:' || ${emailIngest.channelMessageId} END)`,
+              sql`NOT EXISTS (SELECT 1 FROM ${proactiveMoments} WHERE ${proactiveMoments.agentId} = ${emailIngest.agentId} AND ${proactiveMoments.momentKey} = CASE WHEN ${emailIngest.securityIncidentId} IS NOT NULL THEN 'security-incident:' || ${emailIngest.securityIncidentId} || ':r' || ${securityIncidents.revision}::text ELSE 'mail-action:' || ${emailIngest.channelMessageId} END)`,
               sql`(${emailIngest.securityIncidentId} IS NULL OR NOT EXISTS (SELECT 1 FROM ${emailIngest} newer WHERE newer.agent_id = ${emailIngest.agentId} AND newer.security_incident_id = ${emailIngest.securityIncidentId} AND (COALESCE(newer.provider_received_at, newer.created_at), COALESCE(newer.provider_message_id, newer.channel_message_id)) > (COALESCE(${emailIngest.providerReceivedAt}, ${emailIngest.createdAt}), COALESCE(${emailIngest.providerMessageId}, ${emailIngest.channelMessageId}))))`,
-              sql`NOT EXISTS (SELECT 1 FROM ${emailIngest} newer WHERE newer.agent_id = ${emailIngest.agentId} AND newer.provider_thread_id = ${emailIngest.providerThreadId} AND (COALESCE(newer.provider_received_at, newer.created_at), COALESCE(newer.provider_message_id, newer.channel_message_id)) > (COALESCE(${emailIngest.providerReceivedAt}, ${emailIngest.createdAt}), COALESCE(${emailIngest.providerMessageId}, ${emailIngest.channelMessageId})))`,
+              isThreadHead,
             ),
           )
           .orderBy(desc(emailIngest.importance), asc(emailIngest.createdAt), asc(emailIngest.id))
@@ -1162,17 +1207,11 @@ export function postgresPulseRepository(db: Db): PulseRepository {
           const practiceChange = practiceChangeFromMail(row);
           if (!practiceChange && row.createdAt > input.until) continue;
           if (practiceChange && new Date(practiceChange.iso) <= input.now) continue;
-          const bill = admittedBillEmailEvidence(row);
-          const billInvoice = bill?.kind === 'invoice' && !row.obligationDecision ? bill : null;
-          if (
-            billInvoice &&
-            (await readPostgresEmailBillStatus(db, agentId, billInvoice, input.now)).kind !== 'due'
-          )
+          if (!practiceChange && !row.securityIncidentId && admittedBillEmailEvidence(row))
             continue;
           candidates.push({
             ...row,
             ...(practiceChange ? { practiceChange } : {}),
-            ...(billInvoice ? { billInvoice } : {}),
           });
           if (candidates.length >= input.limit) return candidates;
         }
@@ -1425,14 +1464,34 @@ export async function runPulse(
     };
 
     const mailSince = new Date(now.getTime() - MAIL_WINDOW_HOURS * 3600_000);
-    const observedMail = await store.actionableMail(agent.id, {
-      since: mailSince,
-      until: new Date(now.getTime() - MAIL_MIN_AGE_HOURS * 3600_000),
+    const ingestedBy = new Date(now.getTime() - MAIL_MIN_AGE_HOURS * 3600_000);
+    const [observedMail, observedBills] = await Promise.all([
+      store.actionableMail(agent.id, {
+        since: mailSince,
+        until: ingestedBy,
+        now,
+        minImportance: MAIL_MIN_IMPORTANCE,
+        limit: 5,
+      }),
+      store
+        .dueBillMail?.(agent.id, {
+          now,
+          ingestedBy,
+          dueThrough: pulseBillDueThrough(agent.timezone, now),
+          minImportance: MAIL_MIN_IMPORTANCE,
+          limit: 5,
+        })
+        .catch(() => {
+          // A dedicated lookup failure must not stop ordinary mail or Calendar notices.
+          console.error('pulse: bill due-date discovery unavailable');
+          return [];
+        }) ?? [],
+    ]);
+    const mail = await refreshPulseMail(
+      [...observedMail, ...observedBills],
+      deps.emailThreadReader,
       now,
-      minImportance: MAIL_MIN_IMPORTANCE,
-      limit: 5,
-    });
-    const mail = await refreshPulseMail(observedMail, deps.emailThreadReader, now);
+    );
 
     const dueCommitments = await store.dueCommitments(agent.id, {
       now,

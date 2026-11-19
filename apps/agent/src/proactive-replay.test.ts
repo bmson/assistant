@@ -742,24 +742,38 @@ describe('frozen proactive replay', () => {
             runPulse(pulseDeps, { agentId, now: clock }),
           );
 
-          // Suppressed invoices may outrank a live one. The candidate limit applies after
-          // corroborating receipts, including when the next invoice is on another page.
+          // Existing paid sources must not block a different open invoice.
           const next = await addBillMail(
             'Invoice SYN-109: USD 17.00 is due on November 21, 2026.',
             at(32 * 60),
           );
-          if (!activePulse || next.fact?.kind !== 'invoice')
-            throw new Error('Missing open invoice');
-          const afterSuppressed = await activePulse.actionableMail(agentId, {
-            since: at(17 * 60),
-            until: at(34 * 60),
-            now: at(35 * 60),
-            minImportance: 4,
-            limit: 1,
+          if (next.fact?.kind !== 'invoice') throw new Error('Missing open invoice');
+          const openInvoiceKey = `bill-due:${next.fact.identity}`;
+          expect(await runPulse(pulseDeps, { agentId, now: clock })).toMatchObject({
+            delivered: 'bill-due',
+            pinged: true,
           });
-          expect(afterSuppressed.map((candidate) => candidate.channelMessageId)).toEqual([
-            next.key,
-          ]);
+          expect(await readLedger()).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                kind: 'bill-due',
+                momentKey: openInvoiceKey,
+                pinged: true,
+              }),
+            ]),
+          );
+          expect((await readParts()).flat()).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: 'data-card',
+                data: expect.objectContaining({
+                  id: openInvoiceKey,
+                  title: 'Invoice SYN-109',
+                  summary: '$17.00 due on November 21, 2026.',
+                }),
+              }),
+            ]),
+          );
 
           const teacherCase = replayCases.teachers.id;
           const teacherAt = at(55 * 60);

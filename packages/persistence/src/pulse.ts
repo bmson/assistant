@@ -1,6 +1,12 @@
-import type { BillEmailEvidence, EmailBillStatus } from './bill-email-evidence.js';
+import {
+  admittedBillEmailEvidence,
+  type BillEmailEvidence,
+  type EmailBillStatus,
+} from './bill-email-evidence.js';
 import type { CalendarRecoveryObservation } from './calendar-recovery.js';
-import type { PracticeChangeMailFact } from './practice-change-mail.js';
+import { ownerLocalDay } from './nudge-policy.js';
+import { type PracticeChangeMailFact, practiceChangeFromMail } from './practice-change-mail.js';
+import type { Records } from './records.js';
 import type { SituationPackView } from './situations-schema.js';
 
 /** A rescheduled deadline is a new observation, unlike a retry of the same deadline. */
@@ -39,6 +45,65 @@ export interface PulseMail {
   securityRevision?: number | null;
   securityDisposition?: string | null;
   securityDecisionRevision?: number | null;
+}
+
+export interface PulseBillMailQuery {
+  now: Date;
+  ingestedBy: Date;
+  dueThrough: string;
+  minImportance: number;
+  limit: number;
+}
+
+export const PULSE_BILL_DISCOVERY_LIMIT = 500;
+
+/** Invoice due dates are civil dates, so the lead does not depend on DST or the worker's zone. */
+export function pulseBillDueThrough(timeZone: string, now: Date): string {
+  const day = new Date(`${ownerLocalDay(timeZone, now)}T00:00:00Z`);
+  day.setUTCDate(day.getUTCDate() + 3);
+  return day.toISOString().slice(0, 10);
+}
+
+export function pulseBillMailCandidate(
+  row: Records['emailIngest'],
+  input: PulseBillMailQuery,
+):
+  | (PulseMail & { providerThreadId: string; billInvoice: NonNullable<PulseMail['billInvoice']> })
+  | null {
+  const invoice = admittedBillEmailEvidence(row);
+  if (
+    invoice?.kind !== 'invoice' ||
+    invoice.dueDate > input.dueThrough ||
+    !row.actionable ||
+    !Number.isFinite(row.importance) ||
+    row.importance < input.minImportance ||
+    !(row.createdAt instanceof Date) ||
+    !Number.isFinite(row.createdAt.getTime()) ||
+    row.createdAt > input.ingestedBy ||
+    !row.providerReceivedAt ||
+    !Number.isFinite(row.providerReceivedAt.getTime()) ||
+    row.providerReceivedAt > input.now ||
+    !row.providerMessageId ||
+    !row.providerThreadId ||
+    row.securityIncidentId ||
+    row.obligationDecision ||
+    !['unknown', 'open'].includes(row.obligationStatus ?? 'unknown') ||
+    practiceChangeFromMail(row)
+  )
+    return null;
+  return {
+    channelMessageId: row.channelMessageId,
+    providerThreadId: row.providerThreadId,
+    providerMessageId: row.providerMessageId,
+    obligationVersion: row.obligationVersion ?? 0,
+    fromEmail: row.fromEmail,
+    fromName: row.fromName ?? null,
+    subject: row.subject,
+    category: row.category,
+    importance: row.importance,
+    obligationStatus: row.obligationStatus ?? 'unknown',
+    billInvoice: invoice,
+  };
 }
 
 /** A bounded metadata read of the owner's current Gmail thread; no body or model output. */
@@ -221,6 +286,8 @@ export interface PulseRepository {
     agentId: string,
     input: { since: Date; until: Date; now: Date; minImportance: number; limit: number },
   ): Promise<PulseMail[]>;
+  /** Independently discover actionable invoices by their verified civil deadline. */
+  dueBillMail?(agentId: string, input: PulseBillMailQuery): Promise<PulseMail[]>;
   /** Derive current bill state from exact, durably admitted issuer evidence. */
   billStatus?(
     agentId: string,

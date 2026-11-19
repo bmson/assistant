@@ -91,7 +91,7 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | D4  | Leave-by with live traffic                                             | 3     | M    | B5, D1     | open                                                          |
 | D5  | Weather impact on outdoor events                                       | 3     | M    | B6, D1     | open                                                          |
 | D6  | Occasions and gifts                                                    | 3     | M    | C5, D1     | open                                                          |
-| D7  | Money: bills, renewals, unusual charges                                | 3     | M    | C2, C3     | in progress (unpaid and paid bill replay)                     |
+| D7  | Money: bills, renewals, unusual charges                                | 3     | M    | C2, C3     | in progress (owner-local bill timing and payment evidence)   |
 | D8  | School: early dismissal, closures, breaks, forms                       | 3     | M    | C6, C7     | open                                                          |
 | D9  | Home and car: deliveries, maintenance                                  | 3     | S    | C2         | open                                                          |
 | D10 | Weekly reconnect suggestions                                           | 4     | S    | C8         | open                                                          |
