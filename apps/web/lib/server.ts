@@ -153,6 +153,7 @@ import {
   createPostgresModelConnectionRepository,
   createPostgresModelRoutingRepository,
   createPostgresRecallSurfacingRepository,
+  createPostgresResearchAssignmentRepository,
   createPostgresSelfRepairRepository,
   createPostgresTaskDiscoveryRepository,
   createPostgresToolExecutionRepository,
@@ -2329,4 +2330,9 @@ export function getMcpOAuthManagementService(): McpOAuthManagementService | null
       return connection ?? null;
     },
   });
+}
+
+export async function getPostgresResearchAssignments() {
+  const db = getDb();
+  return createPostgresResearchAssignmentRepository(db, (await getAgent(db)).id);
 }

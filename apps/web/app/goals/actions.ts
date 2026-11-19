@@ -39,6 +39,7 @@ import {
   getDb,
   getFirestoreGoalScheduleUpdate,
   getFirestoreInstallationStore,
+  getPostgresResearchAssignments,
   startFirestoreGoalWork,
 } from '@/lib/server';
 
@@ -127,7 +128,7 @@ export async function editResearchAssignment(
   assertResearchAssignmentBriefPatch(patch);
   if (loadConfig().PERSISTENCE_DRIVER === 'firestore')
     await firestoreResearchAssignments().edit(goalId, patch);
-  else await editPostgresResearchAssignment(getDb(), goalId, patch);
+  else await editPostgresResearchAssignment(await getPostgresResearchAssignments(), goalId, patch);
   revalidateGoalViews();
 }
 
@@ -136,7 +137,7 @@ export async function reopenAssignment(goalId: string): Promise<void> {
   if (!goalId) throw new Error('Missing assignment id.');
   if (loadConfig().PERSISTENCE_DRIVER === 'firestore')
     await firestoreResearchAssignments().reopen(goalId);
-  else await reopenPostgresResearchAssignment(getDb(), goalId);
+  else await reopenPostgresResearchAssignment(await getPostgresResearchAssignments(), goalId);
   revalidateGoalViews();
 }
 
@@ -148,7 +149,12 @@ export async function setAssignmentStoppedState(
   if (!goalId) throw new Error('Missing assignment id.');
   if (loadConfig().PERSISTENCE_DRIVER === 'firestore')
     await firestoreResearchAssignments().setStoppedState(goalId, status);
-  else await setPostgresResearchAssignmentStoppedState(getDb(), goalId, status);
+  else
+    await setPostgresResearchAssignmentStoppedState(
+      await getPostgresResearchAssignments(),
+      goalId,
+      status,
+    );
   revalidateGoalViews();
 }
 
@@ -161,7 +167,12 @@ export async function acceptAssignmentShortlist(
     throw new Error('Invalid assignment shortlist.');
   if (loadConfig().PERSISTENCE_DRIVER === 'firestore')
     await firestoreResearchAssignments().acceptShortlist(goalId, resultRevision);
-  else await acceptPostgresResearchAssignmentShortlist(getDb(), goalId, resultRevision);
+  else
+    await acceptPostgresResearchAssignmentShortlist(
+      await getPostgresResearchAssignments(),
+      goalId,
+      resultRevision,
+    );
   revalidateGoalViews();
 }
 
@@ -174,7 +185,12 @@ export async function recordAssignmentOptions(
   assertResearchAssignmentOptionsInput(input);
   if (loadConfig().PERSISTENCE_DRIVER === 'firestore')
     await firestoreResearchAssignments().recordOptions(goalId, input);
-  else await recordPostgresResearchAssignmentOptions(getDb(), goalId, input);
+  else
+    await recordPostgresResearchAssignmentOptions(
+      await getPostgresResearchAssignments(),
+      goalId,
+      input,
+    );
   revalidateGoalViews();
 }
 
