@@ -83,6 +83,8 @@ interface Signal {
 
 Indexes: `(agentId, status, dueAt)`, `(agentId, kind, at)`, `(agentId, dedupeKey)` unique.
 
+The first C1 producer contract covers invoices and paid-in-full receipts. It reads admitted email evidence by ingest row ID and retains the canonical email source ID without copying the message body. Its deterministic signal ID uses agent, kind, and bill identity. Equivalent evidence retains the first committed source reference and validity start. An explicit matching payment atomically records the new fact and closes the selected bill. The query combines kind, person, and a half-open event-time interval, then selects facts valid at the caller's as-of instant. Historical results include canonical replacement metadata. C3 owns automatic matching and integration with producers.
+
 ### 3.2 Household and places
 
 ```ts

@@ -181,6 +181,7 @@ export { FirestoreSettingsRepository } from './settings.js';
 export { createFirestoreSettingsPersistence } from './settings-persistence.js';
 export { FirestoreShellPresenceRepository } from './shell-presence.js';
 export { FirestoreShellStatusRepository } from './shell-status.js';
+export { createFirestoreSignalRepository } from './signals.js';
 export { FirestoreSituationPackMutationRepository } from './situation-pack-mutations.js';
 export { FirestoreSituationPackReadRepository } from './situation-packs.js';
 export { FirestoreSituationToolRepository } from './situation-tools.js';

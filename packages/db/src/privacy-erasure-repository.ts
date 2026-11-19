@@ -44,6 +44,7 @@ import {
   securityIncidentSources,
   securityIncidents,
   selfRepairIssues,
+  signals,
   situationPacks,
   situationPreviews,
   tasks,
@@ -651,9 +652,11 @@ export function createPostgresPrivacyErasureRepository(db: Db): PrivacyErasureRe
         // so a retried suggestion job cannot reconstruct a cleared message.
         await tx.delete(watchFireEffects).where(eq(watchFireEffects.agentId, agentId));
         await tx.delete(watchFires).where(eq(watchFires.agentId, agentId));
+        await tx.delete(signals).where(eq(signals.agentId, agentId));
         await tx
           .update(emailIngest)
           .set({
+            billEvidence: null,
             securityEvidence: null,
             securityIncidentId: null,
             preparedExtraction: null,

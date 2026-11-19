@@ -108,6 +108,7 @@ export * from './schema.js';
 export { createPostgresSecurityIncidentRepository } from './security-incident-repository.js';
 export { createPostgresSelfRepairRepository } from './self-repair-repository.js';
 export { createPostgresSettingsRepository } from './settings-repository.js';
+export { createPostgresSignalRepository } from './signals.js';
 export { createPostgresSkillContextRepository } from './skill-context-repository.js';
 export { createPostgresSkillLibraryRepository } from './skill-library-repository.js';
 export { bumpSkillLibraryRevision, readSkillLibraryRevision } from './skill-library-revision.js';
