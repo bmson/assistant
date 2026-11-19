@@ -11,6 +11,7 @@ export * from './arrival-observation.js';
 export * from './assistant-health.js';
 export * from './audit-investigation.js';
 export * from './autonomy-grant.js';
+export * from './bill-email-evidence.js';
 export * from './briefing.js';
 export * from './budget-caps.js';
 export * from './builtin-tools.js';

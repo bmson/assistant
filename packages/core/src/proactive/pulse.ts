@@ -9,11 +9,13 @@ import {
   emailIngestReadableSql,
   notificationPrefs,
   proactiveMoments,
+  readPostgresEmailBillStatus,
   recordPostgresCalendarRecovery,
   securityIncidentAttention,
   securityIncidents,
 } from '@assistant/db';
 import {
+  admittedBillEmailEvidence,
   calendarRecoveryFact,
   calendarRecoveryHash,
   commitmentDueMomentKey,
@@ -157,6 +159,7 @@ export type PulseMomentKind =
   | 'event-lead'
   | 'mail-action'
   | 'practice-change'
+  | 'bill-due'
   | 'commitment-due'
   | 'situation-change'
   | 'calendar-unverified'
@@ -800,6 +803,7 @@ export function mailMoment(
     securityDisposition?: string | null;
     securityDecisionRevision?: number | null;
     practiceChange?: PulseMail['practiceChange'];
+    billInvoice?: PulseMail['billInvoice'];
   },
   timeZone = 'UTC',
   now = new Date(),
@@ -838,6 +842,38 @@ export function mailMoment(
           { label: 'Field', value: practiceField },
           { label: 'Source', value: `${row.fromEmail} · ${subject}` },
           { label: 'Next step', value: 'Use the updated time and field for your trip.' },
+        ],
+      },
+    };
+  }
+  if (row.billInvoice) {
+    const invoice = row.billInvoice;
+    const amount = new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: invoice.currency,
+    }).format(invoice.amountMinor / 100);
+    const due = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'UTC',
+      month: 'long',
+      day: 'numeric',
+      year: 'numeric',
+    }).format(new Date(`${invoice.dueDate}T00:00:00Z`));
+    const invoiceKey = `bill-due:${invoice.identity}`;
+    return {
+      kind: 'bill-due',
+      key: invoiceKey,
+      priority: 60 + row.importance,
+      text: `Invoice ${invoice.invoiceId} from ${invoice.issuer} lists ${amount} due on ${due}. Review the source email for payment details.`,
+      card: {
+        kind: 'proactive-alert',
+        id: invoiceKey,
+        category: 'email',
+        urgencyLabel: 'Bill due',
+        title: `Invoice ${invoice.invoiceId}`,
+        summary: `${amount} due on ${due}.`,
+        details: [
+          { label: 'Source', value: `${invoice.issuer} · ${subject}` },
+          { label: 'Next step', value: 'Review the source email for payment details.' },
         ],
       },
     };
@@ -1047,71 +1083,103 @@ export function postgresPulseRepository(db: Db): PulseRepository {
           ),
         );
     },
+    billStatus: (agentId, invoice, now) => readPostgresEmailBillStatus(db, agentId, invoice, now),
     async actionableMail(agentId, input) {
       const practiceMarker = sql`(${emailIngest.ingestMode} = 'direct' AND ${emailIngest.authenticated} = true AND ${emailIngest.admittedSourceId} IS NOT NULL AND ${emailIngest.hasExternalOrUnknown} = false AND ${emailIngest.dates} @> '[{"kind":"practice-change"}]'::jsonb)`;
-      const rows = await db
-        .select({
-          channelMessageId: emailIngest.channelMessageId,
-          providerThreadId: emailIngest.providerThreadId,
-          providerMessageId: emailIngest.providerMessageId,
-          obligationVersion: emailIngest.obligationVersion,
-          fromEmail: emailIngest.fromEmail,
-          fromName: emailIngest.fromName,
-          subject: emailIngest.subject,
-          category: emailIngest.category,
-          importance: emailIngest.importance,
-          obligationStatus: emailIngest.obligationStatus,
-          dates: emailIngest.dates,
-          ingestMode: emailIngest.ingestMode,
-          authenticated: emailIngest.authenticated,
-          admittedSourceId: emailIngest.admittedSourceId,
-          admittedSourceKind: emailIngest.admittedSourceKind,
-          messagePersisted: emailIngest.messagePersisted,
-          hasExternalOrUnknown: emailIngest.hasExternalOrUnknown,
-          scoreStatus: emailIngest.scoreStatus,
-          scoreOutcome: emailIngest.scoreOutcome,
-          pipelineStage: emailIngest.pipelineStage,
-          createdAt: emailIngest.createdAt,
-          providerReceivedAt: emailIngest.providerReceivedAt,
-          securityIncidentId: emailIngest.securityIncidentId,
-          securityRevision: securityIncidents.revision,
-          securityDisposition: securityIncidents.disposition,
-          securityDecisionRevision: securityIncidents.decisionRevision,
-        })
-        .from(emailIngest)
-        .leftJoin(
-          securityIncidents,
-          and(
-            eq(securityIncidents.agentId, emailIngest.agentId),
-            eq(securityIncidents.id, emailIngest.securityIncidentId),
-          ),
-        )
-        .where(
-          and(
-            eq(emailIngest.agentId, agentId),
-            eq(emailIngest.actionable, true),
-            emailIngestReadableSql(),
-            sql`${emailIngest.providerThreadId} IS NOT NULL`,
-            sql`(${emailIngest.obligationStatus} IN ('unknown','open') OR (${emailIngest.obligationStatus} = 'snoozed' AND ${emailIngest.obligationSnoozedUntil} <= ${input.now.toISOString()}::timestamptz))`,
-            gte(emailIngest.importance, input.minImportance),
-            gte(emailIngest.createdAt, input.since),
-            lte(emailIngest.createdAt, input.now),
-            or(lte(emailIngest.createdAt, input.until), practiceMarker),
-            sql`(${emailIngest.securityIncidentId} IS NULL OR (${securityIncidents.id} IS NOT NULL AND NOT (${securityIncidents.decisionRevision} = ${securityIncidents.revision} AND ${securityIncidents.disposition} IN ('expected','dismissed'))))`,
-            sql`NOT EXISTS (SELECT 1 FROM ${securityIncidentAttention} WHERE ${securityIncidentAttention.agentId} = ${emailIngest.agentId} AND ${securityIncidentAttention.incidentId} = ${emailIngest.securityIncidentId} AND ${securityIncidentAttention.revision} = ${securityIncidents.revision})`,
-            sql`NOT EXISTS (SELECT 1 FROM ${proactiveMoments} WHERE ${proactiveMoments.agentId} = ${emailIngest.agentId} AND ${proactiveMoments.momentKey} = CASE WHEN ${emailIngest.securityIncidentId} IS NULL THEN 'mail-action:' || ${emailIngest.channelMessageId} ELSE 'security-incident:' || ${emailIngest.securityIncidentId} || ':r' || ${securityIncidents.revision}::text END)`,
-            sql`(${emailIngest.securityIncidentId} IS NULL OR NOT EXISTS (SELECT 1 FROM ${emailIngest} newer WHERE newer.agent_id = ${emailIngest.agentId} AND newer.security_incident_id = ${emailIngest.securityIncidentId} AND (COALESCE(newer.provider_received_at, newer.created_at), COALESCE(newer.provider_message_id, newer.channel_message_id)) > (COALESCE(${emailIngest.providerReceivedAt}, ${emailIngest.createdAt}), COALESCE(${emailIngest.providerMessageId}, ${emailIngest.channelMessageId}))))`,
-            sql`NOT EXISTS (SELECT 1 FROM ${emailIngest} newer WHERE newer.agent_id = ${emailIngest.agentId} AND newer.provider_thread_id = ${emailIngest.providerThreadId} AND (COALESCE(newer.provider_received_at, newer.created_at), COALESCE(newer.provider_message_id, newer.channel_message_id)) > (COALESCE(${emailIngest.providerReceivedAt}, ${emailIngest.createdAt}), COALESCE(${emailIngest.providerMessageId}, ${emailIngest.channelMessageId})))`,
-          ),
-        )
-        .orderBy(desc(emailIngest.importance), asc(emailIngest.createdAt), asc(emailIngest.id))
-        .limit(input.limit);
-      return rows.flatMap((row) => {
-        const practiceChange = practiceChangeFromMail(row);
-        if (!practiceChange && row.createdAt > input.until) return [];
-        if (practiceChange && new Date(practiceChange.iso) <= input.now) return [];
-        return [{ ...row, ...(practiceChange ? { practiceChange } : {}) }];
-      });
+      if (input.limit <= 0) return [];
+      const pageSize = Math.max(1, Math.min(input.limit, 100));
+      const readPage = (after?: string) =>
+        db
+          .select({
+            id: emailIngest.id,
+            channelMessageId: emailIngest.channelMessageId,
+            providerThreadId: emailIngest.providerThreadId,
+            providerMessageId: emailIngest.providerMessageId,
+            obligationVersion: emailIngest.obligationVersion,
+            fromEmail: emailIngest.fromEmail,
+            fromName: emailIngest.fromName,
+            subject: emailIngest.subject,
+            category: emailIngest.category,
+            importance: emailIngest.importance,
+            obligationStatus: emailIngest.obligationStatus,
+            obligationDecision: emailIngest.obligationDecision,
+            billEvidence: emailIngest.billEvidence,
+            contentTrust: emailIngest.contentTrust,
+            agentId: emailIngest.agentId,
+            dates: emailIngest.dates,
+            ingestMode: emailIngest.ingestMode,
+            authenticated: emailIngest.authenticated,
+            admittedSourceId: emailIngest.admittedSourceId,
+            admittedSourceKind: emailIngest.admittedSourceKind,
+            messagePersisted: emailIngest.messagePersisted,
+            hasExternalOrUnknown: emailIngest.hasExternalOrUnknown,
+            scoreStatus: emailIngest.scoreStatus,
+            scoreOutcome: emailIngest.scoreOutcome,
+            pipelineStage: emailIngest.pipelineStage,
+            createdAt: emailIngest.createdAt,
+            providerReceivedAt: emailIngest.providerReceivedAt,
+            securityIncidentId: emailIngest.securityIncidentId,
+            securityRevision: securityIncidents.revision,
+            securityDisposition: securityIncidents.disposition,
+            securityDecisionRevision: securityIncidents.decisionRevision,
+          })
+          .from(emailIngest)
+          .leftJoin(
+            securityIncidents,
+            and(
+              eq(securityIncidents.agentId, emailIngest.agentId),
+              eq(securityIncidents.id, emailIngest.securityIncidentId),
+            ),
+          )
+          .where(
+            and(
+              eq(emailIngest.agentId, agentId),
+              after
+                ? sql`(-${emailIngest.importance}, ${emailIngest.createdAt}, ${emailIngest.id}) > (SELECT -p.importance, p.created_at, p.id FROM ${emailIngest} p WHERE p.id = ${after} AND p.agent_id = ${agentId})`
+                : undefined,
+              eq(emailIngest.actionable, true),
+              emailIngestReadableSql(),
+              sql`${emailIngest.providerThreadId} IS NOT NULL`,
+              sql`(${emailIngest.obligationStatus} IN ('unknown','open') OR (${emailIngest.obligationStatus} = 'snoozed' AND ${emailIngest.obligationSnoozedUntil} <= ${input.now.toISOString()}::timestamptz))`,
+              gte(emailIngest.importance, input.minImportance),
+              gte(emailIngest.createdAt, input.since),
+              lte(emailIngest.createdAt, input.now),
+              or(lte(emailIngest.createdAt, input.until), practiceMarker),
+              sql`(${emailIngest.securityIncidentId} IS NULL OR (${securityIncidents.id} IS NOT NULL AND NOT (${securityIncidents.decisionRevision} = ${securityIncidents.revision} AND ${securityIncidents.disposition} IN ('expected','dismissed'))))`,
+              sql`NOT EXISTS (SELECT 1 FROM ${securityIncidentAttention} WHERE ${securityIncidentAttention.agentId} = ${emailIngest.agentId} AND ${securityIncidentAttention.incidentId} = ${emailIngest.securityIncidentId} AND ${securityIncidentAttention.revision} = ${securityIncidents.revision})`,
+              sql`NOT EXISTS (SELECT 1 FROM ${proactiveMoments} WHERE ${proactiveMoments.agentId} = ${emailIngest.agentId} AND ${proactiveMoments.momentKey} = CASE WHEN ${emailIngest.securityIncidentId} IS NOT NULL THEN 'security-incident:' || ${emailIngest.securityIncidentId} || ':r' || ${securityIncidents.revision}::text WHEN ${emailIngest.billEvidence}->>'kind' = 'invoice' AND ${emailIngest.obligationDecision} IS NULL THEN 'bill-due:' || (${emailIngest.billEvidence}->>'identity') ELSE 'mail-action:' || ${emailIngest.channelMessageId} END)`,
+              sql`(${emailIngest.securityIncidentId} IS NULL OR NOT EXISTS (SELECT 1 FROM ${emailIngest} newer WHERE newer.agent_id = ${emailIngest.agentId} AND newer.security_incident_id = ${emailIngest.securityIncidentId} AND (COALESCE(newer.provider_received_at, newer.created_at), COALESCE(newer.provider_message_id, newer.channel_message_id)) > (COALESCE(${emailIngest.providerReceivedAt}, ${emailIngest.createdAt}), COALESCE(${emailIngest.providerMessageId}, ${emailIngest.channelMessageId}))))`,
+              sql`NOT EXISTS (SELECT 1 FROM ${emailIngest} newer WHERE newer.agent_id = ${emailIngest.agentId} AND newer.provider_thread_id = ${emailIngest.providerThreadId} AND (COALESCE(newer.provider_received_at, newer.created_at), COALESCE(newer.provider_message_id, newer.channel_message_id)) > (COALESCE(${emailIngest.providerReceivedAt}, ${emailIngest.createdAt}), COALESCE(${emailIngest.providerMessageId}, ${emailIngest.channelMessageId})))`,
+            ),
+          )
+          .orderBy(desc(emailIngest.importance), asc(emailIngest.createdAt), asc(emailIngest.id))
+          .limit(pageSize);
+      const candidates: PulseMail[] = [];
+      let after: string | undefined;
+      for (let scanned = 0; scanned < 10_000; scanned += pageSize) {
+        const rows = await readPage(after);
+        for (const row of rows) {
+          const practiceChange = practiceChangeFromMail(row);
+          if (!practiceChange && row.createdAt > input.until) continue;
+          if (practiceChange && new Date(practiceChange.iso) <= input.now) continue;
+          const bill = admittedBillEmailEvidence(row);
+          const billInvoice = bill?.kind === 'invoice' && !row.obligationDecision ? bill : null;
+          if (
+            billInvoice &&
+            (await readPostgresEmailBillStatus(db, agentId, billInvoice, input.now)).kind !== 'due'
+          )
+            continue;
+          candidates.push({
+            ...row,
+            ...(practiceChange ? { practiceChange } : {}),
+            ...(billInvoice ? { billInvoice } : {}),
+          });
+          if (candidates.length >= input.limit) return candidates;
+        }
+        if (rows.length < pageSize) return candidates;
+        after = rows.at(-1)?.id;
+      }
+      throw new Error('Pulse mail candidate scan exceeded its bound');
     },
     async dueCommitments(agentId, input) {
       const rows = await db
@@ -1394,6 +1462,7 @@ export async function runPulse(
           providerMessageId: row.providerMessageId!,
           obligationVersion: row.obligationVersion!,
           ...(row.practiceChange ? { practiceChange: row.practiceChange } : {}),
+          ...(row.billInvoice ? { billInvoice: row.billInvoice } : {}),
         },
       })),
       ...dueCommitments.map((row) => commitmentMoment(row, agent.timezone, now)),

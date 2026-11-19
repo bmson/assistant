@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
+  admittedBillEmailEvidence,
   emailIngestReadable,
   type PulseRepository,
   practiceChangeFromMail,
@@ -7,6 +8,7 @@ import {
   validatePulseNotice,
 } from '@assistant/persistence';
 import { and, count, eq, gte, isNull, sql } from 'drizzle-orm';
+import { readPostgresEmailBillStatus } from './bill-email-evidence.js';
 import type { Db } from './client.js';
 import { postgresPrivacyObservationFence } from './privacy-erasure-repository.js';
 import {
@@ -93,6 +95,18 @@ export function createPostgresPulseAdmissionRepository(
               current.obligationSnoozedUntil > input.now)
           )
             return { status: 'stale-source' as const };
+          if (source.billInvoice) {
+            const invoice = admittedBillEmailEvidence(current);
+            if (
+              invoice?.kind !== 'invoice' ||
+              invoice.identity !== source.billInvoice.identity ||
+              invoice.evidenceLine !== source.billInvoice.evidenceLine ||
+              current.obligationDecision ||
+              (await readPostgresEmailBillStatus(tx, input.agentId, invoice, input.now)).kind !==
+                'due'
+            )
+              return { status: 'stale-source' as const };
+          }
           const [latest] = await tx
             .select({ channelMessageId: emailIngest.channelMessageId })
             .from(emailIngest)

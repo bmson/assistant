@@ -8,6 +8,7 @@ export { createPostgresApplicationConfirmationRepository } from './application-c
 export { createPostgresApprovalPolicyRepository } from './approval-policy-repository.js';
 export { createPostgresApprovalRepository } from './approval-repository.js';
 export { createPostgresAuditInvestigationRepository } from './audit-investigation-repository.js';
+export { readPostgresEmailBillStatus } from './bill-email-evidence.js';
 export { readPostgresBriefingHealth, readPostgresSavedBriefing } from './briefing-watchdog.js';
 export { resumePostgresBudgetWakes, updatePostgresBudgetCaps } from './budget-caps-repository.js';
 export { recordPostgresCalendarRecovery } from './calendar-recovery-repository.js';

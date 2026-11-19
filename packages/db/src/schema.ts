@@ -2437,6 +2437,7 @@ export const emailIngest = pgTable(
     reason: text('reason').notNull().default(''),
     /** Dates the scorer found: [{ iso, what }] — the raw material for occasions. */
     dates: jsonb('dates').notNull().default([]),
+    billEvidence: jsonb('bill_evidence').$type<Records['emailIngest']['billEvidence']>(),
     /** Stable source identity for staged forwarded-ingest recovery. */
     mailbox: text('mailbox').notNull().default(''),
     providerMessageId: text('provider_message_id'),
@@ -2484,6 +2485,7 @@ export const emailIngest = pgTable(
     uniqueIndex('email_ingest_message_idx').on(t.channelMessageId),
     uniqueIndex('email_ingest_owner_source_idx').on(t.agentId, t.mailbox, t.providerMessageId),
     index('email_ingest_agent_created_idx').on(t.agentId, t.createdAt),
+    index('email_ingest_bill_identity_idx').on(sql`(${t.billEvidence}->>'identity')`),
     index('email_ingest_thread_current_idx').on(
       t.agentId,
       t.providerThreadId,
