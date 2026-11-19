@@ -308,6 +308,7 @@ for (const driver of ['postgres', 'firestore'] as const) {
               x.kind === 'executed' &&
               (x.result as { sameOperationReadback?: boolean }).sameOperationReadback,
           ),
+          JSON.stringify(results),
         ).toBe(true);
         const posts = api.mock.calls.filter(
           ([, init]) => (init as RequestInit | undefined)?.method === 'POST',

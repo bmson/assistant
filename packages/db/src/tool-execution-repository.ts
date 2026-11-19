@@ -560,15 +560,21 @@ export function createPostgresToolExecutionRepository(db: Db): ToolExecutionRepo
       }),
     checkpointExternalEffect: async (input) =>
       db.transaction(async (tx) => {
+        // Claims and cancellation lock task before toolCall. A joined FOR UPDATE
+        // can lock toolCall first and deadlock with a concurrent approved claim.
+        const [task] = await tx
+          .select({ id: tasks.id })
+          .from(tasks)
+          .where(and(eq(tasks.id, input.taskId), eq(tasks.agentId, input.agentId)))
+          .for('update');
+        if (!task) return false;
         const [row] = await tx
           .select({ call: toolCalls })
           .from(toolCalls)
-          .innerJoin(tasks, eq(tasks.id, toolCalls.taskId))
           .where(
             and(
               eq(toolCalls.id, input.toolCallId),
               eq(toolCalls.taskId, input.taskId),
-              eq(tasks.agentId, input.agentId),
               eq(toolCalls.status, 'executing'),
             ),
           )

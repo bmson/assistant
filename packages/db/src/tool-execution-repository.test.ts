@@ -372,6 +372,88 @@ describe('PostgreSQL tool execution repository', () => {
     });
   });
 
+  it('waits for the task before locking a provider checkpoint call', async () => {
+    db = createDb(testUrl(), RACE_POOL_OPTIONS);
+    raceObserverDb = createDb(testUrl(), RACE_OBSERVER_POOL_OPTIONS);
+    const [owner] = await db.select({ id: agents.id }).from(agents).limit(1);
+    if (!owner) throw new Error('Seed the test database');
+    const taskId = randomUUID();
+    const callId = randomUUID();
+    taskIds.push(taskId);
+    callIds.push(callId);
+    await db.insert(tasks).values({
+      id: taskId,
+      agentId: owner.id,
+      type: 'adhoc',
+      trust: 'owner',
+      status: 'running',
+    });
+    await db.insert(toolCalls).values({
+      id: callId,
+      taskId,
+      step: 1,
+      toolName: 'calendar.create_event',
+      risk: 'approval',
+      status: 'executing',
+      args: {},
+    });
+    const observer = raceObserverDb;
+    const applicationName = `checkpoint-${callId}`;
+    const repository = createPostgresToolExecutionRepository(
+      withTransactionApplicationName(db, applicationName),
+    );
+    const progress = {
+      provider: 'google' as const,
+      kind: 'calendar_event' as const,
+      objectId: 'original-event',
+      stage: 'prepared' as const,
+      payloadDigest: 'a'.repeat(64),
+    };
+    let checkpoint: Promise<boolean> | undefined;
+    try {
+      await db.transaction(async (tx) => {
+        // Model a second claim that has taken the task lock but not the call.
+        await tx.select({ id: tasks.id }).from(tasks).where(eq(tasks.id, taskId)).for('update');
+        checkpoint = repository.checkpointExternalEffect?.({
+          agentId: owner.id,
+          taskId,
+          toolCallId: callId,
+          progress,
+        });
+        if (!checkpoint) throw new Error('Checkpoint repository is unavailable');
+        const deadline = performance.now() + 5_000;
+        let blocked = false;
+        while (performance.now() < deadline) {
+          const rows = await observer.$client<{ waiting: boolean }[]>`
+            select exists (
+              select 1 from pg_stat_activity
+              where datname = current_database() and application_name = ${applicationName}
+                and state = 'active' and wait_event_type = 'Lock'
+            ) as waiting
+          `;
+          if (rows?.[0]?.waiting) {
+            blocked = true;
+            break;
+          }
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        }
+        expect(blocked).toBe(true);
+        // The blocked checkpoint must not already own the call. The old joined
+        // FOR UPDATE locks it first, so this fails deterministically with 55P03.
+        await tx
+          .select({ id: toolCalls.id })
+          .from(toolCalls)
+          .where(eq(toolCalls.id, callId))
+          .for('update', { noWait: true });
+      });
+    } finally {
+      if (checkpoint) expect(await checkpoint).toBe(true);
+    }
+    expect((await repository.load(owner.id, taskId, callId))?.toolCall.decision).toMatchObject({
+      externalEffect: progress,
+    });
+  });
+
   it('rejects a stale autonomous policy snapshot and starts once against the unchanged tool scope', async () => {
     db = createDb(testUrl());
     extraAgent = randomUUID();
