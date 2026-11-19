@@ -11,6 +11,7 @@ import {
   bootstrapDigest,
   object as bootstrapObject,
   createAgentResume,
+  preparePausedAgentResume,
   readBootstrapNative,
   restoreScaling,
   reviewedBootstrap,
@@ -129,6 +130,7 @@ export async function runWebTagAdmission(mode: string | undefined) {
       '--bootstrap-restore',
       '--bootstrap-hold',
       '--bootstrap-agent-resume',
+      '--bootstrap-verify-paused-agent',
     ].includes(mode ?? '')
   )
     throw new Error('Invalid admission mode');
@@ -465,7 +467,7 @@ export async function runWebTagAdmission(mode: string | undefined) {
     initializePairedWebLifecycle(context, raw, native, receipts);
     return;
   }
-  if (mode === '--bootstrap-agent-resume') {
+  if (mode === '--bootstrap-agent-resume' || mode === '--bootstrap-verify-paused-agent') {
     if (!bootstrap || !preclosed) throw new Error('Reviewed disabled bootstrap required');
     const receipts = openPrivateReleasePhaseReceipts(temp, receiptIdentity),
       state = receipts.readCurrent();
@@ -478,7 +480,7 @@ export async function runWebTagAdmission(mode: string | undefined) {
     await verifyOperatorOwnedHold(state.context);
     if (
       state.context.currentBinding?.reviewedEvidenceSha256 !== bootstrapEvidence ||
-      state.phase !== 'retired' ||
+      state.phase !== (mode === '--bootstrap-verify-paused-agent' ? 'attachedP' : 'retired') ||
       state.admissionPossible
     )
       throw new Error('Agent admission phase changed');
@@ -494,6 +496,52 @@ export async function runWebTagAdmission(mode: string | undefined) {
       throw new Error('Paused agent revision missing');
     let admitted = state;
     const dependencies = await protectedNativeReleaseDependencies(receipts);
+    const expected = {
+      revision: paused,
+      image: String(rec(rec(manifest.components).agent).image),
+      source,
+      runId: String(runId),
+      attempt: String(runAttempt),
+      manifest: String(manifestDigest),
+    };
+    const combined = process.env.OWNER_BOOTSTRAP_DRAINED_API_TRANSITION === 'true';
+    const components = rec(manifest.components);
+    const stagedPeer =
+      rec(components.agent).apiContract === 3 && rec(components.web).apiContract === 3;
+    const pausedPeerPath = path('owner-bootstrap-agent-paused-peer.json');
+    if (mode === '--bootstrap-verify-paused-agent') {
+      if (!stagedPeer || (combined && state.context.estimatedCost?.mode !== 'compatible-off'))
+        throw new Error('Paused peer check requires the reviewed API 3 bootstrap');
+      const binding = bootstrap.services.agent;
+      const agent = await readBootstrapNative(dependencies, binding.service);
+      const revision = await readBootstrapNative(
+        dependencies,
+        `${binding.service}/revisions/${paused}`,
+      );
+      const prepared = preparePausedAgentResume(bootstrap, agent, revision, expected);
+      const canonical = String(agent.uri);
+      const agentTag = process.env.OWNER_TAG_STAGING_TAG;
+      const statuses = agent.trafficStatuses;
+      if (
+        !/^https:\/\/assistant-agent-[a-z0-9]+-uw\.a\.run\.app$/.test(canonical) ||
+        !Array.isArray(statuses) ||
+        !statuses.some(
+          (row) =>
+            rec(row).tag === agentTag &&
+            rec(row).uri === canonical.replace('https://', `https://${agentTag}---`),
+        ) ||
+        literal(revision, 'ASSISTANT_RELEASE_API_CONTRACT') !== '3' ||
+        literal(revision, 'ASSISTANT_RELEASE_WEB_API_MIN') !== '3' ||
+        literal(revision, 'ASSISTANT_RELEASE_WEB_API_MAX') !== '3' ||
+        literal(revision, 'MCP_OAUTH_ENABLED') !== 'false'
+      )
+        throw new Error('Paused API 3 agent peer identity changed');
+      save(pausedPeerPath, prepared);
+      return;
+    }
+    const reviewedPeer = stagedPeer
+      ? JSON.parse(boundedFile(pausedPeerPath).toString('utf8'))
+      : undefined;
     const result = await createAgentResume(
       {
         ...dependencies,
@@ -502,6 +550,12 @@ export async function runWebTagAdmission(mode: string | undefined) {
             outcome = String(row.outcome);
           if (!['attempted', 'unknown', 'observed_exact_successor'].includes(outcome))
             throw new Error('Invalid agent successor outcome');
+          if (
+            outcome === 'attempted' &&
+            stagedPeer &&
+            (!reviewedPeer || bootstrapDigest(reviewedPeer) !== bootstrapDigest(row.prepared))
+          )
+            throw new Error('Verified paused agent changed before admission');
           save(path(`owner-bootstrap-agent-successor-${outcome}.json`), value);
           if (outcome === 'attempted') {
             admitted = markAgentAdmissionPossible(state, fresh);
@@ -510,14 +564,7 @@ export async function runWebTagAdmission(mode: string | undefined) {
         },
       },
       bootstrap,
-      {
-        revision: paused,
-        image: String(rec(rec(manifest.components).agent).image),
-        source,
-        runId: String(runId),
-        attempt: String(runAttempt),
-        manifest: String(manifestDigest),
-      },
+      expected,
     );
     const accepted = bindAgentSuccessorReceipt(admitted, bootstrapDigest(result));
     receipts.recordCheckpoint(accepted);

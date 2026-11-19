@@ -128,6 +128,9 @@ export function pairedWebContext(input: {
     : undefined;
   const releaseEnv = {
     ...(callback ? { GOOGLE_CALENDAR_OAUTH_CALLBACK_URL: callback } : {}),
+    ...(input.current?.binding.preclosed && web.apiContract === 3
+      ? { MCP_OAUTH_ENABLED: 'false' }
+      : {}),
     ...(estimatedCost ? estimatedCostReleaseEnvironment(estimatedCost) : {}),
     ASSISTANT_RELEASE_API_CONTRACT: String(web.apiContract),
     ASSISTANT_RELEASE_AGENT_API_MIN: String(peer?.min),

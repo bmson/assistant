@@ -56,6 +56,20 @@ export function createApp() {
       return c.json({
         ready: true,
         database: deps.firestoreStore ? 'firestore' : 'postgres',
+        ...(c.req.query('release') === 'probe' &&
+        deps.firestoreStore &&
+        process.env.ASSISTANT_RELEASE_API_CONTRACT === '3'
+          ? {
+              release: {
+                service: process.env.K_SERVICE,
+                revision: process.env.K_REVISION,
+                source: process.env.ASSISTANT_RELEASE_SOURCE_SHA,
+                manifest: process.env.ASSISTANT_RELEASE_MANIFEST,
+                writesPaused: deps.config.ASSISTANT_RELEASE_WRITES_PAUSED,
+                mcpOAuthEnabled: deps.config.MCP_OAUTH_ENABLED,
+              },
+            }
+          : {}),
         modules: moduleDiagnostics(deps.config),
       });
     } catch {

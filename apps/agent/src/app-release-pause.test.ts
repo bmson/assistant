@@ -2,13 +2,24 @@ import { loadConfig, resetConfigForTest } from '@assistant/config';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const admission = vi.hoisted(() => vi.fn());
+const firestore = vi.hoisted(() => ({ enabled: false }));
 const ownerReady = vi.hoisted(() => vi.fn(async () => {}));
 vi.mock('@assistant/db', () => ({ assertPostgresInstallationOwner: ownerReady }));
 vi.mock('@assistant/firestore', () => ({ assertFirestoreInstallationOwner: vi.fn() }));
 vi.mock('@assistant/modules/meta', () => ({ moduleDiagnostics: () => ({}) }));
 vi.mock('./deps.js', () => ({
-  buildDeps: () => ({ db: {}, config: {} }),
-  firestoreMaintenanceReady: vi.fn(),
+  buildDeps: () =>
+    firestore.enabled
+      ? {
+          firestoreStore: {},
+          config: {
+            FIRESTORE_AGENT_ID: 'test-owner',
+            ASSISTANT_RELEASE_WRITES_PAUSED: true,
+            MCP_OAUTH_ENABLED: false,
+          },
+        }
+      : { db: {}, config: {} },
+  firestoreMaintenanceReady: vi.fn(async () => true),
 }));
 vi.mock('./routes/api.js', async () => {
   const { Hono } = await import('hono');
@@ -40,6 +51,8 @@ vi.mock('./routes/webhooks.js', async () => {
 const { createApp } = await import('./app.js');
 
 afterEach(() => {
+  firestore.enabled = false;
+  vi.unstubAllEnvs();
   resetConfigForTest();
   loadConfig(process.env);
   vi.clearAllMocks();
@@ -92,5 +105,27 @@ describe('agent release pause admission', () => {
       expect((await app.request(path, { method: 'POST' })).status).toBe(200);
     }
     expect(admission).toHaveBeenCalledTimes(3);
+  });
+
+  it('reports the running Firestore revision only to the release probe', async () => {
+    firestore.enabled = true;
+    vi.stubEnv('ASSISTANT_RELEASE_API_CONTRACT', '3');
+    vi.stubEnv('ASSISTANT_RELEASE_SOURCE_SHA', 'a'.repeat(40));
+    vi.stubEnv('ASSISTANT_RELEASE_MANIFEST', 'b'.repeat(64));
+    vi.stubEnv('K_SERVICE', 'assistant-agent');
+    vi.stubEnv('K_REVISION', 'assistant-agent-p-12345-1-aaaaaaaa');
+    const app = createApp();
+    expect(await (await app.request('/ready')).json()).not.toHaveProperty('release');
+    expect(await (await app.request('/ready?release=probe')).json()).toMatchObject({
+      ready: true,
+      release: {
+        service: 'assistant-agent',
+        revision: 'assistant-agent-p-12345-1-aaaaaaaa',
+        source: 'a'.repeat(40),
+        manifest: 'b'.repeat(64),
+        writesPaused: true,
+        mcpOAuthEnabled: false,
+      },
+    });
   });
 });
