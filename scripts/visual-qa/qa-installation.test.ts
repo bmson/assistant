@@ -1,9 +1,12 @@
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { resetConfigForTest } from '@assistant/config';
-import type { BrowserContext, Route } from 'playwright';
+import { type BrowserContext, type Route, request } from 'playwright';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GET } from '../../apps/web/app/api/health/route.js';
+import { mobileSmokeRequest } from '../mobile-smoke-server.js';
 import {
   assertQaWebInstallation,
   openQaInstallation,
@@ -38,25 +41,72 @@ describe('dedicated QA origin', () => {
   ])('refuses an origin outside the exact loopback contract (%s)', (value) => {
     expect(() => requireQaOrigin(undefined, value)).toThrow(/literal loopback HTTP origin/);
   });
+});
 
-  it('rejects a remote mobile smoke target before Chromium starts', () => {
-    const result = spawnSync(
+async function startFixtureServer(server: ReturnType<typeof createServer>) {
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('No test server address');
+  return `http://127.0.0.1:${address.port}`;
+}
+
+it('refuses a caller-supplied owner-like loopback listener before any request', async () => {
+  const ownerRequest = vi.fn();
+  const owner = createServer((_request, response) => {
+    ownerRequest();
+    response.end('synthetic owner installation');
+  });
+  const origin = await startFixtureServer(owner);
+  try {
+    const child = spawn(
       process.execPath,
       ['--import', 'tsx', fileURLToPath(new URL('../mobile-smoke.ts', import.meta.url))],
       {
-        env: {
-          ...process.env,
-          SMOKE_BASE_URL: 'https://owner.example.invalid',
-          SMOKE_BROWSER_PATH: '/tmp/assistant-qa-deliberately-absent-browser',
-        },
-        encoding: 'utf8',
+        env: { ...process.env, SMOKE_BASE_URL: origin },
+        stdio: ['ignore', 'ignore', 'pipe'],
         timeout: 10_000,
       },
     );
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain('QA requires a literal loopback HTTP origin');
-    expect(result.stderr).not.toContain('browserType.launch');
+    let stderr = '';
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+    const [code] = await once(child, 'close');
+    expect(code).toBe(1);
+    expect(stderr).toContain('Mobile smoke launches its own disposable server');
+    expect(ownerRequest).not.toHaveBeenCalled();
+  } finally {
+    owner.close();
+  }
+});
+
+it('keeps actual Playwright mutation probes on the owned origin without following redirects', async () => {
+  const otherRequest = vi.fn();
+  const other = createServer((_request, response) => {
+    otherRequest();
+    response.end();
   });
+  const otherOrigin = await startFixtureServer(other);
+  const ownedRequest = vi.fn();
+  const owned = createServer((incoming, response) => {
+    ownedRequest(incoming.method, incoming.url);
+    response.writeHead(307, { Location: otherOrigin }).end();
+  });
+  const origin = await startFixtureServer(owned);
+  const context = await request.newContext();
+  try {
+    const probe = mobileSmokeRequest(context, origin);
+    expect(() => probe(otherOrigin, { method: 'POST' })).toThrow(/left its private origin/);
+    const response = await probe('/fixture', { method: 'POST', maxRedirects: 5 });
+    expect(response.status()).toBe(307);
+    expect(ownedRequest).toHaveBeenCalledExactlyOnceWith('POST', '/fixture');
+    expect(otherRequest).not.toHaveBeenCalled();
+  } finally {
+    await context.dispose();
+    owned.close();
+    other.close();
+  }
 });
 
 describe('web installation proof', () => {
