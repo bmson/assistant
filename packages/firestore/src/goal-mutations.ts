@@ -95,7 +95,7 @@ function ownerScheduleQuery(store: InstallationStore, agentId: string, name: str
 function decodeGoal(doc: DocumentSnapshot, id: string, agentId: string): Goal {
   const goal = decodeRecord<Goal>(doc.data());
   identity(doc, goal, id, agentId);
-  return goal;
+  return { ...goal, researchAssignment: goal.researchAssignment ?? null };
 }
 
 function decodeGoalSchedules(
@@ -189,6 +189,7 @@ export class FirestoreGoalMutationRepository {
           taintedOrigin: input.taintedOrigin ?? false,
           autonomy: false,
           archivedAt: null,
+          researchAssignment: null,
         };
       } else {
         if (!goalDoc.exists) throw new Error('goal not found');

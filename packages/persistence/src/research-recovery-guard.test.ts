@@ -28,7 +28,9 @@ describe('future research records fail closed before activation', () => {
         task: { agentId: 'owner', goalId: 'goal' },
         goalGuard: { goal, openTasks: [], supersedeTaskIds: [] },
       } as unknown as ScheduleOccurrence;
-      expect(goalOccurrenceIsCurrent(occurrence, goal, [])).toBe(false);
+      expect(goalOccurrenceIsCurrent(occurrence, goal as unknown as Records['goals'], [])).toBe(
+        false,
+      );
     },
   );
 });
