@@ -8,6 +8,7 @@ import {
   firestoreCodeJobUnavailable,
   getTaskQueue,
   isCodeJobEnabled,
+  nextRun,
   prepareGoalSession,
   purgeAgedHistory,
   purgeExpired,
@@ -18,7 +19,7 @@ import {
   runDueSchedules,
 } from '@assistant/core';
 import { FirestoreOutbox, FirestoreScheduleRepository } from '@assistant/firestore';
-import type { TaskQueue } from '@assistant/persistence';
+import { ASSISTANT_HEALTH_MONITOR_SCHEDULE, type TaskQueue } from '@assistant/persistence';
 import { ensureAwarenessSchedule } from './awareness-schedule.js';
 import {
   type AgentDeps,
@@ -124,7 +125,15 @@ export async function runFirestoreSweep(
           deps.config.FIRESTORE_AGENT_ID,
           deps.config.SELF_REPAIR_DAILY_LIMIT,
         );
-      const fired = await runDueSchedules(new FirestoreScheduleRepository(store), timezone, {
+      const scheduleRepository = new FirestoreScheduleRepository(store);
+      await step('updateDefaultHealthMonitorCadence', async () => {
+        await scheduleRepository.updateDefaultHealthMonitorCadence(
+          deps.config.FIRESTORE_AGENT_ID,
+          nextRun(ASSISTANT_HEALTH_MONITOR_SCHEDULE.cron, timezone, new Date()),
+        );
+        return 0;
+      });
+      const fired = await runDueSchedules(scheduleRepository, timezone, {
         // SQL-only jobs advance their schedule without creating a task.
         isJobEnabled: (job) => isCodeJobEnabled(job) && !firestoreCodeJobUnavailable(job),
         // Goal sessions pass the same gate as PostgreSQL. A goal whose state

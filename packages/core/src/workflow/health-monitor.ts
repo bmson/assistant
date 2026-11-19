@@ -13,9 +13,11 @@ import type {
   AssistantHealthSignal,
   KnowledgeGraphSyncRepository,
 } from '@assistant/persistence';
+import { PENDING_MAIL_ADMISSION_STAGES } from '@assistant/persistence';
 import { and, eq, gte, inArray, isNull, lt, ne, notInArray, or, sql } from 'drizzle-orm';
 import { loadConfig } from '../config.js';
 import { pendingKnowledgeGraphSourceCount } from '../memory/knowledge-graph.js';
+import { mailHealthWindow, sqlMailHealthCounts } from '../proactive/pipeline-health.js';
 import { notifyOwnerInNotifications } from './anomaly.js';
 
 /** A completed graph extraction may hold a five-minute lease; ten minutes is actionable. */
@@ -31,8 +33,9 @@ const MIN_HISTORY_RECALL_FAILURES = 3;
 const MIN_GRAPH_BACKLOG = 50;
 /** Persistent incidents receive a reminder, not a daily stream of identical pings. */
 const HEALTH_ALERT_RENOTIFY_MS = 7 * 24 * 60 * 60 * 1000;
+const MAIL_ALERT_RENOTIFY_MS = 24 * 60 * 60 * 1000;
 
-interface HealthSignal {
+interface HealthSignal extends AssistantHealthSignal {
   kind:
     | 'graph_quarantined'
     | 'graph_stale_pending'
@@ -42,7 +45,8 @@ interface HealthSignal {
     | 'verification_unavailable'
     | 'response_contract_blocks'
     | 'must_act_retries'
-    | 'degraded_steps';
+    | 'degraded_steps'
+    | 'mail_processing_stalled';
   detail: string;
 }
 
@@ -82,9 +86,12 @@ async function claimHealthNotifications(
             eq(assistantHealthAlerts.agentId, agentId),
             eq(assistantHealthAlerts.kind, signal.kind),
             or(
-              ne(assistantHealthAlerts.status, 'open'),
+              signal.notificationDueBefore ? undefined : ne(assistantHealthAlerts.status, 'open'),
               isNull(assistantHealthAlerts.lastNotifiedAt),
-              lt(assistantHealthAlerts.lastNotifiedAt, reminderBefore),
+              lt(
+                assistantHealthAlerts.lastNotifiedAt,
+                signal.notificationDueBefore ?? reminderBefore,
+              ),
             ),
           ),
         )
@@ -123,6 +130,7 @@ async function claimHealthNotifications(
         .update(assistantHealthAlerts)
         .set({
           detail: signal.detail,
+          status: 'open',
           observationCount: sql`${assistantHealthAlerts.observationCount} + 1`,
           lastSeenAt: now,
           updatedAt: now,
@@ -175,11 +183,12 @@ export async function runAssistantHealthMonitor(
   const qualitySince = new Date(now.getTime() - QUALITY_WINDOW_MS);
   await deps.heartbeat?.();
 
-  const [observed, graphBacklog] = await Promise.all([
+  const [observed, graphBacklog, mail] = await Promise.all([
     health.observe({ agentId: opts.agentId, staleBefore, qualitySince }),
     graphRagEnabled
       ? pendingKnowledgeGraphSourceCount(deps.graphSync ?? deps.db, opts.agentId)
       : Promise.resolve(0),
+    health.observeMail?.(opts.agentId, mailHealthWindow(now)),
   ]);
   const {
     graphQuarantined: quarantined,
@@ -191,7 +200,23 @@ export async function runAssistantHealthMonitor(
     mustActRetries,
     degradedSteps,
   } = observed;
+  const mailIntake = PENDING_MAIL_ADMISSION_STAGES.flatMap((stage) => {
+    const count = mail?.mailStalledAdmissionByStage[stage] ?? 0;
+    return count > 0 ? [`${count} in ${stage.replaceAll('_', ' ')}`] : [];
+  });
+  const mailExtraction = mail?.mailPendingOver6h7d ?? 0;
+  const stalledMail = [
+    ...mailIntake,
+    ...(mailExtraction ? [`${mailExtraction} awaiting extraction`] : []),
+  ];
   const signals: AssistantHealthSignal[] = [
+    stalledMail.length > 0
+      ? {
+          kind: 'mail_processing_stalled',
+          detail: `Mail processing has waited over six hours: ${stalledMail.join(', ')}.`,
+          notificationDueBefore: new Date(now.getTime() - MAIL_ALERT_RENOTIFY_MS),
+        }
+      : null,
     graphRagEnabled && quarantined > 0
       ? {
           kind: 'graph_quarantined',
@@ -283,6 +308,7 @@ export async function runAssistantHealthMonitor(
 function postgresAssistantHealth(db: Db): AssistantHealthRepository {
   return {
     kind: 'assistant-health-repository',
+    observeMail: (agentId, window) => sqlMailHealthCounts(db, agentId, window),
     observe: ({ agentId, staleBefore, qualitySince }) =>
       observePostgresHealth(db, agentId, staleBefore, qualitySince),
     claim: ({ agentId, signals, now, renotifyBefore }) =>

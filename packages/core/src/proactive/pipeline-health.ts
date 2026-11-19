@@ -7,6 +7,8 @@ import {
   proactivePings,
 } from '@assistant/db';
 import {
+  type MailHealthCounts,
+  type MailHealthWindow,
   PENDING_MAIL_ADMISSION_STAGES,
   type ProactiveHealthCounts,
   type ProactiveHealthRepository,
@@ -51,11 +53,7 @@ export async function assessProactiveHealth(
   input: { ingestMode: string; googleEnabled: boolean; now?: Date },
 ): Promise<ProactiveHealth> {
   const now = input.now ?? new Date();
-  const window = {
-    since6h: new Date(now.getTime() - 6 * 3600_000),
-    since24h: new Date(now.getTime() - RECENT_HOURS * 3600_000),
-    since7d: new Date(now.getTime() - WEEK_HOURS * 3600_000),
-  };
+  const window = mailHealthWindow(now);
   const counts =
     'kind' in storage && storage.kind === 'proactive-health-repository'
       ? await (storage as ProactiveHealthRepository).counts(agentId, window)
@@ -65,13 +63,22 @@ export async function assessProactiveHealth(
   return health;
 }
 
-async function sqlProactiveCounts(
+export function mailHealthWindow(now: Date): MailHealthWindow {
+  return {
+    since6h: new Date(now.getTime() - 6 * 3600_000),
+    since24h: new Date(now.getTime() - RECENT_HOURS * 3600_000),
+    since7d: new Date(now.getTime() - WEEK_HOURS * 3600_000),
+  };
+}
+
+export async function sqlMailHealthCounts(
   db: Db,
   agentId: string,
-  { since6h, since24h, since7d }: { since6h: Date; since24h: Date; since7d: Date },
-): Promise<ProactiveHealthCounts> {
+  { since6h, since24h, since7d }: MailHealthWindow,
+): Promise<MailHealthCounts> {
   const readable = emailIngestReadableSql();
-  const [mail, latest, moments, pings, devices] = await Promise.all([
+  const stalled = and(sql`${readable} is not true`, lt(emailIngest.createdAt, since6h));
+  const [mail, latest] = await Promise.all([
     db
       .select({
         mailReceived7d: count(),
@@ -85,9 +92,20 @@ async function sqlProactiveCounts(
             Number,
           ),
         mailAwaitingAdmissionOver6h7d:
-          sql<number>`count(*) filter (where ${and(sql`${readable} is not true`, inArray(emailIngest.pipelineStage, PENDING_MAIL_ADMISSION_STAGES), lt(emailIngest.createdAt, since6h))})`.mapWith(
+          sql<number>`count(*) filter (where ${and(stalled, inArray(emailIngest.pipelineStage, PENDING_MAIL_ADMISSION_STAGES))})`.mapWith(
             Number,
           ),
+        mailStalledAdmissionByStage: sql<
+          MailHealthCounts['mailStalledAdmissionByStage']
+        >`jsonb_build_object(
+          ${sql.join(
+            PENDING_MAIL_ADMISSION_STAGES.map(
+              (stage) =>
+                sql`${stage}::text, count(*) filter (where ${and(stalled, eq(emailIngest.pipelineStage, stage))})`,
+            ),
+            sql`, `,
+          )}
+        )`,
         mailPendingOver6h7d:
           sql<number>`count(*) filter (where ${and(readable, isNull(emailIngest.extractedAt), lt(emailIngest.createdAt, since6h))})`.mapWith(
             Number,
@@ -101,26 +119,41 @@ async function sqlProactiveCounts(
       .where(and(eq(emailIngest.agentId, agentId), emailIngestReadableSql()))
       .orderBy(desc(emailIngest.createdAt))
       .limit(1),
-    db
-      .select({ value: count() })
-      .from(proactiveMoments)
-      .where(
-        and(eq(proactiveMoments.agentId, agentId), gte(proactiveMoments.deliveredAt, since24h)),
-      ),
-    db
-      .select({ delivered: proactivePings.delivered })
-      .from(proactivePings)
-      .where(and(eq(proactivePings.agentId, agentId), gte(proactivePings.createdAt, since24h))),
-    db
-      .select({ value: count() })
-      .from(deviceTokens)
-      .where(and(eq(deviceTokens.agentId, agentId), isNull(deviceTokens.invalidatedAt))),
   ]);
   const counts = mail[0];
   if (!counts) throw new Error('Mail health aggregation returned no result');
   return {
     ...counts,
     lastMailAt: latest[0]?.createdAt ?? null,
+  };
+}
+
+async function sqlProactiveCounts(
+  db: Db,
+  agentId: string,
+  window: MailHealthWindow,
+): Promise<ProactiveHealthCounts> {
+  const { since24h } = window;
+  const [{ mailStalledAdmissionByStage: _stageCounts, ...mail }, moments, pings, devices] =
+    await Promise.all([
+      sqlMailHealthCounts(db, agentId, window),
+      db
+        .select({ value: count() })
+        .from(proactiveMoments)
+        .where(
+          and(eq(proactiveMoments.agentId, agentId), gte(proactiveMoments.deliveredAt, since24h)),
+        ),
+      db
+        .select({ delivered: proactivePings.delivered })
+        .from(proactivePings)
+        .where(and(eq(proactivePings.agentId, agentId), gte(proactivePings.createdAt, since24h))),
+      db
+        .select({ value: count() })
+        .from(deviceTokens)
+        .where(and(eq(deviceTokens.agentId, agentId), isNull(deviceTokens.invalidatedAt))),
+    ]);
+  return {
+    ...mail,
     momentsDelivered24h: Number(moments[0]?.value ?? 0),
     pingsDelivered24h: pings.filter((row) => row.delivered).length,
     pingsHeld24h: pings.filter((row) => !row.delivered).length,

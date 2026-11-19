@@ -1,6 +1,12 @@
-import type { ProactiveHealthCounts, ProactiveHealthRepository } from '@assistant/persistence';
+import type {
+  MailHealthCounts,
+  MailHealthWindow,
+  ProactiveHealthCounts,
+  ProactiveHealthRepository,
+} from '@assistant/persistence';
 import {
   emailIngestReadable,
+  type MailAdmissionStage,
   PENDING_MAIL_ADMISSION_STAGES,
   type Records,
 } from '@assistant/persistence';
@@ -19,12 +25,15 @@ export class FirestoreProactiveHealthRepository implements ProactiveHealthReposi
     this.devices = new FirestoreDeviceTokenRepository(store);
   }
 
-  async counts(
-    agentId: string,
-    window: { since6h: Date; since24h: Date; since7d: Date },
-  ): Promise<ProactiveHealthCounts> {
-    const [mailCounts, moments, deliveredPings, heldPings, devices] = await Promise.all([
-      this.completeMailCounts(agentId, window),
+  async counts(agentId: string, window: MailHealthWindow): Promise<ProactiveHealthCounts> {
+    const [
+      { mailStalledAdmissionByStage: _stageCounts, ...mailCounts },
+      moments,
+      deliveredPings,
+      heldPings,
+      devices,
+    ] = await Promise.all([
+      this.mailCounts(agentId, window),
       this.store
         .collection('proactiveMoments')
         .where('agentId', '==', agentId)
@@ -56,25 +65,13 @@ export class FirestoreProactiveHealthRepository implements ProactiveHealthReposi
     };
   }
 
-  private async completeMailCounts(
-    agentId: string,
-    window: { since6h: Date; since24h: Date; since7d: Date },
-  ): Promise<
-    Pick<
-      ProactiveHealthCounts,
-      | 'mailReceived7d'
-      | 'mailProcessed7d'
-      | 'mailPendingOver6h7d'
-      | 'mailAwaitingAdmissionOver6h7d'
-      | 'mailScored24h'
-      | 'mailScored7d'
-      | 'lastMailAt'
-    >
-  > {
+  async mailCounts(agentId: string, window: MailHealthWindow): Promise<MailHealthCounts> {
     let mailReceived7d = 0;
     let mailProcessed7d = 0;
     let mailPendingOver6h7d = 0;
     let mailAwaitingAdmissionOver6h7d = 0;
+    const mailStalledAdmissionByStage: MailHealthCounts['mailStalledAdmissionByStage'] = {};
+    const admissionStages = new Set<string>(PENDING_MAIL_ADMISSION_STAGES);
     let mailScored24h = 0;
     let mailScored7d = 0;
     let lastMailAt: Date | null = null;
@@ -86,6 +83,20 @@ export class FirestoreProactiveHealthRepository implements ProactiveHealthReposi
         .where('agentId', '==', agentId)
         .where('createdAt', '>=', window.since7d)
         .orderBy('createdAt', 'desc')
+        .select(
+          'id',
+          'agentId',
+          'createdAt',
+          'pipelineStage',
+          'ingestMode',
+          'authenticated',
+          'admittedSourceId',
+          'admittedSourceKind',
+          'messagePersisted',
+          'scoreStatus',
+          'scoreOutcome',
+          'extractedAt',
+        )
         .limit(Math.min(250, MAIL_SCAN_LIMIT - scanned));
       if (cursor) query = query.startAfter(cursor);
       const page = await query.get();
@@ -103,9 +114,12 @@ export class FirestoreProactiveHealthRepository implements ProactiveHealthReposi
           if (
             row.createdAt < window.since6h &&
             row.pipelineStage &&
-            PENDING_MAIL_ADMISSION_STAGES.includes(row.pipelineStage)
-          )
+            admissionStages.has(row.pipelineStage)
+          ) {
             mailAwaitingAdmissionOver6h7d += 1;
+            const stage = row.pipelineStage as MailAdmissionStage;
+            mailStalledAdmissionByStage[stage] = (mailStalledAdmissionByStage[stage] ?? 0) + 1;
+          }
           continue;
         }
         mailScored7d += 1;
@@ -125,6 +139,7 @@ export class FirestoreProactiveHealthRepository implements ProactiveHealthReposi
       mailProcessed7d,
       mailPendingOver6h7d,
       mailAwaitingAdmissionOver6h7d,
+      mailStalledAdmissionByStage,
       mailScored24h,
       mailScored7d,
       lastMailAt,

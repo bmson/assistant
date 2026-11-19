@@ -877,7 +877,9 @@ export async function runCodeJob(
         done: true,
         summary: r.notified
           ? `health monitor: notified owner about ${r.signals.length} signal(s)`
-          : 'health monitor: no active signals',
+          : r.signals.length
+            ? `health monitor: ${r.signals.length} active signal(s), already reported`
+            : 'health monitor: no active signals',
       };
     }
     case 'watch.suggest': {

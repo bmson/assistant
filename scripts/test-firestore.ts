@@ -102,6 +102,7 @@ const files = [
   'apps/agent/src/firestore-sms-channel.test.ts',
   'apps/agent/src/firestore-application-confirmations.test.ts',
   'apps/agent/src/firestore-email-sync.test.ts',
+  'apps/agent/src/email-forwarded-extraction.e2e.test.ts',
   'apps/agent/src/firestore-email-channel.test.ts',
   'apps/agent/src/firestore-document-search.test.ts',
   'apps/agent/src/firestore-document-processing.test.ts',

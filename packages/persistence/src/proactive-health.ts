@@ -15,13 +15,27 @@ export interface ProactiveHealthCounts {
   pushDevices: number;
 }
 
+export type MailHealthCounts = Pick<
+  ProactiveHealthCounts,
+  | 'mailReceived7d'
+  | 'mailProcessed7d'
+  | 'mailPendingOver6h7d'
+  | 'mailAwaitingAdmissionOver6h7d'
+  | 'mailScored24h'
+  | 'mailScored7d'
+  | 'lastMailAt'
+> & { mailStalledAdmissionByStage: Partial<Record<MailAdmissionStage, number>> };
+
+export interface MailHealthWindow {
+  since6h: Date;
+  since24h: Date;
+  since7d: Date;
+}
+
 /** The counts behind the proactive-health view. The warnings stay in core. */
 export interface ProactiveHealthRepository {
   readonly kind: 'proactive-health-repository';
-  counts(
-    agentId: string,
-    window: { since6h: Date; since24h: Date; since7d: Date },
-  ): Promise<ProactiveHealthCounts>;
+  counts(agentId: string, window: MailHealthWindow): Promise<ProactiveHealthCounts>;
 }
 
 /** Unfinished, retryable ingress phases. A terminal review row is counted separately by Activity. */
@@ -32,4 +46,6 @@ export const PENDING_MAIL_ADMISSION_STAGES = [
   'scoring',
   'score_prepared',
   'message_persisted',
-];
+] as const;
+
+export type MailAdmissionStage = (typeof PENDING_MAIL_ADMISSION_STAGES)[number];
