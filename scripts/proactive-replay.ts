@@ -11,6 +11,14 @@ const args = process.argv.slice(2);
 if (args.length > 1 || (args.length === 1 && args[0] !== '--firestore-suite'))
   throw new Error('Usage: pnpm test:proactive-replay [--firestore-suite]');
 
+function sourceSnapshot() {
+  const revision = spawnSync('git', ['rev-parse', '--verify', 'HEAD'], { encoding: 'utf8' });
+  const status = spawnSync('git', ['status', '--porcelain'], { encoding: 'utf8' });
+  if (revision.status !== 0 || status.status !== 0) return null;
+  return { revision: revision.stdout.trim(), clean: status.stdout.length === 0 };
+}
+
+const sourceAtStart = sourceSnapshot();
 const evidenceDir = mkdtempSync(join(tmpdir(), 'assistant-proactive-replay-'));
 const outputDir = '.artifacts/proactive-replay';
 const scope =
@@ -65,6 +73,14 @@ try {
       cases,
     };
   });
+  const sourceAtEnd = sourceSnapshot();
+  const source = {
+    revision: sourceAtStart?.revision ?? null,
+    cleanAtBothChecks:
+      sourceAtStart?.clean === true &&
+      sourceAtEnd?.clean === true &&
+      sourceAtEnd.revision === sourceAtStart.revision,
+  };
   const passed = result.status === 0 && adapters.every((adapter) => adapter.passed);
   mkdirSync(outputDir, { recursive: true });
   writeFileSync(
@@ -72,6 +88,7 @@ try {
     `${JSON.stringify(
       {
         version: 1,
+        source,
         scope,
         passed,
         adapters,
@@ -85,6 +102,14 @@ try {
     '',
     scope,
     '',
+    source.revision
+      ? 'Source commit ' +
+        source.revision +
+        (source.cleanAtBothChecks
+          ? ' (clean at start and finish).'
+          : ' (local edits or revision change).')
+      : 'Source revision unavailable.',
+    '',
     'The channel score reflects the fake push acknowledgment. The S14 due setup and generic control are scored separately from benchmark precision and recall. This is a three-case slice of docs/proactive/golden-signals.md.',
     '',
   ];
@@ -94,10 +119,10 @@ try {
     markdown.push(
       `## ${adapter.adapter === 'postgres' ? 'PostgreSQL' : 'Firestore'}`,
       '',
-      `Recall ${percent(adapter.score.recall)} · Precision ${percent(adapter.score.precision)} · Quiet violations ${adapter.score.quietViolations}`,
+      `On-time recall ${adapter.score.matched}/${adapter.score.expected} (${percent(adapter.score.recall)}) · Precision ${adapter.score.matched}/${adapter.score.delivered} (${percent(adapter.score.precision)}) · Quiet violations ${adapter.score.quietViolations}`,
       '',
-      '| Case | Result | Logical moments | Fake push calls | Timing |',
-      '| --- | --- | ---: | ---: | --- |',
+      '| Case | Result | Deliveries outside setup | Setup deliveries | Fake push calls | Timing including setup |',
+      '| --- | --- | ---: | ---: | ---: | --- |',
     );
     for (const row of adapter.cases) {
       const minutes = row.ticks.flatMap(({ moments }) =>
@@ -105,10 +130,10 @@ try {
       );
       const calls = row.ticks.reduce((sum, tick) => sum + tick.pushSinkCalls, 0);
       markdown.push(
-        `| ${row.id} | ${row.passed ? 'Pass' : 'Fail'} | ${row.delivered} | ${calls} | ${minutes.join(', ') || '—'} |`,
+        `| ${row.id} | ${row.passed ? 'Pass' : 'Fail'} | ${row.delivered - row.setupDeliveries} | ${row.setupDeliveries} | ${calls} | ${minutes.join(', ') || '—'} |`,
       );
     }
-    if (!adapter.cases.length) markdown.push('| — | Evidence unavailable | — | — | — |');
+    if (!adapter.cases.length) markdown.push('| — | Evidence unavailable | — | — | — | — |');
     markdown.push('');
     for (const row of adapter.cases)
       for (const finding of row.findings) markdown.push(`- ${row.id} — ${finding}`);
