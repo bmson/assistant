@@ -2,12 +2,14 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 export type ReplayDriver = 'postgres' | 'firestore';
+type DeliveryChannel = 'push' | 'stack';
 type Timing = { earliestMinutes: number; latestMinutes: number };
 type Suppression = { deliveries: 0; phase: 'pending' | 'suppressed'; reason: string };
 
 export interface ReplayTick {
   name: string;
   elapsedMinutes: number;
+  briefing?: { outcome: string | null; mailScanned: number };
   candidates: number | null;
   selected: string | null;
   reason: string | null;
@@ -29,7 +31,11 @@ type ReplayEvidence = Record<string, string | number | boolean | null>;
 export interface ReplayCase {
   id: string;
   facts?: ReplayEvidence;
-  ticks: Record<string, Suppression | ({ deliveries: 1; kind: string; setup?: true } & Timing)>;
+  ticks: Record<
+    string,
+    | Suppression
+    | ({ deliveries: 1; kind: string; setup?: true; channel?: DeliveryChannel } & Timing)
+  >;
 }
 
 // The three observations overlap for a normal delivery. Excess ledger entries,
@@ -44,7 +50,9 @@ export function scoreReplayCase(
   sourceEvidence: ReplayEvidence,
 ) {
   const findings: string[] = [];
-  const deliveryChecks: Array<Timing & { tick: string; kind: string; credit: number }> = [];
+  const deliveryChecks: Array<
+    Timing & { tick: string; kind: string; channel: DeliveryChannel; credit: number }
+  > = [];
   const quietChecks: Array<
     Suppression & { tick: string; observations: number; violations: number }
   > = [];
@@ -64,6 +72,7 @@ export function scoreReplayCase(
         ? {
             tick: name,
             kind: expected.kind,
+            channel: expected.channel ?? 'push',
             earliestMinutes: expected.earliestMinutes,
             latestMinutes: expected.latestMinutes,
             credit: 0,
@@ -84,11 +93,13 @@ export function scoreReplayCase(
     }
     const tick = seen[0];
     if (!tick) continue;
+    const stack = expected.deliveries === 1 && expected.channel === 'stack';
+    const expectedPushes = stack ? 0 : expected.deliveries;
     if (
       tick.moments.length !== expected.deliveries ||
       tick.ownerNotices !== expected.deliveries ||
-      tick.pushSinkCalls !== expected.deliveries ||
-      tick.pushAcknowledged !== (expected.deliveries === 1) ||
+      tick.pushSinkCalls !== expectedPushes ||
+      tick.pushAcknowledged !== (expectedPushes === 1) ||
       tick.moments.some((moment) => moment.durablePushAcknowledged !== tick.pushAcknowledged)
     ) {
       findings.push(`${name}: logical delivery, sink call, or sink acknowledgment count differs`);
@@ -100,7 +111,9 @@ export function scoreReplayCase(
     }
     const grounded = tick.moments.filter(
       (moment) =>
-        tick.selected === expected.kind &&
+        (stack
+          ? tick.briefing?.outcome === 'delivered' && tick.ownerNotices > 0
+          : tick.selected === expected.kind) &&
         moment.kind === expected.kind &&
         moment.exactSource &&
         moment.durableCard &&
@@ -115,11 +128,14 @@ export function scoreReplayCase(
       findings.push(`${name}: durable moment outside the delivery window`);
     const matches = grounded.filter(onTime);
     if (matches.length > 0) {
-      const confirmedPush =
-        tick.pushSinkCalls === 1 &&
-        tick.pushAcknowledged &&
-        matches.some((moment) => moment.durablePushAcknowledged);
-      const credit = confirmedPush ? 1 : 0.5;
+      const channelMatched = stack
+        ? tick.pushSinkCalls === 0 &&
+          !tick.pushAcknowledged &&
+          matches.some((moment) => !moment.durablePushAcknowledged)
+        : tick.pushSinkCalls === 1 &&
+          tick.pushAcknowledged &&
+          matches.some((moment) => moment.durablePushAcknowledged);
+      const credit = channelMatched ? 1 : 0.5;
       matched += credit;
       if (deliveryCheck) deliveryCheck.credit = credit;
       if (expected.setup) {

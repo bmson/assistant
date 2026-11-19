@@ -159,7 +159,7 @@ try {
           : ' (local edits or revision change).')
       : 'Source revision unavailable.',
     '',
-    'Recall divides on-time credit by expected deliveries. Precision divides that credit by observed deliveries. An on-time exact-source match with a durable, grounded card earns one point with confirmed fake push acknowledgment or half a point without it. Unknown kind covers excess notices or push calls without ledger entries.',
+    'Recall divides on-time credit by expected deliveries. Precision divides that credit by observed deliveries. An on-time exact-source match with a durable, grounded card earns one point on the expected channel and half for a channel mismatch. Stack expects no push. Push expects a single call and matching fake and durable acknowledgments. Unknown kind covers excess notices or push calls without ledger entries.',
     '',
     'The S13 same-day control, S14 due setup, and generic control are excluded from the executed subset’s precision and recall.',
     '',
@@ -205,8 +205,8 @@ try {
       '',
       '### Timing by kind',
       '',
-      '| Kind | Case and tick | Expected window (min) | Ledger delivery times (min) | On-time credit |',
-      '| --- | --- | ---: | --- | ---: |',
+      '| Kind | Case and tick | Channel | Expected window (min) | Ledger delivery times (min) | On-time credit |',
+      '| --- | --- | --- | ---: | --- | ---: |',
     );
     for (const row of adapter.perKind) {
       const sameTick = (a: { caseId: string; tick: string }, b: { caseId: string; tick: string }) =>
@@ -216,18 +216,18 @@ try {
           .filter((observation) => sameTick(check, observation))
           .map(({ elapsedMinutes }) => elapsedMinutes);
         markdown.push(
-          `| ${row.kind} | ${check.caseId} · ${check.tick} | ${check.earliestMinutes}–${check.latestMinutes} | ${minutes.join(', ') || '—'} | ${check.credit} |`,
+          `| ${row.kind} | ${check.caseId} · ${check.tick} | ${check.channel} | ${check.earliestMinutes}–${check.latestMinutes} | ${minutes.join(', ') || '—'} | ${check.credit} |`,
         );
       }
       for (const observation of row.observedTiming) {
         if (row.expectations.some((check) => sameTick(check, observation))) continue;
         markdown.push(
-          `| ${row.kind} | ${observation.caseId} · ${observation.tick} | — | ${observation.elapsedMinutes} | 0 |`,
+          `| ${row.kind} | ${observation.caseId} · ${observation.tick} | — | — | ${observation.elapsedMinutes} | 0 |`,
         );
       }
     }
     if (!adapter.perKind.some((row) => row.expectations.length || row.observedTiming.length))
-      markdown.push('| — | Evidence unavailable | — | — | — |');
+      markdown.push('| — | Evidence unavailable | — | — | — | — |');
     markdown.push(
       '',
       '### Required silence',
