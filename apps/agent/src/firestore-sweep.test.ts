@@ -383,7 +383,19 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore maintenance swe
       return health;
     };
     const clock = () => now;
-    expect(await health()).toEqual({ ok: false, state: 'missing' });
+    expect(await health()).toMatchObject({
+      ok: false,
+      state: 'missing',
+      briefing: { state: 'missing' },
+    });
+    await new FirestoreScheduleRepository(store).ensure({
+      agentId,
+      name: 'daily-briefing',
+      enabled: false,
+      cron: '0 8 * * *',
+      nextRunAt: null,
+      taskTemplate: { job: 'briefing.compose' },
+    });
     expect(await runFirestoreSweep(deps, { clock })).toMatchObject({
       report: { schedulesFired: 0 },
     });
@@ -411,9 +423,12 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore maintenance swe
       report: { schedulesFired: 0 },
     });
     expect(await health()).toMatchObject({ ok: true, state: 'healthy', failedSteps: [], ageMs: 0 });
-    expect((await store.collection('proactiveMoments').get()).empty).toBe(true);
+    expect(
+      (await store.collection('proactiveMoments').get()).docs.map((doc) => doc.get('kind')),
+    ).toEqual(['sweep-recovery']);
+    expect((await store.collection('messages').get()).docs).toHaveLength(1);
     expect(sqlAccesses).toEqual([]);
-  });
+  }, 30_000);
 
   it('runs nothing while an imported workspace awaits activation', async () => {
     await store.doc('coordination', 'migration').set({ status: 'pending_activation' });

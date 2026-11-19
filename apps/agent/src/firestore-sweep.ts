@@ -28,7 +28,11 @@ import {
 } from './deps.js';
 import { executorDeps } from './executor-deps.js';
 import { ensureRepairSchedule } from './repair-schedule.js';
-import { recordFirestoreSweepHeartbeat } from './sweep-heartbeat.js';
+import {
+  acknowledgeFirestoreSweepRecovery,
+  recordFirestoreSweepHeartbeat,
+} from './sweep-heartbeat.js';
+import { publishFirestoreSweepRecovery } from './sweep-recovery.js';
 
 export type FirestoreSweepResult =
   | { ready: false; error: string }
@@ -246,19 +250,38 @@ export async function runFirestoreSweep(
     if (report.wakeIntentErrors > 0 || report.wakeIntentsRetrying > 0)
       failedSteps.push('dispatchWakeIntents');
   }
-  await attempt(
+  const recovery = await attempt(
     'recordSweepHeartbeat',
-    async () => {
-      await recordFirestoreSweepHeartbeat(
+    () =>
+      recordFirestoreSweepHeartbeat(
         store,
         deps.config.FIRESTORE_AGENT_ID,
         startedAt,
         clock(),
         failedSteps,
         skippedSteps,
-      );
-    },
+      ),
     undefined,
   );
+  if (recovery && !failedSteps.length && !skippedSteps.length) {
+    await step('publishSweepRecovery', async () => {
+      const notice = await publishFirestoreSweepRecovery(
+        store,
+        deps.config.FIRESTORE_AGENT_ID,
+        recovery,
+        clock(),
+      );
+      if (notice.status === 'persisted') {
+        await deps.outOfBandNotifier.notifyOwner({
+          text: 'Scheduled checks resumed. Your catch-up is ready in chat.',
+          conversationId: notice.conversationId,
+          urgency: 'ambient',
+          deliveryKey: `sweep-recovery:${recovery.fromMs}`,
+        });
+      }
+      await acknowledgeFirestoreSweepRecovery(store, recovery);
+      return Number(notice.status === 'persisted');
+    });
+  }
   return { ready: true, report };
 }

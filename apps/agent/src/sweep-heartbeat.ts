@@ -5,7 +5,7 @@ import {
   createInstallationStore,
   type InstallationStore,
 } from '@assistant/firestore';
-import { eq, lte } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 
 import { readFirestoreBriefingHealth, readPostgresBriefingHealth } from './briefing-watchdog.js';
 
@@ -14,12 +14,18 @@ const STALE_MS = 30 * 60_000;
 const STEP_NAME = /^[a-zA-Z][a-zA-Z0-9_.-]{0,79}$/;
 const FAILURE_LIMIT = 64;
 
+export interface SweepRecovery {
+  fromMs: number;
+  toMs: number;
+}
+
 interface SweepHeartbeat {
   version: 1;
   completedAtMs: number;
   scope: string;
   failedSteps: string[];
   skippedSteps: string[];
+  recovery?: SweepRecovery;
 }
 
 function diagnosticStepNames(names: readonly string[]): string[] {
@@ -46,6 +52,7 @@ function serialize(
   failedSteps: readonly string[],
   skippedSteps: readonly string[],
   completedAt: Date,
+  recovery?: SweepRecovery,
 ): string {
   const diagnostic: SweepHeartbeat = {
     version: 1,
@@ -53,27 +60,34 @@ function serialize(
     completedAtMs: completedAt.getTime(),
     failedSteps: diagnosticStepNames(failedSteps),
     skippedSteps: diagnosticStepNames(skippedSteps),
+    ...(recovery ? { recovery } : {}),
   };
   return JSON.stringify(diagnostic);
+}
+
+function parseSweepHeartbeat(cursor: unknown) {
+  if (typeof cursor !== 'string' || cursor.length > 12_000)
+    throw new Error('Invalid sweep heartbeat');
+  const value = JSON.parse(cursor) as Partial<SweepHeartbeat> | null;
+  if (
+    value?.version !== 1 ||
+    typeof value.scope !== 'string' ||
+    typeof value.completedAtMs !== 'number' ||
+    !Number.isSafeInteger(value.completedAtMs) ||
+    !Number.isFinite(new Date(value.completedAtMs).getTime()) ||
+    value.completedAtMs < 0 ||
+    !validStepNames(value.failedSteps) ||
+    !validStepNames(value.skippedSteps)
+  )
+    throw new Error('Invalid sweep heartbeat');
+  return value as SweepHeartbeat;
 }
 
 function evaluateSweepHeartbeat(scope: string, cursor: unknown, now: Date) {
   if (cursor === null || cursor === undefined) return { ok: false, state: 'missing' } as const;
   try {
-    if (typeof cursor !== 'string' || cursor.length > 12_000)
-      throw new Error('Invalid sweep heartbeat');
-    const value = JSON.parse(cursor) as Partial<SweepHeartbeat>;
-    if (
-      value.version !== 1 ||
-      typeof value.completedAtMs !== 'number' ||
-      !Number.isSafeInteger(value.completedAtMs) ||
-      value.completedAtMs < 0 ||
-      !validStepNames(value.failedSteps) ||
-      !validStepNames(value.skippedSteps)
-    )
-      throw new Error('Invalid sweep heartbeat');
-    // Importing the PostgreSQL cursor into Firestore is not evidence that the
-    // target installation's scheduler has ever run.
+    const value = parseSweepHeartbeat(cursor);
+    // A cursor imported across drivers does not establish a local heartbeat.
     if (value.scope !== scope) return { ok: false, state: 'missing' } as const;
     const ageMs = now.getTime() - value.completedAtMs;
     if (!Number.isFinite(ageMs) || ageMs < 0) throw new Error('Invalid sweep clock');
@@ -91,6 +105,37 @@ function evaluateSweepHeartbeat(scope: string, cursor: unknown, now: Date) {
   }
 }
 
+function recoveryInHeartbeat(prior: SweepHeartbeat) {
+  const pending = prior.recovery;
+  if (
+    pending &&
+    Number.isSafeInteger(pending.fromMs) &&
+    Number.isSafeInteger(pending.toMs) &&
+    pending.fromMs >= 0 &&
+    pending.toMs - pending.fromMs >= STALE_MS &&
+    pending.toMs <= prior.completedAtMs
+  )
+    return pending;
+  return undefined;
+}
+
+function pendingRecovery(scope: string, cursor: unknown, startedAt: Date) {
+  try {
+    const prior = parseSweepHeartbeat(cursor);
+    if (prior.scope !== scope) return undefined;
+    // A concurrent pass can complete after this pass starts and may already
+    // have recorded the gap. Carry it forward with either completion order.
+    const pending = recoveryInHeartbeat(prior);
+    if (pending) return pending;
+    const toMs = startedAt.getTime();
+    return toMs - prior.completedAtMs >= STALE_MS
+      ? { fromMs: prior.completedAtMs, toMs }
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function recordFirestoreSweepHeartbeat(
   store: InstallationStore,
   agentId: string,
@@ -98,9 +143,9 @@ export async function recordFirestoreSweepHeartbeat(
   completedAt: Date,
   failedSteps: readonly string[],
   skippedSteps: readonly string[],
-): Promise<void> {
+): Promise<SweepRecovery | undefined> {
   const ref = store.doc('maintenanceCursors', HEARTBEAT_CURSOR);
-  await store.db.runTransaction(async (tx) => {
+  return store.db.runTransaction(async (tx) => {
     const [old, owner, migration] = await tx.getAll(
       ref,
       store.doc('agents', agentId),
@@ -110,16 +155,14 @@ export async function recordFirestoreSweepHeartbeat(
       return;
     const prior = old?.get('updatedAt') as { toMillis?: () => number } | undefined;
     if (prior?.toMillis && prior.toMillis() > startedAt.getTime()) return;
+    const scope = `firestore:${store.installationId}`;
+    const recovery = pendingRecovery(scope, old?.get('cursor'), startedAt);
     tx.set(ref, {
       name: HEARTBEAT_CURSOR,
       updatedAt: startedAt,
-      cursor: serialize(
-        `firestore:${store.installationId}`,
-        failedSteps,
-        skippedSteps,
-        completedAt,
-      ),
+      cursor: serialize(scope, failedSteps, skippedSteps, completedAt, recovery),
     });
+    return recovery;
   });
 }
 
@@ -146,20 +189,77 @@ export async function recordPostgresSweepHeartbeat(
   completedAt: Date,
   failedSteps: readonly string[],
   skippedSteps: readonly string[],
-): Promise<void> {
+): Promise<SweepRecovery | undefined> {
   const row = {
     name: HEARTBEAT_CURSOR,
     cursor: serialize('postgres', failedSteps, skippedSteps, completedAt),
     updatedAt: startedAt,
   };
-  await db
-    .insert(maintenanceCursors)
-    .values(row)
-    .onConflictDoUpdate({
-      target: maintenanceCursors.name,
-      set: { cursor: row.cursor, updatedAt: row.updatedAt },
-      setWhere: lte(maintenanceCursors.updatedAt, startedAt),
-    });
+  return db.transaction(async (tx) => {
+    const inserted = await tx
+      .insert(maintenanceCursors)
+      .values(row)
+      .onConflictDoNothing()
+      .returning();
+    if (inserted.length) return undefined;
+    const [old] = await tx
+      .select()
+      .from(maintenanceCursors)
+      .where(eq(maintenanceCursors.name, HEARTBEAT_CURSOR))
+      .for('update');
+    if (!old || old.updatedAt > startedAt) return undefined;
+    const recovery = pendingRecovery('postgres', old.cursor, startedAt);
+    await tx
+      .update(maintenanceCursors)
+      .set({
+        updatedAt: startedAt,
+        cursor: serialize('postgres', failedSteps, skippedSteps, completedAt, recovery),
+      })
+      .where(eq(maintenanceCursors.name, HEARTBEAT_CURSOR));
+    return recovery;
+  });
+}
+
+function clearRecovery(scope: string, cursor: unknown, recovery: SweepRecovery): string | null {
+  try {
+    const heartbeat = parseSweepHeartbeat(cursor);
+    if (heartbeat.scope !== scope) return null;
+    const pending = recoveryInHeartbeat(heartbeat);
+    if (pending?.fromMs !== recovery.fromMs || pending.toMs !== recovery.toMs) return null;
+    delete heartbeat.recovery;
+    return JSON.stringify(heartbeat);
+  } catch {
+    return null;
+  }
+}
+
+export async function acknowledgePostgresSweepRecovery(db: Db, recovery: SweepRecovery) {
+  await db.transaction(async (tx) => {
+    const [row] = await tx
+      .select()
+      .from(maintenanceCursors)
+      .where(eq(maintenanceCursors.name, HEARTBEAT_CURSOR))
+      .for('update');
+    const cursor = clearRecovery('postgres', row?.cursor, recovery);
+    if (cursor)
+      await tx
+        .update(maintenanceCursors)
+        .set({ cursor })
+        .where(eq(maintenanceCursors.name, HEARTBEAT_CURSOR));
+  });
+}
+
+export async function acknowledgeFirestoreSweepRecovery(
+  store: InstallationStore,
+  recovery: SweepRecovery,
+) {
+  const ref = store.doc('maintenanceCursors', HEARTBEAT_CURSOR);
+  await store.db.runTransaction(async (tx) => {
+    const [row, migration] = await tx.getAll(ref, store.doc('coordination', 'migration'));
+    if (migration?.exists && migration.get('status') !== 'active') return;
+    const cursor = clearRecovery(`firestore:${store.installationId}`, row?.get('cursor'), recovery);
+    if (cursor) tx.update(ref, { cursor });
+  });
 }
 
 export async function readPostgresSweepHealth(db: Db, now?: Date) {

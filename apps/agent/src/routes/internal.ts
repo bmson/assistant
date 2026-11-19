@@ -128,6 +128,47 @@ internal.get('/sweep/health', async (c) => {
   }
 });
 
+// Cloud Scheduler calls this independently. A provider failure cannot turn a
+// failed probe into a success, and Cloud Monitoring can still alert when this
+// service itself is unreachable. GET remains the read-only health contract.
+internal.post('/sweep/watchdog', async (c) => {
+  c.header('cache-control', 'no-store');
+  const { readConfiguredSweepHealth } = await import('../sweep-heartbeat.js');
+  try {
+    const config = loadConfig();
+    const health = await readConfiguredSweepHealth(config);
+    if (health.state === 'stale') {
+      try {
+        const deps = buildDeps();
+        const { publishSweepOutage } = await import('../sweep-recovery.js');
+        const notify = (input: Parameters<Parameters<typeof publishSweepOutage>[3]>[0]) =>
+          deps.outOfBandNotifier.notifyOwner(input);
+        if (config.PERSISTENCE_DRIVER === 'firestore') {
+          const pulse = deps.persistence?.pulse;
+          if (pulse && (await firestoreMaintenanceReady(deps)))
+            await publishSweepOutage(pulse, config.FIRESTORE_AGENT_ID, health.completedAt, notify);
+        } else {
+          const { assertPostgresInstallationOwner, createPostgresPulseAdmissionRepository } =
+            await import('@assistant/db');
+          const owner = await assertPostgresInstallationOwner(deps.db);
+          await publishSweepOutage(
+            createPostgresPulseAdmissionRepository(deps.db),
+            owner,
+            health.completedAt,
+            notify,
+          );
+        }
+      } catch {
+        console.error('Unable to publish scheduler watchdog alert');
+      }
+    }
+    return c.json({ health }, health.ok ? 200 : 503);
+  } catch {
+    console.error('Unable to read scheduler watchdog health');
+    return c.json({ health: { ok: false, state: 'unavailable' } }, 503);
+  }
+});
+
 internal.post('/sweep', async (c) => {
   const deps = buildDeps();
   if (deps.config.PERSISTENCE_DRIVER === 'firestore') {

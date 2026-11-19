@@ -480,28 +480,30 @@ export class FirestorePulseRepository implements PulseRepository {
       const prefs = await tx.get(this.store.doc('notificationPrefs', input.agentId));
       if (prefs.exists && prefs.get('agentId') !== input.agentId)
         throw new Error('Notification preferences belong to another owner');
-      const dailyCap = pulseDailyCap(
-        input.pacing.dailyCap,
-        (prefs.exists ? (prefs.get('ambientDailyCap') ?? null) : null) as number | null,
-      );
-      if (dailyCap === 0) return { status: 'daily-cap' };
-      const used = await tx.get(
-        this.store
-          .collection('proactiveMoments')
-          .where('agentId', '==', input.agentId)
-          .where('deliveredAt', '>=', input.pacing.windowSince)
-          .limit(dailyCap)
-          .count(),
-      );
-      if (used.data().count >= dailyCap) return { status: 'daily-cap' };
-      const recent = await tx.get(
-        this.store
-          .collection('proactiveMoments')
-          .where('agentId', '==', input.agentId)
-          .where('deliveredAt', '>=', input.pacing.gapSince)
-          .limit(1),
-      );
-      if (!recent.empty) return { status: 'min-gap' };
+      if (input.moment.kind !== 'sweep-recovery' && input.moment.kind !== 'watchdog-outage') {
+        const dailyCap = pulseDailyCap(
+          input.pacing.dailyCap,
+          (prefs.exists ? (prefs.get('ambientDailyCap') ?? null) : null) as number | null,
+        );
+        if (dailyCap === 0) return { status: 'daily-cap' };
+        const used = await tx.get(
+          this.store
+            .collection('proactiveMoments')
+            .where('agentId', '==', input.agentId)
+            .where('deliveredAt', '>=', input.pacing.windowSince)
+            .limit(dailyCap)
+            .count(),
+        );
+        if (used.data().count >= dailyCap) return { status: 'daily-cap' };
+        const recent = await tx.get(
+          this.store
+            .collection('proactiveMoments')
+            .where('agentId', '==', input.agentId)
+            .where('deliveredAt', '>=', input.pacing.gapSince)
+            .limit(1),
+        );
+        if (!recent.empty) return { status: 'min-gap' };
+      }
 
       const existingMessage = await tx.get(messageRef);
       if (existingMessage.exists)
