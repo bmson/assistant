@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { Timestamp } from '@google-cloud/firestore';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { FirestoreBudgetCapsRepository } from './budget-caps.js';
 import { FirestoreCostRepository } from './costs.js';
 import type { InstallationStore } from './store.js';
 import { disposeStore, emulatorStore, seedBudget } from './test-store.js';
@@ -16,6 +18,29 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore atomic cost led
   });
   afterEach(async () => {
     await disposeStore(store);
+  });
+
+  it('finishes a budget wake scan when a whole page has the same sub-millisecond timestamp', async () => {
+    const agentId = randomUUID();
+    const batch = store.db.batch();
+    batch.set(store.doc('agents', agentId), { id: agentId });
+    batch.set(store.doc('budgets', 'task_default'), { limitUsd: '2.00' });
+    for (let n = 0; n < 101; n++) {
+      const id = randomUUID();
+      batch.set(store.doc('tasks', id), {
+        id,
+        agentId,
+        status: 'waiting_budget',
+        updatedAt: new Timestamp(100, 456_789_000),
+      });
+    }
+    await batch.commit();
+    const caps = new FirestoreBudgetCapsRepository(store);
+    await caps.update(agentId, { daily: '3.00' });
+    const cursor = store.doc('coordination', `budget-cap-wake:${agentId}`);
+    expect((await cursor.get()).exists).toBe(true);
+    expect(await caps.resumeWakes(agentId)).toEqual([]);
+    expect((await cursor.get()).exists).toBe(false);
   });
 
   it('returns structured ceiling information for a denied reservation', async () => {

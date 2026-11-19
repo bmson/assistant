@@ -14,7 +14,7 @@ import {
   type TaskWake,
   usdToMicros,
 } from '@assistant/persistence';
-import { FieldPath } from '@google-cloud/firestore';
+import { FieldPath, Timestamp } from '@google-cloud/firestore';
 import { FirestoreCostRepository } from './costs.js';
 import { createWakeIntent } from './outbox.js';
 import { privacyErasureIsActive } from './privacy-erasure.js';
@@ -109,17 +109,29 @@ export class FirestoreBudgetCapsRepository implements BudgetCapsRepository {
           .orderBy('updatedAt')
           .orderBy(FieldPath.documentId())
           .limit(101);
+        // Match Firestore's full timestamp precision when resuming after rows
+        // written by the server or imported with a sub-millisecond timestamp.
+        const position = after && Timestamp.fromDate(new Date(after.updatedAt));
         const parked = await tx.get(
-          after ? candidates.startAfter(new Date(after.updatedAt), after.id) : candidates,
+          after && position
+            ? candidates.startAfter(
+                new Timestamp(position.seconds, after.nanoseconds ?? position.nanoseconds),
+                after.id,
+              )
+            : candidates,
         );
         if (!parked.empty) {
           const page = parked.docs.slice(0, 100);
           const last = page.at(-1);
           if (parked.size > 100 && last) {
-            const updatedAt = decodeRecord<Date>(last.get('updatedAt'));
+            const updatedAt: Timestamp = last.get('updatedAt');
             continuation = {
               scopes: [...scopes],
-              after: { updatedAt: updatedAt.toISOString(), id: last.id },
+              after: {
+                updatedAt: updatedAt.toDate().toISOString(),
+                nanoseconds: updatedAt.nanoseconds,
+                id: last.id,
+              },
             };
           }
           const [holds, day, month] = await tx.getAll(

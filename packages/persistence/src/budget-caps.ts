@@ -110,7 +110,7 @@ export function budgetWakeScheduleIsCurrent(schedule: { taskTemplate: unknown; e
 
 export interface BudgetWakeCursor {
   scopes: Array<BudgetRetry['scope']>;
-  after: { updatedAt: string; id: string };
+  after: { updatedAt: string; nanoseconds?: number; id: string };
 }
 
 export function readBudgetWakeCursor(value: unknown): BudgetWakeCursor | null {
@@ -131,6 +131,10 @@ export function readBudgetWakeCursor(value: unknown): BudgetWakeCursor | null {
     !row.after ||
     typeof row.after.updatedAt !== 'string' ||
     !Number.isFinite(Date.parse(row.after.updatedAt)) ||
+    (row.after.nanoseconds !== undefined &&
+      (!Number.isInteger(row.after.nanoseconds) ||
+        row.after.nanoseconds < 0 ||
+        row.after.nanoseconds >= 1_000_000_000)) ||
     typeof row.after.id !== 'string' ||
     !row.after.id ||
     row.after.id.length > 1500
