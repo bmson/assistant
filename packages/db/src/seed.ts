@@ -1,5 +1,8 @@
 import { loadConfig } from '@assistant/config';
-import { PROACTIVE_AWARENESS_SCHEDULE } from '@assistant/persistence';
+import {
+  ASSISTANT_HEALTH_MONITOR_SCHEDULE,
+  PROACTIVE_AWARENESS_SCHEDULE,
+} from '@assistant/persistence';
 import { and, eq, sql } from 'drizzle-orm';
 import { createDb } from './client.js';
 import { modelDefaults, modelRoleDefaults, reconcileModelConfig } from './model-config.js';
@@ -370,13 +373,9 @@ const scheduleSeed = [
     cron: '*/15 * * * *',
     taskTemplate: { type: 'scheduled', budgetUsdLimit: '0.50', job: 'self.repair' },
   },
-  // Deterministic daily alerting for persistent GraphRAG and final-response
-  // quality failures. This is a code job: no model interprets telemetry.
-  {
-    name: 'assistant-health-monitor',
-    cron: '15 1 * * *',
-    taskTemplate: { type: 'scheduled', budgetUsdLimit: '0.02', job: 'health.monitor' },
-  },
+  // An hourly check surfaces six-hour mail stalls promptly. Durable claims
+  // limit mail notices to daily and other repeated notices to weekly.
+  ASSISTANT_HEALTH_MONITOR_SCHEDULE,
   // Document-processor backstop (Phase 14): ingest enqueues a per-document
   // process job immediately, but this sweep relaunches any heavy-format document
   // whose worker run never called back (stale) or was missed. A code job — no
@@ -397,7 +396,7 @@ for (const s of scheduleSeed) {
   const seedTemplateKey = `assistant.schedule.${s.name}`;
   const decision = decideScheduleSeed(existing ?? null, {
     key: seedTemplateKey,
-    revision: 1,
+    revision: 'revision' in s ? s.revision : 1,
     definition,
   });
   if (decision.kind === 'insert') {

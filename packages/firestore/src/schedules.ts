@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
+  ASSISTANT_HEALTH_MONITOR_SCHEDULE,
   existingTaskResult,
   GOAL_SUPERSEDED_PROGRESS,
   GOAL_TASK_TERMINAL,
@@ -8,6 +9,7 @@ import {
   newTaskRecord,
   occurrenceIsCurrent,
   type Records,
+  reactivatedBriefingTemplate,
   type ScheduleCommitResult,
   type ScheduleCreateInput,
   type ScheduleOccurrence,
@@ -162,6 +164,53 @@ export class FirestoreScheduleRepository implements ScheduleRepository {
     return null;
   }
 
+  /** Advance the untouched managed health-monitor default without replacing the schedule. */
+  async updateDefaultHealthMonitorCadence(agentId: string, nextAt: Date): Promise<void> {
+    const definition = ASSISTANT_HEALTH_MONITOR_SCHEDULE;
+    const key = `assistant.schedule.${definition.name}`;
+    const isDefaultTemplate = (template: unknown) => {
+      if (!template || typeof template !== 'object') return false;
+      const fields = template as Record<string, unknown>;
+      return (
+        Object.keys(fields).length === 3 &&
+        fields.type === definition.taskTemplate.type &&
+        fields.job === definition.taskTemplate.job &&
+        fields.budgetUsdLimit === definition.taskTemplate.budgetUsdLimit
+      );
+    };
+
+    await this.store.db.runTransaction(async (tx) => {
+      const snapshot = await tx.get(scheduleQuery(this.store, agentId, definition.name));
+      const doc = snapshot.docs[0];
+      if (snapshot.size !== 1 || !doc) return;
+      const row = decodeSchedule(doc.data());
+      const seed = row.seedDefinition as { cron?: unknown; taskTemplate?: unknown } | null;
+      if (
+        !row.id ||
+        documentKey(row.id) !== doc.id ||
+        row.agentId !== agentId ||
+        row.name !== definition.name ||
+        row.enabled !== true ||
+        row.seedReviewRequired !== false ||
+        row.seedTemplateKey !== key ||
+        row.seedTemplateRevision !== definition.revision - 1 ||
+        row.cron !== definition.previousCron ||
+        seed?.cron !== definition.previousCron ||
+        !isDefaultTemplate(row.taskTemplate) ||
+        !isDefaultTemplate(seed.taskTemplate)
+      )
+        return;
+      await assertPrivacyErasureInactiveInTransaction(tx, this.store, agentId);
+      tx.update(doc.ref, {
+        cron: definition.cron,
+        seedTemplateRevision: definition.revision,
+        seedDefinition: { cron: definition.cron, taskTemplate: definition.taskTemplate },
+        nextRunAt: nextAt,
+        updatedAt: this.store.now(),
+      });
+    });
+  }
+
   /**
    * Retire an enabled, untouched legacy default only when its deterministic
    * replacement is present and runnable. Keep the original row and history.
@@ -253,13 +302,16 @@ export class FirestoreScheduleRepository implements ScheduleRepository {
       const row = decodeSchedule(snapshot.data());
       if (row.id !== scheduleId || row.agentId !== agentId || row.name.startsWith('reminder:'))
         return false;
+      const now = this.store.now();
+      const taskTemplate = reactivatedBriefingTemplate(row, enabled, now);
       tx.update(ref, {
         enabled,
+        ...(taskTemplate ? { taskTemplate } : {}),
         ...(row.name === 'morning-brief' && isHistoricalMorningBriefDefault(row)
           ? { seedReviewRequired: true }
           : {}),
         ...(enabled ? { nextRunAt: null } : {}),
-        updatedAt: this.store.now(),
+        updatedAt: now,
       });
       return true;
     });

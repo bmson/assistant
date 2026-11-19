@@ -11,12 +11,14 @@ import type {
 } from '@assistant/persistence';
 import {
   drainNotificationOutbox,
+  isWatchdogOutageDeliveryKey,
   type NotificationDeliveryResult,
   type NotificationLegResult,
   notificationDeliveryKey,
   notificationLeg,
   pushDeviceKey,
   sendNotificationOutboxLeg,
+  WATCHDOG_OUTAGE_TEXT,
 } from '@assistant/persistence';
 import type { ApnsClient } from '@assistant/tools/modules/push';
 import { AmbiguousApnsDeliveryError } from '@assistant/tools/modules/push';
@@ -29,6 +31,7 @@ export interface PushChannelDeps {
   owner: () => Promise<{ id: string; name: string }>;
   loadTask?: ExecutionContextRepository['getTask'];
   admitAnswerReady?: (deliveryKey: string, now: Date) => Promise<PingDecision>;
+  admitWatchdog?: (deliveryKey: string, now: Date) => Promise<PingDecision>;
 }
 
 /**
@@ -46,6 +49,7 @@ function plain(text: string, max = 220): string {
 /** The app's UNNotificationCategory identifiers (NotificationManager.swift). */
 const ATTENTION_CATEGORY = 'ASSISTANT_ATTENTION';
 const UPDATE_CATEGORY = 'ASSISTANT_UPDATE';
+const WATCHDOG_BODY = 'Scheduled checks need attention. Open Assistant for details.';
 const ANSWER_READY_TTL_MS = 15 * 60_000;
 const ANSWER_READY_MAX_ATTEMPTS = 3;
 
@@ -58,7 +62,7 @@ async function deliver(
     body: string;
     category: string;
     data?: Record<string, string>;
-    purpose?: 'answer-ready';
+    purpose?: 'answer-ready' | 'watchdog-outage';
   },
   applicationConfirmationNoticeFence?: import('@assistant/persistence').ApplicationConfirmationNoticeFence,
 ): Promise<NotificationDeliveryResult> {
@@ -132,6 +136,23 @@ async function sendPushOutboxLeg(
   );
   if (!device) return { status: 'skipped', reason: 'push-device-no-longer-active' };
 
+  // The outbox hashes the episode identity. Older rows without a purpose
+  // can only be recognized by their fixed text and main-chat destination.
+  const data = alert.data as Record<string, unknown> | undefined;
+  const legacyWatchdog =
+    alert.purpose === undefined &&
+    alert.category === UPDATE_CATEGORY &&
+    Object.values(WATCHDOG_OUTAGE_TEXT).includes(alert.body) &&
+    data?.route === 'chat' &&
+    data.agentId === row.agentId &&
+    data.conversationId === undefined &&
+    data.taskId === undefined;
+  const watchdog = alert.purpose === 'watchdog-outage' || legacyWatchdog;
+  if (watchdog) {
+    if (!deps.admitWatchdog) return { status: 'skipped', reason: 'watchdog-policy-unavailable' };
+    const decision = await deps.admitWatchdog(row.deliveryKey, now);
+    if (!decision.deliver) return { status: 'skipped', reason: decision.reason ?? 'watchdog-held' };
+  }
   const answerReady = alert.purpose === 'answer-ready';
   const expiresAt = answerReady ? row.createdAt.getTime() + ANSWER_READY_TTL_MS : undefined;
   if (expiresAt !== undefined && now.getTime() >= expiresAt)
@@ -148,13 +169,16 @@ async function sendPushOutboxLeg(
     const result = await deps.apns.send({
       token: device.token,
       environment: device.environment,
-      title: alert.title,
-      body: alert.body,
-      category: alert.category,
-      ...(expiresAt !== undefined ? { expiresAt } : {}),
-      ...(alert.data && typeof alert.data === 'object'
-        ? { data: alert.data as Record<string, string> }
-        : {}),
+      title: watchdog ? 'Assistant' : alert.title,
+      body: watchdog ? WATCHDOG_BODY : alert.body,
+      category: watchdog ? UPDATE_CATEGORY : alert.category,
+      // The outbox owns retries so each attempt uses a fresh policy decision.
+      ...(watchdog ? { expiresAt: 0 } : expiresAt !== undefined ? { expiresAt } : {}),
+      ...(watchdog
+        ? { data: { route: 'chat', agentId: row.agentId } }
+        : alert.data && typeof alert.data === 'object'
+          ? { data: alert.data as Record<string, string> }
+          : {}),
     });
     if (result.ok) return { status: 'delivered', providerMessageId: result.apnsId };
     if (result.unregistered) {
@@ -218,6 +242,9 @@ export async function notifyOwnerByPush(
   },
 ): Promise<NotificationDeliveryResult> {
   if (!deps.apns?.configured()) return notificationLeg('push', 'skipped', 'not-configured');
+  const watchdog = input.purpose === 'watchdog-outage';
+  if (watchdog && (!input.deliveryKey || !isWatchdogOutageDeliveryKey(input.deliveryKey)))
+    return notificationLeg('push', 'skipped', 'watchdog-destination-invalid');
   const answerReady = input.purpose === 'answer-ready';
   if (answerReady && (!uuid(input.conversationId) || !input.deliveryKey))
     return notificationLeg('push', 'skipped', 'answer-ready-destination-invalid');
@@ -233,15 +260,20 @@ export async function notifyOwnerByPush(
         input.text,
       ),
     {
-      title: answerReady ? 'Assistant' : agent.name,
-      body: answerReady ? 'Your reply is ready.' : plain(input.text),
+      title: answerReady || watchdog ? 'Assistant' : agent.name,
+      body: watchdog ? WATCHDOG_BODY : answerReady ? 'Your reply is ready.' : plain(input.text),
+      ...(watchdog ? { purpose: 'watchdog-outage' as const } : {}),
       ...(answerReady ? { purpose: 'answer-ready' as const } : {}),
       category: UPDATE_CATEGORY,
       data: {
         route: 'chat',
         agentId: agent.id,
-        ...(uuid(input.conversationId) ? { conversationId: input.conversationId as string } : {}),
-        ...(!answerReady && uuid(input.taskId) ? { taskId: input.taskId as string } : {}),
+        ...(!watchdog && uuid(input.conversationId)
+          ? { conversationId: input.conversationId as string }
+          : {}),
+        ...(!watchdog && !answerReady && uuid(input.taskId)
+          ? { taskId: input.taskId as string }
+          : {}),
       },
     },
     input.applicationConfirmationNoticeFence,

@@ -2,7 +2,12 @@ import { randomUUID } from 'node:crypto';
 import { type ExecutorDeps, executeTask } from '@assistant/core';
 import type { Db } from '@assistant/db';
 import { createFirestoreExecutionPersistence } from '@assistant/firestore';
-import type { ExecutionPersistence, PulseRepository } from '@assistant/persistence';
+import {
+  calendarRecoveryCursor,
+  type ExecutionPersistence,
+  type PulseRepository,
+  parseCalendarRecovery,
+} from '@assistant/persistence';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { encodeRecord, type InstallationStore } from '../../../packages/firestore/src/store.js';
 import { disposeStore, emulatorStore } from '../../../packages/firestore/src/test-store.js';
@@ -259,6 +264,43 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore pulse job', () 
     expect(await pulse.deliveredSince(agentId, at(-1))).toBe(1);
     expect(await pulse.momentKeys(agentId, 'commitment-due')).toEqual(['commitment-due:x']);
     expect(await notices()).toHaveLength(1);
+  });
+
+  it('persists explicit moves from a partial pulse read without inferring missing events', async () => {
+    const saved = (eventId: string) => ({
+      id: randomUUID(),
+      agentId,
+      calendarId: 'fixture-calendar',
+      eventId,
+      summary: 'Private fixture title',
+      start: at(2).toISOString(),
+      end: at(3).toISOString(),
+      status: 'confirmed',
+      updatedAt: at(-1),
+    });
+    const moved = saved('moved');
+    const cached = { ...saved('cached'), calendarId: 'iphone:shared' };
+    await put('calendarEventSnapshots', moved);
+    await put('calendarEventSnapshots', cached);
+    await put('calendarEventSnapshots', saved('missing'));
+    deps.calendarReader = async () => ({
+      complete: false,
+      events: [moved, cached].map((event) => ({
+        ...event,
+        start: at(4).toISOString(),
+        end: at(5).toISOString(),
+        allDay: false,
+        calendar: 'Fixture',
+      })),
+    });
+    expect(await runJob()).toContain('calendar-moved delivered');
+    const document = await store.doc('maintenanceCursors', calendarRecoveryCursor(agentId)).get();
+    expect(parseCalendarRecovery(document.get('cursor'), null)).toMatchObject({
+      reads: [],
+      observations: [{ kind: 'moved' }],
+    });
+    expect(document.get('cursor')).not.toContain(moved.summary);
+    expect(document.get('cursor')).not.toContain(moved.start);
   });
 
   it('keeps the calendar snapshot in step with successful reads', async () => {

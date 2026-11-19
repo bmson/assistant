@@ -23,6 +23,7 @@ import {
   toolCalls,
 } from '@assistant/db';
 import type {
+  ActivityArchiveScope,
   ArchiveOldActivityProgress,
   ChecklistCancellationPolicy,
   ChecklistCorrectionPolicy,
@@ -36,8 +37,10 @@ import type {
   TaskActivityCurrentState,
 } from '@assistant/persistence';
 import {
+  canArchiveActivityStatus,
   chatAdmissionCancellationPayload,
   completeChecklistCorrectionEvidence,
+  isActivityCanary,
   isPinnedOwnerChatRequestMessage,
   MAX_CHECKLIST_CORRECTION_LEDGER_ROWS,
   MAX_TASK_QUEUE_GENERATION,
@@ -46,7 +49,6 @@ import {
   taskActivityOutcome,
 } from '@assistant/persistence';
 import { and, eq, inArray, isNotNull, isNull, lt, sql } from 'drizzle-orm';
-
 import { terminalTaskStatuses } from './queries.js';
 
 const WAKEABLE = new Set([
@@ -89,6 +91,8 @@ export async function retryActivity(db: Db, taskId: string): Promise<TaskActivit
       .for('update');
     if (!task || chatAdmissionCancellationPayload(task))
       return taskActivityOutcome('not_found', null);
+    if (task.archivedAt && task.status === 'needs_attention')
+      return taskActivityOutcome('no_longer_retriable', currentTask(task));
     if (!WAKEABLE.has(task.status))
       return taskActivityOutcome(
         ['done', 'failed', 'cancelled'].includes(task.status)
@@ -930,7 +934,11 @@ export async function raiseTaskBudget(
           : 'no_longer_retriable',
         currentTask(task),
       );
-    if (requested <= Number(task.budgetUsdLimit) || requested < Number(task.spentUsd))
+    if (
+      task.archivedAt ||
+      requested <= Number(task.budgetUsdLimit) ||
+      requested < Number(task.spentUsd)
+    )
       return taskActivityOutcome('no_longer_retriable', currentTask(task));
     if (!Number.isSafeInteger(task.queueGeneration) || task.queueGeneration < 0)
       throw new Error('Invalid task queue generation');
@@ -1072,14 +1080,15 @@ export function raiseTaskBudgetWithRepository(
   return repository.raiseBudget(agentId, taskId, limit);
 }
 
-/** Archives old terminal activity through the configured persistence adapter. */
+/** Archives old activity in the requested scope through the configured persistence adapter. */
 export function archiveOldActivityWithRepository(
   repository: TaskActivityCommandRepository,
   agentId: string,
   olderThanDays = 30,
   operationId?: string,
+  scope?: ActivityArchiveScope,
 ): Promise<ArchiveOldActivityProgress> {
-  return repository.archiveOld(agentId, olderThanDays, operationId);
+  return repository.archiveOld(agentId, olderThanDays, operationId, scope);
 }
 
 export async function archiveActivity(db: Db, taskId: string): Promise<TaskActivityCommandOutcome> {
@@ -1091,11 +1100,19 @@ export async function archiveActivity(db: Db, taskId: string): Promise<TaskActiv
       .where(and(eq(tasks.id, taskId), eq(tasks.agentId, agent.id)))
       .limit(1)
       .for('update');
-    if (!task || chatAdmissionCancellationPayload(task))
+    if (!task || chatAdmissionCancellationPayload(task) || isActivityCanary(task.trigger))
       return taskActivityOutcome('not_found', null);
     if (task.archivedAt) return taskActivityOutcome('already_archived', currentTask(task));
-    if (!terminalTaskStatuses.includes(task.status as (typeof terminalTaskStatuses)[number]))
+    if (!canArchiveActivityStatus(task.status))
       return taskActivityOutcome('no_longer_retriable', currentTask(task));
+    if (task.status === 'needs_attention') {
+      const [pending] = await tx
+        .select({ id: approvals.id })
+        .from(approvals)
+        .where(and(eq(approvals.taskId, task.id), eq(approvals.status, 'pending')))
+        .limit(1);
+      if (pending) return taskActivityOutcome('no_longer_retriable', currentTask(task));
+    }
     const now = new Date();
     const [updated] = await tx
       .update(tasks)
@@ -1141,6 +1158,7 @@ export async function restoreActivity(db: Db, taskId: string): Promise<TaskActiv
 export async function archiveOldActivity(
   db: Db,
   olderThanDays = 30,
+  scope: ActivityArchiveScope = 'terminal',
 ): Promise<ArchiveOldActivityProgress> {
   if (!Number.isFinite(olderThanDays) || olderThanDays <= 0)
     throw new Error('Invalid archive-old activity request');
@@ -1154,7 +1172,16 @@ export async function archiveOldActivity(
         eq(tasks.agentId, agent.id),
         notChatAdmissionCancellationSql(),
         isNull(tasks.archivedAt),
-        inArray(tasks.status, terminalTaskStatuses),
+        scope === 'stale-attention'
+          ? and(
+              eq(tasks.status, 'needs_attention'),
+              sql`${tasks.trigger}->'payload'->>'canary' IS DISTINCT FROM 'true'`,
+              sql`NOT EXISTS (
+                SELECT 1 FROM ${approvals}
+                WHERE ${approvals.taskId} = ${tasks.id} AND ${approvals.status} = 'pending'
+              )`,
+            )
+          : inArray(tasks.status, terminalTaskStatuses),
         lt(tasks.updatedAt, cutoff),
       ),
     )

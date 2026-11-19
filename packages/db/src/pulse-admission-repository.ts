@@ -154,33 +154,35 @@ export function createPostgresPulseAdmissionRepository(
             );
           if (attention) return { status: 'already-said' as const };
         }
-        const [prefs] = await tx
-          .select({ cap: notificationPrefs.ambientDailyCap })
-          .from(notificationPrefs)
-          .where(eq(notificationPrefs.agentId, input.agentId));
-        const cap = pulseDailyCap(input.pacing.dailyCap, prefs?.cap ?? null);
-        const [delivered] = await tx
-          .select({ value: count() })
-          .from(proactiveMoments)
-          .where(
-            and(
-              eq(proactiveMoments.agentId, input.agentId),
-              gte(proactiveMoments.deliveredAt, input.pacing.windowSince),
-            ),
-          );
-        if (Number(delivered?.value ?? 0) >= cap) return { status: 'daily-cap' as const };
+        if (input.moment.kind !== 'sweep-recovery' && input.moment.kind !== 'watchdog-outage') {
+          const [prefs] = await tx
+            .select({ cap: notificationPrefs.ambientDailyCap })
+            .from(notificationPrefs)
+            .where(eq(notificationPrefs.agentId, input.agentId));
+          const cap = pulseDailyCap(input.pacing.dailyCap, prefs?.cap ?? null);
+          const [delivered] = await tx
+            .select({ value: count() })
+            .from(proactiveMoments)
+            .where(
+              and(
+                eq(proactiveMoments.agentId, input.agentId),
+                gte(proactiveMoments.deliveredAt, input.pacing.windowSince),
+              ),
+            );
+          if (Number(delivered?.value ?? 0) >= cap) return { status: 'daily-cap' as const };
 
-        const [recent] = await tx
-          .select({ id: proactiveMoments.id })
-          .from(proactiveMoments)
-          .where(
-            and(
-              eq(proactiveMoments.agentId, input.agentId),
-              gte(proactiveMoments.deliveredAt, input.pacing.gapSince),
-            ),
-          )
-          .limit(1);
-        if (recent) return { status: 'min-gap' as const };
+          const [recent] = await tx
+            .select({ id: proactiveMoments.id })
+            .from(proactiveMoments)
+            .where(
+              and(
+                eq(proactiveMoments.agentId, input.agentId),
+                gte(proactiveMoments.deliveredAt, input.pacing.gapSince),
+              ),
+            )
+            .limit(1);
+          if (recent) return { status: 'min-gap' as const };
+        }
 
         if (input.securityIncident) {
           await tx.insert(securityIncidentAttention).values({

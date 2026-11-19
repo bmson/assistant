@@ -11,7 +11,11 @@ import {
   resolveSubjectContact,
 } from '@assistant/db';
 import type { EmailExtractionRepository } from '@assistant/persistence';
-import { embeddingSpaceIdentityKey } from '@assistant/persistence';
+import {
+  EMAIL_EXTRACTION_LOGISTICS_CATEGORIES,
+  eligibleEmailExtraction,
+  embeddingSpaceIdentityKey,
+} from '@assistant/persistence';
 import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { BudgetReservationError, nextDailyReset, nextMonthlyReset } from '../cost.js';
@@ -37,8 +41,6 @@ import { saveOccasion } from './occasions.js';
  * for the rule that replaces it.
  */
 
-/** A score alone must not discard personal correspondence or dated logistics. */
-const MIN_IMPORTANCE = 3;
 /** Model calls per run. The scheduler re-fires; a backlog drains over hours. */
 const MAX_EXTRACTIONS_PER_RUN = 25;
 /** Rows examined per run, including the cheap below-threshold stamps. */
@@ -51,21 +53,10 @@ const MAX_BODY_CHARS = 6000;
  * and they are checkable — a flight time is either right or wrong, and the
  * owner finds out either way.
  */
-const LOGISTICS_CATEGORIES: ReadonlySet<string> = new Set([
-  'travel',
-  'appointment',
-  'financial',
-  'commitment',
-  'transactional',
-  'security',
-]);
+const LOGISTICS_CATEGORIES: ReadonlySet<string> = new Set(EMAIL_EXTRACTION_LOGISTICS_CATEGORIES);
 
 export function shouldExtractEmailMemory(input: { importance: number; category: string }): boolean {
-  return (
-    input.importance >= MIN_IMPORTANCE ||
-    LOGISTICS_CATEGORIES.has(input.category) ||
-    input.category === 'personal'
-  );
+  return eligibleEmailExtraction(input);
 }
 
 /**

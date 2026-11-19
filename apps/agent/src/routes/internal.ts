@@ -116,6 +116,81 @@ internal.post('/model-probe/vertex', async (c) => {
   }
 });
 
+internal.get('/sweep/health', async (c) => {
+  c.header('cache-control', 'no-store');
+  try {
+    const { readConfiguredSweepHealth } = await import('../sweep-heartbeat.js');
+    const health = await readConfiguredSweepHealth(loadConfig());
+    return c.json({ health }, health.ok ? 200 : 503);
+  } catch {
+    console.error('Unable to read scheduler sweep heartbeat');
+    return c.json({ health: { ok: false, state: 'unavailable' } }, 503);
+  }
+});
+
+// Cloud Scheduler calls this independently. A provider failure cannot turn a
+// failed probe into a success, and Cloud Monitoring can still alert when this
+// service itself is unreachable. GET remains the read-only health contract.
+internal.post('/sweep/watchdog', async (c) => {
+  c.header('cache-control', 'no-store');
+  const { readConfiguredSweepHealth } = await import('../sweep-heartbeat.js');
+  const { recordFirestoreWatchdogEpisode, recordPostgresWatchdogEpisode, watchdogObservation } =
+    await import('../watchdog-episode.js');
+  try {
+    const config = loadConfig();
+    const observedAt = new Date();
+    const health = await readConfiguredSweepHealth(config);
+    const observation = watchdogObservation(health);
+    if (observation) {
+      try {
+        const deps = buildDeps();
+        const { publishSweepOutage } = await import('../sweep-recovery.js');
+        // Chat is saved independently. Push checks the owner's policy on each
+        // attempt using the same durable per-device key.
+        const notify: Parameters<typeof publishSweepOutage>[3] = (input) =>
+          deps.modules.ownerNotifier.notifyOwner(input);
+        if (config.PERSISTENCE_DRIVER === 'firestore') {
+          const store = deps.firestoreStore;
+          const pulse = deps.persistence?.pulse;
+          if (store && pulse && (await firestoreMaintenanceReady(deps))) {
+            const owner = config.FIRESTORE_AGENT_ID;
+            const episode = await recordFirestoreWatchdogEpisode(
+              store,
+              owner,
+              observation,
+              observedAt,
+            );
+            if (episode) await publishSweepOutage(pulse, owner, episode, notify);
+          }
+        } else {
+          const { assertPostgresInstallationOwner, createPostgresPulseAdmissionRepository } =
+            await import('@assistant/db');
+          const owner = await assertPostgresInstallationOwner(deps.db);
+          const episode = await recordPostgresWatchdogEpisode(
+            deps.db,
+            owner,
+            observation,
+            observedAt,
+          );
+          if (episode)
+            await publishSweepOutage(
+              createPostgresPulseAdmissionRepository(deps.db),
+              owner,
+              episode,
+              notify,
+            );
+        }
+      } catch {
+        console.error('Unable to publish scheduler watchdog alert');
+      }
+    }
+    return c.json({ health }, health.ok ? 200 : 503);
+  } catch {
+    console.error('Unable to read scheduler watchdog health');
+    return c.json({ health: { ok: false, state: 'unavailable' } }, 503);
+  }
+});
+
 internal.post('/sweep', async (c) => {
   const deps = buildDeps();
   if (deps.config.PERSISTENCE_DRIVER === 'firestore') {

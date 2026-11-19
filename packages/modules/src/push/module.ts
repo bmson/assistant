@@ -1,5 +1,5 @@
 import { getAgent } from '@assistant/core/chat';
-import { notificationDeliveryKey } from '@assistant/persistence';
+import { notificationDeliveryKey, watchdogOutageNudgeChannel } from '@assistant/persistence';
 import { ApnsClient } from '@assistant/tools/modules/push';
 import { defineModule, type ModuleHooks } from '../platform.js';
 import {
@@ -59,6 +59,14 @@ export const pushModule = defineModule<ApnsClient>({
           channel: notificationDeliveryKey('answer-ready', deliveryKey),
           now,
         }),
+      admitWatchdog: async (deliveryKey, now) => {
+        const agent = await owner();
+        return policy.evaluate(agent, {
+          urgency: 'ambient',
+          channel: watchdogOutageNudgeChannel(deliveryKey, agent.timezone, now),
+          now,
+        });
+      },
     };
 
     const hooks: ModuleHooks = {

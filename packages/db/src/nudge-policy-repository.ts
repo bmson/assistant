@@ -1,11 +1,11 @@
 import {
-  answerReadyPingId,
   curiosityNudgePingId,
   insideQuietHours,
   type NudgePolicyRepository,
   ownerLocalMidnightUtc,
   ownerLocalMinutes,
   type PingDecision,
+  stableNudgePingId,
 } from '@assistant/persistence';
 import { and, count, eq, gte, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
@@ -19,8 +19,10 @@ export function createPostgresNudgePolicyRepository(db: Db): NudgePolicyReposito
       const now = opts.now ?? new Date();
       const channel = opts.channel ?? 'out-of-band';
       const answerReady = channel.startsWith('answer-ready:');
-      const id = answerReady
-        ? answerReadyPingId(agent.id, channel)
+      const watchdog = channel.startsWith('watchdog-outage:');
+      const recheck = answerReady || watchdog;
+      const id = recheck
+        ? stableNudgePingId(agent.id, channel)
         : channel.startsWith('curiosity-nudge:')
           ? curiosityNudgePingId(agent.id, channel)
           : undefined;
@@ -37,10 +39,10 @@ export function createPostgresNudgePolicyRepository(db: Db): NudgePolicyReposito
           );
           // A retry can cross midnight. Serialize the same answer identity
           // independently of the day used for the ambient quota.
-          if (answerReady) {
+          if (recheck) {
             await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${id}))`);
           }
-          let reservedAnswer = false;
+          let reserved = false;
           if (id) {
             const [prior] = await tx
               .select()
@@ -50,7 +52,7 @@ export function createPostgresNudgePolicyRepository(db: Db): NudgePolicyReposito
             if (prior) {
               if (prior.agentId !== agent.id || prior.channel !== channel)
                 throw new Error('Nudge reservation ownership mismatch');
-              if (answerReady && prior.delivered) reservedAnswer = true;
+              if (recheck && prior.delivered) reserved = true;
               else
                 return {
                   deliver: prior.delivered,
@@ -69,7 +71,7 @@ export function createPostgresNudgePolicyRepository(db: Db): NudgePolicyReposito
           if (prefs && insideQuietHours(prefs, ownerLocalMinutes(agent.timezone, now))) {
             decision = { deliver: false, reason: 'quiet-hours' };
           }
-          if (reservedAnswer) {
+          if (reserved && answerReady) {
             return decision.deliver && prefs?.ambientDailyCap === 0
               ? { deliver: false, reason: 'daily-cap' }
               : decision;
@@ -86,10 +88,11 @@ export function createPostgresNudgePolicyRepository(db: Db): NudgePolicyReposito
                   gte(proactivePings.createdAt, midnight),
                 ),
               );
-            if (Number(used?.value ?? 0) >= prefs.ambientDailyCap) {
+            if (Number(used?.value ?? 0) + Number(!reserved) > prefs.ambientDailyCap) {
               decision = { deliver: false, reason: 'daily-cap' };
             }
           }
+          if (reserved) return decision;
         }
 
         await tx.insert(proactivePings).values({
