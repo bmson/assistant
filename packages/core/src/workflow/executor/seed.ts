@@ -307,10 +307,9 @@ export async function seedContext(
 /**
  * Fold owner corrections typed while the task was parked into the resumed window.
  *
- * A task parks on an approval; the owner adds "actually make it Bob" in the same
- * chat; that reply becomes its OWN task and the parked task, on resume, would run
- * from a stale window and act on the pre-correction args. Append owner chat
- * messages newer than the watermark so the correction shapes the NEXT model step.
+ * An explicit correction linked to the parked task can shape its next model
+ * step. A later independently admitted turn belongs to its own task. Keep the
+ * legacy behavior for older unbound messages, which have no task identity.
  *
  * Chat channel ONLY: never re-inject email/SMS conversation content, which can
  * carry third-party text (the taint boundary). The approved call's exact args
@@ -357,6 +356,7 @@ export async function foldOwnerRepliesSincePark(
   });
   if (newer.length === 0) return true;
   for (const m of newer) {
+    if (m.taskId && m.taskId !== task.id) continue;
     const text = m.text?.trim();
     if (text) {
       if (state.requestChecklist) {

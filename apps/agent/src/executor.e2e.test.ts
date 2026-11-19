@@ -1,4 +1,5 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { getChatConversationView } from '@assistant/application/chat';
 import type { DispatcherPort, InboundEvent, ModelRouter, StepCallOutcome } from '@assistant/core';
 import {
   acceptSuggestion,
@@ -17,6 +18,7 @@ import {
   conversationSegments,
   conversations,
   createDb,
+  createPostgresApplicationChatPersistence,
   type Db,
   messages,
   modelCallAudit,
@@ -586,11 +588,17 @@ describe('executor end-to-end (integration, scripted model)', () => {
     expect(row?.status).toBe('done');
   });
 
-  it('an approval park in a conversation posts a notice message (the thread never goes silent)', async (ctx) => {
+  it('keeps an approval and its resumed reply on the originating turn across two later turns', async (ctx) => {
     if (!dbUp) return ctx.skip();
     const key = `t4-${Date.now()}`;
     const dispatcher = new ToolDispatcher(db, makeRegistry(key));
     const router = makeFakeRouter();
+    const windows: ModelMessage[][] = [];
+    const step = router.step.bind(router);
+    router.step = async (role, options) => {
+      windows.push(options.messages ?? []);
+      return step(role, options);
+    };
 
     const [conversation] = await db
       .insert(conversations)
@@ -602,35 +610,32 @@ describe('executor end-to-end (integration, scripted model)', () => {
     expect(extractOwnerIntent({ trust: 'owner', text: ownerText }).authorizedScopes).toContain(
       'external_send',
     );
-    const [ownerMessage] = await db
-      .insert(messages)
-      .values({
-        conversationId: convId,
-        role: 'user',
-        origin: 'owner',
-        parts: [{ type: 'text', text: ownerText }],
-        text: ownerText,
-        embedding: new Array(1536).fill(0.01),
-      })
-      .returning({ id: messages.id });
-    if (!ownerMessage?.id) throw new Error('Expected the owner chat message to be persisted');
-
-    const { task } = await enqueueTask(db, {
-      event: {
-        source: 'chat',
+    const chat = createPostgresApplicationChatPersistence(db);
+    const admit = async (text: string) => {
+      const clientOperationId = randomUUID();
+      const accepted = await chat.admitChatTurn({
         agentId,
         conversationId: convId,
-        trust: 'owner',
-        payload: {
-          text: ownerText,
-          triggerMessageId: ownerMessage.id,
-          requestAt: new Date().toISOString(),
-          intentRevision: 1,
-        },
-      },
-      type: 'chat_turn',
+        clientOperationId,
+        text,
+        requestHash: createHash('sha256').update(text).digest('hex'),
+        autonomous: false,
+        force: false,
+        spoken: false,
+      });
+      if (accepted.kind !== 'admitted' || !accepted.lease)
+        throw new Error('Expected the owner operation to be durably admitted');
+      createdTaskIds.push(accepted.task.id);
+      return { ...accepted, clientOperationId, lease: accepted.lease };
+    };
+    const first = await admit(ownerText);
+    const task = first.task;
+    const queued = await chat.queueAdmittedChatTurn({
+      agentId,
+      task: first.lease,
+      triagedActionable: false,
     });
-    createdTaskIds.push(task.id);
+    if (!queued) throw new Error('Expected the first operation to queue');
 
     const run = await executeTask({ db, router, dispatcher }, task.id);
     expect(run.outcome).toBe('parked');
@@ -649,6 +654,177 @@ describe('executor end-to-end (integration, scripted model)', () => {
     expect(last?.text).toContain('okay to go ahead?');
     expect(last?.text).not.toContain('This needs your approval');
     expect(JSON.stringify(last?.parts)).toContain(approval?.shortCode ?? '@@missing@@');
+    expect(last?.parts).toContainEqual({
+      type: 'data-turn-origin',
+      data: { triggerMessageId: first.message.id, clientOperationId: first.clientOperationId },
+    });
+    const laterOne = 'Which books should I pack?';
+    const laterTwo = 'Give me a cookie recipe.';
+    await admit(laterOne);
+    await admit(laterTwo);
+    const sameTaskFollowup = 'Keep the recap brief.';
+    await chat.appendOwned(agentId, {
+      conversationId: convId,
+      taskId: task.id,
+      role: 'user',
+      origin: 'owner',
+      text: sameTaskFollowup,
+      parts: [{ type: 'text', text: sameTaskFollowup }],
+    });
+    if (!approval) throw new Error('Expected a pending approval');
+    await expect(
+      resolveApproval(db, {
+        approvalId: approval.id,
+        decision: 'approved',
+        via: 'web',
+      }),
+    ).resolves.toMatchObject({ ok: true });
+    expect(await executeTask({ db, router, dispatcher }, task.id)).toMatchObject({
+      outcome: 'done',
+    });
+    expect(await executeTask({ db, router, dispatcher }, task.id)).toEqual({
+      outcome: 'not_claimable',
+    });
+    const resumedWindow = JSON.stringify(windows.at(-1));
+    expect(resumedWindow).toContain(ownerText);
+    expect(resumedWindow).toContain(sameTaskFollowup);
+    expect(resumedWindow).not.toContain(laterOne);
+    expect(resumedWindow).not.toContain(laterTwo);
+
+    const view = await getChatConversationView(db, convId, {});
+    const answer = view?.messages.filter((message) =>
+      message.parts.some(
+        (part) => part.type === 'text' && part.text === 'All done: counted and sent.',
+      ),
+    );
+    expect(answer).toHaveLength(1);
+    expect(answer?.[0]?.metadata).toMatchObject({
+      taskId: task.id,
+      triggerMessageId: first.message.id,
+      clientOperationId: first.clientOperationId,
+    });
+    expect(answer?.[0]?.parts.every((part) => part.type !== 'data-turn-origin')).toBe(true);
+  });
+
+  it.each([
+    {
+      request: 'Delete the obsolete file.',
+      draft: "I'll delete it now.",
+      receipt: null,
+      status: 'needs_attention',
+    },
+    {
+      request: 'Cancel the sunglasses reminder.',
+      draft: 'I removed the sunglasses reminder.',
+      receipt: true,
+      status: 'done',
+    },
+    {
+      request: 'Cancel the sunglasses reminder.',
+      draft: 'I removed the sunglasses reminder.',
+      receipt: false,
+      status: 'needs_attention',
+    },
+  ])('publishes $status for the current mutation receipt through the executor', async (fixture) => {
+    if (!dbUp) throw new Error('Database unavailable');
+    const chat = createPostgresApplicationChatPersistence(db);
+    const conversation = await chat.createConversation(agentId);
+    createdConversationIds.push(conversation.id);
+    const admitted = await chat.admitChatTurn({
+      agentId,
+      conversationId: conversation.id,
+      clientOperationId: randomUUID(),
+      requestHash: createHash('sha256').update(fixture.request).digest('hex'),
+      text: fixture.request,
+      autonomous: false,
+      force: false,
+      spoken: false,
+    });
+    if (admitted.kind !== 'admitted' || !admitted.lease) throw new Error('Expected admitted turn');
+    const taskId = admitted.task.id;
+    createdTaskIds.push(taskId);
+    await expect(
+      chat.queueAdmittedChatTurn({
+        agentId,
+        task: admitted.lease,
+        triagedActionable: false,
+      }),
+    ).resolves.toMatchObject({ id: taskId });
+
+    let calls = 0;
+    const registry = new ToolRegistry();
+    registry.register(
+      {
+        name: 'reminder.cancel',
+        description: 'Synthetic cancellation of one reminder',
+        inputSchema: z.object({ query: z.literal('sunglasses') }),
+        risk: 'autonomous',
+        acceptsUntrustedInput: false,
+        execute: async () => {
+          calls += 1;
+          if (!fixture.receipt) throw new Error('Synthetic provider interruption');
+          return { cancelled: true, reminderId: 'synthetic-sunglasses', text: 'Sunglasses' };
+        },
+      },
+      { privateWrite: true },
+    );
+    let proposed = false;
+    const router = {
+      async object() {
+        return {
+          ok: true,
+          modelId: 'fake/a6',
+          degraded: false,
+          object: {
+            action: fixture.receipt === null ? 'reply' : 'workflow',
+            reasoning: '',
+            steps: fixture.receipt === null ? [] : ['Check request'],
+            missingInfo: [],
+          },
+        };
+      },
+      async embeddingSpace() {
+        return { provider: 'synthetic', model: 'a6', dimensions: 1536, revision: 'test' };
+      },
+      async embed(texts: string[]) {
+        return texts.map(() => new Array(1536).fill(0));
+      },
+      async step() {
+        const propose = !proposed && fixture.receipt !== null;
+        proposed = true;
+        return {
+          ok: true,
+          modelId: 'fake/a6',
+          degraded: false,
+          text: propose ? '' : fixture.draft,
+          toolCalls: propose
+            ? [
+                {
+                  toolCallId: 'call_cancel',
+                  toolName: 'reminder.cancel',
+                  input: { query: 'sunglasses' },
+                },
+              ]
+            : [],
+        };
+      },
+    } as unknown as ModelRouter;
+    const result = await executeTask(
+      { db, router, dispatcher: new ToolDispatcher(db, registry) },
+      taskId,
+    );
+    expect(result.outcome).toBe(fixture.status);
+    expect(calls).toBe(fixture.receipt === null ? 0 : 1);
+    const final = await db
+      .select()
+      .from(messages)
+      .where(and(eq(messages.taskId, taskId), eq(messages.role, 'assistant')));
+    expect(final).toHaveLength(1);
+    if (fixture.receipt) expect(final[0]?.text).toBe(fixture.draft);
+    else {
+      expect(final[0]?.text).toContain('couldn’t confirm');
+      expect(final[0]?.text).not.toContain(fixture.draft);
+    }
   });
 
   it('turns a model-invented approval notice into a real approval record', async (ctx) => {

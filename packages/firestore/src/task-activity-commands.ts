@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type {
+  ActivityArchiveScope,
   ArchiveOldActivityProgress,
   ChecklistCancellationPolicy,
   ChecklistCorrectionPolicy,
@@ -13,7 +14,9 @@ import type {
   TaskActivityCurrentState,
 } from '@assistant/persistence';
 import {
+  canArchiveActivityStatus,
   completeChecklistCorrectionEvidence,
+  isActivityCanary,
   isChatAdmissionCancellationProjection,
   isPinnedOwnerChatRequestMessage,
   MAX_CHECKLIST_CORRECTION_LEDGER_ROWS,
@@ -63,6 +66,7 @@ const WAKEABLE = new Set([
   'needs_attention',
 ]);
 const ARCHIVE_BATCH_SIZE = 250;
+const STALE_ATTENTION_ARCHIVE_BATCH_SIZE = 50;
 const ARCHIVE_OPERATION_COLLECTION = 'taskActivityArchiveRuns';
 
 function currentTask(task: Record<string, unknown>): TaskActivityCurrentState {
@@ -149,10 +153,11 @@ function progress(
   };
 }
 
-function isTerminalArchiveCandidate(
+function isOldArchiveCandidate(
   document: DocumentSnapshot | QueryDocumentSnapshot,
   agentId: string,
   cutoff: Date,
+  statuses: readonly string[],
 ): boolean {
   const data = document.data();
   if (!document.exists || !data) return false;
@@ -173,7 +178,8 @@ function isTerminalArchiveCandidate(
   if (isChatAdmissionCancellationProjection(task)) return false;
   return (
     task.archivedAt === null &&
-    TERMINAL.has(task.status) &&
+    statuses.includes(task.status) &&
+    (task.status !== 'needs_attention' || !isActivityCanary(task.trigger)) &&
     task.updatedAt.getTime() < cutoff.getTime()
   );
 }
@@ -793,6 +799,8 @@ export class FirestoreTaskActivityCommandRepository implements TaskActivityComma
       if (typeof task.status !== 'string') throw new Error('Invalid activity task');
       // This makes client retries idempotent: after the first successful wake,
       // pending is no longer wakeable and cannot increment the generation twice.
+      if (task.archivedAt && task.status === 'needs_attention')
+        return withCurrent(task, {}, 'no_longer_retriable');
       if (!WAKEABLE.has(task.status))
         return withCurrent(
           task,
@@ -969,6 +977,7 @@ export class FirestoreTaskActivityCommandRepository implements TaskActivityComma
           {},
           TERMINAL.has(String(task.status)) ? 'already_terminal' : 'no_longer_retriable',
         );
+      if (task.archivedAt) return withCurrent(task, {}, 'no_longer_retriable');
       const currentLimit = Number(task.budgetUsdLimit);
       const spent = Number(task.spentUsd);
       if (
@@ -1020,12 +1029,19 @@ export class FirestoreTaskActivityCommandRepository implements TaskActivityComma
     agentId: string,
     olderThanDays = 30,
     requestedOperationId?: string,
+    scope: ActivityArchiveScope = 'terminal',
   ): Promise<ArchiveOldActivityProgress> {
     if (!agentId || !Number.isFinite(olderThanDays) || olderThanDays <= 0)
       throw new Error('Invalid archive-old activity request');
     if (requestedOperationId !== undefined && !/^[0-9a-f-]{36}$/i.test(requestedOperationId))
       throw new Error('Invalid archive-old activity operation');
-    const operationRef = this.store.doc(ARCHIVE_OPERATION_COLLECTION, agentId);
+    const staleAttention = scope === 'stale-attention';
+    const statuses = staleAttention ? ['needs_attention'] : [...TERMINAL];
+    const batchSize = staleAttention ? STALE_ATTENTION_ARCHIVE_BATCH_SIZE : ARCHIVE_BATCH_SIZE;
+    const operationRef = this.store.doc(
+      ARCHIVE_OPERATION_COLLECTION,
+      staleAttention ? `stale-attention:${agentId}` : agentId,
+    );
     const run = await this.store.db.runTransaction(async (tx): Promise<ArchiveRun> => {
       const ownerQuery = await tx.get(this.store.collection('agents').limit(2));
       const owner = ownerQuery.docs[0];
@@ -1072,7 +1088,7 @@ export class FirestoreTaskActivityCommandRepository implements TaskActivityComma
       .collection('tasks')
       .where('agentId', '==', agentId)
       .where('archivedAt', '==', null)
-      .where('status', 'in', [...TERMINAL])
+      .where('status', 'in', statuses)
       .select(
         'id',
         'agentId',
@@ -1086,15 +1102,15 @@ export class FirestoreTaskActivityCommandRepository implements TaskActivityComma
         'updatedAt',
       )
       .orderBy(FieldPath.documentId())
-      .limit(ARCHIVE_BATCH_SIZE);
+      .limit(batchSize);
     if (run.cursorId) query = query.startAfter(run.cursorId);
     const page = await query.get();
     const cutoff = run.cutoff;
     const candidates = page.docs.filter((document) =>
-      isTerminalArchiveCandidate(document, agentId, cutoff),
+      isOldArchiveCandidate(document, agentId, cutoff, statuses),
     );
     const cursorId = page.docs.at(-1)?.id ?? run.cursorId;
-    const complete = page.size < ARCHIVE_BATCH_SIZE;
+    const complete = page.size < batchSize;
     const now = this.store.now();
 
     return this.store.db.runTransaction(async (tx) => {
@@ -1126,14 +1142,28 @@ export class FirestoreTaskActivityCommandRepository implements TaskActivityComma
       const currentCandidates = await Promise.all(
         candidates.map((document) => tx.get(document.ref)),
       );
-      let archivedThisBatch = 0;
-      for (const snapshot of currentCandidates) {
-        if (!snapshot.exists) continue;
-        if (isTerminalArchiveCandidate(snapshot, agentId, cutoff)) {
-          tx.update(snapshot.ref, { archivedAt: now, updatedAt: now });
-          archivedThisBatch += 1;
-        }
-      }
+      const eligible = currentCandidates.filter((snapshot) =>
+        isOldArchiveCandidate(snapshot, agentId, cutoff, statuses),
+      );
+      const unblocked = staleAttention
+        ? (
+            await Promise.all(
+              eligible.map(async (snapshot) => {
+                const pending = await tx.get(
+                  this.store
+                    .collection('approvals')
+                    .where('taskId', '==', snapshot.get('id'))
+                    .where('status', '==', 'pending')
+                    .limit(1),
+                );
+                return pending.empty ? snapshot : null;
+              }),
+            )
+          ).filter((snapshot) => snapshot !== null)
+        : eligible;
+      for (const snapshot of unblocked)
+        tx.update(snapshot.ref, { archivedAt: now, updatedAt: now });
+      const archivedThisBatch = unblocked.length;
       const advanced: ArchiveRun = {
         ...current,
         cursorId,
@@ -1191,8 +1221,20 @@ export class FirestoreTaskActivityCommandRepository implements TaskActivityComma
       if (isChatAdmissionCancellationProjection(task))
         return taskActivityOutcome('not_found', null);
       if (action === 'archive') {
-        if (!TERMINAL.has(task.status)) return withCurrent(task, {}, 'no_longer_retriable');
+        if (isActivityCanary(task.trigger)) return taskActivityOutcome('not_found', null);
+        if (!canArchiveActivityStatus(task.status))
+          return withCurrent(task, {}, 'no_longer_retriable');
         if (task.archivedAt !== null) return withCurrent(task, {}, 'already_archived');
+        if (task.status === 'needs_attention') {
+          const pending = await tx.get(
+            this.store
+              .collection('approvals')
+              .where('taskId', '==', taskId)
+              .where('status', '==', 'pending')
+              .limit(1),
+          );
+          if (!pending.empty) return withCurrent(task, {}, 'no_longer_retriable');
+        }
       } else if (task.archivedAt === null) {
         return withCurrent(task, {}, 'already_restored');
       }

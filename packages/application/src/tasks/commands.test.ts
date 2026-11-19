@@ -2,10 +2,13 @@ import { randomUUID } from 'node:crypto';
 import { getAgent } from '@assistant/core/chat';
 import {
   agents,
+  approvals,
   conversations,
   createDb,
   createPostgresApplicationChatPersistence,
+  createPostgresTaskDiscoveryRepository,
   tasks,
+  toolCalls,
 } from '@assistant/db';
 import {
   chatAdmissionCancellationTrigger,
@@ -14,14 +17,18 @@ import {
 } from '@assistant/persistence';
 import { and, eq, inArray } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
+import { getDashboardPresence } from '../dashboard.js';
 import {
   archiveActivity,
+  archiveOldActivity,
   cancelActivity,
   raiseTaskBudget,
   restoreActivity,
   retryActivity,
   revokeTaskAutonomy,
 } from './commands.js';
+import { discoverActivityWithRepository } from './discovery.js';
+import { listActivity } from './queries.js';
 
 describe('owner task activity commands', () => {
   it('keeps pre-admission cancellation markers out of every owner task mutation', async () => {
@@ -241,6 +248,109 @@ describe('owner task activity commands', () => {
       expect(current.status).toMatch(/^(done|cancelled)$/);
     } finally {
       await db.delete(tasks).where(eq(tasks.id, taskId));
+      await db.$client.end();
+    }
+  });
+
+  it('counts current Needs You rows and archives only eligible stale attention', async () => {
+    const db = createDb(
+      process.env.TEST_DATABASE_URL ?? 'postgres://assistant@127.0.0.1:1/unallocated',
+    );
+    const ids: string[] = Array.from({ length: 8 }, () => randomUUID());
+    const [old, blocked, fresh, budget, estimated, approval, hidden, canary] = ids as [
+      string,
+      string,
+      string,
+      string,
+      string,
+      string,
+      string,
+      string,
+    ];
+    const toolCallId = randomUUID();
+    const approvalId = randomUUID();
+    const aged = new Date('2020-01-01T00:00:00Z');
+    try {
+      const { id: agentId } = await getAgent(db);
+      const before = await getDashboardPresence(db, agentId);
+      await db.insert(tasks).values(
+        [
+          { id: old, status: 'needs_attention', updatedAt: aged },
+          { id: blocked, status: 'needs_attention', updatedAt: aged },
+          { id: fresh, status: 'needs_attention' },
+          { id: budget, status: 'waiting_budget', updatedAt: aged },
+          { id: estimated, status: 'waiting_estimated_cost', updatedAt: aged },
+          { id: approval, status: 'waiting_approval', updatedAt: aged },
+          { id: hidden, status: 'needs_attention', updatedAt: aged, archivedAt: aged },
+          {
+            id: canary,
+            status: 'needs_attention',
+            updatedAt: aged,
+            trigger: { payload: { canary: 'true' } },
+          },
+        ].map((row) => ({ agentId, type: 'chat_turn', ...row })),
+      );
+      await db.insert(toolCalls).values({
+        id: toolCallId,
+        taskId: blocked,
+        step: 0,
+        toolName: 'test.approval',
+        risk: 'approval',
+        status: 'awaiting_approval',
+      });
+      await db.insert(approvals).values({
+        id: approvalId,
+        taskId: blocked,
+        toolCallId,
+        shortCode: `T${approvalId.slice(0, 6)}`,
+        summary: 'Synthetic approval',
+        status: 'pending',
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+
+      const visible = await listActivity(db, { archived: false, filter: 'needs-you', limit: 500 });
+      expect(
+        visible.items
+          .filter((row) => ids.includes(row.id))
+          .map((row) => row.id)
+          .sort(),
+      ).toEqual([old, blocked, fresh, budget, estimated, approval].sort());
+      expect((await getDashboardPresence(db, agentId)).needsAttention).toBe(
+        before.needsAttention + 6,
+      );
+      const discovery = await discoverActivityWithRepository(
+        createPostgresTaskDiscoveryRepository(db),
+        agentId,
+        {
+          archived: false,
+          filter: 'needs-you',
+          limit: 1,
+        },
+      );
+      expect(discovery.items).toHaveLength(1);
+      expect(discovery.nextCursor).toEqual(expect.any(String));
+      expect(discovery.needsYouCount).toBe(before.needsAttention + 6);
+      expect(await archiveActivity(db, blocked)).toMatchObject({ outcome: 'no_longer_retriable' });
+      expect(await archiveOldActivity(db, 30, 'stale-attention')).toMatchObject({
+        archivedTotal: 1,
+        complete: true,
+      });
+      const archived = await listActivity(db, { archived: true, filter: 'needs-you', limit: 500 });
+      expect(archived.items).toContainEqual(
+        expect.objectContaining({ id: old, status: 'needs_attention' }),
+      );
+      expect((await getDashboardPresence(db, agentId)).needsAttention).toBe(
+        before.needsAttention + 5,
+      );
+      expect(await retryActivity(db, old)).toMatchObject({ outcome: 'no_longer_retriable' });
+      expect(await restoreActivity(db, old)).toMatchObject({ outcome: 'restored' });
+      expect(await archiveActivity(db, old)).toMatchObject({ outcome: 'archived' });
+      expect(await archiveActivity(db, old)).toMatchObject({ outcome: 'already_archived' });
+      expect(await archiveActivity(db, canary)).toMatchObject({ outcome: 'not_found' });
+    } finally {
+      await db.delete(approvals).where(eq(approvals.id, approvalId));
+      await db.delete(toolCalls).where(eq(toolCalls.id, toolCallId));
+      await db.delete(tasks).where(inArray(tasks.id, ids));
       await db.$client.end();
     }
   });

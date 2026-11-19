@@ -7,7 +7,20 @@ import type { SmsDeliveryAccounting } from './sms-segments.js';
  * owner read it. `unknown` is a transport ambiguity and is not safe to retry
  * automatically without a durable provider idempotency key.
  */
-export type OwnerNoticePurpose = 'answer-ready' | 'task-attention' | 'leave-now';
+export type OwnerNoticePurpose =
+  | 'answer-ready'
+  | 'task-attention'
+  | 'leave-now'
+  | 'watchdog-outage';
+
+export const WATCHDOG_OUTAGE_TEXT = {
+  sweep: 'Scheduled checks have been unavailable for at least 30 minutes.',
+  briefing: 'The daily briefing is overdue. No scheduled briefing has completed within 26 hours.',
+};
+
+export function isWatchdogOutageDeliveryKey(key: string): boolean {
+  return /^watchdog-outage:(?:\d{1,16}|briefing:[a-f0-9-]{36})$/.test(key);
+}
 
 export type NotificationLegStatus =
   | 'delivered'

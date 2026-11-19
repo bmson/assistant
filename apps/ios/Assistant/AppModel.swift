@@ -657,7 +657,9 @@ final class AppModel {
     var pendingApprovalCount: Int {
         overview?.approvals.pending.count ?? bootstrap?.shell.dashboard.pendingApprovals ?? 0
     }
-    var needsAttentionCount: Int { bootstrap?.shell.dashboard.needsAttention ?? 0 }
+    private var activityAttentionCount: (value: Int, readAt: Date)?
+    private var activityAttentionReadRevision = 0
+    var needsAttentionCount: Int { activityAttentionCount?.value ?? bootstrap?.shell.dashboard.needsAttention ?? 0 }
     var conversationId: String? {
         activeConversation?.conversation.id ?? bootstrap?.conversation.conversation.id
     }
@@ -1910,6 +1912,7 @@ final class AppModel {
 
     private func resetConnectedState(preserveCardFormRecoveryFence: Bool = false) {
         memoryCorrections.retire()
+        activityAttentionCount = nil
         phoneCalendarSyncRevision += 1
         phoneCalendarSyncTask?.cancel()
         phoneCalendarSyncTask = nil
@@ -2329,16 +2332,24 @@ final class AppModel {
         }
     }
 
-    func activityDiscoveryPage(archived: Bool, query: String, filter: String, cursor: String?) async -> ActivityList? {
+    func activityDiscoveryPage(
+        archived: Bool, query: String, filter: String, cursor: String?, reportFailure: Bool = true
+    ) async -> ActivityList? {
         guard let client else { return nil }
         let version = connectionVersion
+        let readsAttentionCount = !archived && filter == "needs-you" && cursor == nil
+        if readsAttentionCount { activityAttentionReadRevision += 1 }
+        let revision = activityAttentionReadRevision
         do {
             let page = try await client.activity(archived: archived, query: query, filter: filter, cursor: cursor)
-            guard connectionIsCurrent(client, version: version) else { return nil }
+            guard !Task.isCancelled, connectionIsCurrent(client, version: version) else { return nil }
+            if readsAttentionCount, revision == activityAttentionReadRevision, let count = page.needsYouCount {
+                activityAttentionCount = (count, Date())
+            }
             return page
         } catch {
-            guard connectionIsCurrent(client, version: version) else { return nil }
-            reportError(error)
+            guard !Task.isCancelled, connectionIsCurrent(client, version: version) else { return nil }
+            if reportFailure { reportError(error) }
             return nil
         }
     }
@@ -2392,7 +2403,12 @@ final class AppModel {
             async let goalsRefresh: Void = archivedGoals
                 ? self.refreshArchivedGoals(reportFailure: false)
                 : ()
-            _ = await (overviewRefresh, activityRefresh, goalsRefresh)
+            async let attentionRefresh: ActivityList? = archivedActivity
+                ? self.activityDiscoveryPage(
+                    archived: false, query: "", filter: "needs-you", cursor: nil, reportFailure: false
+                )
+                : nil
+            _ = await (overviewRefresh, activityRefresh, goalsRefresh, attentionRefresh)
         }
     }
 
@@ -2426,11 +2442,15 @@ final class AppModel {
         }
     }
 
-    func archiveOldActivity(operationId: String? = nil) async -> ArchiveOldActivityProgress? {
+    func archiveOldActivity(
+        operationId: String? = nil, staleAttention: Bool = false
+    ) async -> ArchiveOldActivityProgress? {
         guard let client else { return nil }
         errorMessage = nil
         do {
-            let progress = try await client.archiveOldActivity(operationId: operationId)
+            let progress = try await client.archiveOldActivity(
+                operationId: operationId, staleAttention: staleAttention
+            )
             reconcileAfterMutation(archivedActivity: true)
             return progress
         } catch {
@@ -4457,7 +4477,8 @@ final class AppModel {
         beginSpeaking(streamID: streamID)
         // Recorded before the send, not after the receipt: backgrounding during
         // the stream is exactly the case this exists for, and at that point
-        // there is no taskId yet. Polling by cursor alone still finds the reply.
+        // there is no taskId yet. Polling binds any durable reply to this
+        // operation rather than treating another turn's answer as completion.
         resumableTurn = (taskId: nil, streamID: streamID)
         ordinaryTurn = OrdinaryTurn(
             token: turnToken,
@@ -5202,6 +5223,11 @@ final class AppModel {
         if let client {
             edits.configureRecovery(scope: client.configuration.baseURL.absoluteString + "|" + response.identity.id)
         }
+        // The shell is briefly cached. Let a recently read Activity count lead
+        // until a later bootstrap can carry a newer shell projection.
+        if let count = activityAttentionCount, Date().timeIntervalSince(count.readAt) >= 30 {
+            activityAttentionCount = nil
+        }
         bootstrap = response
         applyMemoryHealth(response.shell.memoryHealth)
         if activeConversation == nil
@@ -5362,16 +5388,21 @@ final class AppModel {
         var finalStatus: String?
         var receivedCurrentReply = false
         var currentReplyMessageIDs = Set<String>()
-        let assistantMessageIDsAtStart = Set(messages.compactMap { message in
-            message.role == .assistant && !message.id.hasPrefix("stream-") ? message.id : nil
-        })
+        let operationId = ordinaryTurnToken.flatMap { token in
+            ordinaryTurn?.token == token ? ordinaryTurn?.operationId : nil
+        }
         func refreshCurrentReplyState() {
             currentReplyMessageIDs = Set(messages.compactMap { message in
                 guard isVisibleDurableAssistantReply(message) else { return nil }
+                let replyTaskId = message.metadata?["taskId"]?.string
+                let replyOperationId = message.metadata?["clientOperationId"]?.string
                 if let taskId {
-                    return message.metadata?["taskId"]?.string == taskId ? message.id : nil
+                    guard replyTaskId == taskId else { return nil }
+                    if let operationId, let replyOperationId, replyOperationId != operationId { return nil }
+                    return message.id
                 }
-                return !assistantMessageIDsAtStart.contains(message.id) ? message.id : nil
+                guard let operationId, replyOperationId == operationId, replyTaskId != nil else { return nil }
+                return message.id
             })
             receivedCurrentReply = !currentReplyMessageIDs.isEmpty
         }
@@ -5658,11 +5689,6 @@ final class AppModel {
                 $0.id.hasPrefix("local-") && $0.role == message.role && $0.text == message.text
             }) {
                 messages.remove(at: localIndex)
-            }
-            if message.role == .assistant {
-                messages.removeAll {
-                    $0.id.hasPrefix("stream-") && ($0.text == message.text || !$0.text.isEmpty)
-                }
             }
             messages.append(message)
         }

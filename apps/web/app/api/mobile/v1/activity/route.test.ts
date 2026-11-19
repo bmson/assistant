@@ -1,7 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { listActivityWithRepository } from '@assistant/application/tasks';
 import { resetConfigForTest } from '@assistant/config';
-import { createInstallationStore, FirestoreTaskActivityRepository } from '@assistant/firestore';
+import {
+  createInstallationStore,
+  FirestoreShellStatusRepository,
+  FirestoreTaskActivityRepository,
+} from '@assistant/firestore';
 import { NextRequest } from 'next/server';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
@@ -95,9 +99,12 @@ describe.skipIf(!localEmulator)('Firestore mobile Activity GET with PostgreSQL o
         .doc('tasks', 'current-canary')
         .set(task('current-canary', { trigger: { payload: { canary: 'true' } } })),
       store.doc('tasks', 'foreign').set(task('foreign', { agentId: foreignAgentId })),
-      store
-        .doc('approvals', 'pending')
-        .set({ id: 'pending', taskId: 'approval', status: 'pending' }),
+      store.doc('approvals', 'pending').set({
+        id: 'pending',
+        taskId: 'approval',
+        status: 'pending',
+        expiresAt: new Date(now.getTime() + 60_000),
+      }),
     ]);
   });
 
@@ -205,6 +212,77 @@ describe.skipIf(!localEmulator)('Firestore mobile Activity GET with PostgreSQL o
     const stillArchived = await store.doc('tasks', 'old-archived').get();
     expect(stillArchived.get('archivedAt').toDate()).toEqual(preArchived);
     expect(stillArchived.get('updatedAt').toDate()).toEqual(preArchiveUpdatedAt);
+  });
+
+  it('keeps the Needs You count aligned while clearing only stale, unblocked attention', async () => {
+    const aged = new Date('2020-01-01T00:00:00Z');
+    const rows = [
+      task('stale-attention', { status: 'needs_attention', updatedAt: aged }),
+      task('blocked-attention', { status: 'needs_attention', updatedAt: aged }),
+      task('fresh-attention', { status: 'needs_attention', updatedAt: new Date() }),
+      task('old-waiting-budget', { status: 'waiting_budget', updatedAt: aged }),
+      task('old-waiting-estimate', { status: 'waiting_estimated_cost', updatedAt: aged }),
+      task('old-attention-canary', {
+        status: 'needs_attention',
+        updatedAt: aged,
+        trigger: { payload: { canary: true } },
+      }),
+      task('old-attention-foreign', {
+        status: 'needs_attention',
+        updatedAt: aged,
+        agentId: foreignAgentId,
+      }),
+    ];
+    await Promise.all([
+      ...rows.map((row) => store.doc('tasks', row.id as string).set(row)),
+      store.doc('approvals', 'blocked-attention').set({
+        id: 'blocked-attention',
+        taskId: 'blocked-attention',
+        status: 'pending',
+        expiresAt: new Date(Date.now() + 60_000),
+      }),
+    ]);
+    const shell = new FirestoreShellStatusRepository(store, agentId);
+    const before = await shell.load(agentId);
+    const initial = await (await get('?filter=needs-you')).json();
+    expect(initial.needsYouCount).toBe(before.dashboard.needsAttention);
+    expect(before.dashboard.needsAttention).toBe(initial.items.length);
+    const clearStale = () =>
+      route.POST(
+        new Request('http://localhost/api/mobile/v1/activity', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ action: 'clear-stale-attention' }),
+        }),
+      );
+    const result = await clearStale();
+    expect(result.status).toBe(200);
+    expect(await result.json()).toMatchObject({ archivedTotal: 1, complete: true });
+    const after = await shell.load(agentId);
+    const visible = await (await get('?filter=needs-you')).json();
+    expect(after.dashboard.needsAttention).toBe(before.dashboard.needsAttention - 1);
+    expect(visible.needsYouCount).toBe(after.dashboard.needsAttention);
+    expect(after.dashboard.needsAttention).toBe(visible.items.length);
+    expect(visible.items).toContainEqual(
+      expect.objectContaining({
+        id: 'blocked-attention',
+        hasPendingApproval: true,
+      }),
+    );
+    expect((await store.doc('tasks', 'stale-attention').get()).get('status')).toBe(
+      'needs_attention',
+    );
+    expect((await store.doc('tasks', 'stale-attention').get()).get('archivedAt')).not.toBeNull();
+    for (const id of [
+      'fresh-attention',
+      'old-waiting-budget',
+      'old-waiting-estimate',
+      'old-attention-canary',
+      'old-attention-foreign',
+    ]) {
+      expect((await store.doc('tasks', id).get()).get('archivedAt'), id).toBeNull();
+    }
+    expect(await (await clearStale()).json()).toMatchObject({ archivedTotal: 0, complete: true });
   });
 
   it('requires auth and keeps unsupported Firestore writes unavailable', async () => {

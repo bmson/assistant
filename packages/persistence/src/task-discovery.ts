@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { ActivityTaskRecord } from './task-activity.js';
+import { needsYouTaskStatuses } from './task-activity.js';
 
 export class TaskDiscoveryInputError extends Error {}
 
@@ -38,11 +39,12 @@ export interface TaskDiscoveryRepository {
   readonly driver: 'postgres' | 'firestore';
   scan(
     agentId: string,
-    input: { after?: TaskDiscoveryCursor; limit: number },
+    input: { after?: TaskDiscoveryCursor; limit: number; includeNeedsYouCount?: boolean },
   ): Promise<{
     rows: TaskDiscoveryRow[];
     hasMore: boolean;
     archivedCount: number;
+    needsYouCount?: number;
     pendingApprovalTaskIds: string[];
   }>;
 }
@@ -167,7 +169,7 @@ export function matchesTaskDiscovery(row: TaskDiscoveryRow, input: TaskDiscovery
     return false;
   const statuses =
     input.filter === 'needs-you'
-      ? ['waiting_approval', 'waiting_budget', 'waiting_estimated_cost', 'needs_attention']
+      ? [...needsYouTaskStatuses]
       : input.filter === 'working'
         ? ['pending', 'running']
         : input.filter === 'scheduled'

@@ -3,7 +3,7 @@
   "purpose": "Source composition and route drift evidence only; not a deployment or configured-runtime receipt.",
   "runtimeSources": {
     "packages/config/src/index.ts": "4b5e869fdc45b6630930827b97b8480fa19d6fa567abc18cee7ea5f11fea68b1",
-    "apps/agent/src/deps.ts": "ae851c6c8ba0c3dd2e66347495ba70be541931b29ebab750adf361b5ec909ec2",
+    "apps/agent/src/deps.ts": "ddd18be2b051841d65fb303cba2b981eadc01a50facca4fbe84584167439bede",
     "apps/agent/src/index.ts": "bc65b1a16ba83c6351a74e2c071189fb4288d5d3ec2c4425accc185da77fe6ab",
     "apps/web/lib/server.ts": "d7134834a1d0b86e5cba4c7fa9f00898b7951a2c6741fc6be254e73022159f5c",
     "apps/web/proxy.ts": "a98bad019e18f95a23024a0b6d25780e1ec74cf7cc4a23c58780a58e1e56c024",
@@ -151,7 +151,7 @@
     },
     "apps/web/app/api/mobile/v1/activity/route.ts": {
       "methods": ["GET", "POST"],
-      "sha256": "0dd81eb334882a173b428ab9224e7f29f34bfd5a73d8097a595b99971725e0b3"
+      "sha256": "29880201cadea2c72d18bdbe07c3643b8dcbec5d15844fcae5c49aa0114c7adb"
     },
     "apps/web/app/api/mobile/v1/anomalies/[id]/route.ts": {
       "methods": ["POST"],
@@ -467,7 +467,7 @@
     },
     "apps/web/app/api/mobile/v1/workspace/route.ts": {
       "methods": ["GET"],
-      "sha256": "2ed36ec32a074598330acb6299b6e91b5242bb6b5d79918a6d1392be917e1a31"
+      "sha256": "a196c70725694e001950fc8709756ad7ffda3000b0b1dbaea1e7a4c8980d92ed"
     },
     "apps/web/app/api/mobile/v1/workspace/sections/[section]/route.ts": {
       "methods": ["GET"],

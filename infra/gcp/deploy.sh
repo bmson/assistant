@@ -608,22 +608,25 @@ done
 
 echo "── scheduler jobs"
 make_job() {
-  local name="$1" schedule="$2" path="$3"
+  local name="$1" schedule="$2" path="$3" deadline="${4:-300s}"
   if gcloud scheduler jobs describe "$name" --location="$REGION" >/dev/null 2>&1; then
     gcloud scheduler jobs update http "$name" --location="$REGION" --schedule="$schedule" \
       --uri="${AGENT_URL}${path}" --http-method=POST \
-      --attempt-deadline=300s --max-retry-attempts=0 \
+      --attempt-deadline="$deadline" --max-retry-attempts=0 \
       --clear-headers --oidc-service-account-email="$INTERNAL_INVOKER_SA" \
       --oidc-token-audience="${AGENT_URL}${path}" --quiet
   else
     gcloud scheduler jobs create http "$name" --location="$REGION" --schedule="$schedule" \
       --uri="${AGENT_URL}${path}" --http-method=POST \
-      --attempt-deadline=300s --max-retry-attempts=0 \
+      --attempt-deadline="$deadline" --max-retry-attempts=0 \
       --oidc-service-account-email="$INTERNAL_INVOKER_SA" \
       --oidc-token-audience="${AGENT_URL}${path}" --quiet
   fi
 }
 make_job assistant-sweep "* * * * *" "/internal/sweep"
+# Probe independently of the sweep job. Cloud Scheduler logs failed HTTP
+# responses even when the agent is unreachable.
+make_job assistant-sweep-watchdog "*/5 * * * *" "/internal/sweep/watchdog" 30s
 # Module-owned schedules come from the plan, so a module declares its cron once
 # in metadata rather than here as well. The value is read as quoted lines: cron
 # expressions contain spaces and `*`, which unquoted word splitting would glob.
@@ -736,6 +739,46 @@ if [ -z "$ALERT_CHANNEL" ]; then
   ALERT_CHANNEL="$(gcloud beta monitoring channels create \
     --display-name="Assistant owner email" --type=email \
     --channel-labels="email_address=${OWNER_EMAIL}" --format='value(name)')"
+fi
+
+# Use the probe job's execution logs, rather than relying on the service under
+# test to emit a log. Monitoring keeps one incident open across repeated misses.
+WATCHDOG_LOG_FILTER='resource.type="cloud_scheduler_job" AND resource.labels.job_id="assistant-sweep-watchdog" AND severity>=ERROR AND jsonPayload."@type"="type.googleapis.com/google.cloud.scheduler.logging.AttemptFinished"'
+if gcloud logging metrics describe assistant-sweep-watchdog-errors >/dev/null 2>&1; then
+  gcloud logging metrics update assistant-sweep-watchdog-errors \
+    --description="Failed independent Assistant scheduler health probes" \
+    --log-filter="$WATCHDOG_LOG_FILTER" --quiet
+else
+  gcloud logging metrics create assistant-sweep-watchdog-errors \
+    --description="Failed independent Assistant scheduler health probes" \
+    --log-filter="$WATCHDOG_LOG_FILTER" --quiet
+fi
+if [ -z "$(gcloud alpha monitoring policies list \
+  --filter='displayName="Assistant scheduled checks unavailable"' --format='value(name)' 2>/dev/null | head -1)" ]; then
+  WATCHDOG_POLICY_FILE="$(mktemp)"
+  cat >"$WATCHDOG_POLICY_FILE" <<JSON
+{
+  "displayName": "Assistant scheduled checks unavailable",
+  "combiner": "OR",
+  "conditions": [
+    {
+      "displayName": "Independent scheduler health probe failed",
+      "conditionThreshold": {
+        "filter": "metric.type=\"logging.googleapis.com/user/assistant-sweep-watchdog-errors\" AND resource.type=\"cloud_scheduler_job\"",
+        "aggregations": [{"alignmentPeriod": "600s", "perSeriesAligner": "ALIGN_SUM"}],
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 0,
+        "duration": "0s",
+        "trigger": {"count": 1}
+      }
+    }
+  ],
+  "notificationChannels": ["${ALERT_CHANNEL}"],
+  "alertStrategy": {"autoClose": "1800s"}
+}
+JSON
+  gcloud alpha monitoring policies create --policy-from-file="$WATCHDOG_POLICY_FILE" --quiet
+  rm -f "$WATCHDOG_POLICY_FILE"
 fi
 
 # Create-once alert policy: a burst of error logs emails the owner. Threshold

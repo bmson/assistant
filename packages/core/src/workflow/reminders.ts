@@ -1,9 +1,11 @@
 import { createPostgresReminderRepository, type Db } from '@assistant/db';
 import {
+  normalizeReminderText,
   REMINDER_SCHEDULE_PREFIX,
   type ReminderRepository,
   reminderScheduleIsActive,
   reminderScheduleTemplate,
+  reminderTextMatchesQuery,
   type ScheduleRepository,
 } from '@assistant/persistence';
 import { listOwnerSchedules } from './schedules.js';
@@ -40,15 +42,6 @@ export async function listReminderSchedules(store: Db | ScheduleRepository, agen
   );
 }
 
-function normalizeReminderText(value: string): string {
-  return value
-    .toLocaleLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, ' ')
-    .replace(/\b(?:the|a|an|reminder)\b/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
 /** Resolve the owner's words completely before invoking the authoritative cancellation command. */
 export async function cancelNamedReminder(
   store: Db | ReminderManagementStore,
@@ -71,10 +64,7 @@ export async function cancelNamedReminder(
     const exact = active.filter((row) => textFor(row) === query);
     const matches = exact.length
       ? exact
-      : active.filter((row) => {
-          const text = textFor(row);
-          return text.length > 0 && (text.includes(query) || query.includes(text));
-        });
+      : active.filter((row) => reminderTextMatchesQuery(textFor(row), query));
     if (!matches.length) return { cancelled: false as const, reason: 'not_found' as const };
     if (matches.length > 1)
       return {

@@ -9,11 +9,13 @@ import type {
   Records,
 } from '@assistant/persistence';
 import {
+  briefingMessageKey,
   matchesApplicationConfirmationNoticeLineage,
   matchesPreparedEmailObserverClaim,
   securityIncidentId,
 } from '@assistant/persistence';
 import { type DocumentSnapshot, Timestamp, type Transaction } from '@google-cloud/firestore';
+import { readFirestoreSavedBriefing } from './briefing-watchdog.js';
 import { conversationDocument } from './conversation-document.js';
 import { messageRecord } from './messages.js';
 import {
@@ -408,6 +410,11 @@ export class FirestoreOwnerNoticeRepository implements NotificationsConversation
     });
   }
 
+  async readBriefingPublication(agentId: string, taskId: string) {
+    if (agentId !== this.agentId) return null;
+    return readFirestoreSavedBriefing(this.store, agentId, taskId);
+  }
+
   async postWithDecisionFence(
     input: OwnerNoticeDecisionFenceInput,
   ): Promise<OwnerNoticeDecisionFenceResult> {
@@ -450,6 +457,16 @@ export class FirestoreOwnerNoticeRepository implements NotificationsConversation
       if (currentGeneration !== input.observationFence)
         throw new Error('Privacy erasure changed during owner notice composition');
       await this.assertErasureUnchanged(tx, fence);
+      if (input.deduplicateBriefing && input.taskId) {
+        const saved = await readFirestoreSavedBriefing(
+          this.store,
+          this.agentId,
+          input.taskId,
+          undefined,
+          tx,
+        );
+        if (saved) return { status: 'posted', ...saved, replayed: true };
+      }
 
       const inactiveSuggestionSourceRefs: string[] = [];
       const pendingSuggestionWindows: Array<{
@@ -567,8 +584,10 @@ export class FirestoreOwnerNoticeRepository implements NotificationsConversation
           inactiveSecurityIncidents,
         };
       const conversationId = destination.row.id;
+      const messageId =
+        input.deduplicateBriefing && input.taskId ? briefingMessageKey(input.taskId) : randomUUID();
       this.appendNoticeInTransaction(tx, destination, {
-        id: randomUUID(),
+        id: messageId,
         text: input.text,
         ...(input.taskId ? { taskId: input.taskId } : {}),
         extraParts: input.extraParts ?? [],
@@ -576,7 +595,7 @@ export class FirestoreOwnerNoticeRepository implements NotificationsConversation
       });
       for (const attention of attentionToAccept)
         tx.update(attention.ref, { deliveryStatus: 'accepted', updatedAt: publicationNow });
-      return { status: 'posted', conversationId };
+      return { status: 'posted', conversationId, messageId };
     });
   }
 

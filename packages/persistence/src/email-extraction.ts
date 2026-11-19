@@ -1,3 +1,30 @@
+export const EMAIL_EXTRACTION_MIN_IMPORTANCE = 3;
+export const EMAIL_EXTRACTION_LOGISTICS_CATEGORIES = [
+  'travel',
+  'appointment',
+  'financial',
+  'commitment',
+  'transactional',
+  'security',
+] as const;
+export const EMAIL_EXTRACTION_ALWAYS_ELIGIBLE = [
+  ...EMAIL_EXTRACTION_LOGISTICS_CATEGORIES,
+  'personal',
+];
+export const EMAIL_EXTRACTION_EXCLUDED = ['bulk', 'quarantined'];
+
+export function eligibleEmailExtraction(input: {
+  importance?: number;
+  category?: string;
+}): boolean {
+  return (
+    !!input.category &&
+    !EMAIL_EXTRACTION_EXCLUDED.includes(input.category) &&
+    ((input.importance ?? 0) >= EMAIL_EXTRACTION_MIN_IMPORTANCE ||
+      EMAIL_EXTRACTION_ALWAYS_ELIGIBLE.some((category) => category === input.category))
+  );
+}
+
 export interface EmailExtractionRow {
   id: string;
   agentId: string;

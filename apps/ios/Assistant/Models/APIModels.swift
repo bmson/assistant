@@ -1306,15 +1306,18 @@ struct ActivityList: Codable, Sendable {
     let searchIncomplete: Bool?
     let scanned: Int?
     let captureStatus: String?
+    let needsYouCount: Int?
 
     init(items: [ActivityItem], archivedCount: Int, nextCursor: String? = nil,
-         searchIncomplete: Bool? = nil, scanned: Int? = nil, captureStatus: String? = nil) {
+         searchIncomplete: Bool? = nil, scanned: Int? = nil, captureStatus: String? = nil,
+         needsYouCount: Int? = nil) {
         self.items = items
         self.archivedCount = archivedCount
         self.nextCursor = nextCursor
         self.searchIncomplete = searchIncomplete
         self.scanned = scanned
         self.captureStatus = captureStatus
+        self.needsYouCount = needsYouCount
     }
 }
 
@@ -3009,6 +3012,7 @@ struct WorkspaceSkill: Codable, Identifiable, Sendable {
 struct WorkspaceSettings: Codable, Sendable {
     var agent: WorkspaceAgentSettings
     var schedules: [WorkspaceSchedule]
+    var visibleAutomations: [WorkspaceSchedule] { schedules.filter(\.isVisibleInAutomations) }
     var reminders: [WorkspaceReminder]
     var policies: [WorkspacePolicy]
     let goalAutomationCount: Int
@@ -3054,6 +3058,12 @@ struct WorkspaceSchedule: Codable, Identifiable, Sendable {
     let nextRunAt: String?
     let lastRunAt: String?
 
+    let visibleInAutomations: Bool?
+
+    // Older servers sent every maintenance schedule in this list.
+    var isVisibleInAutomations: Bool {
+        visibleInAutomations ?? ["daily-briefing", "tomorrow-check", "weekly-review"].contains(name)
+    }
     var displayName: String { label ?? name.sentenceCaseIdentifier }
 }
 

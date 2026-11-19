@@ -15,7 +15,7 @@ import {
 } from '@assistant/firestore';
 import { assistantModuleMetas } from '@assistant/modules/meta';
 import type { AgentReadinessSource } from '@assistant/persistence';
-import { scheduleLabels } from '@/app/settings/labels';
+import { mobileAutomations } from '@/lib/mobile-automations';
 import { getSelfRepairOverview } from '@/lib/self-repair-server';
 import { projectStandingApprovalPolicy } from '@/lib/standing-approval-view';
 import { readMobileWorkspaceSection } from './mobile-workspace-sections';
@@ -276,17 +276,7 @@ export async function getFirestoreMobileWorkspace(
             locale: settings.agent.locale,
             signature: settings.agent.signature,
           },
-          schedules: settings.schedules
-            .filter((schedule) => !schedule.name.startsWith('reminder:'))
-            .map((schedule) => ({
-              id: schedule.id,
-              name: schedule.name,
-              label: scheduleLabels[schedule.name] ?? null,
-              cron: schedule.cron,
-              enabled: schedule.enabled,
-              nextRunAt: schedule.nextRunAt,
-              lastRunAt: schedule.lastRunAt,
-            })),
+          schedules: mobileAutomations(settings.schedules),
           reminders: settings.reminders,
           policies: settings.policies.map((policy) =>
             projectStandingApprovalPolicy(policy, config.PHONE_CALL_TO_OWNER_GRANT_ENABLED),
