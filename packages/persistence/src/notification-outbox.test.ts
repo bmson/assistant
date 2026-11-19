@@ -1,11 +1,13 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { notificationDeliveryKey } from './notification-delivery.js';
 import {
+  drainNotificationOutbox,
   type NotificationOutboxLeg,
   type NotificationOutboxPreparation,
   type NotificationOutboxRepository,
   sendNotificationOutboxLeg,
 } from './notification-outbox.js';
+import type { Records } from './records.js';
 
 class MemoryOutbox implements NotificationOutboxRepository {
   readonly kind = 'notification-outbox-repository' as const;
@@ -169,6 +171,53 @@ describe('durable notification outbox helper', () => {
     expect(sends.get('device-a')).toBe(1);
     expect(sends.get('device-b')).toBe(2);
   });
+
+  it.each(['dashboard', 'sms', 'push'])(
+    'suppresses a legacy queued answer on %s while allowing a different notice for the same task',
+    async (adapter) => {
+      const outbox = new MemoryOutbox();
+      const task = {
+        id: 'task-1',
+        agentId: 'owner-1',
+        conversationId: 'secondary-chat',
+        type: 'chat_turn',
+        trust: 'owner',
+        state: { pendingFinal: { text: 'Private final answer.' } },
+      };
+      const legacy = preparation('old', adapter);
+      await outbox.prepare({
+        ...legacy,
+        deliveryKey: notificationDeliveryKey(
+          'outbox',
+          task.agentId,
+          notificationDeliveryKey(
+            'owner-notice',
+            task.id,
+            task.conversationId,
+            'Private final answer.',
+          ),
+        ),
+        payload: adapter === 'push' ? { data: { taskId: task.id } } : { taskId: task.id },
+      });
+      await outbox.prepare({
+        ...preparation('other', adapter),
+        payload: adapter === 'push' ? { data: { taskId: task.id } } : { taskId: task.id },
+      });
+      const send = vi.fn(async () => ({ status: 'delivered' as const }));
+      await drainNotificationOutbox(outbox, {
+        agentId: task.agentId,
+        adapter,
+        now,
+        send,
+        loadTask: async () => task as Records['tasks'],
+      });
+      expect(send).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ legKey: 'other' }));
+      expect([...outbox.rows.values()][0]).toMatchObject({
+        status: 'skipped',
+        result: { reason: 'legacy-chat-answer-notification' },
+      });
+    },
+  );
 
   it('never retries an ambiguous attempt, including a sender throw', async () => {
     const outbox = new MemoryOutbox();

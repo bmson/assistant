@@ -473,7 +473,7 @@ describe('response cards', () => {
     expect(cards[0]).toMatchObject({
       id: 'calendar-updated-flight',
       title: 'Calendar event updated',
-      details: [{ label: 'Time', value: '2026-10-09T13:45:00-07:00' }],
+      details: [{ label: 'Time', value: 'Oct 9, 2026, 1:45 PM' }],
     });
     expect(JSON.stringify(cards)).not.toContain('booking@airline.example');
   });
@@ -499,11 +499,15 @@ describe('response cards', () => {
         ],
       },
     };
-    const flightCardsWithoutUpdate = responseCardsForFinal({ evidence: [searched] });
+    const flightCardsWithoutUpdate = responseCardsForFinal({
+      evidence: [searched],
+      ownerTimeZone: 'America/Los_Angeles',
+    });
     expect(flightCardsWithoutUpdate.filter((card) => card.kind === 'calendar-event')).toMatchObject(
       [{ title: 'SFO to BER flight' }, { title: 'Lunch' }],
     );
     const cards = responseCardsForFinal({
+      ownerTimeZone: 'America/Los_Angeles',
       evidence: [
         searched,
         {
@@ -518,28 +522,54 @@ describe('response cards', () => {
       { title: 'Lunch' },
     ]);
     expect(JSON.stringify(cards)).not.toContain('09:15');
-    expect(JSON.stringify(cards)).toContain('13:45');
+    expect(JSON.stringify(cards)).toContain('1:45 PM');
+  });
+
+  it.each([
+    ['2026-11-18T18:30:00Z', '2026-11-18T19:45:00Z', '10:30 AM–11:45 AM'],
+    ['2026-07-18T18:30:00Z', '2026-07-18T19:45:00Z', '11:30 AM–12:45 PM'],
+    ['2026-11-18', '2026-11-19', 'All day'],
+    ['2026-11-18T18:30:00', '2026-11-18T19:45:00', 'Time unavailable'],
+  ])('formats event creation %s in the owner time zone', (start, end, time) => {
+    expect(
+      responseCardsForFinal({
+        ownerTimeZone: 'America/Los_Angeles',
+        evidence: [
+          {
+            toolName: 'calendar.create_event',
+            status: 'succeeded',
+            args: { summary: 'Planning', start, end },
+            result: { eventId: 'event' },
+          },
+        ],
+      }),
+    ).toMatchObject([
+      { kind: 'calendar-event', title: 'Planning', time, timeZone: 'America/Los_Angeles' },
+    ]);
   });
 
   it('uses the returned calendar update time instead of the requested time', () => {
-    const cards = statusResponseCards([
-      {
-        toolName: 'calendar.update_event',
-        status: 'succeeded',
-        args: { eventId: 'flight', start: '2026-10-09T09:15:00-07:00', summary: 'United flight' },
-        result: {
-          eventId: 'flight',
-          updated: true,
-          start: '2026-10-09T13:45:00-07:00',
-          summary: 'KLM flight',
+    const cards = statusResponseCards(
+      [
+        {
+          toolName: 'calendar.update_event',
+          status: 'succeeded',
+          args: { eventId: 'flight', start: '2026-10-09T09:15:00-07:00', summary: 'United flight' },
+          result: {
+            eventId: 'flight',
+            updated: true,
+            start: '2026-10-09T13:45:00-07:00',
+            summary: 'KLM flight',
+          },
         },
-      },
-    ]);
+      ],
+      'America/Los_Angeles',
+    );
     expect(cards).toMatchObject([
       {
         title: 'Calendar event updated',
         detail: 'KLM flight',
-        details: [{ label: 'Time', value: '2026-10-09T13:45:00-07:00' }],
+        details: [{ label: 'Time', value: 'Oct 9, 2026, 1:45 PM' }],
       },
     ]);
     expect(JSON.stringify(cards)).not.toContain('09:15');
@@ -732,24 +762,27 @@ describe('response cards', () => {
   });
 
   it('builds calendar cards from successful evidence even when wording detection missed', () => {
-    const result = calendarResponseCards([
-      {
-        toolName: 'calendar.list_events',
-        status: 'succeeded',
-        result: {
-          events: [
-            {
-              eventId: 'coffee',
-              calendarId: 'family',
-              calendar: 'Family',
-              summary: 'Coffee with Tine',
-              start: '2026-09-02T09:00:00-07:00',
-              end: '2026-09-02T10:00:00-07:00',
-            },
-          ],
+    const result = responseCardsForFinal({
+      ownerTimeZone: 'America/Los_Angeles',
+      evidence: [
+        {
+          toolName: 'calendar.list_events',
+          status: 'succeeded',
+          result: {
+            events: [
+              {
+                eventId: 'coffee',
+                calendarId: 'family',
+                calendar: 'Family',
+                summary: 'Coffee with Tine',
+                start: '2026-09-02T16:00:00Z',
+                end: '2026-09-02T17:00:00Z',
+              },
+            ],
+          },
         },
-      },
-    ]);
+      ],
+    });
     expect(result).toMatchObject([
       { kind: 'calendar-event', title: 'Coffee with Tine', time: '9:00 AM–10:00 AM' },
     ]);

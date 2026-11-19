@@ -89,6 +89,7 @@ describe('deterministic calendar agenda integration', () => {
         readRequest: request,
         requestText: ownerText,
       });
+      expect(cards[0]?.timeZone).toBe('America/Los_Angeles');
       const sections = cards[0]?.sections as Array<Record<string, unknown>>;
       const agendaItems = sections.find((section) => section.type === 'agenda')?.items as Array<
         Record<string, unknown>
@@ -96,6 +97,8 @@ describe('deterministic calendar agenda integration', () => {
       expect(agendaItems).toHaveLength(2);
       expect(agendaItems.find((item) => item.title === family.summary)).toMatchObject({
         time: '4:25 PM – 6:30 PM',
+        start: family.start,
+        end: family.end,
       });
       expect(JSON.stringify(agendaItems)).toContain('5:10 PM');
       const overlap = sections.find((section) => Array.isArray(section.overlaps));

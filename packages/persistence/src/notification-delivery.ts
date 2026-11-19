@@ -7,6 +7,8 @@ import type { SmsDeliveryAccounting } from './sms-segments.js';
  * owner read it. `unknown` is a transport ambiguity and is not safe to retry
  * automatically without a durable provider idempotency key.
  */
+export type OwnerNoticePurpose = 'answer-ready' | 'task-attention' | 'leave-now';
+
 export type NotificationLegStatus =
   | 'delivered'
   | 'held'
