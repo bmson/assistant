@@ -128,6 +128,12 @@ Modelled on one real week. Production on Nov 18, 2026 raised one of them (S17).
 
 S14 tests quiet; S19 tests both an action and restraint; S23 checks data. The remaining 25 scenarios each expect a delivered moment.
 
+## Running the replay
+
+With a local PostgreSQL test server and the Firestore emulator running, set `TEST_DATABASE_URL` to the loopback PostgreSQL connection and `FIRESTORE_EMULATOR_HOST` to the emulator address. Run `pnpm test:proactive-replay`. The command writes a Markdown scorecard and JSON evidence in `.artifacts/proactive-replay/`.
+
+The current slice measures timely delivery for S16 and S17 and suppression after payment for S14. It reads durable cards and acknowledgments from a simulated push service. S14 first establishes that the unpaid bill could be delivered. That setup and the generic-mail control are excluded from the recall and precision denominators. The other scenarios await executable fixtures.
+
 ## Adding scenarios (H2)
 
 The weekly audit in the owner's installation compares sampled real data with delivered moments and lists the top misses. For each miss, write a **synthetic** scenario that reproduces its shape (who, when, which source, expected kind, window) and add it here with a new `S` number. Never copy the original text.

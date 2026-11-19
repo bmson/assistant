@@ -119,7 +119,7 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | G2  | Health data minimization                                               | 4     | M    | —          | open                                                          |
 | G3  | Permissions live in policy, not memory                                 | 5     | S    | —          | open                                                          |
 | G4  | Household consent and visibility                                       | 5     | S    | B2         | open                                                          |
-| H1  | Golden-signal benchmark harness                                        | 3     | L    | —          | open                                                          |
+| H1  | Golden-signal benchmark harness                                        | 3     | L    | —          | in progress (S14, S16 and S17 on both drivers)                |
 | H2  | Weekly missed-signal audit                                             | 5     | M    | H1         | open                                                          |
 | H3  | Proactive telemetry                                                    | 5     | M    | —          | open                                                          |
 | H4  | Daily canary                                                           | 0     | S    | —          | open                                                          |
