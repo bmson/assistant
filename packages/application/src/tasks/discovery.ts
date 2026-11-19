@@ -20,6 +20,9 @@ export async function discoverActivityWithRepository(
   const page = await repository.scan(agentId, {
     after: decodeDiscoveryCursor(agentId, repository.driver, input),
     limit: SCAN_LIMIT,
+    ...(!input.archived && input.filter === 'needs-you' && !input.cursor
+      ? { includeNeedsYouCount: true }
+      : {}),
   });
   const selected = [];
   let scanned = 0;
@@ -45,6 +48,7 @@ export async function discoverActivityWithRepository(
       stuckWaiting: row.status === 'waiting_approval' && !pending.has(row.id),
     })),
     archivedCount: page.archivedCount,
+    needsYouCount: page.needsYouCount,
     nextCursor:
       hasMore && last
         ? encodeDiscoveryCursor(agentId, repository.driver, input, {

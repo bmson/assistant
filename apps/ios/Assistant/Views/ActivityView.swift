@@ -1362,6 +1362,12 @@ struct ActivityView: View {
     @State private var showingArchived = false
     @State private var activityActionInFlight: String?
     @State private var archiveProgress: ArchiveOldActivityProgress?
+    @State private var staleAttentionProgress: ArchiveOldActivityProgress?
+    @State private var confirmingStaleArchive = false
+
+    private var visibleArchiveProgress: ArchiveOldActivityProgress? {
+        filter == .needsYou ? staleAttentionProgress : archiveProgress
+    }
     @State private var budgetItem: ActivityItem?
     @State private var itemPendingCancellation: ActivityItem?
     @State private var budgetText = ""
@@ -1386,44 +1392,10 @@ struct ActivityView: View {
                     isLoading: discoveryInFlight,
                     onSubmit: { loadDiscovery(reset: true) }
                 )
-                if let archiveProgress, !archiveProgress.complete {
-                    Label(
-                        "Archived \(archiveProgress.archivedTotal) older tasks. Continue to process the next batch.",
-                        systemImage: "archivebox"
-                    )
-                    .font(.footnote)
-                    .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
-                    .accessibilityIdentifier("activity-archive-progress")
-                }
+                archiveProgressStatus
                 if !items.isEmpty { activitySummary }
 
-                if discovery == nil && (showingArchived ? model.archivedActivity == nil : model.overview == nil) {
-                    AssistantLoadingState(title: "Loading activity…")
-                } else if filteredItems.isEmpty {
-                    AssistantEmptyState(
-                        emptyStateTitle,
-                        systemImage: "waveform.path.ecg",
-                        description: emptyStateDescription
-                    )
-                } else if isLandscape {
-                    LazyVGrid(
-                        columns: [
-                            GridItem(.flexible(), spacing: AssistantTheme.cardStackSpacing),
-                            GridItem(.flexible(), spacing: AssistantTheme.cardStackSpacing),
-                        ],
-                        spacing: AssistantTheme.cardStackSpacing
-                    ) {
-                        ForEach(filteredItems) { item in
-                            activityCard(item)
-                        }
-                    }
-                } else {
-                    LazyVStack(spacing: AssistantTheme.cardStackSpacing) {
-                        ForEach(filteredItems) { item in
-                            activityCard(item)
-                        }
-                    }
-                }
+                activityRows
                 if showsSecurityReviews, let securityReviewController {
                     SecurityReviewSection(controller: securityReviewController)
                 }
@@ -1457,6 +1429,7 @@ struct ActivityView: View {
                 filter = .needsYou
             }
 #endif
+            if discovery == nil && filter == .needsYou { loadDiscovery(reset: true) }
             updateChecklistCorrectionEligibility()
         }
         .onChange(of: showingArchived) { _, _ in
@@ -1467,6 +1440,7 @@ struct ActivityView: View {
             activityStatuses = [:]
             activityStatusAvailability.reset()
             statusRefreshOffset = 0
+            if filter == .needsYou { loadDiscovery(reset: true) }
             disposeSecurityReviews()
             updateChecklistCorrectionEligibility()
         }
@@ -1474,11 +1448,14 @@ struct ActivityView: View {
             discoveryTask?.cancel()
             discoveryGeneration = UUID()
             discoveryInFlight = false
-            if discovery != nil { loadDiscovery(reset: true) }
+            if discovery != nil || filter == .needsYou { loadDiscovery(reset: true) }
             if !showsSecurityReviews { disposeSecurityReviews() }
             updateChecklistCorrectionEligibility()
         }
         .onChange(of: model.activityConnectionVersion) { _, _ in
+            archiveProgress = nil
+            staleAttentionProgress = nil
+            confirmingStaleArchive = false
             discoveryTask?.cancel()
             discoveryGeneration = UUID()
             discoveryInFlight = false
@@ -1486,6 +1463,7 @@ struct ActivityView: View {
             activityStatuses = [:]
             activityStatusAvailability.reset()
             statusRefreshOffset = 0
+            if filter == .needsYou { loadDiscovery(reset: true) }
             disposeSecurityReviews()
             disposeChecklistCorrections()
         }
@@ -1511,36 +1489,13 @@ struct ActivityView: View {
         .toolbarBackground(.visible, for: .navigationBar)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Menu {
-                    Button(
-                        showingArchived ? "Show current activity" : "Show archived activity",
-                        systemImage: showingArchived ? "tray.and.arrow.up" : "archivebox"
-                    ) {
-                        showingArchived.toggle()
-                        if showingArchived { Task { await model.refreshArchivedActivity() } }
-                    }
-                    if !showingArchived {
-                        Button(
-                            archiveProgress.map { $0.complete ? "Archive old activity" : "Continue archiving (\($0.archivedTotal))" } ?? "Archive old activity",
-                            systemImage: "archivebox"
-                        ) {
-                            activityActionInFlight = "archive-old"
-                            Task {
-                                let operationId = archiveProgress?.complete == false
-                                    ? archiveProgress?.operationId
-                                    : nil
-                                if let progress = await model.archiveOldActivity(operationId: operationId) {
-                                    archiveProgress = progress
-                                }
-                                activityActionInFlight = nil
-                            }
-                        }
-                        .disabled(activityActionInFlight != nil)
-                    }
-                } label: {
-                    Label("Activity actions", systemImage: "ellipsis")
-                }
+                activityToolbarMenu
             }
+        }
+        .confirmationDialog("Clear stale activity?", isPresented: $confirmingStaleArchive) {
+            Button("Clear stale") { archiveOldActivity(staleAttention: true) }
+        } message: {
+            Text("Archives items that have needed attention for over 30 days and have no pending approval.")
         }
         .refreshable {
             if showingArchived { await model.refreshArchivedActivity() }
@@ -1588,6 +1543,85 @@ struct ActivityView: View {
             Text("This cancels “\(item.displayTitle)”.")
         }
         .sensoryFeedback(.selection, trigger: filter)
+    }
+
+    @ViewBuilder
+    private var archiveProgressStatus: some View {
+        if let archiveProgress = visibleArchiveProgress,
+           !showingArchived, !archiveProgress.complete || filter == .needsYou {
+            Label(
+                archiveProgress.complete
+                    ? "Archived \(archiveProgress.archivedTotal) older tasks."
+                    : "Archived \(archiveProgress.archivedTotal) older tasks. Continue to process the next batch.",
+                systemImage: "archivebox"
+            )
+            .font(.footnote)
+            .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+            .accessibilityIdentifier("activity-archive-progress")
+        }
+    }
+
+    @ViewBuilder
+    private var activityRows: some View {
+        if discovery == nil && (showingArchived ? model.archivedActivity == nil : model.overview == nil) {
+            AssistantLoadingState(title: "Loading activity…")
+        } else if filteredItems.isEmpty {
+            AssistantEmptyState(
+                emptyStateTitle,
+                systemImage: "waveform.path.ecg",
+                description: emptyStateDescription
+            )
+        } else if isLandscape {
+            LazyVGrid(
+                columns: [
+                    GridItem(.flexible(), spacing: AssistantTheme.cardStackSpacing),
+                    GridItem(.flexible(), spacing: AssistantTheme.cardStackSpacing),
+                ],
+                spacing: AssistantTheme.cardStackSpacing
+            ) {
+                ForEach(filteredItems) { item in
+                    activityCard(item)
+                }
+            }
+        } else {
+            LazyVStack(spacing: AssistantTheme.cardStackSpacing) {
+                ForEach(filteredItems) { item in
+                    activityCard(item)
+                }
+            }
+        }
+    }
+
+    private var activityToolbarMenu: some View {
+        Menu {
+            Button(
+                showingArchived ? "Show current activity" : "Show archived activity",
+                systemImage: showingArchived ? "tray.and.arrow.up" : "archivebox"
+            ) {
+                showingArchived.toggle()
+                if showingArchived { Task { await model.refreshArchivedActivity() } }
+            }
+            if !showingArchived {
+                let staleAttention = filter == .needsYou
+                let progress = visibleArchiveProgress
+                let continuing = progress?.complete == false
+                Button(
+                    continuing
+                        ? "Continue archiving (\(progress?.archivedTotal ?? 0))"
+                        : staleAttention ? "Clear stale" : "Archive old activity",
+                    systemImage: "archivebox"
+                ) {
+                    if staleAttention && !continuing {
+                        confirmingStaleArchive = true
+                    } else {
+                        archiveOldActivity(staleAttention: staleAttention)
+                    }
+                }
+                .disabled(activityActionInFlight != nil)
+            }
+        } label: {
+            Label("Activity actions", systemImage: "ellipsis")
+        }
     }
 
     private var filterControl: some View {
@@ -1640,7 +1674,8 @@ struct ActivityView: View {
             let newItems = page.items.filter { seen.insert($0.id).inserted }
             discovery = ActivityList(items: previous + newItems, archivedCount: page.archivedCount,
                                      nextCursor: page.nextCursor, searchIncomplete: page.searchIncomplete,
-                                     scanned: page.scanned, captureStatus: page.captureStatus)
+                                     scanned: page.scanned, captureStatus: page.captureStatus,
+                                     needsYouCount: page.needsYouCount ?? (reset ? nil : discovery?.needsYouCount))
         }
     }
 
@@ -1848,7 +1883,7 @@ struct ActivityView: View {
 
     private func activityActions(_ item: ActivityItem) -> some View {
         Menu {
-            if isTerminal(item) {
+            if isTerminal(item) || (item.status == "needs_attention" && !item.hasPendingApproval) {
                 Button("Archive", systemImage: "archivebox") {
                     updateActivity(item, action: "archive")
                 }
@@ -1883,11 +1918,29 @@ struct ActivityView: View {
         }
     }
 
+    private func archiveOldActivity(staleAttention: Bool) {
+        let previous = staleAttention ? staleAttentionProgress : archiveProgress
+        let operationId = previous?.complete == false ? previous?.operationId : nil
+        let connectionVersion = model.activityConnectionVersion
+        activityActionInFlight = "archive-old"
+        Task {
+            let progress = await model.archiveOldActivity(
+                operationId: operationId, staleAttention: staleAttention
+            )
+            activityActionInFlight = nil
+            guard let progress, model.activityConnectionIsCurrent(version: connectionVersion) else { return }
+            if staleAttention { staleAttentionProgress = progress }
+            else { archiveProgress = progress }
+            if discovery != nil || filter == .needsYou { loadDiscovery(reset: true) }
+        }
+    }
+
     private func updateActivity(_ item: ActivityItem, action: String) {
         activityActionInFlight = item.id
         Task {
-            _ = await model.updateActivity(item, action: action)
+            let updated = await model.updateActivity(item, action: action)
             activityActionInFlight = nil
+            if updated && (discovery != nil || filter == .needsYou) { loadDiscovery(reset: true) }
         }
     }
 

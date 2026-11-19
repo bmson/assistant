@@ -5,7 +5,7 @@ import type {
   TaskActivityRepository,
   TaskTimelineCursor,
 } from '@assistant/persistence';
-import { isChatAdmissionCancellationProjection } from '@assistant/persistence';
+import { isActivityCanary, isChatAdmissionCancellationProjection } from '@assistant/persistence';
 import {
   FieldPath,
   type Query,
@@ -79,14 +79,6 @@ function taskFromDocument(value: unknown, documentId: string, agentId: string): 
   } as ActivityTaskRecord;
 }
 
-function isCanary(trigger: unknown): boolean {
-  if (!trigger || typeof trigger !== 'object' || Array.isArray(trigger)) return false;
-  const payload = (trigger as { payload?: unknown }).payload;
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
-  const value = (payload as { canary?: unknown }).canary;
-  return value === true || value === 'true';
-}
-
 /** A bounded owner scan preserves SQL's archived count, filters, and updated ordering. */
 export class FirestoreTaskActivityRepository
   implements TaskActivityRepository, TaskActivityDetailRepository
@@ -119,7 +111,7 @@ export class FirestoreTaskActivityRepository
     // exist, so this needs no new index.
     const wanted = (row: ActivityTaskRecord) =>
       (input.archived ? row.archivedAt !== null : row.archivedAt === null) &&
-      !isCanary(row.trigger) &&
+      !isActivityCanary(row.trigger) &&
       !isChatAdmissionCancellationProjection(row) &&
       (!statuses || statuses.has(row.status));
     const newestFirst = async (query: Query): Promise<ActivityTaskRecord[]> => {
@@ -174,7 +166,9 @@ export class FirestoreTaskActivityRepository
       .slice(0, input.limit);
 
     // One lookup per task waiting on approval, side by side rather than in turn.
-    const waiting = tasks.filter((row) => row.status === 'waiting_approval');
+    const waiting = tasks.filter(
+      (row) => row.status === 'waiting_approval' || row.status === 'needs_attention',
+    );
     const pendingApprovalTaskIds = (
       await Promise.all(
         waiting.map(async (task) => {
@@ -221,9 +215,9 @@ export class FirestoreTaskActivityRepository
     if (!snapshot.exists) return null;
     if (snapshot.get('agentId') !== agentId) return null;
     const task = taskFromDocument(snapshot.data(), snapshot.id, agentId);
-    if (isCanary(task.trigger) || isChatAdmissionCancellationProjection(task)) return null;
+    if (isActivityCanary(task.trigger) || isChatAdmissionCancellationProjection(task)) return null;
     const hasPendingApproval =
-      task.status === 'waiting_approval' &&
+      (task.status === 'waiting_approval' || task.status === 'needs_attention') &&
       !(
         await this.store
           .collection('approvals')

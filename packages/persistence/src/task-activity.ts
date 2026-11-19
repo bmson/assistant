@@ -1,6 +1,26 @@
 import type { Records } from './records.js';
 import type { TaskTimelineCursor } from './task-timeline.js';
 
+/** The actionable task rows in the owner-facing Needs You filter. */
+export const needsYouTaskStatuses = [
+  'waiting_approval',
+  'waiting_budget',
+  'waiting_estimated_cost',
+  'needs_attention',
+] as const;
+
+export function canArchiveActivityStatus(status: string): boolean {
+  return ['done', 'failed', 'cancelled', 'needs_attention'].includes(status);
+}
+
+export function isActivityCanary(trigger: unknown): boolean {
+  if (!trigger || typeof trigger !== 'object' || Array.isArray(trigger)) return false;
+  const payload = (trigger as { payload?: unknown }).payload;
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
+  const value = (payload as { canary?: unknown }).canary;
+  return value === true || value === 'true';
+}
+
 export type ActivityTaskRecord = Pick<
   Records['tasks'],
   | 'id'

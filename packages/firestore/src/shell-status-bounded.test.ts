@@ -89,7 +89,9 @@ it('pages imported-size source collections and preserves exact shell counts', as
   const taskRows = Array.from({ length: 12_945 }, (_, index) => ({
     id: `task-${String(index).padStart(5, '0')}`,
     agentId: 'owner',
-    status: index % 3 === 0 ? 'needs_attention' : index % 3 === 1 ? 'running' : 'done',
+    status: index % 100 === 0 ? 'needs_attention' : index % 3 === 1 ? 'running' : 'done',
+    archivedAt: null,
+    updatedAt: now,
   }));
   const memoryRows = Array.from({ length: 4_519 }, (_, index) => ({
     id: `memory-${String(index).padStart(4, '0')}`,
@@ -177,12 +179,11 @@ it('pages imported-size source collections and preserves exact shell counts', as
     },
   });
   expect(stats.largestPage).toBe(1000);
-  // The memories and the pending approvals are paged; the 12,945 tasks are not
-  // read at all — their statuses are counted, which used to take more than
-  // twenty-five pages of every task the assistant had created.
+  // Only current Needs You buckets are read. The unrelated task history does
+  // not add pages to the shell-status scan.
   expect(stats.pages).toBeGreaterThanOrEqual(6);
-  expect(stats.pages).toBeLessThan(12);
-  expect(stats.projections).not.toContainEqual(['id', 'agentId', 'status']);
+  expect(stats.pages).toBeLessThan(16);
+  expect(stats.projections).toContainEqual(['id', 'agentId', 'updatedAt', 'trigger']);
   expect(stats.projections).toContainEqual([
     'id',
     'agentId',

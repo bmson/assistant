@@ -2,6 +2,8 @@
 /** Highest value persisted by PostgreSQL's signed 32-bit queue_generation column. */
 export const MAX_TASK_QUEUE_GENERATION = 2_147_483_647;
 
+export type ActivityArchiveScope = 'terminal' | 'stale-attention';
+
 export interface ArchiveOldActivityProgress {
   /** Stable identifier for resuming a bounded archive run. Null for atomic SQL runs. */
   operationId: string | null;
@@ -290,5 +292,6 @@ export interface TaskActivityCommandRepository {
     agentId: string,
     olderThanDays?: number,
     operationId?: string,
+    scope?: ActivityArchiveScope,
   ): Promise<ArchiveOldActivityProgress>;
 }

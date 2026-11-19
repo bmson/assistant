@@ -939,6 +939,36 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       });
     });
 
+    it('archives attention only without pending approval and can restore it before retrying', async () => {
+      const approval = store.doc('approvals', 'pending-attention');
+      await approval.set({ id: 'pending-attention', taskId: retryId, status: 'pending' });
+      await expect(repository.archive(agentId, retryId)).resolves.toMatchObject({
+        outcome: 'no_longer_retriable',
+      });
+      await expect(repository.archive(agentId, 'foreign')).resolves.toMatchObject({
+        outcome: 'not_found',
+      });
+      await approval.update({ status: 'approved' });
+      await expect(repository.archive(agentId, retryId)).resolves.toMatchObject({
+        outcome: 'archived',
+        current: { status: 'needs_attention', queueGeneration: 5 },
+      });
+      await expect(repository.archive(agentId, retryId)).resolves.toMatchObject({
+        outcome: 'already_archived',
+      });
+      await expect(repository.retry(agentId, retryId)).resolves.toMatchObject({
+        outcome: 'no_longer_retriable',
+      });
+      expect((await store.collection('outbox').get()).size).toBe(0);
+      expect((await store.doc('tasks', retryId).get()).get('state')).toMatchObject({
+        checkpoint: 'resume',
+      });
+      await expect(repository.restore(agentId, retryId)).resolves.toMatchObject({
+        outcome: 'restored',
+        current: { status: 'needs_attention', archivedAt: null },
+      });
+    });
+
     it('hides cancellation marker task IDs from archive, restore, and archive-old', async () => {
       await seedCancellationMarker();
       await expect(repository.archive(agentId, markerId)).resolves.toMatchObject({
@@ -1072,6 +1102,37 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       expect(
         await repository.archiveOld(agentId, 30, first.operationId ?? undefined),
       ).toMatchObject({ archivedTotal: 601, complete: true, scannedThisBatch: 0 });
+    });
+
+    it('keeps stale attention continuation separate from terminal cleanup', async () => {
+      const old = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000);
+      const batch = store.db.batch();
+      for (let index = 0; index < 51; index += 1) {
+        const id = `stalled-${String(index).padStart(2, '0')}`;
+        batch.set(store.doc('tasks', id), {
+          ...taskFixture({ id, agentId, conversationId: randomUUID(), reminderId: '' }),
+          status: 'needs_attention',
+          updatedAt: old,
+        });
+      }
+      await batch.commit();
+      const first = await repository.archiveOld(agentId, 30, undefined, 'stale-attention');
+      expect(first).toMatchObject({ archivedTotal: expect.any(Number), complete: false });
+      const operationId = first.operationId ?? undefined;
+      expect(operationId).toBeDefined();
+      await expect(repository.archiveOld(agentId, 30, operationId)).rejects.toThrow(
+        'Archive-old activity operation was not found',
+      );
+      const second = await repository.archiveOld(agentId, 30, operationId, 'stale-attention');
+      expect(second).toMatchObject({ operationId, archivedTotal: 51, complete: true });
+      await expect(
+        repository.archiveOld(agentId, 30, operationId, 'stale-attention'),
+      ).resolves.toMatchObject({
+        operationId,
+        archivedTotal: 51,
+        complete: true,
+        archivedThisBatch: 0,
+      });
     });
 
     it('rechecks ownership and privacy erasure before each continuation batch', async () => {

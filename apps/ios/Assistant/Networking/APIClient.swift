@@ -817,11 +817,13 @@ struct APIClient: Sendable, GoogleCalendarConnectionService, McpSignInOptionsSer
         _ = try await perform(request, as: OkPayload.self)
     }
 
-    func archiveOldActivity(operationId: String? = nil) async throws -> ArchiveOldActivityProgress {
+    func archiveOldActivity(
+        operationId: String? = nil, staleAttention: Bool = false
+    ) async throws -> ArchiveOldActivityProgress {
         var request = makeRequest(url: configuration.baseURL.appending(path: "api/mobile/v1/activity"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "content-type")
-        var body = ["action": "archive-old"]
+        var body = ["action": staleAttention ? "clear-stale-attention" : "archive-old"]
         if let operationId { body["operationId"] = operationId }
         request.httpBody = try JSONEncoder().encode(body)
         return try await perform(request, as: ArchiveOldActivityProgress.self)
