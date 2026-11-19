@@ -1,18 +1,22 @@
 import { randomUUID } from 'node:crypto';
 import {
   agents,
+  budgets,
   costEvents,
   costReservations,
   createDb,
   createPostgresCostRepository,
+  createPostgresTaskRepository,
   type Db,
   modelCalls,
+  resumePostgresBudgetWakes,
+  tasks,
 } from '@assistant/db';
 import { assertAllocatedTestTarget } from '@assistant/db/test-target';
 import { addMicros, usdDecimalToMicros } from '@assistant/persistence';
-import { sql } from 'drizzle-orm';
+import { eq, inArray, sql } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
-import { getCostsDashboard } from './costs.js';
+import { getCostsDashboard, updateBudgetCaps } from './costs.js';
 
 const DATABASE_URL = process.env.DATABASE_URL;
 assertAllocatedTestTarget({
@@ -498,6 +502,97 @@ describe('PostgreSQL costs dashboard reservation exposure aggregate', () => {
         },
       ]);
     } finally {
+      await db.$client.end();
+    }
+  });
+});
+
+describe('PostgreSQL owner cost settings wake', () => {
+  it('makes an eligible parked generation immediately claimable exactly once', async () => {
+    const db = createDb(DATABASE_URL);
+    const repository = createPostgresTaskRepository(db);
+    const costs = createPostgresCostRepository(db);
+    const ids = [randomUUID(), randomUUID(), randomUUID()];
+    const backlogIds = Array.from({ length: 110 }, () => randomUUID());
+    const [eligible, overTaskCap, completed] = ids;
+    if (!eligible || !overTaskCap || !completed) throw new Error('Missing test IDs');
+    const [owner] = await db.select().from(agents).limit(1);
+    const [original] = await db.select().from(budgets).where(eq(budgets.scope, 'daily'));
+    if (!owner || !original) throw new Error('Incomplete test setup');
+    try {
+      await updateBudgetCaps(db, { daily: '0.2' });
+      await db.insert(tasks).values(
+        ids.map((id) => ({
+          id,
+          agentId: owner.id,
+          type: 'adhoc',
+          trust: 'owner',
+          budgetUsdLimit: id === overTaskCap ? '0.20' : '1.00',
+        })),
+      );
+      await db.insert(tasks).values(
+        backlogIds.map((id) => ({
+          id,
+          agentId: owner.id,
+          type: 'adhoc',
+          trust: 'owner',
+          status: 'waiting_budget',
+          updatedAt: new Date(0),
+          runAfter: new Date(Date.now() + 3_600_000),
+        })),
+      );
+      const denial = await costs.reserve({ source: 'model', estimatedUsd: 0.3, taskId: eligible });
+      expect(denial).toMatchObject({
+        ok: false,
+        budget: { scope: 'daily', nextAttemptMicros: 300_000 },
+      });
+      const resumeAt = new Date(Date.now() + 3_600_000);
+      for (const id of ids) {
+        const lease = await repository.claim(id, 0);
+        if (!lease) throw new Error('Incomplete test lease');
+        await repository.parkForBudget(
+          lease,
+          {
+            budgetRetry: {
+              scope: 'daily',
+              nextAttemptMicros: 300_000,
+              critical: false,
+            },
+          },
+          resumeAt,
+        );
+      }
+      await repository.completeTask(completed, { status: 'cancelled' });
+
+      const started = Date.now();
+      expect(await updateBudgetCaps(db, { daily: '0.50' })).toEqual([]);
+      expect(await repository.getTask(eligible)).toMatchObject({ status: 'waiting_budget' });
+      const resumed = await Promise.all([
+        resumePostgresBudgetWakes(db),
+        resumePostgresBudgetWakes(db),
+      ]);
+      expect(resumed.flat()).toEqual([{ id: eligible, queueGeneration: 2 }]);
+      expect(await resumePostgresBudgetWakes(db)).toEqual([]);
+      expect(await updateBudgetCaps(db, { daily: '0.50' })).toEqual([]);
+      expect(await repository.getTask(overTaskCap)).toMatchObject({
+        status: 'waiting_budget',
+        queueGeneration: 1,
+      });
+      expect(await repository.getTask(completed)).toMatchObject({ status: 'cancelled' });
+      expect(await repository.claim(eligible, 1)).toBeNull();
+      expect((await repository.findDueTasks()).map(({ id }) => id)).toContain(eligible);
+      const claims = await Promise.all([
+        repository.claim(eligible, 2),
+        repository.claim(eligible, 2),
+      ]);
+      expect(claims.filter(Boolean)).toHaveLength(1);
+      expect(Date.now() - started).toBeLessThan(60_000);
+    } finally {
+      await db.delete(tasks).where(inArray(tasks.id, [...ids, ...backlogIds]));
+      await db
+        .update(budgets)
+        .set({ limitUsd: original.limitUsd })
+        .where(eq(budgets.scope, 'daily'));
       await db.$client.end();
     }
   });

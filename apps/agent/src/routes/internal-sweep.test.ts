@@ -52,6 +52,9 @@ vi.mock('@assistant/firestore', () => ({
   FirestoreScheduleRepository: class {
     readonly kind = 'schedule-repository';
     constructor(readonly store: unknown) {}
+    async retireDefaultMorningBrief() {
+      return 0;
+    }
   },
 }));
 vi.mock('../deps.js', () => ({
@@ -155,6 +158,7 @@ beforeEach(() => {
     cache: 1,
     memories: 1,
     reservations: 4,
+    reservationsMarkedUnknown: 2,
     locations: 1,
     dreamNotes: 0,
     recallMetrics: 0,
@@ -191,10 +195,12 @@ describe('POST /internal/sweep in Firestore mode', () => {
       awarenessSchedulesCreated: 0,
       schedulesFired: 1,
       budgetNotices: 1,
+      capChangeWakes: 0,
       messagesEmbedded: 7,
       purgedExpired: 3,
       agedHistory: 3,
       releasedReservations: 4,
+      reservationsMarkedUnknown: 2,
     });
     const { maintenance, costs, tasks, recallMetrics, modelRouting } = f.persistence;
     expect(mocks.expireStaleSuggestions).toHaveBeenCalledWith(maintenance);

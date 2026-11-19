@@ -5,6 +5,7 @@ import { loadConfig, validateAgentPersistenceConfig } from '@assistant/config';
 import { createInstallationStore, FirestoreBudgetCapsRepository } from '@assistant/firestore';
 import { revalidatePath } from 'next/cache';
 import { requireOwner } from '@/auth';
+import { dispatchBudgetWakes } from '@/lib/budget-wakes';
 import { getDb } from '@/lib/server';
 
 /** Raise/lower the default task, daily, and monthly hard caps. */
@@ -25,14 +26,18 @@ export async function updateCaps(formData: FormData): Promise<void> {
       databaseId: config.FIRESTORE_DATABASE_ID,
     });
     try {
-      await updateBudgetCapsWithRepository(
+      const wakes = await updateBudgetCapsWithRepository(
         new FirestoreBudgetCapsRepository(store),
         config.FIRESTORE_AGENT_ID,
         values,
       );
+      await dispatchBudgetWakes(config.QUEUE_DRIVER, wakes, store);
     } finally {
       await store.db.terminate();
     }
-  } else await updateBudgetCaps(getDb(), values);
+  } else {
+    const wakes = await updateBudgetCaps(getDb(), values);
+    await dispatchBudgetWakes(config.QUEUE_DRIVER, wakes);
+  }
   revalidatePath('/costs');
 }

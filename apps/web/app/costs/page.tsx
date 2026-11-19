@@ -1,4 +1,4 @@
-import { getCostsDashboard } from '@assistant/application/costs';
+import { classifyDailyBudgetHolds, getCostsDashboard } from '@assistant/application/costs';
 import { billingCoverageProjection } from '@assistant/application/provider-billing';
 import { loadConfig, validateAgentPersistenceConfig } from '@assistant/config';
 import { createInstallationStore, getFirestoreMobileCosts } from '@assistant/firestore';
@@ -65,6 +65,7 @@ export default async function CostsPage() {
     parkedTasks: parked,
     taskDefaultLimit,
   } = dashboard;
+  const dailyBudgetHolds = classifyDailyBudgetHolds(totals);
   const [billing, estimatedCostOverview] = await Promise.all([
     getBillingOverview(),
     getOwnerEstimatedCostOverview(),
@@ -98,6 +99,12 @@ export default async function CostsPage() {
         </p>
       ) : null}
 
+      {dailyBudgetHolds === 'above_threshold' ? (
+        <p className="mt-4 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
+          Pending cost estimates reserve more than 25% of today’s spending limit.
+        </p>
+      ) : null}
+
       <BillingCoverageSummary coverage={billingCoverage} />
       <ProviderBillingCards reports={billing} />
 
@@ -105,8 +112,18 @@ export default async function CostsPage() {
       <section className="mt-8 grid gap-4 sm:grid-cols-2">
         {(
           [
-            { label: 'This month', spent: totals.monthlySpentUsd, limit: totals.monthlyLimitUsd },
-            { label: 'Today', spent: totals.dailySpentUsd, limit: totals.dailyLimitUsd },
+            {
+              label: 'This month',
+              spent: totals.monthlySpentUsd,
+              limit: totals.monthlyLimitUsd,
+              held: totals.monthlyHeldUsd,
+            },
+            {
+              label: 'Today',
+              spent: totals.dailySpentUsd,
+              limit: totals.dailyLimitUsd,
+              held: totals.dailyHeldUsd,
+            },
           ] as const
         ).map((p) => (
           <div key={p.label} className={`${cardShellClass} p-4`}>
@@ -116,12 +133,14 @@ export default async function CostsPage() {
                 {formatUsd(p.spent.toFixed(4))}
               </p>
             </div>
-            <Bar spent={p.spent} held={totals.heldUsd} limit={p.limit} />
+            <Bar spent={p.spent} held={p.held ?? 0} limit={p.limit} />
             <InfoGrid className="mt-3">
               <InfoItem label="Limit">
                 {Number.isFinite(p.limit) ? formatUsd(p.limit.toFixed(2)) : 'No cap'}
               </InfoItem>
-              <InfoItem label="Budget holds">{formatUsd(totals.heldUsd.toFixed(4))}</InfoItem>
+              <InfoItem label="Budget holds">
+                {p.held === undefined ? 'Unavailable' : formatUsd(p.held.toFixed(4))}
+              </InfoItem>
             </InfoGrid>
           </div>
         ))}
@@ -174,6 +193,11 @@ export default async function CostsPage() {
             </section>
           ) : null}
 
+          {totals.heldUsd > 0 ? (
+            <p className="mt-5 text-sm text-muted">
+              {formatUsd(totals.heldUsd.toFixed(4))} in unresolved estimates across all periods.
+            </p>
+          ) : null}
           <DispatchingCostAttempts summary={dashboard.dispatchingAttempts} />
           <UnknownCostAttempts summary={dashboard.unknownAttempts} />
 

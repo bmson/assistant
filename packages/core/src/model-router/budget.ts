@@ -1,3 +1,5 @@
+import type { BudgetRetry } from '@assistant/persistence';
+
 /**
  * Pure budget evaluation — the order matters and is part of the contract:
  * hard task cap → park (owner can grant more); hard daily/monthly → block
@@ -20,6 +22,8 @@ export interface BudgetSnapshot {
    * tasks that never actually approached the cap.
    */
   heldUsd: number;
+  dailyHeldUsd?: number;
+  monthlyHeldUsd?: number;
   /** Percentage (0-100) at which degradation kicks in. */
   softPct: number;
 }
@@ -28,7 +32,7 @@ export type BudgetDecision =
   | { mode: 'primary' }
   | { mode: 'fallback'; reason: string }
   | { mode: 'park'; reason: string }
-  | { mode: 'block'; reason: string };
+  | { mode: 'block'; reason: string; scope?: 'monthly' | 'daily'; budgetRetry?: BudgetRetry };
 
 export interface BudgetEvalOptions {
   /**
@@ -59,16 +63,20 @@ export function evaluateBudget(s: BudgetSnapshot, opts: BudgetEvalOptions = {}):
       reason: `task budget exhausted ($${(s.taskSpentUsd ?? 0).toFixed(4)} of $${s.taskLimitUsd.toFixed(4)})`,
     };
   }
-  if (hard(s.monthlySpentUsd + s.heldUsd, s.monthlyLimitUsd)) {
+  const monthlyCommitted = s.monthlySpentUsd + (s.monthlyHeldUsd ?? s.heldUsd);
+  const dailyCommitted = s.dailySpentUsd + (s.dailyHeldUsd ?? s.heldUsd);
+  if (hard(monthlyCommitted, s.monthlyLimitUsd)) {
     return {
       mode: 'block',
-      reason: `monthly budget exhausted ($${(s.monthlySpentUsd + s.heldUsd).toFixed(2)} of $${s.monthlyLimitUsd.toFixed(2)})`,
+      scope: 'monthly',
+      reason: `monthly budget exhausted ($${monthlyCommitted.toFixed(2)} of $${s.monthlyLimitUsd.toFixed(2)})`,
     };
   }
-  if (hard(s.dailySpentUsd + s.heldUsd, s.dailyLimitUsd)) {
+  if (hard(dailyCommitted, s.dailyLimitUsd)) {
     return {
       mode: 'block',
-      reason: `daily budget exhausted ($${(s.dailySpentUsd + s.heldUsd).toFixed(2)} of $${s.dailyLimitUsd.toFixed(2)})`,
+      scope: 'daily',
+      reason: `daily budget exhausted ($${dailyCommitted.toFixed(2)} of $${s.dailyLimitUsd.toFixed(2)})`,
     };
   }
 

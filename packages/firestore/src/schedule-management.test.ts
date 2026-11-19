@@ -1,7 +1,17 @@
+import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { FirestoreScheduleRepository } from './schedules.js';
 import type { InstallationStore } from './store.js';
 import { disposeStore, emulatorStore } from './test-store.js';
+
+const historicalInstruction =
+  "Prepare the owner's morning brief. Check: (1) today's events on your calendar and the owner's free/busy, (2) recent email in your inbox needing attention (gmail.search newer_than:1d), (3) goals list — anything slipping, (4) upcoming occasions in the next several days (occasions.list) — birthdays or anniversaries to prepare for, (5) your own progress notes. Then send ONE concise brief via owner.notify: schedule, needs-attention items, any upcoming occasion, and what you plan to do today. No fluff.";
+const legacyTemplate = {
+  type: 'scheduled',
+  budgetUsdLimit: '0.10',
+  instruction: historicalInstruction,
+};
+const dailyTemplate = { type: 'scheduled', budgetUsdLimit: '0.10', job: 'briefing.compose' };
 
 describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore schedule management reads', () => {
   let store: InstallationStore;
@@ -34,6 +44,109 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore schedule manage
       updatedAt: new Date('2026-09-12T12:00:00Z'),
     });
   }
+
+  async function seedRetirementPair() {
+    await store.doc('agents', 'owner').set({ id: 'owner' });
+    const morning = await schedules.ensure({
+      agentId: 'owner',
+      name: 'morning-brief',
+      cron: '30 7 * * *',
+      taskTemplate: legacyTemplate,
+      nextRunAt: new Date('2026-11-18T15:30:00.000Z'),
+    });
+    const daily = await schedules.ensure({
+      agentId: 'owner',
+      name: 'daily-briefing',
+      cron: '45 7 * * *',
+      taskTemplate: dailyTemplate,
+      nextRunAt: new Date('2026-11-18T15:45:00.000Z'),
+    });
+    return { morning, daily };
+  }
+
+  it('retires exactly once and preserves subsequent owner re-enable', async () => {
+    const { morning, daily } = await seedRetirementPair();
+    const observations = await Promise.all([
+      schedules.retireDefaultMorningBrief('owner'),
+      schedules.retireDefaultMorningBrief('owner'),
+    ]);
+    expect(observations.sort()).toEqual([0, 1]);
+    expect(await schedules.getByName('owner', 'morning-brief')).toMatchObject({
+      id: morning.id,
+      enabled: false,
+      seedReviewRequired: true,
+      nextRunAt: morning.nextRunAt,
+      taskTemplate: legacyTemplate,
+    });
+    expect(await schedules.getByName('owner', 'daily-briefing')).toEqual(daily);
+    expect((await store.collection('tasks').get()).empty).toBe(true);
+    expect((await store.collection('outbox').get()).empty).toBe(true);
+    expect(await schedules.setOwnerEnabled('owner', morning.id, true)).toBe(true);
+    expect(await schedules.retireDefaultMorningBrief('owner')).toBe(0);
+    expect(await schedules.getByName('owner', 'morning-brief')).toMatchObject({ enabled: true });
+  });
+
+  it.each([
+    'inactive',
+    'paused',
+    'review',
+    'owner-enabled',
+    'custom',
+    'duplicate',
+    'wrong-job',
+    'wrong-owner',
+    'paused-replacement',
+    'identity-conflict',
+    'seed-conflict',
+  ] as const)('leaves %s schedules exactly as stored', async (scenario) => {
+    const { morning, daily } = await seedRetirementPair();
+    const legacyRef = store.doc('schedules', morning.id);
+    const dailyRef = store.doc('schedules', daily.id);
+    switch (scenario) {
+      case 'inactive':
+        await store.doc('coordination', 'migration').set({ status: 'pending_activation' });
+        break;
+      case 'paused':
+        await legacyRef.update({ enabled: false });
+        break;
+      case 'owner-enabled':
+        await schedules.setOwnerEnabled('owner', morning.id, true);
+        break;
+      case 'review':
+        await legacyRef.update({ seedReviewRequired: true });
+        break;
+      case 'custom':
+        await legacyRef.update({ 'taskTemplate.instruction': 'Owner-written briefing.' });
+        break;
+      case 'duplicate':
+        await store.doc('schedules', 'shadow').set({ ...morning, id: 'shadow' });
+        break;
+      case 'wrong-job':
+        await dailyRef.update({ 'taskTemplate.job': 'pulse.check' });
+        break;
+      case 'wrong-owner':
+        await dailyRef.update({ agentId: 'foreign' });
+        break;
+      case 'paused-replacement':
+        await dailyRef.update({ enabled: false });
+        break;
+      case 'identity-conflict': {
+        const key = createHash('sha256')
+          .update(JSON.stringify(['owner', 'daily-briefing']))
+          .digest('hex');
+        await store.doc('scheduleNames', key).update({ scheduleId: 'unrelated' });
+        break;
+      }
+      case 'seed-conflict':
+        await legacyRef.update({
+          seedDefinition: { cron: '0 10 * * *', taskTemplate: legacyTemplate },
+        });
+        break;
+    }
+    const prior = (await legacyRef.get()).data();
+    expect(await schedules.retireDefaultMorningBrief('owner')).toBe(0);
+    expect((await legacyRef.get()).data()).toEqual(prior);
+  });
 
   it('pages all owner schedules in ID order, including disabled and nonreminder rows', async () => {
     await seed('b', 'owner');

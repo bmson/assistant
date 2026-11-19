@@ -2,16 +2,16 @@
   "format": 1,
   "purpose": "Source composition and route drift evidence only; not a deployment or configured-runtime receipt.",
   "runtimeSources": {
-    "packages/config/src/index.ts": "563c98374b32afdf42eab148f4ac891cd0ecc0925387f7cc18b84ef208bd4381",
+    "packages/config/src/index.ts": "4b5e869fdc45b6630930827b97b8480fa19d6fa567abc18cee7ea5f11fea68b1",
     "apps/agent/src/deps.ts": "ae851c6c8ba0c3dd2e66347495ba70be541931b29ebab750adf361b5ec909ec2",
     "apps/agent/src/index.ts": "bc65b1a16ba83c6351a74e2c071189fb4288d5d3ec2c4425accc185da77fe6ab",
     "apps/web/lib/server.ts": "d7134834a1d0b86e5cba4c7fa9f00898b7951a2c6741fc6be254e73022159f5c",
     "apps/web/proxy.ts": "a98bad019e18f95a23024a0b6d25780e1ec74cf7cc4a23c58780a58e1e56c024",
-    "packages/db/drizzle/meta/_journal.json": "1298534f57c4f7d30773af0fcceac2210ce367bc54e2bdd982c7f77ed3ff096a",
-    "infra/gcp/release-contracts.json": "ece3a6603b419d386e83d9ae8a4936cc6cac137d7f31922b85e7e7f5e556845b"
+    "packages/db/drizzle/meta/_journal.json": "b63eb827f1fa493edb5f69febe784a632923da0ac10f6c23094d2d13805781a8",
+    "infra/gcp/release-contracts.json": "96d7977b62d068c4deb6d5dc4a0272b0578a56b3b4116fac25c680805038d0ad"
   },
-  "latestPostgresMigration": "0139_research_assignment_state",
-  "postgresSchemaVersion": 139,
+  "latestPostgresMigration": "0140_cost_event_accounted_at",
+  "postgresSchemaVersion": 140,
   "releaseContracts": {
     "agent": {
       "apiContract": 3,
@@ -20,8 +20,8 @@
         "max": 3
       },
       "postgresSchema": {
-        "min": 139,
-        "max": 139
+        "min": 140,
+        "max": 140
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -32,8 +32,8 @@
         "max": 3
       },
       "postgresSchema": {
-        "min": 139,
-        "max": 139
+        "min": 140,
+        "max": 140
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -44,8 +44,8 @@
         "max": 1
       },
       "postgresSchema": {
-        "min": 139,
-        "max": 139
+        "min": 140,
+        "max": 140
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -56,8 +56,8 @@
         "max": 1
       },
       "postgresSchema": {
-        "min": 139,
-        "max": 139
+        "min": 140,
+        "max": 140
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -68,8 +68,8 @@
         "max": 1
       },
       "postgresSchema": {
-        "min": 139,
-        "max": 139
+        "min": 140,
+        "max": 140
       },
       "currentPostgresSchemaCompatible": true
     }
@@ -243,7 +243,7 @@
     },
     "apps/web/app/api/mobile/v1/costs/route.ts": {
       "methods": ["PATCH"],
-      "sha256": "4d908925abaf79e1ed5c793e4a58aef5b87c3eace1ad750f398f6292c3fec4aa"
+      "sha256": "0058b1c941da18b6bb54835dcdda4e80a58acc8b003517f8f36ab9ef066dea89"
     },
     "apps/web/app/api/mobile/v1/devices/route.ts": {
       "methods": ["POST"],

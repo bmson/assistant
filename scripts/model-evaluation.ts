@@ -1110,7 +1110,7 @@ export class EvaluationLedger implements CostRepository {
     }
   }
   async releaseStale() {
-    return 0;
+    return { released: 0, markedUnknown: 0 };
   }
 }
 

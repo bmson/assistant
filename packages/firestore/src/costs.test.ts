@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { Timestamp } from '@google-cloud/firestore';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { FirestoreBudgetCapsRepository } from './budget-caps.js';
 import { FirestoreCostRepository } from './costs.js';
 import type { InstallationStore } from './store.js';
 import { disposeStore, emulatorStore, seedBudget } from './test-store.js';
@@ -16,6 +18,29 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore atomic cost led
   });
   afterEach(async () => {
     await disposeStore(store);
+  });
+
+  it('finishes a budget wake scan when a whole page has the same sub-millisecond timestamp', async () => {
+    const agentId = randomUUID();
+    const batch = store.db.batch();
+    batch.set(store.doc('agents', agentId), { id: agentId });
+    batch.set(store.doc('budgets', 'task_default'), { limitUsd: '2.00' });
+    for (let n = 0; n < 101; n++) {
+      const id = randomUUID();
+      batch.set(store.doc('tasks', id), {
+        id,
+        agentId,
+        status: 'waiting_budget',
+        updatedAt: new Timestamp(100, 456_789_000),
+      });
+    }
+    await batch.commit();
+    const caps = new FirestoreBudgetCapsRepository(store);
+    await caps.update(agentId, { daily: '3.00' });
+    const cursor = store.doc('coordination', `budget-cap-wake:${agentId}`);
+    expect((await cursor.get()).exists).toBe(true);
+    expect(await caps.resumeWakes(agentId)).toEqual([]);
+    expect((await cursor.get()).exists).toBe(false);
   });
 
   it('returns structured ceiling information for a denied reservation', async () => {
@@ -654,12 +679,12 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore atomic cost led
     await costs.reserve({ source: 'model', estimatedUsd: 0.2 });
     now = new Date(now.getTime() + 121 * 60_000);
     await costs.reserve({ source: 'model', estimatedUsd: 0.1 });
-    expect(await costs.releaseStale()).toBe(1);
-    expect(await costs.releaseStale()).toBe(0);
+    expect(await costs.releaseStale()).toEqual({ released: 1, markedUnknown: 0 });
+    expect(await costs.releaseStale()).toEqual({ released: 0, markedUnknown: 0 });
     expect((await costs.totals()).heldUsd).toBe(0.1);
   });
 
-  it('retains dispatched unknown usage as a hold and accepts one late actual after timeout', async () => {
+  it('retains dispatched unknown usage before the TTL and accepts one late actual', async () => {
     await store
       .doc('tasks', 'terminal-task')
       .set({ id: 'terminal-task', spentUsd: '0', budgetUsdLimit: '1', status: 'done' });
@@ -685,7 +710,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore atomic cost led
       requestId: 'generation-late',
     });
     now = new Date(now.getTime() + 121 * 60_000);
-    expect(await costs.releaseStale()).toBe(0);
+    expect(await costs.releaseStale(120, 500, 180)).toEqual({ released: 0, markedUnknown: 0 });
     expect((await costs.totals()).heldUsd).toBe(0.4);
     const reservationRef = store.doc('costReservations', reserved.reservationId);
     const taskRef = store.doc('tasks', 'terminal-task');
@@ -733,7 +758,10 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore atomic cost led
     });
     await costs.reconcile(reserved.reservationId, { usd: 0.17 });
     expect((await costs.totals()).heldUsd).toBe(0);
-    expect((await costs.totals()).dailySpentUsd).toBe(0.17);
+    expect((await costs.totals()).dailySpentUsd).toBe(0);
+    expect((await store.doc('budgetPeriods', 'day:2026-09-30').get()).get('spentMicros')).toBe(
+      170_000,
+    );
     expect((await store.collection('costEvents').get()).size).toBe(1);
     expect(
       (await store.doc('costReservations', reserved.reservationId).get()).get('attemptMetadata'),
@@ -755,11 +783,270 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore atomic cost led
       reasoning: 'unknown',
     });
     now = new Date(now.getTime() + 121 * 60_000);
-    expect(await costs.releaseStale()).toBe(1);
+    expect(await costs.releaseStale()).toEqual({ released: 0, markedUnknown: 1 });
     expect((await store.doc('costReservations', reserved.reservationId).get()).get('status')).toBe(
       'unknown',
     );
     expect((await costs.totals()).heldUsd).toBe(0.25);
+  });
+
+  it('resumes a bounded scan past protected attempts with identical dispatch times', async () => {
+    const started = new Date(now.getTime() - 60 * 60_000);
+    for (let i = 0; i < 5; i++) {
+      const id = `protected-read-budget-${i}`;
+      await store.doc('costReservations', id).set({
+        id,
+        source: 'external_api',
+        status: 'unknown',
+        createdAt: started,
+        attemptStartedAt: started,
+      });
+    }
+    const marker = store.doc('maintenanceCursors', 'unknown-model-estimate-scan');
+    await costs.releaseStale(120, 1, 10);
+    expect((await marker.get()).get('cursor')).toEqual(expect.any(String));
+    await costs.releaseStale(120, 1, 10);
+    expect((await marker.get()).get('cursor')).toBeNull();
+    expect((await store.collection('costEvents').get()).empty).toBe(true);
+  });
+
+  it('settles a stale ordinary model estimate once and corrects its settlement period', async () => {
+    const taskId = 'estimate-correction-task';
+    await store.doc('tasks', taskId).set({ spentUsd: '0', budgetUsdLimit: '1' });
+    const metadata = {
+      provider: 'fixture',
+      model: 'fixture/model',
+      role: 'draft',
+      requestDigest: 'a'.repeat(64),
+      inputTokenEstimate: 100,
+      outputTokenLimit: 100,
+      reasoning: 'unknown' as const,
+    };
+    const protectedTool = await costs.reserve({ source: 'external_api', estimatedUsd: 0.05 });
+    const protectedGrant = await costs.reserve({ source: 'model', estimatedUsd: 0.05 });
+    const ordinary = await costs.reserve({ source: 'model', estimatedUsd: 0.8, taskId });
+    if (!protectedTool.ok || !protectedGrant.ok || !ordinary.ok)
+      throw new Error('Fixture failed to reserve');
+    for (const item of [protectedTool, protectedGrant, ordinary]) {
+      expect(await costs.beginAttempt(item.reservationId, metadata)).toBe(true);
+      await costs.markAttemptUnknown(item.reservationId, 'Synthetic missing usage');
+      now = new Date(now.getTime() + 1_000);
+    }
+    await store
+      .doc('costReservations', protectedGrant.reservationId)
+      .update({ costGrantId: 'protected' });
+    now = new Date('2026-10-01T00:08:00Z');
+    expect(await costs.releaseStale(120, 1, 10)).toEqual({ released: 0, markedUnknown: 0 });
+    now = new Date('2026-10-01T00:10:00Z');
+    const sweeps = await Promise.all([
+      costs.releaseStale(120, 1, 10),
+      costs.releaseStale(120, 1, 10),
+    ]);
+    expect(sweeps.reduce((sum, sweep) => sum + (sweep.settledAtEstimate ?? 0), 0)).toBe(1);
+    const events = () =>
+      store.collection('costEvents').where('reservationId', '==', ordinary.reservationId).get();
+    const [estimate] = (await events()).docs;
+    expect(estimate?.data()).toMatchObject({
+      usd: '0.800000',
+      evidence: { basis: 'preflight_estimate', modelAttemptEstimate: 'usage_missing_after_ttl' },
+    });
+    const row = store.doc('costReservations', ordinary.reservationId);
+    expect((await row.get()).data()).toMatchObject({ status: 'reconciled', actualUsd: null });
+    expect(await costs.totals()).toMatchObject({
+      heldUsd: 0.1,
+      dailySpentUsd: 0.8,
+      monthlySpentUsd: 0.8,
+    });
+    expect(await costs.reserve({ source: 'model', estimatedUsd: 0.100001 })).toMatchObject({
+      ok: false,
+      budget: { scope: 'daily' },
+    });
+
+    now = new Date('2026-11-01T00:10:00Z');
+    await costs.reconcile(ordinary.reservationId, {
+      usd: 0.2,
+      evidence: { basis: 'preflight_estimate' },
+    });
+    expect((await row.get()).get('actualUsd')).toBeNull();
+    const actual = {
+      usd: 0.4,
+      evidence: { basis: 'provider_reported' as const, requestId: 'late' },
+    };
+    await Promise.all([
+      costs.reconcile(ordinary.reservationId, actual),
+      costs.reconcile(ordinary.reservationId, actual),
+    ]);
+    const corrected = await events();
+    expect(corrected.size).toBe(1);
+    expect(corrected.docs[0]?.id).toBe(estimate?.id);
+    expect(corrected.docs[0]?.data()).toMatchObject({ usd: '0.400000', evidence: actual.evidence });
+    expect((await row.get()).get('actualUsd')).toBe('0.400000');
+    expect((await store.doc('tasks', taskId).get()).get('spentUsd')).toBe('0.400000');
+    expect((await store.doc('budgetPeriods', 'day:2026-10-01').get()).get('spentMicros')).toBe(
+      400_000,
+    );
+    expect((await store.doc('budgetPeriods', 'month:2026-10').get()).get('spentMicros')).toBe(
+      400_000,
+    );
+    expect(await costs.totals()).toMatchObject({
+      heldUsd: 0.1,
+      dailySpentUsd: 0,
+      monthlySpentUsd: 0,
+    });
+    for (const protectedRow of [protectedTool, protectedGrant])
+      expect(
+        (await store.doc('costReservations', protectedRow.reservationId).get()).get('status'),
+      ).toBe('unknown');
+  });
+
+  it('does not count yesterday’s 400 ordinary unknown holds against today’s cap', async () => {
+    const startedAt = new Date('2026-09-29T12:00:00Z');
+    const write = store.db.batch();
+    for (let index = 0; index < 400; index++) {
+      write.set(store.doc('costReservations', `prior-${index}`), {
+        status: 'unknown',
+        source: 'model',
+        reservationKind: 'attempt',
+        createdAt: startedAt,
+        attemptStartedAt: startedAt,
+        estimatedUsd: '0.004000',
+      });
+    }
+    write.set(store.doc('coordination', 'budget-holds'), { heldMicros: 1_600_000 });
+    await write.commit();
+    expect(await costs.totals()).toMatchObject({
+      heldUsd: 1.6,
+      dailyHeldUsd: 0,
+      monthlyHeldUsd: 1.6,
+    });
+    expect(await costs.reserve({ source: 'model', estimatedUsd: 1 })).toMatchObject({ ok: true });
+  });
+
+  it('attributes an unpriced result to its attempt periods while preserving task exposure', async () => {
+    now = new Date('2026-09-29T23:59:00Z');
+    await store.doc('coordination', 'budget-policy').update({ monthlyLimitMicros: 1_000_000 });
+    const taskId = 'uncertain-task';
+    await store.doc('tasks', taskId).set({ spentUsd: '0', budgetUsdLimit: '1' });
+    const oldInput = { source: 'model' as const, estimatedUsd: 0.9, taskId, operationId: 'old' };
+    const old = await costs.reserve(oldInput);
+    if (!old.ok) throw new Error('Fixture failed to reserve');
+    await costs.beginAttempt(old.reservationId, {
+      provider: 'fixture',
+      model: 'fixture/model',
+      role: 'draft',
+      requestDigest: 'a'.repeat(64),
+      inputTokenEstimate: 100,
+      outputTokenLimit: 100,
+      reasoning: 'unknown',
+    });
+    await costs.markAttemptUnknown(old.reservationId, 'provider returned unpriced', {
+      outcome: 'unpriced_result',
+      requestId: 'late-fixture',
+    });
+    const next = { source: 'model' as const, estimatedUsd: 0.2 };
+    expect(await costs.reserve(next)).toMatchObject({ ok: false, budget: { scope: 'monthly' } });
+    now = new Date('2026-09-30T00:01:00Z');
+    expect(await costs.totals()).toMatchObject({
+      heldUsd: 0.9,
+      dailyHeldUsd: 0,
+      monthlyHeldUsd: 0.9,
+    });
+    expect(await costs.reserve(next)).toMatchObject({ ok: false, budget: { scope: 'monthly' } });
+    now = new Date('2026-10-01T00:01:00Z');
+    expect(await costs.totals()).toMatchObject({
+      heldUsd: 0.9,
+      dailyHeldUsd: 0,
+      monthlyHeldUsd: 0,
+      dailySpentUsd: 0,
+      monthlySpentUsd: 0,
+    });
+    expect(await costs.reserve({ ...next, taskId })).toMatchObject({
+      ok: false,
+      budget: { scope: 'task' },
+    });
+    expect(await costs.reserve(oldInput)).toMatchObject({ ok: false });
+    expect(await costs.reserve(next)).toMatchObject({ ok: true });
+    await costs.release(old.reservationId);
+    expect((await store.doc('costReservations', old.reservationId).get()).data()).toMatchObject({
+      status: 'unknown',
+      attemptMetadata: { outcome: 'unpriced_result', requestId: 'late-fixture' },
+    });
+    const actual = {
+      usd: 0.7,
+      evidence: { basis: 'provider_reported' as const, requestId: 'late-fixture' },
+    };
+    await Promise.all([
+      costs.reconcile(old.reservationId, actual),
+      costs.reconcile(old.reservationId, actual),
+    ]);
+    expect(await costs.totals()).toMatchObject({
+      heldUsd: 0.2,
+      dailyHeldUsd: 0.2,
+      monthlyHeldUsd: 0.2,
+      dailySpentUsd: 0,
+      monthlySpentUsd: 0,
+    });
+    expect((await store.doc('budgetPeriods', 'day:2026-09-29').get()).get('spentMicros')).toBe(
+      700_000,
+    );
+    expect((await store.doc('budgetPeriods', 'month:2026-09').get()).get('spentMicros')).toBe(
+      700_000,
+    );
+    expect((await store.doc('tasks', taskId).get()).get('spentUsd')).toBe('0.700000');
+    expect(
+      (await store.collection('costEvents').where('reservationId', '==', old.reservationId).get())
+        .size,
+    ).toBe(1);
+  });
+
+  it('admits new work with 418 prior unknown attempts while enforcing both current caps', async () => {
+    now = new Date('2026-10-02T00:01:00Z');
+    await seedBudget(store, 1, 1.05);
+    const batch = store.db.batch();
+    for (let index = 0; index < 418; index++) {
+      const ago = new Date(index < 400 ? '2026-09-30T21:00:00Z' : '2026-10-01T21:00:00Z');
+      batch.set(store.doc('costReservations', `legacy-attempt-${index}`), {
+        id: `legacy-attempt-${index}`,
+        source: 'model',
+        status: 'unknown',
+        createdAt: ago,
+        attemptStartedAt: ago,
+        estimatedUsd: '0.003000',
+        unknownReason: 'provider returned without complete usage or authoritative cost',
+      });
+    }
+    // A missing dispatch timestamp must still protect both current caps.
+    batch.set(store.doc('costReservations', 'unknown-without-time'), {
+      id: 'unknown-without-time',
+      source: 'model',
+      status: 'unknown',
+      createdAt: new Date('2026-09-29T12:00:00Z'),
+      estimatedUsd: '0.100000',
+    });
+    batch.set(store.doc('coordination', 'budget-holds'), { heldMicros: 1_354_000 });
+    await batch.commit();
+    expect(await costs.totals()).toMatchObject({
+      heldUsd: 1.354,
+      dailyHeldUsd: 0.1,
+      monthlyHeldUsd: 0.154,
+      dailySpentUsd: 0,
+      monthlySpentUsd: 0,
+    });
+    expect(await costs.reserve({ source: 'model', estimatedUsd: 0.897 })).toMatchObject({
+      ok: false,
+      budget: { scope: 'monthly' },
+    });
+    await seedBudget(store, 1, 1.1);
+    expect(await costs.reserve({ source: 'model', estimatedUsd: 0.901 })).toMatchObject({
+      ok: false,
+      budget: { scope: 'daily' },
+    });
+    expect(await costs.reserve({ source: 'model', estimatedUsd: 0.9 })).toMatchObject({ ok: true });
+    expect(await costs.totals()).toMatchObject({
+      heldUsd: 2.254,
+      dailyHeldUsd: 1.0,
+      monthlyHeldUsd: 1.054,
+    });
   });
 
   it('fails closed without budget configuration and rejects invalid values', async () => {
