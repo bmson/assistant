@@ -10,6 +10,10 @@ struct RootView: View {
     // connect the owner just triggered from the Connection form.
     @State private var hasPresentedConnection = false
 
+    static func isNativeCostsLink(_ url: URL) -> Bool {
+        url.relativeString == "/costs" && url.baseURL == nil
+    }
+
     var body: some View {
         GeometryReader { geometry in
             rootContent(
@@ -24,6 +28,11 @@ struct RootView: View {
             // Standalone ChatView has no known viewport and keeps the 20pt fallback.
             .environment(\.conversationViewportWidth, geometry.size.width)
         }
+        .environment(\.openURL, OpenURLAction { url in
+            guard Self.isNativeCostsLink(url) else { return .systemAction }
+            model.present(.costs)
+            return .handled
+        })
 #if DEBUG
         .onConnectionGeometry(.rootAvailable)
         .environment(\.dynamicTypeSize, localPendingReview && ProcessInfo.processInfo.environment["ASSISTANT_PENDING_SPENDING_LARGE_TEXT"] == "1" ? .accessibility3 : dynamicTypeSize)

@@ -171,8 +171,13 @@ export async function parkForBudget(
   task: TaskLease,
   state: TaskState,
   resumeAt: Date,
+  budgetRetry?: import('@assistant/persistence').BudgetRetry,
 ): Promise<boolean> {
-  return lifecycle(db).parkForBudget(task, state, resumeAt);
+  return lifecycle(db).parkForBudget(
+    task,
+    { ...state, budgetRetry: budgetRetry ?? null },
+    resumeAt,
+  );
 }
 
 /** Sleep until runAfter (mission wake cadence, retries with backoff, timed waits). */

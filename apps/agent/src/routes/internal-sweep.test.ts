@@ -52,6 +52,9 @@ vi.mock('@assistant/firestore', () => ({
   FirestoreScheduleRepository: class {
     readonly kind = 'schedule-repository';
     constructor(readonly store: unknown) {}
+    async retireDefaultMorningBrief() {
+      return 0;
+    }
   },
 }));
 vi.mock('../deps.js', () => ({
@@ -192,6 +195,7 @@ describe('POST /internal/sweep in Firestore mode', () => {
       awarenessSchedulesCreated: 0,
       schedulesFired: 1,
       budgetNotices: 1,
+      capChangeWakes: 0,
       messagesEmbedded: 7,
       purgedExpired: 3,
       agedHistory: 3,

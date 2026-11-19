@@ -4,6 +4,7 @@ import {
   GOAL_SUPERSEDED_PROGRESS,
   GOAL_TASK_TERMINAL,
   goalOccurrenceIsCurrent,
+  isHistoricalMorningBriefDefault,
   newTaskRecord,
   occurrenceIsCurrent,
   type Records,
@@ -161,6 +162,88 @@ export class FirestoreScheduleRepository implements ScheduleRepository {
     return null;
   }
 
+  /**
+   * Retire an enabled, untouched legacy default only when its deterministic
+   * replacement is present and runnable. Keep the original row and history.
+   */
+  async retireDefaultMorningBrief(agentId: string, now: Date = this.store.now()): Promise<number> {
+    const legacyName = 'morning-brief';
+    const replacementName = 'daily-briefing';
+    return this.store.db.runTransaction(async (tx) => {
+      const [owner, migration, legacyKey, replacementKey] = await tx.getAll(
+        this.store.doc('agents', agentId),
+        this.store.doc('coordination', 'migration'),
+        this.store.doc('scheduleNames', scheduleNameKey(agentId, legacyName)),
+        this.store.doc('scheduleNames', scheduleNameKey(agentId, replacementName)),
+      );
+      if (
+        owner?.get('id') !== agentId ||
+        (migration?.exists && migration.get('status') !== 'active')
+      )
+        return 0;
+      const old = await tx.get(scheduleQuery(this.store, agentId, legacyName));
+      if (old.size !== 1) return 0;
+      const legacy = old.docs[0];
+      if (!legacy) return 0;
+      const row = decodeSchedule(legacy.data());
+      const originalSeed = row.seedDefinition as { cron: string; taskTemplate: unknown } | null;
+      if (
+        !row.id ||
+        documentKey(row.id) !== legacy.id ||
+        row.agentId !== agentId ||
+        row.name !== legacyName ||
+        row.enabled !== true ||
+        row.seedReviewRequired === true ||
+        (row.seedTemplateKey != null &&
+          row.seedTemplateKey !== 'assistant.schedule.morning-brief') ||
+        !isHistoricalMorningBriefDefault(row) ||
+        (originalSeed != null && !isHistoricalMorningBriefDefault(originalSeed)) ||
+        (legacyKey?.exists &&
+          (legacyKey.get('scheduleId') !== row.id ||
+            legacyKey.get('agentId') !== agentId ||
+            legacyKey.get('name') !== legacyName))
+      )
+        return 0;
+
+      const next = await tx.get(scheduleQuery(this.store, agentId, replacementName));
+      if (next.size !== 1) return 0;
+      const replacement = next.docs[0];
+      if (!replacement) return 0;
+      const daily = decodeSchedule(replacement.data());
+      const template = daily.taskTemplate as Record<string, unknown> | null;
+      if (
+        !daily.id ||
+        documentKey(daily.id) !== replacement.id ||
+        daily.agentId !== agentId ||
+        daily.name !== replacementName ||
+        daily.enabled !== true ||
+        daily.seedReviewRequired === true ||
+        (daily.seedTemplateKey != null &&
+          daily.seedTemplateKey !== 'assistant.schedule.daily-briefing') ||
+        daily.cron !== '45 7 * * *' ||
+        !scheduleCanRun(daily) ||
+        template?.type !== 'scheduled' ||
+        template.job !== 'briefing.compose' ||
+        template.budgetUsdLimit !== '0.10' ||
+        Object.keys(template).some((key) => !['type', 'job', 'budgetUsdLimit'].includes(key)) ||
+        (replacementKey?.exists &&
+          (replacementKey.get('scheduleId') !== daily.id ||
+            replacementKey.get('agentId') !== agentId ||
+            replacementKey.get('name') !== replacementName))
+      )
+        return 0;
+
+      await assertPrivacyErasureInactiveInTransaction(tx, this.store, agentId);
+      // The review flag prevents future sweeps from changing an owner's
+      // explicit decision to re-enable the retired schedule.
+      tx.update(
+        legacy.ref,
+        encodeRecord({ enabled: false, seedReviewRequired: true, updatedAt: now }),
+      );
+      return 1;
+    });
+  }
+
   async setOwnerEnabled(agentId: string, scheduleId: string, enabled: boolean): Promise<boolean> {
     const ref = this.store.doc('schedules', scheduleId);
     return this.store.db.runTransaction(async (tx) => {
@@ -172,6 +255,9 @@ export class FirestoreScheduleRepository implements ScheduleRepository {
         return false;
       tx.update(ref, {
         enabled,
+        ...(row.name === 'morning-brief' && isHistoricalMorningBriefDefault(row)
+          ? { seedReviewRequired: true }
+          : {}),
         ...(enabled ? { nextRunAt: null } : {}),
         updatedAt: this.store.now(),
       });

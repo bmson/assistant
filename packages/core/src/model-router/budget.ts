@@ -1,3 +1,5 @@
+import type { BudgetRetry } from '@assistant/persistence';
+
 /**
  * Pure budget evaluation — the order matters and is part of the contract:
  * hard task cap → park (owner can grant more); hard daily/monthly → block
@@ -30,7 +32,7 @@ export type BudgetDecision =
   | { mode: 'primary' }
   | { mode: 'fallback'; reason: string }
   | { mode: 'park'; reason: string }
-  | { mode: 'block'; reason: string };
+  | { mode: 'block'; reason: string; scope?: 'monthly' | 'daily'; budgetRetry?: BudgetRetry };
 
 export interface BudgetEvalOptions {
   /**
@@ -66,12 +68,14 @@ export function evaluateBudget(s: BudgetSnapshot, opts: BudgetEvalOptions = {}):
   if (hard(monthlyCommitted, s.monthlyLimitUsd)) {
     return {
       mode: 'block',
+      scope: 'monthly',
       reason: `monthly budget exhausted ($${monthlyCommitted.toFixed(2)} of $${s.monthlyLimitUsd.toFixed(2)})`,
     };
   }
   if (hard(dailyCommitted, s.dailyLimitUsd)) {
     return {
       mode: 'block',
+      scope: 'daily',
       reason: `daily budget exhausted ($${dailyCommitted.toFixed(2)} of $${s.dailyLimitUsd.toFixed(2)})`,
     };
   }

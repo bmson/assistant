@@ -296,6 +296,7 @@ export async function executeTask(
               task,
               taskState(fresh ?? task),
               err.resumeAt,
+              err.budgetRetry,
             );
             if (!parked) return LOST_LEASE;
             await postConversationNotice(

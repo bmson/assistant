@@ -9,6 +9,7 @@ export { createPostgresApprovalPolicyRepository } from './approval-policy-reposi
 export { createPostgresApprovalRepository } from './approval-repository.js';
 export { createPostgresAuditInvestigationRepository } from './audit-investigation-repository.js';
 export { readPostgresEmailBillStatus } from './bill-email-evidence.js';
+export { resumePostgresBudgetWakes, updatePostgresBudgetCaps } from './budget-caps-repository.js';
 export { createPostgresCallSessionRepository } from './call-session-repository.js';
 export { createPostgresCardFormAdmissionRepository } from './card-form-admission-repository.js';
 export { createPostgresCardRefreshRepository } from './card-refresh-repository.js';
