@@ -9,7 +9,11 @@ import type {
 import { act, StrictMode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { readCostDecision, retainCostDecision } from './estimated-cost-decision';
+import {
+  costQuoteRefreshId,
+  readCostDecision,
+  retainCostDecision,
+} from './estimated-cost-decision';
 import type { EstimatedCostTransport } from './estimated-cost-transport';
 import { InlineEstimatedCostRequest } from './inline-estimated-cost-request';
 
@@ -99,12 +103,30 @@ afterEach(async () => {
   vi.unstubAllGlobals();
   vi.useRealTimers();
 });
+function findButton(label: string, scope: ParentNode = container) {
+  return [...scope.querySelectorAll('button')].find((node) => node.textContent?.includes(label));
+}
 async function click(label: string, scope: ParentNode = container) {
-  const button = [...scope.querySelectorAll('button')].find((node) =>
-    node.textContent?.includes(label),
-  );
+  const button = findButton(label, scope);
   expect(button).toBeDefined();
   await act(async () => button?.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+}
+async function clickRefreshEstimate(whileDigestPending?: () => void) {
+  const computeDigest = crypto.subtle.digest.bind(crypto.subtle);
+  const pending = Promise.withResolvers<ArrayBuffer>();
+  const digest = vi.spyOn(crypto.subtle, 'digest').mockReturnValueOnce(pending.promise);
+  try {
+    await click('Refresh estimate');
+    expect(digest).toHaveBeenCalledTimes(1);
+    const [input] = digest.mock.calls;
+    if (!input) throw new Error('Refresh did not start its digest');
+    whileDigestPending?.();
+    // The click handler returns void. Release its asynchronous work inside act,
+    // using the real digest of the inputs supplied by the mounted component.
+    await act(async () => pending.resolve(await computeDigest(...input)));
+  } finally {
+    digest.mockRestore();
+  }
 }
 async function mount(api: EstimatedCostTransport) {
   await act(async () =>
@@ -186,7 +208,7 @@ describe('mounted request-scoped estimated spending approval', () => {
       [...container.querySelectorAll('button')].find((b) => b.textContent?.includes('Approve'))
         ?.disabled,
     ).toBe(true);
-    await click('Refresh estimate');
+    await clickRefreshEstimate();
     expect(
       [...container.querySelectorAll('button')].find((b) => b.textContent?.includes('Approve'))
         ?.disabled,
@@ -248,7 +270,7 @@ describe('mounted request-scoped estimated spending approval', () => {
       request: { status: 'pending', operationId, quote: revised },
       tracking: current,
     }));
-    await click('Refresh estimate');
+    await clickRefreshEstimate();
     const grantExpiresAt = new Date(Date.now() + 600_000).toISOString();
     api.decide = vi.fn<EstimatedCostTransport['decide']>(async (decision) => ({
       ok: true,
@@ -585,13 +607,15 @@ describe('mounted request-scoped estimated spending approval', () => {
 
   it('offers no approval for expired quotes and does not mint a quote on mount, including Strict Mode', async () => {
     const api = transport();
+    const expiredQuote = { ...quote(), expiresAt: new Date(Date.now() - 1_000).toISOString() };
+    const refreshId = await costQuoteRefreshId(expiredQuote);
     api.read = vi.fn<EstimatedCostTransport['read']>(async (operationId) => ({
       ok: true,
       tracking: tracking(),
       request: {
         status: 'pending',
         operationId,
-        quote: { ...quote(), expiresAt: new Date(Date.now() - 1_000).toISOString() },
+        quote: expiredQuote,
       },
     }));
     await act(async () =>
@@ -607,8 +631,17 @@ describe('mounted request-scoped estimated spending approval', () => {
     ).toBe(true);
     expect(api.refresh).not.toHaveBeenCalled();
     expect(api.decide).not.toHaveBeenCalled();
-    await click('Refresh estimate');
-    expect(api.refresh).toHaveBeenCalledTimes(1);
+    await clickRefreshEstimate(() => {
+      expect(findButton('Refresh estimate')?.disabled).toBe(true);
+      expect(findButton('Approve')?.disabled).toBe(true);
+      expect(api.refresh).not.toHaveBeenCalled();
+      expect(api.decide).not.toHaveBeenCalled();
+    });
+    expect(api.refresh).toHaveBeenCalledExactlyOnceWith({
+      operationId: expiredQuote.operationId,
+      quoteRequestId: refreshId,
+    });
+    expect(findButton('Approve')?.disabled).toBe(false);
     expect(api.decide).not.toHaveBeenCalled();
   });
 });
