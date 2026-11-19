@@ -1480,8 +1480,8 @@ enum MessageResponseCard: Identifiable {
         let error: String
     }
 
-    /// The daily briefing: a lead and labelled sections, all pre-formatted
-    /// in the owner's zone by the server.
+    /// The daily briefing: a lead and labelled sections, with owner-local
+    /// text for historical cards and structured times for current cards.
     struct BriefingCard: Hashable {
         enum Presentation: String, Hashable {
             case calendarAgenda = "calendar-agenda"
@@ -1512,6 +1512,8 @@ enum MessageResponseCard: Identifiable {
             let id: String
             let day: String
             let time: String
+            let start: Date?
+            let end: Date?
             let title: String
             let location: String
             let flag: String
@@ -1522,8 +1524,24 @@ enum MessageResponseCard: Identifiable {
 
             var timeCategory: TimeCategory {
                 if day == "All day" { return .allDay }
-                if day == "Timed", !time.isEmpty { return .timed }
+                if day == "Timed", !time.isEmpty || start != nil { return .timed }
                 return .timeUnavailable
+            }
+
+            func localTimeLabel(timeZone: TimeZone?, locale: Locale = .current) -> String {
+                guard day != "All day", day != "Time unavailable",
+                      time != "All day", let timeZone, let start else { return time }
+                let formatter = DateFormatter()
+                formatter.locale = locale
+                formatter.timeZone = timeZone
+                formatter.timeStyle = .short
+                guard let end, end >= start else { return formatter.string(from: start) }
+                var calendar = Calendar(identifier: .gregorian)
+                calendar.timeZone = timeZone
+                if !calendar.isDate(start, inSameDayAs: end) {
+                    formatter.dateStyle = .medium
+                }
+                return "\(formatter.string(from: start)) – \(formatter.string(from: end))"
             }
         }
         struct ListItem: Hashable {
@@ -1551,6 +1569,7 @@ enum MessageResponseCard: Identifiable {
         }
         let id: String
         let date: String
+        let timeZone: TimeZone?
         let lead: String
         let title: String
         let presentation: Presentation?
@@ -1585,7 +1604,10 @@ enum MessageResponseCard: Identifiable {
                                 return MeetingLink(label: object["label"]?.string.flatMap { $0.isEmpty ? nil : $0 } ?? "Join meeting", url: url)
                             }()
                             return AgendaItem(id: text(row, "id").isEmpty ? "agenda-\(index)-\(text(row, "title"))" : text(row, "id"),
-                                              day: text(row, "day"), time: text(row, "time"), title: text(row, "title"),
+                                              day: text(row, "day"), time: text(row, "time"),
+                                              start: row["start"]?.string.flatMap(ISO8601DateFormatter.flexible),
+                                              end: row["end"]?.string.flatMap(ISO8601DateFormatter.flexible),
+                                              title: text(row, "title"),
                                               location: text(row, "location"), flag: text(row, "flag"), note: text(row, "note"),
                                               calendars: row["calendars"]?.arrayStrings ?? [], calendarLinks: links, meetingLink: meeting)
                         }
@@ -1642,6 +1664,7 @@ enum MessageResponseCard: Identifiable {
             guard !lead.isEmpty || !sections.isEmpty else { return nil }
             self.id = id
             self.date = text(data, "date")
+            self.timeZone = TimeZone(identifier: text(data, "timeZone"))
             self.lead = lead
             self.title = text(data, "title")
             self.presentation = Presentation(rawValue: text(data, "presentation"))
@@ -1714,7 +1737,7 @@ enum MessageResponseCard: Identifiable {
     }
 
     case agenda(title: String, subtitle: String, items: [AgendaItem])
-    case event(id: String, start: String, time: String, title: String, location: String, attendees: [String], calendars: [String], calendarLinkURL: String?, meetingLinkURL: String?)
+    case event(id: String, start: String, time: String, title: String, location: String, attendees: [String], calendars: [String], calendarLinkURL: String?, meetingLinkURL: String?, timeZone: TimeZone? = nil)
     case weather(location: String, temperature: String, condition: String, details: [WeatherDetail], symbol: String, forecast: WeatherForecast = .init())
     case duration(title: String, duration: String, detail: String?, confidence: String?)
     case reminder(id: String, title: String, schedule: String, nextFires: String, enabled: Bool)
@@ -1722,7 +1745,7 @@ enum MessageResponseCard: Identifiable {
     case documents(id: String, title: String, query: String, passages: [DocumentPassage])
     case drive(id: String, title: String, query: String, files: [DriveFile])
     case search(id: String, title: String, query: String, results: [SearchResult])
-    case availability(id: String, timeMin: String, timeMax: String, busy: [BusyBlock], calendarsChecked: [String], complete: Bool, note: String?)
+    case availability(id: String, timeMin: String, timeMax: String, busy: [BusyBlock], calendarsChecked: [String], complete: Bool, note: String?, timeZone: TimeZone?)
     case thread(id: String, subject: String, messageCount: Int, messages: [ThreadMessage])
     case sheetRows(id: String, sheetName: String, rows: [[String]], totalRows: Int, linkURL: String?)
     case resource(id: String, resourceType: String, title: String, subtitle: String, details: [Detail], linkLabel: String?, linkURL: String?)
@@ -1738,7 +1761,7 @@ enum MessageResponseCard: Identifiable {
     var id: String {
         switch self {
         case let .agenda(title, _, _): "agenda-\(title)"
-        case let .event(id, _, _, _, _, _, _, _, _): id
+        case let .event(id, _, _, _, _, _, _, _, _, _): id
         case let .weather(location, temperature, _, details, _, _):
             // Per-day forecast cards share their location and can share a
             // reading; the day name keeps each card's identity distinct.
@@ -1749,7 +1772,7 @@ enum MessageResponseCard: Identifiable {
         case let .documents(id, _, _, _): id
         case let .drive(id, _, _, _): id
         case let .search(id, _, _, _): id
-        case let .availability(id, _, _, _, _, _, _): id
+        case let .availability(id, _, _, _, _, _, _, _): id
         case let .thread(id, _, _, _): id
         case let .sheetRows(id, _, _, _, _): id
         case let .resource(id, _, _, _, _, _, _): id
@@ -1777,8 +1800,16 @@ enum MessageResponseCard: Identifiable {
             let rawStart = data["start"]?.string ?? ""
             let allDay = data["allDay"] == .bool(true)
             let start = allDay ? String(rawStart.prefix(10)) : rawStart
-            let time = allDay ? "All day" : CalendarEventPresentation.timeLabel(start: start,
-                end: data["end"]?.string, fallback: data["time"]?.string ?? "Time unavailable")
+            let timeZone = data["timeZone"]?.string.flatMap(TimeZone.init(identifier:))
+            let fallback = data["time"]?.string ?? "Time unavailable"
+            let time: String
+            if allDay {
+                time = "All day"
+            } else if timeZone != nil {
+                time = fallback
+            } else {
+                time = CalendarEventPresentation.timeLabel(start: start, end: data["end"]?.string, fallback: fallback)
+            }
             let attendees = data["attendees"]?.arrayStrings ?? []
             let calendars = data["calendars"]?.arrayStrings ?? []
             let calendarLink = data["calendarLink"]?.objectValue
@@ -1791,7 +1822,8 @@ enum MessageResponseCard: Identifiable {
                 calendarLinkURL: calendarLink?["url"]?.string
                     ?? (Self.isCalendarEventURL(legacyURL) ? legacyURL : nil),
                 meetingLinkURL: meetingLink?["url"]?.string
-                    ?? (Self.isMeetingURL(legacyURL) ? legacyURL : nil)
+                    ?? (Self.isMeetingURL(legacyURL) ? legacyURL : nil),
+                timeZone: timeZone
             )
         case "calendar", "agenda":
             let items: [AgendaItem] = {
@@ -2025,7 +2057,8 @@ enum MessageResponseCard: Identifiable {
                 complete: data["complete"]?.boolValue == true
                     && !checkedCalendars.isEmpty
                     && allBusyRowsUsable,
-                note: data["note"]?.string
+                note: data["note"]?.string,
+                timeZone: data["timeZone"]?.string.flatMap(TimeZone.init(identifier:))
             )
         case "email-thread":
             let messages: [ThreadMessage] = {
@@ -2587,17 +2620,19 @@ enum WeatherPresentation {
         fallback: [MessageResponseCard.WeatherDetail]
     ) -> [Metric] {
         if let current {
+            let precipitationLabel = fallback.contains { $0.label == "Precipitation chance" }
+                ? "Precipitation chance" : "Rain chance"
             return [
                 current.windKmh.map { Metric(label: "Wind", value: "\(Int($0.rounded())) km/h", symbol: "wind") },
                 current.humidity.map { Metric(label: "Humidity", value: "\(Int($0.rounded()))%", symbol: "humidity") },
-                current.precipPct.map { Metric(label: "Rain chance", value: "\(Int($0.rounded()))%", symbol: "umbrella") },
+                current.precipPct.map { Metric(label: precipitationLabel, value: "\(Int($0.rounded()))%", symbol: "umbrella") },
             ].compactMap { $0 }
         }
         return fallback
             .filter { $0.label.caseInsensitiveCompare("Today") != .orderedSame }
             .map { detail in
                 let lower = detail.label.lowercased()
-                let symbol = lower.contains("rain") ? "umbrella" : lower.contains("wind") ? "wind"
+                let symbol = lower.contains("rain") || lower.contains("precipitation") ? "umbrella" : lower.contains("wind") ? "wind"
                     : lower.contains("humid") ? "humidity" : "thermometer.medium"
                 return Metric(label: detail.label, value: detail.value, symbol: symbol)
             }
@@ -2750,6 +2785,7 @@ struct RichResponseCards: View {
     private struct EventRow: Identifiable {
         let id: String
         let start: String
+        let timeZone: TimeZone?
         let time: String
         let title: String
         let location: String
@@ -2823,12 +2859,13 @@ struct RichResponseCards: View {
     /// an itinerary instead of a column of unrelated tiles.
     private var eventRows: [EventRow] {
         cards.compactMap { card in
-            guard case let .event(id, start, time, title, location, attendees, calendars, calendarLinkURL, meetingLinkURL) = card else {
+            guard case let .event(id, start, time, title, location, attendees, calendars, calendarLinkURL, meetingLinkURL, timeZone) = card else {
                 return nil
             }
             return .init(
                 id: id,
                 start: start,
+                timeZone: timeZone,
                 time: time,
                 title: title,
                 location: locationWithoutInlineURLs(location),
@@ -2910,8 +2947,8 @@ struct RichResponseCards: View {
                 driveResultsCard(title: title, query: query, files: files)
             case let .search(_, title, query, results):
                 searchResultsCard(title: title, query: query, results: results)
-            case let .availability(_, timeMin, timeMax, busy, calendarsChecked, complete, note):
-                availabilityCard(timeMin: timeMin, timeMax: timeMax, busy: busy, calendarsChecked: calendarsChecked, complete: complete, note: note)
+            case let .availability(_, timeMin, timeMax, busy, calendarsChecked, complete, note, timeZone):
+                availabilityCard(timeMin: timeMin, timeMax: timeMax, busy: busy, calendarsChecked: calendarsChecked, complete: complete, note: note, timeZone: timeZone ?? .current)
             case let .thread(_, subject, messageCount, messages):
                 threadCard(subject: subject, messageCount: messageCount, messages: messages)
             case let .sheetRows(_, sheetName, rows, totalRows, linkURL):
@@ -2963,7 +3000,7 @@ struct RichResponseCards: View {
         var order: [String] = []
         var byDate: [String: [EventRow]] = [:]
         for row in eventRows {
-            let key = eventDateCaption(row.start) ?? ""
+            let key = CalendarEventPresentation.dateCaption(row.start, timeZone: row.timeZone ?? .current) ?? ""
             if byDate[key] == nil { order.append(key) }
             byDate[key, default: []].append(row)
         }
@@ -3108,10 +3145,6 @@ struct RichResponseCards: View {
         } else {
             EmptyView()
         }
-    }
-
-    private func eventDateCaption(_ start: String) -> String? {
-        CalendarEventPresentation.dateCaption(start)
     }
 
     private func eventAttendee(_ value: String) -> EventAttendee {
@@ -3400,6 +3433,9 @@ struct RichResponseCards: View {
                 let low = convert(day.lowC)
                 let high = convert(day.highC)
                 let rain = day.precipPct.flatMap { $0 >= 30 ? "\(Int($0.rounded()))%" : nil }
+                let description = day.description.lowercased()
+                let precipitation = description.contains("snow") || description.contains("precipitation type uncertain") || description == "unsettled"
+                    ? "precipitation" : "rain"
                 if usesAccessibilityLayout {
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 8) {
@@ -3408,7 +3444,7 @@ struct RichResponseCards: View {
                                 .symbolRenderingMode(.hierarchical)
                                 .foregroundStyle(AssistantTheme.accent(for: colorScheme))
                         }
-                        Text([ "\(low)°–\(high)°", rain.map { "\($0) rain" } ].compactMap { $0 }.joined(separator: " · "))
+                        Text([ "\(low)°–\(high)°", rain.map { "\($0) \(precipitation)" } ].compactMap { $0 }.joined(separator: " · "))
                             .font(.subheadline)
                             .monospacedDigit()
                             .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
@@ -3446,7 +3482,7 @@ struct RichResponseCards: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
                     .accessibilityElement(children: .combine)
-                    .accessibilityLabel("\(day.weekday), \(day.description), low \(low), high \(high)\(rain.map { ", \($0) chance of rain" } ?? "")")
+                    .accessibilityLabel("\(day.weekday), \(day.description), low \(low), high \(high)\(rain.map { ", \($0) chance of \(precipitation)" } ?? "")")
                 }
             }
         }
@@ -3953,13 +3989,14 @@ struct RichResponseCards: View {
         busy: [MessageResponseCard.BusyBlock],
         calendarsChecked: [String],
         complete: Bool,
-        note: String?
+        note: String?,
+        timeZone: TimeZone
     ) -> some View {
-        let spansMultipleDays = availabilitySpansMultipleDays(timeMin: timeMin, timeMax: timeMax)
+        let spansMultipleDays = availabilitySpansMultipleDays(timeMin: timeMin, timeMax: timeMax, timeZone: timeZone)
         return VStack(alignment: .leading, spacing: 13) {
             resultHeader(
                 title: "Availability",
-                subtitle: availabilityWindowCaption(timeMin: timeMin, timeMax: timeMax),
+                subtitle: availabilityWindowCaption(timeMin: timeMin, timeMax: timeMax, timeZone: timeZone),
                 countLabel: busy.isEmpty
                     ? (complete ? "Free" : "Unconfirmed")
                     : "\(busy.count) busy"
@@ -3980,7 +4017,7 @@ struct RichResponseCards: View {
             } else {
                 VStack(spacing: 0) {
                     ForEach(Array(busy.enumerated()), id: \.element.id) { index, block in
-                        let interval = Text(availabilityTimeLabel(start: block.start, end: block.end, spansMultipleDays: spansMultipleDays))
+                        let interval = Text(availabilityTimeLabel(start: block.start, end: block.end, spansMultipleDays: spansMultipleDays, timeZone: timeZone))
                             .font(.subheadline.monospacedDigit().weight(.semibold))
                             .foregroundStyle(AssistantTheme.ink(for: colorScheme))
                         let calendar = Text(block.calendar)
@@ -4033,26 +4070,28 @@ struct RichResponseCards: View {
 
     /// Multi-day windows prefix each block with its weekday so "Tue" never
     /// reads as if it belonged to the first day of the range.
-    private func availabilityTimeLabel(start: String, end: String, spansMultipleDays: Bool) -> String {
-        let range = "\(cardTime(start))–\(cardTime(end))"
+    private func availabilityTimeLabel(start: String, end: String, spansMultipleDays: Bool, timeZone: TimeZone) -> String {
+        let range = "\(cardTime(start, timeZone: timeZone))–\(cardTime(end, timeZone: timeZone))"
         guard spansMultipleDays, let date = cardTimestamp(start) else { return range }
-        return "\(date.formatted(.dateTime.weekday(.abbreviated))) · \(range)"
+        return "\(date.formatted(Date.FormatStyle(timeZone: timeZone).weekday(.abbreviated))) · \(range)"
     }
 
-    private func availabilityWindowCaption(timeMin: String, timeMax: String) -> String {
-        let start = eventDateCaption(timeMin) ?? timeMin
-        guard availabilitySpansMultipleDays(timeMin: timeMin, timeMax: timeMax),
-              let end = eventDateCaption(timeMax) else {
+    private func availabilityWindowCaption(timeMin: String, timeMax: String, timeZone: TimeZone) -> String {
+        let start = CalendarEventPresentation.dateCaption(timeMin, timeZone: timeZone) ?? timeMin
+        guard availabilitySpansMultipleDays(timeMin: timeMin, timeMax: timeMax, timeZone: timeZone),
+              let end = CalendarEventPresentation.dateCaption(timeMax, timeZone: timeZone) else {
             return start
         }
         return "\(start) – \(end)"
     }
 
-    private func availabilitySpansMultipleDays(timeMin: String, timeMax: String) -> Bool {
+    private func availabilitySpansMultipleDays(timeMin: String, timeMax: String, timeZone: TimeZone) -> Bool {
         guard let start = cardTimestamp(timeMin), let end = cardTimestamp(timeMax) else {
             return false
         }
-        return !Calendar.current.isDate(start, inSameDayAs: end)
+        var calendar = Calendar.current
+        calendar.timeZone = timeZone
+        return !calendar.isDate(start, inSameDayAs: end)
     }
 
     private func availabilityCoverage(calendarsChecked: [String], complete: Bool, note: String?) -> String {
@@ -4784,9 +4823,9 @@ struct RichResponseCards: View {
         return date.formatted(date: .abbreviated, time: .shortened)
     }
 
-    private func cardTime(_ value: String) -> String {
+    private func cardTime(_ value: String, timeZone: TimeZone = .current) -> String {
         guard let date = cardTimestamp(value) else { return value }
-        return date.formatted(date: .omitted, time: .shortened)
+        return date.formatted(Date.FormatStyle(timeZone: timeZone).hour().minute())
     }
 
     /// ISO 8601 from the Google APIs, or a raw RFC 5322 header off a Gmail
@@ -4815,6 +4854,7 @@ struct RichResponseCards: View {
     /// same names to its own icon set — and a name this build does not know
     /// falls through to the prose reading below.
     private static let weatherSymbols: [String: String] = [
+        "uncertain": "questionmark.circle",
         "clear": "sun.max.fill",
         "partly-cloudy": "cloud.sun.fill",
         "cloudy": "cloud.fill",
@@ -4833,6 +4873,7 @@ struct RichResponseCards: View {
     private func weatherSymbol(_ condition: String, symbol: String = "") -> String {
         if let named = Self.weatherSymbols[symbol.lowercased()] { return named }
         let lower = condition.lowercased()
+        if lower.contains("precipitation type uncertain") { return "questionmark.circle" }
         if lower.contains("thunder") || lower.contains("storm") { return "cloud.bolt.rain.fill" }
         if lower.contains("snow") { return "cloud.snow.fill" }
         if lower.contains("freezing rain") || lower.contains("sleet") { return "cloud.sleet.fill" }

@@ -906,6 +906,7 @@ export async function stageModelFinalResponse(
     // the gap is named under it rather than replacing the whole reply.
     const mixedRead = readContext?.readRequest;
     const cards = responseCardsForFinal({
+      ownerTimeZone: state.requestTimeZone ?? readContext?.lookupContext?.timeZone,
       evidence: actionEvidence(rows, true),
       readRequest: mixedRead,
       requestText: latestUserText(window),
@@ -1312,6 +1313,7 @@ export async function stageModelFinalResponse(
       })
     : evidence;
   const specializedCards = responseCardsForFinal({
+    ownerTimeZone: state.requestTimeZone ?? readContext?.lookupContext?.timeZone,
     resolvedReadIntent: readContext?.resolvedReadIntent,
     evidence: tripOwnsCalendar
       ? cardEvidence.filter((row) => row.toolName !== 'calendar.list_events')

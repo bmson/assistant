@@ -222,7 +222,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('repair schedule provision
     await expect(ensureRepairSchedule(store, agentId)).rejects.toThrow('Privacy erasure');
   });
   it.each(['fixing', 'testing', 'pr_open', 'merged'] as const)(
-    'reconciles %s on the next minute check even with no daily allowance',
+    'polls %s on its normal cadence even with no daily allowance',
     async (status) => {
       await ensureRepairSchedule(store, agentId);
       const schedule = (await store.collection('schedules').where('agentId', '==', agentId).get())
@@ -239,7 +239,11 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('repair schedule provision
       const later = new Date(Date.now() + 3600000);
       await schedule.ref.update({ nextRunAt: later });
       await ensureRepairSchedule(store, agentId, 0);
-      expect((await schedule.ref.get()).get('nextRunAt').toMillis()).toBeLessThan(later.getTime());
+      const next = (await schedule.ref.get()).get('nextRunAt').toDate() as Date;
+      expect(next.getTime()).toBeGreaterThanOrEqual(later.getTime() - 45 * 60_000);
+      expect(next.getTime()).toBeLessThan(later.getTime());
+      await ensureRepairSchedule(store, agentId, 0);
+      expect((await schedule.ref.get()).get('nextRunAt').toMillis()).toBe(next.getTime());
       expect(await repairs.claim(agentId, new Date(), 0)).toBeNull();
     },
   );

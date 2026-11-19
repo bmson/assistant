@@ -28,6 +28,16 @@ function hasLocalChatPreview(request: NextRequest, authUrl: string, enabled: boo
   }
 }
 
+const identifier =
+  '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}';
+const mobileNote = '/api/mobile/v1/memory/' + identifier;
+const mobileNoteRead = new RegExp(
+  '^' + mobileNote + '/(?:snapshot|correction/' + identifier + '/status)$',
+);
+const mobileNoteWrite = new RegExp(
+  '^' + mobileNote + '/correction/(?:authorize|' + identifier + '/apply)$',
+);
+
 /** Firestore preview exposes migrated read surfaces and the supported owner mutations. */
 export function proxy(request: NextRequest) {
   const path = request.nextUrl.pathname;
@@ -214,7 +224,7 @@ export function proxy(request: NextRequest) {
     (path === '/api/files' && request.method === 'GET') ||
     // Versioned recall controls retain owner authentication and privacy fences
     // in the handler. Admit only its existing read and explicit write methods.
-    (/^\/api\/recall\/sources\/[a-f0-9]{64}$/.test(path) &&
+    (/^\/api\/(?:mobile\/v1\/)?recall\/sources\/[a-f0-9]{64}$/.test(path) &&
       ['GET', 'PATCH'].includes(request.method)) ||
     (path === '/api/ready' && request.method === 'GET') ||
     (path === '/api/release-probe' && request.method === 'GET') ||
@@ -335,6 +345,8 @@ export function proxy(request: NextRequest) {
     (memoryPersonPath.test(path) && ['GET', 'PATCH', 'POST', 'DELETE'].includes(request.method)) ||
     // Owner memory commands: create, correct, confirm, forget, and review.
     (path === '/api/mobile/v1/memory' && request.method === 'POST') ||
+    (mobileNoteRead.test(path) && request.method === 'GET') ||
+    (mobileNoteWrite.test(path) && request.method === 'POST') ||
     (/^\/api\/mobile\/v1\/memory\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
       path,
     ) &&

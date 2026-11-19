@@ -2,6 +2,7 @@ import { ambientSnapshots, createDb, type Db, locationPings } from '@assistant/d
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { getAgent } from '../chat.js';
+import { weatherResponseCards } from '../workflow/response-cards.js';
 import {
   fetchWeather,
   geocodePlace,
@@ -224,7 +225,7 @@ describe('placeQueryCandidates', () => {
   });
 });
 
-describe('ambient — hourly is opt-in', () => {
+describe('ambient — hourly forecast evidence', () => {
   function urlSpy(body: unknown) {
     const urls: string[] = [];
     const impl = (async (url: string) => {
@@ -245,15 +246,78 @@ describe('ambient — hourly is opt-in', () => {
     },
   };
 
-  it('asks for no hourly block by default, so the snapshot payload is unchanged', () => {
-    // refreshAmbientSnapshot calls fetchWeather with three arguments and reads
-    // only current/daily. Seven days of hourly rows would roughly triple a
-    // payload it rewrites every half hour.
+  it('requests only the hourly evidence needed to verify daily conditions', () => {
     const { impl, urls } = urlSpy(DAILY_BODY);
     return fetchWeather(64, -22, impl).then((weather) => {
-      expect(urls[0]).not.toContain('hourly=');
+      expect(new URL(urls[0] ?? '').searchParams.get('hourly')).toBe('temperature_2m,weather_code');
       expect(weather?.hourly).toBeUndefined();
     });
+  });
+
+  it('distinguishes warm, corroborated cold, and unverified snow on their own dates', async () => {
+    const { impl } = urlSpy({
+      ...DAILY_BODY,
+      current: { ...DAILY_BODY.current, temperature_2m: 12, weather_code: 75 },
+      daily: {
+        time: ['2026-08-28', '2026-08-29', '2026-08-30', '2026-08-31'],
+        weather_code: [75, 75, 75, 75],
+        temperature_2m_max: [15, 16, 7, 2],
+        temperature_2m_min: [12, 9, -1, -4],
+        precipitation_probability_max: [95, 90, 80, 65],
+      },
+      hourly_units: { temperature_2m: '°F' },
+      hourly: {
+        time: [
+          '2026-08-29T11:00',
+          '2026-08-29T12:00',
+          '2026-08-29T24:00',
+          '2026-08-30T02:00',
+          '2026-08-30T13:00',
+        ],
+        temperature_2m: [56, 60, 28, 30, 44],
+        weather_code: [75, 61, 75, 75, 3],
+      },
+    });
+    const weather = await fetchWeather(37.77, -122.42, impl, { hourly: true });
+    expect(weather).toMatchObject({
+      description: 'precipitation type uncertain',
+      dailyPrecipitationType: 'unspecified',
+      forecast: [
+        {
+          date: '2026-08-29',
+          description: 'precipitation type uncertain',
+          precipProbabilityMax: 90,
+        },
+        { date: '2026-08-30', description: 'heavy snow', precipProbabilityMax: 80 },
+        {
+          date: '2026-08-31',
+          description: 'precipitation type uncertain',
+          precipProbabilityMax: 65,
+        },
+      ],
+    });
+    expect(weather?.hourly?.map(({ tempC, description }) => ({ tempC, description }))).toEqual([
+      { tempC: 13, description: 'precipitation type uncertain' },
+      { tempC: 16, description: 'light rain' },
+      { tempC: -1, description: 'heavy snow' },
+      { tempC: 7, description: 'overcast' },
+    ]);
+  });
+
+  it('keeps an unverified snow signal uncertain when no hourly block or units are returned', async () => {
+    const daily = { ...DAILY_BODY.daily, weather_code: [3, 75] };
+    for (const hourly of [
+      undefined,
+      {
+        time: ['2026-08-29T11:00'],
+        temperature_2m: [-2],
+        weather_code: [75],
+      },
+    ]) {
+      const { impl } = urlSpy({ ...DAILY_BODY, daily, hourly });
+      const weather = await fetchWeather(37.77, -122.42, impl);
+      expect(weather?.forecast[0]?.description).toBe('precipitation type uncertain');
+    }
   });
 
   it('parses hour rows when asked, dropping any the provider left incomplete', async () => {
@@ -358,6 +422,38 @@ describe('ambient — snapshot refresh + block', () => {
     expect(block).toContain(
       'Coming days: Tue 9–16°C, clear; Wed 9–13°C, light rain, 80% chance of rain.',
     );
+  });
+
+  it('carries warm snow conflicts through the persisted ambient block and weather card', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const fetchImpl = async () =>
+      Response.json({
+        current: { temperature_2m: 12, weather_code: 75, wind_speed_10m: 11 },
+        daily: {
+          time: ['2026-08-28', '2026-08-29'],
+          weather_code: [75, 75],
+          temperature_2m_min: [10, 10],
+          temperature_2m_max: [15, 15],
+          precipitation_probability_max: [90, 85],
+        },
+        hourly_units: { temperature_2m: '°C' },
+        hourly: {
+          time: ['2026-08-28T13:00', '2026-08-29T13:00'],
+          temperature_2m: [13, 13],
+          weather_code: [75, 75],
+        },
+      });
+    const result = await refreshAmbientSnapshot({ db, fetchImpl }, { agentId });
+    expect(result.flags).toMatchObject({ raining_now: false, raining_soon: false });
+    const block = await getAmbientBlock(db, agentId);
+    expect(block).toContain('85% chance of precipitation');
+    expect(block).not.toMatch(/heavy snow|chance of rain/);
+    const [card] = weatherResponseCards(block ?? undefined);
+    expect(card).toMatchObject({
+      condition: 'precipitation type uncertain',
+      details: expect.arrayContaining([{ label: 'Precipitation chance', value: '90%' }]),
+    });
+    expect(JSON.stringify(card)).not.toMatch(/heavy snow|Rain chance|chance of rain/);
   });
 
   it('falls back to the location line when the snapshot is stale', async (ctx) => {

@@ -562,7 +562,7 @@ interface DirectEmailReviewIntent {
   unsupportedScope?: string;
 }
 
-const EMAIL_REVIEW_NUMBER_WORDS: Record<string, number> = {
+const READ_NUMBER_WORDS: Record<string, number> = {
   one: 1,
   two: 2,
   three: 3,
@@ -585,10 +585,10 @@ const EMAIL_REVIEW_NUMBER_WORDS: Record<string, number> = {
   twenty: 20,
 };
 
-function emailReviewNumber(value: string | undefined): number | undefined {
+function readNumber(value: string | undefined): number | undefined {
   if (!value) return undefined;
   const numeric = /^\d{1,2}$/.test(value) ? Number(value) : undefined;
-  return numeric ?? EMAIL_REVIEW_NUMBER_WORDS[value.toLowerCase()];
+  return numeric ?? READ_NUMBER_WORDS[value.toLowerCase()];
 }
 
 function directLatestUnansweredEmailIntent(text: string): boolean {
@@ -626,10 +626,11 @@ function directEmailReviewIntent(text: string): DirectEmailReviewIntent | undefi
   )
     return undefined;
   const period =
-    /\b(?:last|past|over\s+(?:the\s+)?(?:last|past)|within\s+(?:the\s+)?(?:last|past))\s+(\d{1,2}|[a-z]+)\s+(?:(local|user[- ]local)\s+calendar\s+)?days?\b/i.exec(
+    /\b(?:last|past|over\s+(?:the\s+)?(?:last|past)|within\s+(?:the\s+)?(?:last|past))\s+(\d{1,2}|[a-z]+)\s+(?:(local|user[- ]local)\s+calendar\s+)?(days?|weeks?)\b/i.exec(
       text,
     );
-  const windowDays = emailReviewNumber(period?.[1]) ?? 7;
+  const count = readNumber(period?.[1]);
+  const windowDays = (count ?? 7) * (period?.[3]?.toLowerCase().startsWith('week') ? 7 : 1);
   const localCalendarDays = Boolean(period?.[2]);
   const asksToReviewRecentMail =
     /\b(?:review|look through|go through|scan|check|prepare|make|create|build)\b/i.test(text) &&
@@ -644,7 +645,7 @@ function directEmailReviewIntent(text: string): DirectEmailReviewIntent | undefi
     /\b(?:find|identify|list|prioritize)\s+(?:the\s+)?(\d{1,2}|[a-z]+)\s+(?:most\s+important\s+)?(?:outstanding\s+)?(?:reply\s+)?requests?\b/i.exec(
       text,
     );
-  const requestedCount = emailReviewNumber(countMatch?.[1]) ?? 5;
+  const requestedCount = readNumber(countMatch?.[1]) ?? 5;
   const actionBrief = /\baction\s+brief\b/i.test(text);
   const asksForContextualDrafts =
     /\b(?:draft|write)\s+(?:the\s+)?repl(?:y|ies)\b/i.test(text) &&
@@ -1324,7 +1325,13 @@ export function resolveTemporalIntent(
   const now = options.now ? new Date(options.now.getTime()) : new Date();
   if (!Number.isFinite(now.getTime())) return { kind: 'unresolved' };
   const boundOptions = { ...options, now };
-  const unsupported = unsupportedRelativePeriod(text);
+  // Spoken and typed counts share the same bounded civil-date arithmetic.
+  const periodText = text.replace(
+    /\b(next|last|past)\s+(one|two|three|four|five|six|seven|eight|nine|ten)\s+(days?|weeks?)\b/gi,
+    (_, direction: string, number: string, unit: string) =>
+      `${direction} ${READ_NUMBER_WORDS[number.toLowerCase()]} ${unit}`,
+  );
+  const unsupported = unsupportedRelativePeriod(periodText);
   if (unsupported) {
     const granularity = temporalGranularity(unsupported, kind, hasNamedTerms);
     return {
@@ -1334,7 +1341,7 @@ export function resolveTemporalIntent(
     };
   }
   const today = civilDateAt(now, options.timeZone);
-  let window = resolveTimeWindowBounds(text, kind, hasNamedTerms, boundOptions);
+  let window = resolveTimeWindowBounds(periodText, kind, hasNamedTerms, boundOptions);
   if (purpose === 'trip' && !hasExplicitTemporalPhrase(text)) {
     window = {
       timeMin: now.toISOString(),
@@ -1385,7 +1392,7 @@ export function resolveTemporalIntent(
         localDate: civilDateKey(today),
       },
       interval,
-      granularity: temporalGranularity(text, kind, hasNamedTerms),
+      granularity: temporalGranularity(periodText, kind, hasNamedTerms),
       window,
     },
   };
@@ -2179,7 +2186,7 @@ function explicitPrivateSourceRequest(
   const topic = broadTravel ? 'travel' : terms.join(' ');
   const temporalText = text.replace(
     /\bnext\s+(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:(?:local|calendar)\s+)*days?\b/giu,
-    (_, count: string) => `next ${emailReviewNumber(count) ?? count} days`,
+    (_, count: string) => `next ${readNumber(count) ?? count} days`,
   );
   const children: PersonalReadRequest[] = [];
   if (history)
