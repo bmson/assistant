@@ -5,6 +5,7 @@ import {
   type InstallationStore,
 } from '@assistant/firestore';
 import {
+  REPAIR_POLL_INTERVAL_MS,
   type Records,
   type RepairIssue,
   repairQueueNextEligibleAt,
@@ -43,11 +44,22 @@ export async function ensureRepairSchedule(
       const followUp = issues.some((issue) =>
         ['fixing', 'testing', 'pr_open', 'merged'].includes(issue.status),
       );
-      const nextRunAt = repairQueueReady(issues, now, dailyLimit)
-        ? now
-        : (eligibleAt ?? (followUp ? now : undefined));
+      const next: Date | undefined = schedule.get('nextRunAt')?.toDate?.();
+      const lastRun: Date | undefined = schedule.get('lastRunAt')?.toDate?.();
+      const earliest = lastRun ? lastRun.getTime() + REPAIR_POLL_INTERVAL_MS : now.getTime();
+      // The scheduler already advances the configured cron. A capped queue may
+      // have postponed a default poll, so restore it once without sliding it
+      // forward every time the minute sweep runs.
+      const poll =
+        followUp && schedule.get('cron') === '*/15 * * * *'
+          ? Math.min(next?.getTime() ?? Infinity, now.getTime() + REPAIR_POLL_INTERVAL_MS)
+          : undefined;
+      const requested = repairQueueReady(issues, now, dailyLimit)
+        ? now.getTime()
+        : (eligibleAt?.getTime() ?? poll);
+      const nextRunAt =
+        requested === undefined ? undefined : new Date(Math.max(earliest, requested));
       if (nextRunAt) {
-        const next = schedule.get('nextRunAt')?.toDate?.();
         if (!next || Math.abs(next.getTime() - nextRunAt.getTime()) > 1000)
           tx.update(schedule.ref, { nextRunAt, updatedAt: now });
       }
@@ -67,7 +79,7 @@ export async function ensureRepairSchedule(
         taskTemplate: { type: 'scheduled', budgetUsdLimit: '0.50', job: 'self.repair' },
       },
       seedReviewRequired: false,
-      nextRunAt: now,
+      nextRunAt: null,
       lastRunAt: null,
       createdAt: now,
       updatedAt: now,
