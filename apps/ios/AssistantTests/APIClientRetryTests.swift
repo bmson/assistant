@@ -7009,7 +7009,7 @@ extension APIClientRetryTests {
         XCTAssertEqual(changed, true)
         XCTAssertNil(model.errorMessage, "Only the exact task's newly visible durable reply clears the notice")
         XCTAssertTrue(model.messages.contains(where: { $0.id == reply.id }))
-        XCTAssertEqual(recorder.entries.map(\.body), ["A new response is ready."])
+        XCTAssertTrue(recorder.entries.isEmpty)
         XCTAssertNotEqual(model.activityThought, .finished, "Idle reconciliation does not fabricate task completion speech or activity")
     }
 
@@ -7245,13 +7245,11 @@ extension APIClientRetryTests {
 
         model.send("Check the completed task")
         let deadline = ContinuousClock.now.advanced(by: .seconds(5))
-        while (recorder.entries.isEmpty || spokenReplies.isEmpty), ContinuousClock.now < deadline {
+        while (model.activityThought != .finished || spokenReplies.isEmpty), ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(10))
         }
 
-        let notification = try XCTUnwrap(recorder.entries.first)
-        XCTAssertEqual(notification.title, "Ada finished")
-        XCTAssertEqual(notification.body, "Your result is ready.")
+        XCTAssertTrue(recorder.entries.isEmpty)
         XCTAssertEqual(model.activityDetail, "Your result is ready")
         XCTAssertEqual(model.activityThought, .finished)
         XCTAssertEqual(spokenReplies.map(\.id), [reply.id])
@@ -7296,13 +7294,11 @@ extension APIClientRetryTests {
 
         model.send("Check the completed task")
         let deadline = ContinuousClock.now.advanced(by: .seconds(5))
-        while recorder.entries.isEmpty, ContinuousClock.now < deadline {
+        while model.activityThought != .finished, ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(10))
         }
 
-        let notification = try XCTUnwrap(recorder.entries.first)
-        XCTAssertEqual(notification.title, "Ada finished")
-        XCTAssertEqual(notification.body, "Your result is ready.")
+        XCTAssertTrue(recorder.entries.isEmpty)
         XCTAssertEqual(model.activityThought, .finished)
         XCTAssertNotEqual(model.errorMessage, "This task is marked complete, but its reply has not appeared yet.")
     }
