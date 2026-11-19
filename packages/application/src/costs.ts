@@ -1,6 +1,16 @@
 import { getAgent } from '@assistant/core/chat';
 import { type CostTotals, costTotals } from '@assistant/core/cost';
-import { budgets, costEvents, costReservations, type Db, modelCalls, tasks } from '@assistant/db';
+import { getTaskQueue } from '@assistant/core/queue';
+import { dispatchOutbox } from '@assistant/core/workflow/dispatch';
+import {
+  budgets,
+  costEvents,
+  costReservations,
+  type Db,
+  modelCalls,
+  tasks,
+  updatePostgresBudgetCaps,
+} from '@assistant/db';
 import {
   addMicros,
   type BudgetCapsRepository,
@@ -8,8 +18,11 @@ import {
   type CostEvidence,
   type CostEvidenceTotal,
   costBasis,
+  type DispatchOutbox,
   microsToUsd,
   normalizeBudgetCaps,
+  type TaskQueue,
+  type TaskWake,
   usdDecimalToMicros,
 } from '@assistant/persistence';
 import { and, count, desc, eq, gte, lt, sql, sum } from 'drizzle-orm';
@@ -292,7 +305,7 @@ export function updateBudgetCapsWithRepository(
   repository: BudgetCapsRepository,
   agentId: string,
   values: Partial<Record<'task_default' | 'daily' | 'monthly', string>>,
-): Promise<void> {
+): Promise<TaskWake[]> {
   const normalized = normalizeBudgetCaps(values);
   if (normalized.error) throw new Error(normalized.error);
   return repository.update(agentId, normalized.caps ?? {});
@@ -301,15 +314,35 @@ export function updateBudgetCapsWithRepository(
 export async function updateBudgetCaps(
   db: Db,
   values: Partial<Record<'task_default' | 'daily' | 'monthly', string>>,
-): Promise<void> {
+): Promise<TaskWake[]> {
   const normalized = normalizeBudgetCaps(values);
   if (normalized.error) throw new Error(normalized.error);
-  await db.transaction(async (tx) => {
-    for (const [scope, limitUsd] of Object.entries(normalized.caps ?? {})) {
-      await tx
-        .update(budgets)
-        .set({ limitUsd, updatedAt: sql`now()` })
-        .where(eq(budgets.scope, scope));
+  return updatePostgresBudgetCaps(db, normalized.caps ?? {});
+}
+
+/** PostgreSQL workers can poll the task row. Firestore also retains the exact outbox lease. */
+export async function dispatchBudgetWakes(
+  queueDriver: string,
+  wakes: readonly TaskWake[],
+  options: { outbox?: DispatchOutbox; ids?: readonly string[]; queue?: TaskQueue } = {},
+): Promise<void> {
+  if (queueDriver !== 'cloudtasks' || !wakes.length) return;
+  try {
+    const queue = options.queue ?? getTaskQueue();
+    if (options.outbox && options.ids) {
+      await dispatchOutbox(options.outbox, queue, {
+        batch: wakes.length,
+        ids: options.ids,
+        maxDurationMs: 15_000,
+      });
+      return;
     }
-  });
+    const signal = AbortSignal.timeout(15_000);
+    await Promise.allSettled(
+      wakes.map(({ id, queueGeneration }) => queue.enqueue(id, queueGeneration, signal)),
+    );
+  } catch (error) {
+    // The worker's normal poll or dispatch sweep will retry the committed wake.
+    console.error('Budget cap wake dispatch unavailable', error);
+  }
 }

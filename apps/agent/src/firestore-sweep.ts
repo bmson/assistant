@@ -17,7 +17,11 @@ import {
   resumeResolvedApprovalTasks,
   runDueSchedules,
 } from '@assistant/core';
-import { FirestoreOutbox, FirestoreScheduleRepository } from '@assistant/firestore';
+import {
+  FirestoreBudgetCapsRepository,
+  FirestoreOutbox,
+  FirestoreScheduleRepository,
+} from '@assistant/firestore';
 import type { TaskQueue } from '@assistant/persistence';
 import { ensureAwarenessSchedule } from './awareness-schedule.js';
 import {
@@ -160,6 +164,12 @@ export async function runFirestoreSweep(
             deps.config.FIRESTORE_AGENT_ID,
           )
         ).length,
+    ),
+    capChangeWakes: await step(
+      'resumeBudgetCapWakes',
+      async () =>
+        (await new FirestoreBudgetCapsRepository(store).resumeWakes(deps.config.FIRESTORE_AGENT_ID))
+          .length,
     ),
     // Vectors are written only in the configured Firestore embedding space,
     // and only while the embed role still produces that space.

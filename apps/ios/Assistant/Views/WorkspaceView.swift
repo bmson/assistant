@@ -1041,7 +1041,7 @@ struct WorkspaceView: View {
             }
 
             if costs.heldUsd > 0 {
-                Label("\(currency(costs.heldUsd)) in budget holds", systemImage: "clock.arrow.circlepath")
+                Label("\(currency(costs.heldUsd)) in unresolved estimates", systemImage: "clock.arrow.circlepath")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                 Text("Budget holds are reservation estimates, not confirmed provider charges.")

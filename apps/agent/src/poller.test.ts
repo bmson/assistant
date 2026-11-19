@@ -15,6 +15,10 @@ const renotifyStalledApprovals = vi.hoisted(() => vi.fn(async () => 0));
 const notifyApproval = vi.hoisted(() => vi.fn(async () => {}));
 const runFirestoreSweep = vi.hoisted(() => vi.fn(async () => ({ ready: true, report: {} })));
 
+vi.mock('@assistant/db', async (original) => ({
+  ...(await original<typeof import('@assistant/db')>()),
+  resumePostgresBudgetWakes: vi.fn(async () => []),
+}));
 vi.mock('@assistant/core', () => ({
   findDueTasks,
   backfillMessageEmbeddings: sweepStep,

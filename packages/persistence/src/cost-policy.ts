@@ -1,3 +1,4 @@
+import type { BudgetRetry } from './budget-caps.js';
 import type { SpendSource } from './contracts.js';
 
 /**
@@ -9,6 +10,7 @@ export class BudgetReservationError extends Error {
   constructor(
     message: string,
     public readonly resumeAt: Date,
+    public readonly budgetRetry?: BudgetRetry,
   ) {
     super(message);
     this.name = 'BudgetReservationError';
