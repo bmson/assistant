@@ -52,3 +52,13 @@ The receipt is capped at 64 KiB. It retains allowlisted release metadata and con
 ## Missing epoch: separate reviewed initializer
 
 See `owner-editor-v1-initialization-plan.md`. No initializer executable or production write is included. A missing epoch causes an automatic release failure before rollout, allowing inspection and a concrete, separately reviewed initialization decision. PostgreSQL migrations and V2 removal tables are not requirements for an observed Firestore basic-five release.
+
+## Archived API 1 runtime observation
+
+The standalone CLI accepts `--observe-archived-runtime` for the reviewed agent and web pair from build `44263661117`. Use the same first-attempt, exact-main observer workflow identity and source/configuration bindings as `--verify-source`. The collector needs permission to GET the two fixed Cloud Run services and their named revisions. This mode needs no database access.
+
+Stage the reviewed private directory at `$RUNNER_TEMP/owner-archived-runtime-pack` and the approved platform-specific Cosign executable at `.artifacts/archived-runtime-tools/cosign` in the checkout. The directory contains `oci-layout`, `index.json`, the runtime descriptor graph under `blobs/sha256`, `trusted-root.json`, `native-binding.json`, and each role's raw historical parent, original build receipt, image signature bundle, and SBOM bundle under `historical`. The CLI pins the SHA-256 of the compact JSON list of every file's relative path, byte length and SHA-256, sorted by ASCII path. A changed pack or native baseline requires a reviewed source update.
+
+The CLI verifies the complete pair before obtaining an access token. It checks the observed service and revision identities, configuration, image digests and routing, then rereads the services to detect drift. On success it writes `owner-archived-runtime-observation.json` exclusively. The receipt identifies the observer run, the original release and the pack. This observation proves historical runtime identity at the time of the reads. Service startup, restoration from a recovery target, and promotion each require separate evidence.
+
+This increment provides the CLI. The hosted workflow still uses its existing modes. Staging the private evidence on a hosted runner and authorizing a live observation belong to the release operator. Existing collection, release and rollback paths retain their registry checks.

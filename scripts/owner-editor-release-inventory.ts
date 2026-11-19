@@ -711,9 +711,91 @@ export function requireBasicEditorReadiness(receipt: unknown, current?: Bootstra
   )
     throw new Error('basic editor release prerequisites unproven');
 }
+function inventoryCredentialContext(mark: InventoryStageMarker) {
+  mark('credential_file');
+  const identity = verifyWifEnvironment(process.env, (file) => {
+    const stat = lstatSync(file);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 32768)
+      throw new Error('invalid credential file');
+    return JSON.parse(readFileSync(file, 'utf8'));
+  });
+  mark('cli_context');
+  const runnerTemp = process.env.RUNNER_TEMP;
+  if (!runnerTemp) throw new Error('invalid context');
+  const cloudConfig = resolve(runnerTemp, 'owner-editor-inventory-gcloud');
+  if (relative(resolve(runnerTemp), cloudConfig).startsWith('..'))
+    throw new Error('invalid context');
+  const childEnv = {
+    PATH: process.env.PATH,
+    HOME: process.env.HOME,
+    CLOUDSDK_CONFIG: cloudConfig,
+    CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: identity.file,
+    CLOUDSDK_CORE_PROJECT: PROJECT,
+    CLOUDSDK_CORE_DISABLE_PROMPTS: '1',
+    CLOUDSDK_COMPONENT_MANAGER_DISABLE_UPDATE_CHECK: 'true',
+  };
+  return { identity, childEnv };
+}
+
+// The pack digest binds the reviewed private pair, including its native baseline.
+// A new historical pair or a changed baseline requires a separately reviewed digest.
+const ARCHIVED_RUNTIME_PACK_SHA256 =
+  'cbf60ddcd176546d5944536e2aef3619acd2d8623b3c8dc699ec10e2886a0b94';
+
+async function observeArchivedOriginal(mark: InventoryStageMarker) {
+  mark('protected_context');
+  verifyPrerequisitesBinding(process.env);
+  const runnerTemp = process.env.RUNNER_TEMP;
+  if (!runnerTemp) throw new Error('missing protected runner directory');
+  mark('archived_runtime_evidence');
+  const { readArchivedRuntimePack } = await import('./owner-archived-runtime-pack.js');
+  const { verifyArchivedRuntimeProvenance } = await import(
+    './owner-archived-runtime-provenance.js'
+  );
+  const { observeArchivedRuntimePair } = await import('./owner-archived-runtime-native.js');
+  const pack = await readArchivedRuntimePack(
+    resolve(runnerTemp, 'owner-archived-runtime-pack'),
+    ARCHIVED_RUNTIME_PACK_SHA256,
+  );
+  await verifyArchivedRuntimeProvenance(pack.roles, pack.trustedRoot);
+  const { childEnv } = inventoryCredentialContext(mark);
+  mark('access_token');
+  const { stdout } = await exec('gcloud', ['auth', 'print-access-token', '--quiet'], {
+    env: childEnv,
+    timeout: 8000,
+    maxBuffer: 16384,
+    killSignal: 'SIGKILL',
+  });
+  mark('archived_runtime_observation');
+  const observed = await observeArchivedRuntimePair(
+    pack.nativeBinding,
+    pack.roles,
+    createReadOnlyGet(stdout.trim(), Date.now() + 60_000),
+  );
+  const receipt = {
+    format: 1,
+    kind: 'archived-original-runtime-observation',
+    packSha256: pack.sha256,
+    observation: observed,
+    workflowSource: process.env.GITHUB_SHA,
+    workflowRun: process.env.GITHUB_RUN_ID,
+    observedAt: new Date().toISOString(),
+    maintenanceAuthorized: false,
+    recoveryPairQualified: false,
+  };
+  mark('receipt_write');
+  writeFileSync('owner-archived-runtime-observation.json', `${JSON.stringify(receipt)}\n`, {
+    flag: 'wx',
+    mode: 0o600,
+  });
+}
+
 async function main(mark: InventoryStageMarker) {
   mark('arguments');
   const mode = process.argv[2];
+  if (process.argv.length === 3 && mode === '--observe-archived-runtime') {
+    return observeArchivedOriginal(mark);
+  }
   if (
     process.argv.length !== 3 ||
     !['--verify-source', '--collect', '--release-preflight'].includes(mode ?? '')
@@ -751,28 +833,7 @@ async function main(mark: InventoryStageMarker) {
     candidateSource ?? process.env.GITHUB_SHA ?? '',
   );
   const started = Date.now();
-  mark('credential_file');
-  const identity = verifyWifEnvironment(process.env, (file) => {
-    const stat = lstatSync(file);
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 32768)
-      throw new Error('invalid credential file');
-    return JSON.parse(readFileSync(file, 'utf8'));
-  });
-  mark('cli_context');
-  const runnerTemp = process.env.RUNNER_TEMP;
-  if (!runnerTemp) throw new Error('invalid context');
-  const cloudConfig = resolve(runnerTemp, 'owner-editor-inventory-gcloud');
-  if (relative(resolve(runnerTemp), cloudConfig).startsWith('..'))
-    throw new Error('invalid context');
-  const childEnv = {
-    PATH: process.env.PATH,
-    HOME: process.env.HOME,
-    CLOUDSDK_CONFIG: cloudConfig,
-    CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: identity.file,
-    CLOUDSDK_CORE_PROJECT: PROJECT,
-    CLOUDSDK_CORE_DISABLE_PROMPTS: '1',
-    CLOUDSDK_COMPONENT_MANAGER_DISABLE_UPDATE_CHECK: 'true',
-  };
+  const { identity, childEnv } = inventoryCredentialContext(mark);
   let retainedBytes = 0;
   const command = async (args: readonly string[], maxBuffer = LIMIT / 2) => {
     const remaining = started + 60000 - Date.now();
