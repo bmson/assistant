@@ -14,18 +14,13 @@
 import { mkdirSync } from 'node:fs';
 import { chromium } from 'playwright';
 import {
-  assertQaWebInstallation,
-  openQaInstallation,
   requireQaOrigin,
+  restrictQaBrowserContext,
+  verifyQaBrowserInstallation,
 } from './visual-qa/qa-installation.js';
 
 const base = requireQaOrigin(process.argv[2], process.env.ASSISTANT_QA_WEB_ORIGIN);
-const { db, target } = await openQaInstallation();
-try {
-  await assertQaWebInstallation(base, target);
-} finally {
-  await db.$client.end({ timeout: 5 });
-}
+await verifyQaBrowserInstallation(base);
 const outDir = '/tmp/visual-qa';
 mkdirSync(outDir, { recursive: true });
 
@@ -76,26 +71,7 @@ for (const viewport of viewports) {
     isMobile: viewport.name === 'phone',
     hasTouch: viewport.name === 'phone',
   });
-  await context.route('**/*', async (route) => {
-    const request = route.request();
-    if (new URL(request.url()).origin !== base || !['GET', 'HEAD'].includes(request.method())) {
-      await route.abort();
-      return;
-    }
-    if (!request.isNavigationRequest()) {
-      await route.continue();
-      return;
-    }
-    const response = await route.fetch({ maxRedirects: 0 });
-    const location = response.headers().location;
-    if (location && new URL(location, request.url()).origin !== base) {
-      await response.dispose();
-      await route.abort();
-      return;
-    }
-    await route.fulfill({ response });
-    await response.dispose();
-  });
+  await restrictQaBrowserContext(context, base);
   const page = await context.newPage();
   const errors: string[] = [];
   page.on('pageerror', (err) => errors.push(`${err.message}`));

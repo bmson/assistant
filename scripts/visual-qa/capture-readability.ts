@@ -1,7 +1,12 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { chromium } from 'playwright';
-import { readPrivateJson } from './chat-readability-safety.js';
+import { type ReadabilityRunManifest, readPrivateJson } from './chat-readability-safety.js';
+import {
+  requireQaOrigin,
+  restrictQaBrowserContext,
+  verifyQaBrowserInstallation,
+} from './qa-installation.js';
 
 // Re-render the saved model outputs, without generating new replies or changing
 // conversations. Top and bottom screenshots preserve the actual scrolling UI.
@@ -13,22 +18,23 @@ const selectedCases = new Set(process.argv.slice(2).map(Number));
 if ([...selectedCases].some((value) => !Number.isInteger(value) || value < 1 || value > 30)) {
   throw new Error('Optional case numbers must be integers from 1 to 30');
 }
+const origin = requireQaOrigin(undefined, process.env.ASSISTANT_QA_WEB_ORIGIN);
+const target = await verifyQaBrowserInstallation(origin);
 const browser = await chromium.launch({ channel: 'chrome', headless: true });
 try {
   for (const run of ['baseline', 'reframed']) {
     const pointer = await readPrivateJson<{ runId: string; manifestFile: string }>(
       path.join(artifacts, `${run}-current.json`),
     );
-    const manifest = await readPrivateJson<{
-      run: string;
-      runId: string;
-      status: string;
-      conversationId: string | null;
-    }>(path.join(artifacts, path.basename(pointer.manifestFile)));
+    const manifest = await readPrivateJson<ReadabilityRunManifest>(
+      path.join(artifacts, path.basename(pointer.manifestFile)),
+    );
     if (
       manifest.run !== run ||
       manifest.runId !== pointer.runId ||
       manifest.status !== 'complete' ||
+      manifest.targetDatabaseName !== target.databaseName ||
+      manifest.targetToken !== target.token ||
       !manifest.conversationId
     ) {
       throw new Error(`${run}: current readability run is missing or incomplete`);
@@ -37,11 +43,14 @@ try {
     for (const width of [1280, 390]) {
       const directory = path.join(output, `${run}-${width}`);
       await mkdir(directory, { recursive: true });
-      const page = await browser.newPage({
+      const context = await browser.newContext({
         viewport: { width, height: 844 },
         reducedMotion: 'reduce',
+        serviceWorkers: 'block',
       });
-      await page.goto(`http://localhost:3000/chat/${conversationId}`, {
+      await restrictQaBrowserContext(context, origin);
+      const page = await context.newPage();
+      await page.goto(`${origin}/chat/${encodeURIComponent(conversationId)}`, {
         waitUntil: 'domcontentloaded',
       });
       await page.locator('.bubble-assistant').first().waitFor();
@@ -97,7 +106,7 @@ try {
           ),
         );
       }
-      await page.close();
+      await context.close();
       console.log(
         `Captured ${run} at ${width}px: ${selectedCases.size || 30} answers, top + bottom`,
       );

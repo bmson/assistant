@@ -1,5 +1,6 @@
 import { createHmac, randomBytes } from 'node:crypto';
 import { createDb } from '@assistant/db';
+import type { BrowserContext } from 'playwright';
 import {
   assertAllocatedTestDatabaseOwnership,
   assertAllocatedTestTargetMarker,
@@ -74,4 +75,37 @@ export async function assertQaWebInstallation(origin: string, target: VerifiedSc
   }).catch(() => null);
   if (!response?.ok || response.headers.get('x-assistant-qa-proof') !== expected)
     throw new Error('The local web server did not prove it uses the allocated QA installation.');
+}
+
+export async function verifyQaBrowserInstallation(origin: string) {
+  const { db, target } = await openQaInstallation();
+  try {
+    await assertQaWebInstallation(origin, target);
+    return target;
+  } finally {
+    await db.$client.end({ timeout: 5 });
+  }
+}
+
+export async function restrictQaBrowserContext(context: BrowserContext, base: string) {
+  await context.route('**/*', async (route) => {
+    const request = route.request();
+    if (new URL(request.url()).origin !== base || !['GET', 'HEAD'].includes(request.method())) {
+      await route.abort();
+      return;
+    }
+    if (!request.isNavigationRequest()) {
+      await route.continue();
+      return;
+    }
+    const response = await route.fetch({ maxRedirects: 0 });
+    const location = response.headers().location;
+    if (location && new URL(location, request.url()).origin !== base) {
+      await response.dispose();
+      await route.abort();
+      return;
+    }
+    await route.fulfill({ response });
+    await response.dispose();
+  });
 }
