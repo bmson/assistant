@@ -2,8 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { type ExecutorDeps, executeTask } from '@assistant/core';
 import {
   agents,
+  assertPostgresInstallationOwner,
   conversations,
-  createDb,
   createPostgresEmailSyncRepository,
   createPostgresExecutionPersistence,
   type Db,
@@ -11,7 +11,6 @@ import {
   memories,
   messages,
 } from '@assistant/db';
-import { assertAllocatedTestTarget } from '@assistant/db/test-target';
 import { createFirestoreExecutionPersistence } from '@assistant/firestore';
 import { type EmailSyncDeps, processMessage } from '@assistant/modules';
 import { type ExecutionPersistence, embeddingSpaceIdentityKey } from '@assistant/persistence';
@@ -22,8 +21,8 @@ import {
   sqlMailHealthCounts,
 } from '../../../packages/core/src/proactive/pipeline-health.js';
 import { runAssistantHealthMonitor } from '../../../packages/core/src/workflow/health-monitor.js';
-import type { InstallationStore } from '../../../packages/firestore/src/store.js';
 import { disposeStore, emulatorStore } from '../../../packages/firestore/src/test-store.js';
+import { createIsolatedTestDatabase } from './isolated-test-database.fixture.js';
 
 const SPACE = {
   provider: 'synthetic',
@@ -50,39 +49,29 @@ for (const driver of ['postgres', 'firestore'] as const) {
     async () => {
       const id = randomUUID();
       const channelMessageId = `gmail:${id}`;
-      const agentId = randomUUID();
       const agentEmail = 'assistant@example.test';
-      let db = noSql();
-      let store: InstallationStore | undefined;
-      let persistence: ExecutionPersistence;
-      if (driver === 'postgres') {
-        const url = process.env.DATABASE_URL;
-        if (!url) throw new Error('Allocated test database required');
-        assertAllocatedTestTarget({
-          databaseUrl: url,
-          testDatabaseUrl: process.env.TEST_DATABASE_URL,
-          token: process.env.ASSISTANT_TEST_TARGET_TOKEN,
-        });
-        db = createDb(url);
-        persistence = {
-          ...createPostgresExecutionPersistence(db),
-          emailSync: createPostgresEmailSyncRepository(db, agentId),
-        };
-        await db.insert(agents).values({
-          id: agentId,
-          email: `assistant-${agentId}@example.test`,
-          name: 'Synthetic assistant',
-          workspacePrefix: agentId,
-        });
-      } else {
-        store = emulatorStore();
-        persistence = createFirestoreExecutionPersistence(store, agentId, SPACE);
-        await store
-          .doc('agents', agentId)
-          .set({ id: agentId, email: agentEmail, name: 'Synthetic assistant', timezone: 'UTC' });
-      }
-
+      const installation = driver === 'postgres' ? await createIsolatedTestDatabase() : undefined;
+      const db = installation?.db ?? noSql();
+      const store = driver === 'firestore' ? emulatorStore() : undefined;
       try {
+        const agentId = store ? randomUUID() : await assertPostgresInstallationOwner(db);
+        let persistence: ExecutionPersistence;
+        if (store) {
+          persistence = createFirestoreExecutionPersistence(store, agentId, SPACE);
+          await store
+            .doc('agents', agentId)
+            .set({ id: agentId, email: agentEmail, name: 'Synthetic assistant', timezone: 'UTC' });
+        } else {
+          persistence = {
+            ...createPostgresExecutionPersistence(db),
+            emailSync: createPostgresEmailSyncRepository(db, agentId),
+          };
+          await db
+            .update(agents)
+            .set({ email: agentEmail, timezone: 'UTC' })
+            .where(eq(agents.id, agentId));
+        }
+
         const syntheticBody =
           'Booking QX42 is confirmed. The shuttle leaves the test station at 08:15 UTC on 3 April 2027.';
         const extractedFact = `Synthetic booking ${id} leaves the test station at 08:15 UTC.`;
@@ -413,7 +402,7 @@ for (const driver of ['postgres', 'firestore'] as const) {
         }
       } finally {
         if (store) await disposeStore(store);
-        else await db.$client.end();
+        else await installation?.close();
       }
     },
     30_000,
