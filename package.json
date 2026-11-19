@@ -41,6 +41,7 @@
     "firestore:indexes": "tsx scripts/firestore-target-indexes.ts",
     "visual-qa:cleanup": "tsx scripts/visual-qa/cleanup-fixtures.ts",
     "config:check": "tsx scripts/config-doctor.ts",
+    "mcp:discover": "tsx scripts/mcp-discover.ts",
     "github:read": "tsx scripts/github-app-read.ts",
     "support:matrix:check": "node scripts/runtime-support-matrix.mjs --check",
     "ios:generated-card-contract:check": "tsx scripts/generate-ios-card-capability-manifest.ts --check",

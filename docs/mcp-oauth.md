@@ -40,6 +40,27 @@ Complete browser and native sign-in, canonical status confirmation, refresh, can
 
 Qualify two independently implemented OAuth MCP servers through connect, an approved read, expiry recovery, and disconnect. Mocked HTTP and local persistence tests are required source evidence; they do not replace real provider and installed-iPhone acceptance.
 
+## Local qualification for the July 2026 transport
+
+Use a running local MCP server or fixture to inspect its advertised tools. Substitute its actual port and endpoint path in the example. The command prints the negotiated revision and the discovered tool names.
+
+```sh
+pnpm mcp:discover http://127.0.0.1:3000/mcp
+pnpm mcp:discover http://127.0.0.1:3000/mcp --allow-legacy
+```
+
+Both commands begin with July 2026 discovery. The optional flag permits a November 2025 initialization handshake when the initial response indicates a legacy server. Authorization errors, timeouts, and failures on later pages end discovery. The local command requires no provider credentials and executes only discovery operations.
+
+The client follows each opaque cursor on the same endpoint, with one 20-second deadline, at most eight list pages and 80 tool definitions in total. A repeated cursor, duplicate tool name, failed page, or exceeded limit ends the operation with an error. A terminal response returns eligible tools in server order. For modern HTTP discovery, `excludedTools` counts definitions omitted because their custom header annotations could not be validated. The tests exercise JSON responses and request-scoped Server-Sent Events.
+
+```sh
+pnpm exec vitest run packages/tools/src/mcp scripts/mcp-discover.test.ts
+```
+
+Local interoperability runs on November 19, 2026 used published SDKs with synthetic tools. The command discovered tools from the TypeScript server 2.4.0 and Python SDK 2.3.0 using July 2026 discovery, including JSON and streaming responses. With `--allow-legacy`, it completed the November 2025 handshake and listed tools on stateful and stateless servers using TypeScript SDK 1.32.2 and Python SDK 1.30.0. These runs required no account or tool execution.
+
+Saved connections use the November 2025 transport. Modern tool execution and hosted-provider interoperability remain open before activating this revision for saved connections. See the [Streamable HTTP binding](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http), [pagination rules](https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/pagination), and [versioning rules](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning).
+
 ## Remaining Phase 3 work
 
 1. Qualify the newer MCP transport independently while preserving existing server compatibility.
