@@ -30,7 +30,13 @@ function moment(key: string, priority: number): PulseMoment {
 }
 
 describe('persistNextPulseMoment', () => {
-  const options = { agentId: 'owner', now, observationFence: null, dailyCap: 6 };
+  const options = {
+    agentId: 'owner',
+    timeZone: 'America/Los_Angeles',
+    now,
+    observationFence: null,
+    dailyCap: 6,
+  };
   const persisted = (key: string) => ({
     status: 'persisted' as const,
     momentId: `moment-${key}`,
@@ -108,6 +114,29 @@ describe('persistNextPulseMoment', () => {
           gapSince: new Date('2026-10-02T11:00:00Z'),
           windowSince: new Date('2026-10-01T12:00:00Z'),
           dailyCap: 6,
+        },
+      }),
+    );
+  });
+
+  it('stores the owner time zone with a timed notice for client rendering', async () => {
+    const admitNotice = vi.fn(async () => persisted('timed'));
+    const timed = moment('timed', 50);
+    const dueAt = '2026-10-02T13:00:00Z';
+    await persistNextPulseMoment(
+      { admitNotice },
+      { ...options, candidates: [{ ...timed, card: { ...timed.card, dueAt } }] },
+    );
+    expect(admitNotice).toHaveBeenCalledWith(
+      expect.objectContaining({
+        notice: {
+          text: timed.text,
+          extraParts: [
+            {
+              type: 'data-card',
+              data: { ...timed.card, dueAt, timeZone: 'America/Los_Angeles' },
+            },
+          ],
         },
       }),
     );

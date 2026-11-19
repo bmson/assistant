@@ -144,7 +144,7 @@ enum SpeakableText {
             sentence = join([spoken(title), spoken(duration), spoken(detail ?? "")])
         case let .reminder(_, title, schedule, _, _):
             sentence = join([spoken(title), spoken(schedule)])
-        case let .proactiveAlert(_, _, _, title, summary, _, _, _):
+        case let .proactiveAlert(_, _, _, title, summary, _, _, _, _):
             sentence = join([spoken(title), spoken(summary)])
         case let .status(_, title, detail, _, _, _, _):
             sentence = join([spoken(title), spoken(detail)])

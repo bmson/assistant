@@ -176,7 +176,7 @@ final class AssistantMarkdownTests: XCTestCase {
                     url: "https://example.com/jobs", snippet: "Build reusable components with a small product team. Help make the interface work well for everyone.")]),
             .proactiveAlert(id: "event", category: "event", urgency: "Tomorrow",
                 title: "Soccer match at Morgan Hill Outdoor Sports Center", summary: "",
-                startsAt: "2026-09-06T18:00:00-07:00", dueAt: "",
+                startsAt: "2026-09-06T18:00:00-07:00", dueAt: "", timeZone: nil,
                 details: [.init(label: "Location", value: "16500 Condit Road, Morgan Hill, CA")])
         ]
         for (name, scheme, size, width) in [

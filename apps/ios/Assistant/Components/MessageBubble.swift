@@ -1235,7 +1235,7 @@ extension MessagePart {
     }
 
     var suggestionTitle: String {
-        if case let .proactiveAlert(_, _, _, title, _, _, _, _)? = suggestionContext { return title }
+        if case let .proactiveAlert(_, _, _, title, _, _, _, _, _)? = suggestionContext { return title }
         return summary ?? "Suggestion"
     }
 }
@@ -1754,7 +1754,7 @@ enum MessageResponseCard: Identifiable {
     case status(id: String, title: String, detail: String, symbol: String, details: [Detail], linkLabel: String?, linkURL: String?)
     case knowledgeGraph(id: String, title: String, edges: [KnowledgeEdge], complete: Bool)
     case calendarConflicts(id: String, title: String, conflicts: [CalendarConflict], complete: Bool)
-    case proactiveAlert(id: String, category: String, urgency: String, title: String, summary: String, startsAt: String, dueAt: String, details: [Detail])
+    case proactiveAlert(id: String, category: String, urgency: String, title: String, summary: String, startsAt: String, dueAt: String, timeZone: TimeZone?, details: [Detail])
     case generated(GeneratedCard)
     case briefing(BriefingCard)
     case scoreboard(id: String, title: String, games: [ScoreGame], fetchedAt: Date?, pollSeconds: Int, live: Bool)
@@ -1781,7 +1781,7 @@ enum MessageResponseCard: Identifiable {
         case let .status(id, _, _, _, _, _, _): id
         case let .knowledgeGraph(id, _, _, _): id
         case let .calendarConflicts(id, _, _, _): id
-        case let .proactiveAlert(id, _, _, _, _, _, _, _): id
+        case let .proactiveAlert(id, _, _, _, _, _, _, _, _): id
         case let .generated(card): card.id
         case let .briefing(card): card.id
         case let .scoreboard(id, _, _, _, _, _): id
@@ -2140,6 +2140,7 @@ enum MessageResponseCard: Identifiable {
                 summary: data["summary"]?.string ?? "",
                 startsAt: data["startsAt"]?.string ?? "",
                 dueAt: data["dueAt"]?.string ?? "",
+                timeZone: data["timeZone"]?.string.flatMap(TimeZone.init(identifier:)),
                 details: Self.details(from: data)
             )
         case "briefing":
@@ -2353,6 +2354,7 @@ enum MessageResponseCard: Identifiable {
             summary: "",
             startsAt: "",
             dueAt: "",
+            timeZone: nil,
             details: location.isEmpty ? [] : [.init(label: "Location", value: location)]
         )
     }
@@ -2969,7 +2971,7 @@ struct RichResponseCards: View {
                 knowledgeGraphCard(title: title, edges: edges, complete: complete)
             case let .calendarConflicts(_, title, conflicts, complete):
                 calendarConflictsCard(title: title, conflicts: conflicts, complete: complete)
-            case let .proactiveAlert(_, category, urgency, title, summary, startsAt, dueAt, details):
+            case let .proactiveAlert(_, category, urgency, title, summary, startsAt, dueAt, timeZone, details):
                 proactiveAlertCard(
                     category: category,
                     urgency: urgency,
@@ -2977,6 +2979,7 @@ struct RichResponseCards: View {
                     summary: summary,
                     startsAt: startsAt,
                     dueAt: dueAt,
+                    timeZone: timeZone,
                     details: details
                 )
             case let .generated(card):
@@ -4307,10 +4310,11 @@ struct RichResponseCards: View {
         summary: String,
         startsAt: String,
         dueAt: String,
+        timeZone: TimeZone?,
         details: [MessageResponseCard.Detail]
     ) -> some View {
         ProactiveAlertContent(category: category, urgency: urgency, title: title, summary: summary,
-            startsAt: startsAt, dueAt: dueAt, details: details)
+            startsAt: startsAt, dueAt: dueAt, timeZone: timeZone, details: details)
             .responseCardSurface(colorScheme: colorScheme, colorSchemeContrast: colorSchemeContrast, inset: 20)
     }
 
@@ -5150,6 +5154,7 @@ struct ProactiveAlertContent: View {
     let summary: String
     let startsAt: String
     let dueAt: String
+    var timeZone: TimeZone? = nil
     let details: [MessageResponseCard.Detail]
     var actionSummary: String? = nil
     @State private var expanded = false
@@ -5162,6 +5167,20 @@ struct ProactiveAlertContent: View {
         case "commitment": "bell.badge.fill"
         default: "calendar.badge.clock"
         }
+    }
+
+    static func temporalLabel(_ value: String, timeZone: TimeZone,
+                              locale: Locale = .autoupdatingCurrent) -> String? {
+        guard !value.isEmpty else { return nil }
+        if value.count == 10,
+           let day = CalendarEventPresentation.dateCaption(value, timeZone: timeZone, locale: locale) {
+            return day
+        }
+        guard let instant = CalendarEventPresentation.timestamp(value) else { return value }
+        return instant.formatted(
+            Date.FormatStyle(locale: locale, timeZone: timeZone)
+                .month(.abbreviated).day().hour().minute()
+        )
     }
 
     var body: some View {
@@ -5182,9 +5201,8 @@ struct ProactiveAlertContent: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             let temporal = startsAt.isEmpty ? dueAt : startsAt
-            if !temporal.isEmpty {
-                let date = CalendarEventPresentation.timestamp(temporal)
-                Label("\(startsAt.isEmpty ? "Due" : "Starts") \(date?.formatted(.dateTime.month(.abbreviated).day().hour().minute()) ?? temporal)", systemImage: "clock")
+            if let date = Self.temporalLabel(temporal, timeZone: timeZone ?? .current) {
+                Label("\(startsAt.isEmpty ? "Due" : "Starts") \(date)", systemImage: "clock")
                     .font(.caption)
                     .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
             }
@@ -5310,9 +5328,9 @@ struct SuggestionCard: View {
     private func question(_ part: MessagePart) -> some View {
         let id = part.suggestionId ?? ""
         return VStack(alignment: .leading, spacing: 10) {
-            if case let .proactiveAlert(_, category, urgency, title, summary, startsAt, dueAt, details)? = part.suggestionContext {
+            if case let .proactiveAlert(_, category, urgency, title, summary, startsAt, dueAt, timeZone, details)? = part.suggestionContext {
                 ProactiveAlertContent(category: category, urgency: urgency, title: title, summary: summary,
-                    startsAt: startsAt, dueAt: dueAt, details: details, actionSummary: part.summary)
+                    startsAt: startsAt, dueAt: dueAt, timeZone: timeZone, details: details, actionSummary: part.summary)
             } else {
                 Text(AssistantMarkdown.inlineAttributed(part.summary ?? part.proposedAction ?? "The assistant has a suggestion."))
                     .font(.subheadline.weight(.medium))
@@ -5379,9 +5397,9 @@ struct SuggestionCard: View {
             set: { if $0 { expandedReceipts.insert(id) } else { expandedReceipts.remove(id) } }
         )) {
             VStack(alignment: .leading, spacing: 10) {
-                if case let .proactiveAlert(_, category, urgency, title, summary, startsAt, dueAt, details)? = part.suggestionContext {
+                if case let .proactiveAlert(_, category, urgency, title, summary, startsAt, dueAt, timeZone, details)? = part.suggestionContext {
                     ProactiveAlertContent(category: category, urgency: urgency, title: title, summary: summary,
-                        startsAt: startsAt, dueAt: dueAt, details: details, actionSummary: part.summary)
+                        startsAt: startsAt, dueAt: dueAt, timeZone: timeZone, details: details, actionSummary: part.summary)
                 } else if let summary = part.summary {
                     Text(AssistantMarkdown.inlineAttributed(summary))
                         .font(.subheadline)
