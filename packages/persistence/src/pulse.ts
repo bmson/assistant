@@ -1,3 +1,4 @@
+import type { BillEmailEvidence, EmailBillStatus } from './bill-email-evidence.js';
 import type { PracticeChangeMailFact } from './practice-change-mail.js';
 import type { SituationPackView } from './situations-schema.js';
 
@@ -32,6 +33,7 @@ export interface PulseMail {
   importance: number;
   obligationStatus?: string;
   practiceChange?: PracticeChangeMailFact;
+  billInvoice?: Extract<BillEmailEvidence, { kind: 'invoice' }>;
   securityIncidentId?: string | null;
   securityRevision?: number | null;
   securityDisposition?: string | null;
@@ -50,6 +52,7 @@ export interface PulseEmailSourceFence {
   providerMessageId: string;
   obligationVersion: number;
   practiceChange?: PracticeChangeMailFact;
+  billInvoice?: Extract<BillEmailEvidence, { kind: 'invoice' }>;
 }
 
 export interface PulseCommitment {
@@ -116,9 +119,16 @@ export function validatePulseNotice(input: PulseNoticeInput): void {
       throw new Error('Invalid pulse email source fence');
     const expectedKey = input.securityIncident
       ? `security-incident:${input.securityIncident.id}:r${input.securityIncident.revision}`
-      : `mail-action:${source.channelMessageId}`;
+      : source.billInvoice
+        ? `bill-due:${source.billInvoice.identity}`
+        : `mail-action:${source.channelMessageId}`;
     if (
-      input.moment.kind !== (source.practiceChange ? 'practice-change' : 'mail-action') ||
+      input.moment.kind !==
+        (source.practiceChange
+          ? 'practice-change'
+          : source.billInvoice
+            ? 'bill-due'
+            : 'mail-action') ||
       input.moment.key !== expectedKey
     )
       throw new Error('Pulse email source does not match the moment');
@@ -203,6 +213,12 @@ export interface PulseRepository {
     agentId: string,
     input: { since: Date; until: Date; now: Date; minImportance: number; limit: number },
   ): Promise<PulseMail[]>;
+  /** Derive current bill state from exact, durably admitted issuer evidence. */
+  billStatus?(
+    agentId: string,
+    invoice: Extract<BillEmailEvidence, { kind: 'invoice' }>,
+    now: Date,
+  ): Promise<EmailBillStatus>;
   /** Active obligations due inside `[now, until]`, excluding admitted deadline occurrences, earliest deadline then identity. */
   dueCommitments(
     agentId: string,

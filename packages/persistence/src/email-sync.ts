@@ -84,7 +84,7 @@ export type PreparedEmailScore = Pick<
   Records['emailIngest'],
   'category' | 'importance' | 'actionable' | 'reason' | 'dates' | 'cardCandidate' | 'nextStep'
 > &
-  Partial<Pick<Records['emailIngest'], 'securityEvidence'>>;
+  Partial<Pick<Records['emailIngest'], 'securityEvidence' | 'billEvidence'>>;
 
 export type NewEmailIngest = Pick<
   Records['emailIngest'],

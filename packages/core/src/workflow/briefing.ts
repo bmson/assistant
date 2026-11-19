@@ -11,11 +11,13 @@ import {
   emailIngestReadableSql,
   goals as goalsTable,
   proactiveMoments,
+  readPostgresEmailBillStatus,
   tasks as taskTable,
   watches,
   watchFires,
 } from '@assistant/db';
 import {
+  admittedBillEmailEvidence,
   type BriefingInputs,
   type CalendarOccurrenceIdentity,
   type CalendarOwnerParticipation,
@@ -903,6 +905,19 @@ async function briefingInputsFromSql(
           dates: emailIngest.dates,
           channelMessageId: emailIngest.channelMessageId,
           authenticated: emailIngest.authenticated,
+          agentId: emailIngest.agentId,
+          ingestMode: emailIngest.ingestMode,
+          billEvidence: emailIngest.billEvidence,
+          contentTrust: emailIngest.contentTrust,
+          obligationDecision: emailIngest.obligationDecision,
+          providerReceivedAt: emailIngest.providerReceivedAt,
+          admittedSourceKind: emailIngest.admittedSourceKind,
+          admittedSourceId: emailIngest.admittedSourceId,
+          messagePersisted: emailIngest.messagePersisted,
+          pipelineStage: emailIngest.pipelineStage,
+          scoreStatus: emailIngest.scoreStatus,
+          scoreOutcome: emailIngest.scoreOutcome,
+          hasExternalOrUnknown: emailIngest.hasExternalOrUnknown,
         })
         .from(emailIngest)
         .where(
@@ -988,7 +1003,28 @@ async function briefingInputsFromSql(
       createPostgresOccasionToolReadRepository(db).list(agentId),
       createPostgresOwnerContextRepository(db).listOpenCommitments({ agentId, now, limit: 60 }),
     ]);
-  return { mail, bookings, attention, pending, goalDeltas, watchHits, occasions, commitments };
+  const currentMail = [];
+  for (const row of mail) {
+    const bill = admittedBillEmailEvidence(row);
+    if (bill?.kind === 'paid-in-full') continue;
+    if (
+      bill?.kind === 'invoice' &&
+      !row.obligationDecision &&
+      (await readPostgresEmailBillStatus(db, agentId, bill, now)).kind !== 'due'
+    )
+      continue;
+    currentMail.push(row);
+  }
+  return {
+    mail: currentMail,
+    bookings,
+    attention,
+    pending,
+    goalDeltas,
+    watchHits,
+    occasions,
+    commitments,
+  };
 }
 
 /** The briefing's portable stores; without them it reads and writes PostgreSQL. */

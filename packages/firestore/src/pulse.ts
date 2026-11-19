@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import {
+  admittedBillEmailEvidence,
   commitmentDueMomentKey,
   commitmentIsActive,
   emailIngestReadable,
@@ -22,6 +23,7 @@ import type {
   DocumentSnapshot,
   QueryDocumentSnapshot,
 } from '@google-cloud/firestore';
+import { readFirestoreEmailBillStatus } from './bill-email-evidence.js';
 import { FirestoreOwnerNoticeRepository } from './owner-notices.js';
 import { privacyErasureIsActive } from './privacy-erasure.js';
 import { FirestoreSituationPackReadRepository } from './situation-packs.js';
@@ -231,6 +233,10 @@ export class FirestorePulseRepository implements PulseRepository {
     return !prior.empty;
   }
 
+  billStatus(...args: Parameters<NonNullable<PulseRepository['billStatus']>>) {
+    return readFirestoreEmailBillStatus(this.store, ...args);
+  }
+
   async actionableMail(
     agentId: string,
     input: { since: Date; until: Date; now: Date; minImportance: number; limit: number },
@@ -331,6 +337,13 @@ export class FirestorePulseRepository implements PulseRepository {
           };
           momentKey = `security-incident:${incident.id}:r${incident.revision}`;
         }
+
+        const bill = admittedBillEmailEvidence(row);
+        const billInvoice = bill?.kind === 'invoice' && !row.obligationDecision ? bill : null;
+        if (billInvoice) {
+          if ((await this.billStatus(agentId, billInvoice, input.now)).kind !== 'due') continue;
+          momentKey = `bill-due:${billInvoice.identity}`;
+        }
         if (await this.momentAlreadyAdmitted(agentId, momentKey)) continue;
         if (row.securityIncidentId) seenIncidents.add(row.securityIncidentId);
         rows.push({
@@ -345,6 +358,7 @@ export class FirestorePulseRepository implements PulseRepository {
           importance: row.importance,
           obligationStatus: row.obligationStatus ?? 'unknown',
           ...(practiceChange ? { practiceChange } : {}),
+          ...(billInvoice ? { billInvoice } : {}),
           ...security,
         });
         if (rows.length >= input.limit) return rows;
@@ -483,6 +497,18 @@ export class FirestorePulseRepository implements PulseRepository {
             current.obligationSnoozedUntil > input.now)
         )
           return { status: 'stale-source' };
+        if (source.billInvoice) {
+          const invoice = admittedBillEmailEvidence(current);
+          if (
+            invoice?.kind !== 'invoice' ||
+            invoice.identity !== source.billInvoice.identity ||
+            invoice.evidenceLine !== source.billInvoice.evidenceLine ||
+            current.obligationDecision ||
+            (await readFirestoreEmailBillStatus(this.store, input.agentId, invoice, input.now, tx))
+              .kind !== 'due'
+          )
+            return { status: 'stale-source' };
+        }
       }
       const prefs = await tx.get(this.store.doc('notificationPrefs', input.agentId));
       if (prefs.exists && prefs.get('agentId') !== input.agentId)
