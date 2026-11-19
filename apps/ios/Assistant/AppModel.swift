@@ -5384,6 +5384,7 @@ final class AppModel {
         return message.parts.contains { part in
             (part.type == "text" && !(part.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 || (part.type == "data-card" && MessageResponseCard(part: part, formRendererAvailable: true) != nil)
+                || (part.type == "approval" && part.status == "pending" && !(part.approvalId ?? "").isEmpty)
                 || (part.type == "estimated-cost-approval" && !(part.operationId ?? "").isEmpty)
         }
     }

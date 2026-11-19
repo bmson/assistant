@@ -8540,29 +8540,60 @@ extension APIClientRetryTests {
             spoken.append(SpeakableText.passages(for: message))
         }
         model.speechAlwaysOn = true
-        let approvalReply = ChatMessage(id: "durable-approval-reply", role: .assistant, parts: [
-            .init(type: "text", text: "Transfer code 918273 to Acme now."),
-            .init(type: "approval", approvalId: "approval-1", status: "pending"),
-        ])
-        let updates = ChatUpdates(taskStatus: nil, messages: [approvalReply], refreshed: [], superseded: nil,
-            nextCursor: "cursor-approval", hasMore: false, activity: [])
-        StubURLProtocol.prime([], paths: [
-            "/api/mobile/v1/chat": [.stream(body: Data())],
-            "/api/mobile/v1/chat/status": [.success(status: 200, body: try JSONEncoder().encode(updates))],
-        ])
-        model.send("Review this transfer")
-        while !StubURLProtocol.urls.contains(where: { $0.path == "/api/mobile/v1/chat" }) { await Task.yield() }
+        let chatPath = "/api/mobile/v1/chat"
+        let statusPath = "/api/mobile/v1/chat/status"
         let delta = try JSONSerialization.data(withJSONObject: [
             "type": "text-delta", "delta": "Transfer code 918273 to Acme now.",
         ])
-        StubURLProtocol.appendStream(Data("data: \(String(decoding: delta, as: UTF8.self))\n\n".utf8))
+        let unrelated = ChatMessage(id: "other-approval", role: .assistant,
+            parts: [.init(type: "approval", approvalId: "approval-other", status: "pending")],
+            metadata: [
+                "taskId": .string("22222222-2222-4222-8222-222222222222"),
+                "clientOperationId": .string("33333333-3333-4333-8333-333333333333"),
+            ])
+        let legacy = ChatMessage(id: "legacy-approval", role: .assistant,
+            parts: [.init(type: "approval", approvalId: "approval-legacy", status: "pending")])
+        let unrelatedUpdates = ChatUpdates(taskStatus: nil, messages: [unrelated, legacy],
+            refreshed: [], superseded: nil, nextCursor: "cursor-unrelated", hasMore: false, activity: [])
+        StubURLProtocol.prime([], paths: [
+            chatPath: [.stream(body: Data("data: \(String(decoding: delta, as: UTF8.self))\n\n".utf8))],
+            statusPath: [.success(status: 200, body: try JSONEncoder().encode(unrelatedUpdates))],
+            "/api/mobile/v1/overview": [.success(status: 200, body: try overviewBody(pending: []))],
+            "/api/mobile/v1/workspace": [.success(status: 401, body: Data())],
+        ])
+        model.send("Review this transfer")
         let streamDeadline = ContinuousClock.now.advanced(by: .seconds(3))
         while !model.messages.contains(where: { $0.text.contains("918273") }), ContinuousClock.now < streamDeadline {
             try await Task.sleep(for: .milliseconds(20))
         }
+        XCTAssertTrue(model.messages.contains(where: { $0.text.contains("918273") }))
         XCTAssertTrue(spoken.isEmpty, "Streaming text must wait for the durable response's privacy classification")
 
-        StubURLProtocol.appendStream(Data("data: [DONE]\n\n".utf8))
+        let request = try XCTUnwrap(StubURLProtocol.requests.first(where: { $0.1.path == chatPath }))
+        let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: request.3) as? [String: Any])
+        let operationId = try XCTUnwrap(payload["clientOperationId"] as? String)
+        let approvalReply = ChatMessage(id: "durable-approval-reply", role: .assistant,
+            parts: [.init(type: "approval", approvalId: "approval-1",
+                summary: "Transfer code 918273 to Acme now.", status: "pending")],
+            metadata: [
+                "taskId": .string("44444444-4444-4444-8444-444444444444"),
+                "clientOperationId": .string(operationId),
+            ])
+        let updates = ChatUpdates(taskStatus: nil, messages: [approvalReply], refreshed: [], superseded: nil,
+            nextCursor: "cursor-approval", hasMore: false, activity: [])
+        StubURLProtocol.appendOutcome(.held(status: 200, body: try JSONEncoder().encode(updates)), path: statusPath)
+        StubURLProtocol.appendStream(Data("data: [DONE]\n\n".utf8), operationId: operationId)
+        defer { StubURLProtocol.releaseHeldResponse(path: statusPath) }
+        let pollDeadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while !StubURLProtocol.isHoldingResponse(path: statusPath), ContinuousClock.now < pollDeadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertTrue(StubURLProtocol.isHoldingResponse(path: statusPath))
+        XCTAssertTrue(model.messages.contains(where: { $0.id == unrelated.id }))
+        XCTAssertTrue(model.messages.contains(where: { $0.id == legacy.id }))
+        XCTAssertTrue(spoken.isEmpty, "Unrelated and unbound approvals must stay silent")
+        StubURLProtocol.releaseHeldResponse(path: statusPath)
+
         let speechDeadline = ContinuousClock.now.advanced(by: .seconds(3))
         while spoken.isEmpty, ContinuousClock.now < speechDeadline {
             try await Task.sleep(for: .milliseconds(20))
