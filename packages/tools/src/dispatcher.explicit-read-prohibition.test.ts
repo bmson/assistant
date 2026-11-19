@@ -176,6 +176,17 @@ function fixture(docsReplayKey = false, preparedDocumentId?: string) {
   const registry = new ToolRegistry()
     .register(
       {
+        name: 'github.get_pull_request',
+        description: 'synthetic selected repository read',
+        inputSchema: z.object({}),
+        risk: 'approval',
+        acceptsUntrustedInput: false,
+        execute: read,
+      },
+      { confidentialRead: true, networkEgress: true },
+    )
+    .register(
+      {
         name: 'gmail.search',
         description: 'synthetic private mailbox read',
         inputSchema: z.object({}),
@@ -588,6 +599,17 @@ describe('P03 owner intent at ToolDispatcher boundary (synthetic repositories on
     expect(repositories.started.mock.calls[0]?.[0].expectedPolicyFingerprint).toBe(
       approvalPolicyFingerprint([disabledPolicy]),
     );
+  });
+
+  it('honors an explicit GitHub opt-out before requesting approval or fetching a PR', async () => {
+    const { dispatch, read } = fixture();
+    expect(
+      await dispatch("Don't use GitHub; summarize the text I pasted.", 'github.get_pull_request'),
+    ).toMatchObject({
+      kind: 'rejected',
+      reason: 'owner explicitly prohibited reading data from github',
+    });
+    expect(read).not.toHaveBeenCalled();
   });
 
   it('blocks an explicit no-read request before gmail.search execute', async () => {
