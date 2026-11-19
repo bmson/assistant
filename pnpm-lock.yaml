@@ -76,8 +76,8 @@ importers:
         specifier: ^0.45.4
         version: 0.45.4(@opentelemetry/api@1.10.0)(postgres@4.1.1)
       google-auth-library:
-        specifier: 10.9.1
-        version: 10.9.1
+        specifier: ^11.3.4
+        version: 11.3.4
       playwright:
         specifier: ^1.65.1
         version: 1.65.1
@@ -410,8 +410,8 @@ importers:
         specifier: ^9.4.1
         version: 9.4.1
       google-auth-library:
-        specifier: 10.9.1
-        version: 10.9.1
+        specifier: ^11.3.4
+        version: 11.3.4
     devDependencies:
       '@assistant/application':
         specifier: workspace:*
