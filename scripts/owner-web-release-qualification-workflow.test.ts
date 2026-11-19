@@ -43,10 +43,13 @@ function condition(job: string) {
 }
 function evaluate(expression: string, values: Record<string, unknown>, success = true) {
   let text = expression.replace(/'(?:[^']*)'/g, (m) => JSON.stringify(m.slice(1, -1)));
-  text = text.replace(/\b(?:github|inputs)\.[a-zA-Z0-9_.]+/g, (m) =>
+  text = text.replace(/\b(?:github|inputs|needs)\.[a-zA-Z0-9_.]+/g, (m) =>
     JSON.stringify(values[m] ?? ''),
   );
-  text = text.replace(/\balways\(\)/g, 'true').replace(/\bsuccess\(\)/g, String(success));
+  text = text
+    .replace(/\balways\(\)/g, 'true')
+    .replace(/\bcancelled\(\)/g, String(values.cancelled === true))
+    .replace(/\bsuccess\(\)/g, String(success));
   if (
     /[^\s()=!&|]/.test(
       text.replace(/"(?:[^"\\]|\\.)*"/g, '').replace(/\b(?:true|false|[0-9]+)\b/g, ''),
@@ -68,6 +71,8 @@ function context(overrides: Record<string, unknown> = {}) {
     'inputs.native_web_qualification': 'read_only',
     'inputs.sha': '',
     'inputs.break_glass': false,
+    'needs.plan.result': 'success',
+    'needs.image.result': 'success',
     ...overrides,
   };
 }
@@ -409,5 +414,56 @@ cosign() { printf '%s\\n' "$*" >> "$RUNNER_TEMP/signing.log"; }
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
+  });
+});
+
+describe('prebuilt Firestore promotion workflow', () => {
+  const promotion = context({
+    'inputs.native_web_qualification': 'off',
+    'inputs.prebuilt_run_id': '90501',
+    'inputs.api3_recovery_proof': 'signed-envelope',
+    'needs.image.result': 'skipped',
+  });
+  it('skips the image matrix and admits only the validated prebuilt result', () => {
+    expect(evaluate(condition('image'), promotion)).toBe(false);
+    expect(evaluate(condition('release'), promotion)).toBe(true);
+    expect(evaluate(condition('release'), { ...promotion, 'needs.image.result': 'failure' })).toBe(
+      false,
+    );
+    expect(evaluate(condition('release'), { ...promotion, 'needs.plan.result': 'failure' })).toBe(
+      false,
+    );
+    expect(evaluate(condition('release'), { ...promotion, cancelled: true })).toBe(false);
+    expect(evaluate(condition('release'), { ...promotion, 'inputs.build_only': true })).toBe(false);
+    expect(evaluate(condition('release'), { ...promotion, 'inputs.prebuilt_run_id': '' })).toBe(
+      false,
+    );
+  });
+  it('does not combine prebuilt inputs with read-only qualification', () => {
+    expect(
+      evaluate(
+        condition('native_web_qualification'),
+        context({
+          'inputs.prebuilt_run_id': '90501',
+        }),
+      ),
+    ).toBe(false);
+  });
+  it('sets immutable digest input after verification and before delivery guards', () => {
+    const release = jobs.get('release') ?? '';
+    expect(release).toContain('run-id: ${{ inputs.prebuilt_run_id }}');
+    expect(
+      release.indexOf('Verify prebuilt Firestore build provenance before downloading artifacts'),
+    ).toBeLessThan(release.indexOf('Fetch prebuilt Firestore build evidence'));
+    for (const critical of [
+      'Verify agent smoke receipt against Artifact Registry',
+      'Check live Firestore pair compatibility before delivery guard mutations',
+      'Release Firestore pair with delivery guard',
+    ]) {
+      expect(release.indexOf('Verify and pin the signed prebuilt Firestore images')).toBeLessThan(
+        release.indexOf(critical),
+      );
+    }
+    expect(release).toContain('RELEASE_PREBUILT_IMAGES_PATH=$verified');
   });
 });

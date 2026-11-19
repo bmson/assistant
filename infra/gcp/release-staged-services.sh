@@ -325,8 +325,14 @@ release_tag_url() {
 
 release_component_digest() {
   local component="$1" digest
-  digest="$(gcloud artifacts docker images describe "${IMAGE_ROOT}/${component}:${TAG}" \
-    --project "$PROJECT" --format='value(image_summary.digest)')" || return 1
+  if [[ -n "${RELEASE_PREBUILT_RUN_ID:-}" ]]; then
+    [[ "$IMAGE_ROOT" == us-west1-docker.pkg.dev/bmson-assistant/assistant ]] || return 1
+    [[ -n "${RELEASE_PREBUILT_IMAGES_PATH:-}" ]] || return 1
+    digest="$(node "${BASH_SOURCE[0]%/*}/verify-prebuilt-firestore.mjs" digest "$TAG" "$component")" || return 1
+  else
+    digest="$(gcloud artifacts docker images describe "${IMAGE_ROOT}/${component}:${TAG}" \
+      --project "$PROJECT" --format='value(image_summary.digest)')" || return 1
+  fi
   [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]] || {
     echo "  ${component}:${TAG} did not resolve to an immutable sha256 digest" >&2
     return 1
@@ -578,6 +584,9 @@ release_staged_services() {
     "${live_agent_api:-}" "${live_agent_schema_min:-}" "${live_agent_schema_max:-}" || return 1
   node "${BASH_SOURCE[0]%/*}/release-manifest.mjs" validate "$manifest_path" \
     "${live_agent_api:-}" "${live_agent_schema_min:-}" "${live_agent_schema_max:-}" || return 1
+  if [[ -n "${RELEASE_PREBUILT_RUN_ID:-}" ]]; then
+    node "${BASH_SOURCE[0]%/*}/verify-prebuilt-firestore.mjs" manifest "$TAG" "$manifest_path" || return 1
+  fi
   manifest_sha="$(node -e 'const x=JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8")); process.stdout.write(x.manifestDigest)' "$manifest_path")"
   echo "Release manifest ${manifest_sha}: ${selected}; web=${web_digest}${agent_digest:+, agent=${agent_digest}}"
 

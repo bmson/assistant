@@ -32,6 +32,14 @@ on:
         required: false
         default: false
         type: boolean
+      prebuilt_run_id:
+        description: Successful exact-main build-only run whose signed Firestore images will be reused
+        required: false
+        type: string
+      api3_recovery_proof:
+        description: Signed recovery review for the exact prebuilt API 3 pair
+        required: false
+        type: string
       native_web_qualification:
         description: Read-only native web qualification; no image, release, delivery hold or cleanup
         required: false
@@ -188,6 +196,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: bash infra/gcp/verify-release-source.sh
+      - name: Validate prebuilt promotion scope
+        if: inputs.prebuilt_run_id != '' || inputs.api3_recovery_proof != ''
+        env:
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+          RELEASE_PREBUILT_RUN_ID: ${{ inputs.prebuilt_run_id }}
+          REQUESTED_PERSISTENCE: ${{ inputs.persistence }}
+          REQUESTED_COMPONENTS: ${{ inputs.components }}
+          NATIVE_WEB_QUALIFICATION: ${{ inputs.native_web_qualification }}
+          BUILD_ONLY: ${{ inputs.build_only }}
+          BREAK_GLASS: ${{ inputs.break_glass }}
+        run: node infra/gcp/verify-prebuilt-firestore.mjs validate-context "$RELEASE_SHA"
       # Which release path the installation expects. A non-auto manual input wins,
       # then the PERSISTENCE_DRIVER repository variable (set it to firestore
       # after the cutover), then auto. release.sh always re-reads the live
@@ -286,7 +305,9 @@ jobs:
   # The release job still requires the entire matrix to succeed; images pushed
   # by successful siblings remain inert when any other image fails.
   image:
-    if: inputs.native_web_qualification == '' || inputs.native_web_qualification == 'off'
+    if: >-
+      inputs.prebuilt_run_id == '' &&
+      (inputs.native_web_qualification == '' || inputs.native_web_qualification == 'off')
     needs: plan
     runs-on: ubuntu-latest
     environment: production
@@ -434,8 +455,10 @@ jobs:
       contents: read
       id-token: write
     if: >-
-      inputs.build_only != true &&
-      (inputs.native_web_qualification == '' || inputs.native_web_qualification == 'off')
+      !cancelled() && needs.plan.result == 'success' && inputs.build_only != true &&
+      (inputs.native_web_qualification == '' || inputs.native_web_qualification == 'off') &&
+      ((inputs.prebuilt_run_id == '' && needs.image.result == 'success') ||
+       (inputs.prebuilt_run_id != '' && needs.image.result == 'skipped'))
     needs: [plan, image]
     runs-on: ubuntu-latest
     environment: production
@@ -448,12 +471,14 @@ jobs:
       GOOGLE_CALENDAR_OAUTH_CALLBACK_URL: ${{ inputs.google_calendar_oauth_callback_url }}
       ESTIMATED_COST_RELEASE_PROFILE_JSON: ${{ inputs.estimated_cost_release_profile }}
       ESTIMATED_COST_DRAIN_PACKET_JSON: ${{ inputs.estimated_cost_drain_packet }}
+      RELEASE_PREBUILT_RUN_ID: ${{ inputs.prebuilt_run_id }}
+      API3_RECOVERY_PROOF: ${{ inputs.api3_recovery_proof }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ needs.plan.outputs.sha }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        if: contains(needs.plan.outputs.components, 'agent')
+        if: inputs.prebuilt_run_id == '' && contains(needs.plan.outputs.components, 'agent')
         with:
           name: release-sboms-${{ needs.plan.outputs.sha }}-agent
           path: ${{ runner.temp }}/agent-image-evidence
@@ -463,6 +488,26 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
+      - name: Verify prebuilt Firestore build provenance before downloading artifacts
+        if: inputs.prebuilt_run_id != ''
+        env:
+          RELEASE_SHA: ${{ needs.plan.outputs.sha }}
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_PERSISTENCE: ${{ inputs.persistence }}
+          REQUESTED_COMPONENTS: ${{ inputs.components }}
+          NATIVE_WEB_QUALIFICATION: ${{ inputs.native_web_qualification }}
+          BUILD_ONLY: ${{ inputs.build_only }}
+          BREAK_GLASS: ${{ inputs.break_glass }}
+        run: node infra/gcp/verify-prebuilt-firestore.mjs verify-provenance "$RELEASE_SHA"
+      - name: Fetch prebuilt Firestore build evidence
+        if: inputs.prebuilt_run_id != ''
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          github-token: ${{ github.token }}
+          repository: bmson/assistant
+          run-id: ${{ inputs.prebuilt_run_id }}
+          pattern: release-sboms-${{ needs.plan.outputs.sha }}-*
+          path: ${{ runner.temp }}/prebuilt-firestore
       - name: Check intrinsic BASIC5 context before cloud authentication
         env:
           IMAGE_TAG: ${{ needs.plan.outputs.sha }}
@@ -495,6 +540,30 @@ jobs:
         with:
           version: 576.0.0
           cache: true
+      - name: Install the fixed signature verifier for the reviewed spending profile
+        if: inputs.estimated_cost_release_profile != '' || inputs.prebuilt_run_id != ''
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: v3.1.3
+          install-dir: ${{ runner.temp }}/estimated-cost-cosign
+      - name: Verify and pin the signed prebuilt Firestore images
+        if: inputs.prebuilt_run_id != ''
+        env:
+          RELEASE_SHA: ${{ needs.plan.outputs.sha }}
+          RELEASE_IMAGE_MATRIX: ${{ needs.plan.outputs.images }}
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_PERSISTENCE: ${{ inputs.persistence }}
+          REQUESTED_COMPONENTS: ${{ inputs.components }}
+          NATIVE_WEB_QUALIFICATION: ${{ inputs.native_web_qualification }}
+          BUILD_ONLY: ${{ inputs.build_only }}
+          BREAK_GLASS: ${{ inputs.break_glass }}
+        run: |
+          gcloud auth configure-docker us-west1-docker.pkg.dev --quiet
+          verified="$RUNNER_TEMP/verified-firestore-images.json"
+          node infra/gcp/verify-prebuilt-firestore.mjs verify "$RELEASE_SHA" "$RUNNER_TEMP/prebuilt-firestore" "$verified"
+          install -D -m 600 "$RUNNER_TEMP/prebuilt-firestore/release-sboms-$RELEASE_SHA-agent/agent-image-smoke-receipt.json" \
+            "$RUNNER_TEMP/agent-image-evidence/agent-image-smoke-receipt.json"
+          echo "RELEASE_PREBUILT_IMAGES_PATH=$verified" >> "$GITHUB_ENV"
       - name: Verify agent smoke receipt against Artifact Registry
         if: contains(needs.plan.outputs.components, 'agent')
         env:
@@ -507,7 +576,12 @@ jobs:
           [[ "$(jq -er '.imageTag' "$receipt")" == "$expected_tag" ]] || { echo 'agent smoke receipt tag mismatch' >&2; exit 1; }
           push_digest="$(jq -er '.registryManifestDigest' "$receipt")"
           [[ "$push_digest" =~ ^sha256:[a-f0-9]{64}$ ]] || { echo 'agent push receipt digest is malformed' >&2; exit 1; }
-          resolved_digest="$(timeout --signal=TERM --kill-after=2s 20s gcloud artifacts docker images describe "$expected_tag" \
+          lookup="$expected_tag"
+          if [[ -n "$RELEASE_PREBUILT_RUN_ID" ]]; then
+            [[ "$(jq -er '.digests.agent' "$RELEASE_PREBUILT_IMAGES_PATH")" == "$push_digest" ]] || exit 1
+            lookup="${expected_tag%:*}@$push_digest"
+          fi
+          resolved_digest="$(timeout --signal=TERM --kill-after=2s 20s gcloud artifacts docker images describe "$lookup" \
             --project "$GCP_PROJECT" --format='value(image_summary.digest)')"
           [[ "$resolved_digest" == "$push_digest" ]] || { echo 'agent release tag no longer resolves to the smoked push digest' >&2; exit 1; }
           echo "AGENT_IMAGE_PUSH_DIGEST=$push_digest" >> "$GITHUB_ENV"
@@ -555,12 +629,6 @@ jobs:
           path: owner-editor-release-inventory.json
           if-no-files-found: ignore
           retention-days: 14
-      - name: Install the fixed signature verifier for the reviewed spending profile
-        if: inputs.estimated_cost_release_profile != ''
-        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
-        with:
-          cosign-release: v3.1.3
-          install-dir: ${{ runner.temp }}/estimated-cost-cosign
       - name: Verify actual spending profile prerequisites before delivery guard mutations
         if: inputs.estimated_cost_release_profile != '' || steps.release_path.outputs.basic5 == 'true'
         env:
@@ -700,6 +768,7 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' &&
       inputs.native_web_qualification == 'read_only' && inputs.build_only != true &&
+      inputs.prebuilt_run_id == '' && inputs.api3_recovery_proof == '' &&
       github.ref == 'refs/heads/main' && github.run_attempt == '1' &&
       github.workflow_ref == 'bmson/assistant/.github/workflows/deploy.yml@refs/heads/main' &&
       github.workflow_sha == github.sha &&

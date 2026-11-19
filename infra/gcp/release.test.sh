@@ -4,6 +4,8 @@
 # machine.
 set -euo pipefail
 
+node --test "$(dirname "${BASH_SOURCE[0]}")/api3-recovery-proof.test.mjs"
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Every selected image must truthfully cover the bounded calendar schema bridge.
 node --test "$ROOT/calendar-bridge-contract.test.mjs" "$ROOT/release-contract-133.test.mjs" "$ROOT/release-contract-134.test.mjs" "$ROOT/release-contract-137.test.mjs" "$ROOT/release-contract-138.test.mjs" "$ROOT/release-role-qualification-138.test.mjs"
