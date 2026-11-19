@@ -1,6 +1,13 @@
 import { randomUUID } from 'node:crypto';
+import { dispatchBudgetWakes } from '@assistant/application/costs';
 import { resetConfigForTest } from '@assistant/config';
-import { createInstallationStore, FirestoreCostRepository } from '@assistant/firestore';
+import {
+  createInstallationStore,
+  FirestoreCostRepository,
+  FirestoreOutbox,
+  FirestoreTaskRepository,
+  wakeIntentId,
+} from '@assistant/firestore';
 import { NextRequest } from 'next/server';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -102,6 +109,99 @@ describe.skipIf(!localEmulator)(
         dailyLimitUsd: 3.5,
         monthlyLimitUsd: 20,
       });
+    });
+
+    it('wakes only eligible owner work once after a live cap increase', async () => {
+      const tasks = new FirestoreTaskRepository(store);
+      const costs = new FirestoreCostRepository(store);
+      const resumeAt = new Date(Date.now() + 3_600_000);
+      const parked: string[] = [];
+      const durableApprovalId = randomUUID();
+      try {
+        const create = async (
+          owner: string,
+          checkpoint: Record<string, unknown> = {},
+          taskCap = '5',
+        ) => {
+          const { task } = await tasks.createTask({
+            agentId: owner,
+            type: 'adhoc',
+            trust: 'owner',
+          });
+          parked.push(task.id);
+          await store.doc('tasks', task.id).update({ budgetUsdLimit: taskCap });
+          const lease = await tasks.claim(task.id, 0);
+          if (!lease) throw new Error('Fixture lease unavailable');
+          await tasks.parkForBudget(
+            lease,
+            {
+              ...checkpoint,
+              budgetRetry: { scope: 'daily', nextAttemptMicros: 1_200_000, critical: false },
+            },
+            resumeAt,
+          );
+          return task.id;
+        };
+
+        const eligible = await create(agentId);
+        const approval = await create(agentId, { pendingApprovals: [{ approvalId: 'waiting' }] });
+        const durableApproval = await create(agentId);
+        await store
+          .doc('approvals', durableApprovalId)
+          .set({ taskId: durableApproval, status: 'pending' });
+        const staleSchedule = await create(agentId);
+        await store
+          .doc('tasks', staleSchedule)
+          .update({ trigger: { payload: { scheduleId: 'deleted-schedule' } } });
+        const overTaskCap = await create(agentId, {}, '1');
+        const other = await create('unrelated-owner');
+        const archived = await create(agentId);
+        await store.doc('tasks', archived).update({ archivedAt: new Date() });
+        const completed = await create(agentId);
+        await tasks.completeTask(completed, { status: 'cancelled' });
+        expect(
+          await costs.reserve({ taskId: eligible, estimatedUsd: 1.2, source: 'model' }),
+        ).toMatchObject({ ok: false, budget: { scope: 'daily' } });
+
+        const startedAt = Date.now();
+        const responses = await Promise.all([patch({ daily: '2' }), patch({ daily: '2' })]);
+        expect(responses.map(({ status }) => status)).toEqual([200, 200]);
+        expect(await tasks.getTask(eligible)).toMatchObject({
+          status: 'pending',
+          queueGeneration: 2,
+          runAfter: null,
+        });
+        for (const id of [approval, durableApproval, staleSchedule, overTaskCap, other, archived])
+          expect(await tasks.getTask(id)).toMatchObject({
+            status: 'waiting_budget',
+            queueGeneration: 1,
+          });
+        expect(await tasks.getTask(completed)).toMatchObject({ status: 'cancelled' });
+        expect(await tasks.claim(eligible, 1)).toBeNull();
+
+        const queue = {
+          enqueue: vi.fn(async (id: string, generation: number) => {
+            const lease = await tasks.claim(id, generation);
+            expect(lease).not.toBeNull();
+            await expect(tasks.claim(id, generation)).resolves.toBeNull();
+          }),
+        };
+        const ids = [wakeIntentId(eligible, 2)];
+        const outbox = new FirestoreOutbox(store);
+        const wakes = [{ id: eligible, queueGeneration: 2 }];
+        await dispatchBudgetWakes('cloudtasks', wakes, { outbox, ids, queue });
+        await dispatchBudgetWakes('cloudtasks', wakes, { outbox, ids, queue });
+        expect((await store.doc('outbox', ids[0] ?? '').get()).get('status')).toBe('delivered');
+        expect(queue.enqueue).toHaveBeenCalledTimes(1);
+        expect(Date.now() - startedAt).toBeLessThan(60_000);
+      } finally {
+        await store.doc('approvals', durableApprovalId).delete();
+        for (const id of parked) {
+          await store.doc('tasks', id).delete();
+          for (const generation of [0, 1, 2])
+            await store.doc('outbox', wakeIntentId(id, generation)).delete();
+        }
+      }
     });
 
     it('rejects malformed caps and never reports a skipped update as success', async () => {

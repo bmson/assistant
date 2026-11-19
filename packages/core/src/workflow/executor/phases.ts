@@ -700,6 +700,7 @@ export async function resumePendingApprovals(rc: RunContext): Promise<ExecuteRes
             lease,
             state,
             outcome.resumeAt,
+            outcome.budgetRetry,
           );
           if (!parked) return LOST_LEASE;
           await postConversationNotice(
@@ -907,6 +908,7 @@ export async function runDirectDocumentRead(rc: RunContext): Promise<ExecuteResu
         lease,
         state,
         outcome.resumeAt,
+        outcome.budgetRetry,
       );
       if (!parked) return LOST_LEASE;
       return { outcome: 'parked', detail: outcome.reason };
@@ -1361,6 +1363,7 @@ export async function runPlanPhase(rc: RunContext): Promise<ExecuteResult | { pl
           lease,
           state,
           budgetResumeAt(decision.reason),
+          decision.budgetRetry,
         );
         if (!parked) return LOST_LEASE;
         await postConversationNotice(

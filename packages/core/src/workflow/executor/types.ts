@@ -1,6 +1,7 @@
 import type { Db, TaskRow } from '@assistant/db';
 import type {
   ApplicationConfirmationNoticeFence,
+  BudgetRetry,
   DocumentExtractionRepository,
   EmailThreadHeadReader,
   ExecutionPersistence,
@@ -63,7 +64,7 @@ export interface DispatcherPort {
         summary: string;
       }
     | { kind: 'rejected'; reason: string }
-    | { kind: 'budget_blocked'; reason: string; resumeAt: Date }
+    | { kind: 'budget_blocked'; reason: string; resumeAt: Date; budgetRetry?: BudgetRetry }
   >;
   executeApproved(
     toolCallId: string,
@@ -79,7 +80,7 @@ export interface DispatcherPort {
         requestedArgumentsVerified: false;
       }
     | { kind: 'failed'; error: string }
-    | { kind: 'budget_blocked'; reason: string; resumeAt: Date }
+    | { kind: 'budget_blocked'; reason: string; resumeAt: Date; budgetRetry?: BudgetRetry }
   >;
 }
 

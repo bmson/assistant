@@ -3826,6 +3826,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           lease,
           state,
           budgetResumeAt(stepResult.decision.reason),
+          stepResult.decision.budgetRetry,
         );
         if (!parked) return LOST_LEASE;
         await postConversationNotice(
@@ -4545,6 +4546,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
             lease,
             state,
             outcome.resumeAt,
+            outcome.budgetRetry,
           );
           if (!parked) return LOST_LEASE;
           if (approvalNotices.length > 0) {

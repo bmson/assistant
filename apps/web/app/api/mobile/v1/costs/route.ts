@@ -6,6 +6,7 @@ import {
 import { loadConfig, validateAgentPersistenceConfig } from '@assistant/config';
 import { createInstallationStore, FirestoreBudgetCapsRepository } from '@assistant/firestore';
 import { readBoundedJson } from '@/lib/bounded-json';
+import { dispatchBudgetWakes } from '@/lib/budget-wakes';
 import { getDb } from '@/lib/server';
 import { isMobileAuthed, mobileJson, mobileUnauthorized } from '@/mobile-auth';
 
@@ -47,14 +48,18 @@ export async function PATCH(request: Request): Promise<Response> {
       databaseId: config.FIRESTORE_DATABASE_ID,
     });
     try {
-      await updateBudgetCapsWithRepository(
+      const wakes = await updateBudgetCapsWithRepository(
         new FirestoreBudgetCapsRepository(store),
         config.FIRESTORE_AGENT_ID,
         normalized.caps ?? {},
       );
+      await dispatchBudgetWakes(config.QUEUE_DRIVER, wakes, store);
     } finally {
       await store.db.terminate();
     }
-  } else await updateBudgetCaps(getDb(), normalized.caps ?? {});
+  } else {
+    const wakes = await updateBudgetCaps(getDb(), normalized.caps ?? {});
+    await dispatchBudgetWakes(config.QUEUE_DRIVER, wakes);
+  }
   return mobileJson({ ok: true, appliedCaps: normalized.caps });
 }

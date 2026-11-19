@@ -243,7 +243,7 @@
     },
     "apps/web/app/api/mobile/v1/costs/route.ts": {
       "methods": ["PATCH"],
-      "sha256": "4d908925abaf79e1ed5c793e4a58aef5b87c3eace1ad750f398f6292c3fec4aa"
+      "sha256": "0058b1c941da18b6bb54835dcdda4e80a58acc8b003517f8f36ab9ef066dea89"
     },
     "apps/web/app/api/mobile/v1/devices/route.ts": {
       "methods": ["POST"],
