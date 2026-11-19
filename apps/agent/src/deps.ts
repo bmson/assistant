@@ -350,6 +350,7 @@ function dashboardOwnerNotifier(deps: AgentDeps): OwnerNotifier {
   };
   return {
     notifyOwner: async ({
+      purpose,
       text,
       taskId,
       conversationId,
@@ -357,6 +358,8 @@ function dashboardOwnerNotifier(deps: AgentDeps): OwnerNotifier {
       emailObserverEffectFence,
       applicationConfirmationNoticeFence,
     }) => {
+      if (purpose === 'answer-ready')
+        return notificationLeg('dashboard', 'skipped', 'already-in-source-conversation');
       return post(
         text,
         taskId,
@@ -544,6 +547,7 @@ async function drainDashboardNotificationOutbox(deps: AgentDeps): Promise<number
     adapter: 'dashboard',
     now: new Date(),
     limit: 100,
+    loadTask: (agentId, taskId) => persistence.executionContext.getTask(agentId, taskId),
     send: (row) => sendDashboardOutboxLeg(deps, persistence, row),
   });
 }
@@ -560,6 +564,7 @@ function firestoreDashboardOwnerNotifier(deps: AgentDeps): OwnerNotifier {
   );
   return {
     notifyOwner: async ({
+      purpose,
       text,
       taskId,
       conversationId,
@@ -567,6 +572,8 @@ function firestoreDashboardOwnerNotifier(deps: AgentDeps): OwnerNotifier {
       emailObserverEffectFence,
       applicationConfirmationNoticeFence,
     }) => {
+      if (purpose === 'answer-ready')
+        return notificationLeg('dashboard', 'skipped', 'already-in-source-conversation');
       const agentId = deps.config.FIRESTORE_AGENT_ID;
       const primaryId = await notices.primaryConversationId();
       if (!shouldMirrorIntoPrimary(conversationId, primaryId))
@@ -628,6 +635,9 @@ function policyGatedOutOfBand(
 ): OwnerNotifier {
   return {
     notifyOwner: async (input) => {
+      // Answer-ready evaluates the same policy at the push sender, including
+      // outbox retries. SMS does not handle this purpose.
+      if (input.purpose === 'answer-ready') return inner.notifyOwner(input);
       const decision = await evaluateOutOfBandPing(policy, await owner(), {
         urgency: input.urgency ?? 'interrupt',
         ...(input.deliveryKey?.startsWith('curiosity-notice:')

@@ -2,9 +2,11 @@ import { truncateAtBoundary } from '@assistant/core/owner-text';
 import type {
   ActiveDeviceToken,
   DeviceTokenRepository,
+  ExecutionContextRepository,
   NotificationOutboxLeg,
   NotificationOutboxRepository,
   NotificationOutboxSendResult,
+  PingDecision,
 } from '@assistant/persistence';
 import {
   drainNotificationOutbox,
@@ -24,6 +26,8 @@ export interface PushChannelDeps {
   notificationOutbox: NotificationOutboxRepository;
   /** The owner the notices belong to: their id selects devices, their name titles the alert. */
   owner: () => Promise<{ id: string; name: string }>;
+  loadTask?: ExecutionContextRepository['getTask'];
+  admitAnswerReady?: (deliveryKey: string, now: Date) => Promise<PingDecision>;
 }
 
 /**
@@ -41,12 +45,20 @@ function plain(text: string, max = 220): string {
 /** The app's UNNotificationCategory identifiers (NotificationManager.swift). */
 const ATTENTION_CATEGORY = 'ASSISTANT_ATTENTION';
 const UPDATE_CATEGORY = 'ASSISTANT_UPDATE';
+const ANSWER_READY_TTL_MS = 15 * 60_000;
+const ANSWER_READY_MAX_ATTEMPTS = 3;
 
 async function deliver(
   deps: PushChannelDeps,
   agentId: string,
   deliveryKey: string,
-  alert: { title: string; body: string; category: string; data?: Record<string, string> },
+  alert: {
+    title: string;
+    body: string;
+    category: string;
+    data?: Record<string, string>;
+    purpose?: 'answer-ready';
+  },
   applicationConfirmationNoticeFence?: import('@assistant/persistence').ApplicationConfirmationNoticeFence,
 ): Promise<NotificationDeliveryResult> {
   if (!deps.apns?.configured()) return notificationLeg('push', 'skipped', 'not-configured');
@@ -68,7 +80,7 @@ async function deliver(
           ...(applicationConfirmationNoticeFence ? { applicationConfirmationNoticeFence } : {}),
           now: new Date(),
         },
-        (row) => sendPushOutboxLeg(deps, row, device),
+        (row) => sendPushOutboxLeg(deps, row, new Date(), device),
       ),
     );
   }
@@ -82,13 +94,14 @@ function pushTarget(device: ActiveDeviceToken): { deviceKey: string; environment
   };
 }
 
-function retryAt(attempts: number): Date {
-  return new Date(Date.now() + Math.min(60 * 60_000, 15_000 * 2 ** Math.max(0, attempts - 1)));
+function retryAt(now: Date, attempts: number): Date {
+  return new Date(now.getTime() + Math.min(60 * 60_000, 15_000 * 2 ** Math.max(0, attempts - 1)));
 }
 
 async function sendPushOutboxLeg(
   deps: PushChannelDeps,
   row: NotificationOutboxLeg,
+  now: Date,
   knownDevice?: ActiveDeviceToken,
 ): Promise<NotificationOutboxSendResult> {
   if (!deps.apns.configured()) return { status: 'skipped', reason: 'push-provider-unavailable' };
@@ -98,6 +111,7 @@ async function sendPushOutboxLeg(
     body?: unknown;
     category?: unknown;
     data?: unknown;
+    purpose?: unknown;
   } | null;
   if (
     !destination ||
@@ -116,6 +130,19 @@ async function sendPushOutboxLeg(
       candidate.environment === destination.environment,
   );
   if (!device) return { status: 'skipped', reason: 'push-device-no-longer-active' };
+
+  const answerReady = alert.purpose === 'answer-ready';
+  const expiresAt = answerReady ? row.createdAt.getTime() + ANSWER_READY_TTL_MS : undefined;
+  if (expiresAt !== undefined && now.getTime() >= expiresAt)
+    return { status: 'skipped', reason: 'answer-ready-expired' };
+  if (answerReady) {
+    if (!deps.admitAnswerReady)
+      return { status: 'skipped', reason: 'answer-ready-policy-unavailable' };
+    const decision = await deps.admitAnswerReady(row.deliveryKey, now);
+    if (!decision.deliver)
+      return { status: 'skipped', reason: decision.reason ?? 'answer-ready-held' };
+  }
+  const attemptsRemain = !answerReady || row.attempts < ANSWER_READY_MAX_ATTEMPTS;
   try {
     const result = await deps.apns.send({
       token: device.token,
@@ -123,6 +150,7 @@ async function sendPushOutboxLeg(
       title: alert.title,
       body: alert.body,
       category: alert.category,
+      ...(expiresAt !== undefined ? { expiresAt } : {}),
       ...(alert.data && typeof alert.data === 'object'
         ? { data: alert.data as Record<string, string> }
         : {}),
@@ -133,11 +161,12 @@ async function sendPushOutboxLeg(
         console.error('push: could not invalidate an unregistered token', err);
       });
     }
-    const retryable = !result.unregistered && (result.status === 429 || result.status >= 500);
+    const retryable =
+      attemptsRemain && !result.unregistered && (result.status === 429 || result.status >= 500);
     return {
       status: 'failed',
       retryable,
-      ...(retryable ? { retryAt: retryAt(row.attempts) } : {}),
+      ...(retryable ? { retryAt: retryAt(now, row.attempts) } : {}),
       reason: result.unregistered ? 'device-unregistered' : 'provider-rejected',
       result: { status: result.status },
     };
@@ -146,8 +175,8 @@ async function sendPushOutboxLeg(
       ? { status: 'unknown', reason: 'provider-outcome-unknown' }
       : {
           status: 'failed',
-          retryable: true,
-          retryAt: retryAt(row.attempts),
+          retryable: attemptsRemain,
+          ...(attemptsRemain ? { retryAt: retryAt(now, row.attempts) } : {}),
           reason: 'send-rejected',
         };
   }
@@ -163,8 +192,9 @@ export async function drainPushNotificationOutbox(
     agentId: owner.id,
     adapter: 'push',
     now,
+    loadTask: deps.loadTask,
     limit: 100,
-    send: (row) => sendPushOutboxLeg(deps, row),
+    send: (row) => sendPushOutboxLeg(deps, row, new Date(Math.max(now.getTime(), Date.now()))),
   });
 }
 
@@ -178,6 +208,7 @@ export async function drainPushNotificationOutbox(
 export async function notifyOwnerByPush(
   deps: PushChannelDeps,
   input: {
+    purpose?: 'answer-ready';
     taskId?: string;
     conversationId?: string | null;
     text: string;
@@ -186,6 +217,9 @@ export async function notifyOwnerByPush(
   },
 ): Promise<NotificationDeliveryResult> {
   if (!deps.apns?.configured()) return notificationLeg('push', 'skipped', 'not-configured');
+  const answerReady = input.purpose === 'answer-ready';
+  if (answerReady && (!uuid(input.conversationId) || !input.deliveryKey))
+    return notificationLeg('push', 'skipped', 'answer-ready-destination-invalid');
   const agent = await deps.owner();
   return deliver(
     deps,
@@ -198,14 +232,15 @@ export async function notifyOwnerByPush(
         input.text,
       ),
     {
-      title: agent.name,
-      body: plain(input.text),
+      title: answerReady ? 'Assistant' : agent.name,
+      body: answerReady ? 'Your reply is ready.' : plain(input.text),
+      ...(answerReady ? { purpose: 'answer-ready' as const } : {}),
       category: UPDATE_CATEGORY,
       data: {
         route: 'chat',
         agentId: agent.id,
         ...(uuid(input.conversationId) ? { conversationId: input.conversationId as string } : {}),
-        ...(uuid(input.taskId) ? { taskId: input.taskId as string } : {}),
+        ...(!answerReady && uuid(input.taskId) ? { taskId: input.taskId as string } : {}),
       },
     },
     input.applicationConfirmationNoticeFence,

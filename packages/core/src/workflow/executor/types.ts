@@ -201,6 +201,7 @@ export interface ExecutorDeps {
    */
   notifyOwner?: (input: {
     deliveryKey?: string;
+    purpose?: 'answer-ready';
     taskId?: string;
     conversationId: string | null;
     text: string;

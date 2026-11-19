@@ -50,6 +50,7 @@ export interface SmsChannelDeps {
     'costs' | 'approvals' | 'messages' | 'tasks' | 'notificationOutbox'
   > & {
     smsChannel: SmsChannelRepository;
+    executionContext?: ExecutionPersistence['executionContext'];
   };
   /** The owner an inbound SMS belongs to. */
   owner: () => Promise<{ id: string }>;
@@ -377,12 +378,15 @@ export async function deliverSmsFinal(
 export async function notifyOwnerBySms(
   deps: SmsChannelDeps,
   input: {
+    purpose?: 'answer-ready';
     taskId?: string;
     text: string;
     deliveryKey?: string;
     applicationConfirmationNoticeFence?: import('@assistant/persistence').ApplicationConfirmationNoticeFence;
   },
 ): Promise<NotificationDeliveryResult> {
+  if (input.purpose === 'answer-ready')
+    return notificationLeg('sms', 'skipped', 'push-only-notice');
   // Optional chaining: some internal/test call paths build a partial deps
   // without a Twilio client or config. A missing notifier is a silent no-op,
   // never an error — owner pings are best-effort.
@@ -498,6 +502,8 @@ export async function drainSmsNotificationOutbox(
     agentId: owner.id,
     adapter: 'sms',
     now,
+    loadTask: (agentId, taskId) =>
+      deps.persistence.executionContext?.getTask(agentId, taskId) ?? Promise.resolve(null),
     limit: 100,
     send: (leg) => sendSmsOutboxLeg(deps, leg),
   });
