@@ -276,6 +276,7 @@ final class AppModel {
     private(set) var bootstrap: BootstrapResponse?
     let phoneCalendarSharing: PhoneCalendarSharingCoordinator
     let edits = OptimisticEditStore()
+    let nativeMemoryCorrectionEnabled: Bool
     let memoryCorrections: NativeMemoryCorrectionConsumer
     @ObservationIgnored private var memoryErasureToken: UUID? {
         didSet { updateMemoryCorrectionRetryInterlock() }
@@ -562,7 +563,10 @@ final class AppModel {
         }
     ) {
         self.defaults = defaults
-        self.memoryCorrections = memoryCorrections ?? NativeMemoryCorrectionConsumer()
+        // Production uses the existing editor until the server can attribute a saved edit.
+        // An explicitly supplied consumer enables the isolated recovery tests.
+        self.nativeMemoryCorrectionEnabled = memoryCorrections != nil
+        self.memoryCorrections = memoryCorrections ?? NativeMemoryCorrectionConsumer(storage: nil)
         self.systemSurfaces = systemSurfaces ?? ProductionAppSystemSurfaces()
         self.phoneCalendarSharing = phoneCalendarSharing ?? PhoneCalendarSharingCoordinator()
         self.cardFormMobileSessionFactory = cardFormMobileSessionFactory
@@ -3766,6 +3770,7 @@ final class AppModel {
     }
 
     func openNativeMemoryCorrection(memoryID: String) async {
+        guard nativeMemoryCorrectionEnabled else { return }
         guard bindMemoryCorrectionConsumer() else {
             memoryCorrections.retire()
             await memoryCorrections.open(memoryID: memoryID)
@@ -3776,7 +3781,7 @@ final class AppModel {
 
     private func nativeCorrectionAllowsLegacyWrite(memoryID: String) async -> Bool {
         // Preserve legacy behavior before a verified bootstrap; no new binary/server fence.
-        guard bootstrap != nil else { return true }
+        guard nativeMemoryCorrectionEnabled, bootstrap != nil else { return true }
         guard bindMemoryCorrectionConsumer() else { return false }
         let permitted = await memoryCorrections.permitsLegacyWrite(memoryID: memoryID)
         if !permitted { errorMessage = "Check the earlier correction for this saved note before making another change." }
@@ -3793,10 +3798,14 @@ final class AppModel {
         }) { try await $0.createMemory(memory) }
     }
 
+    private func memoryEditResources(for id: String) -> Set<MobileEditResource> {
+        nativeMemoryCorrectionEnabled ? memoryEditResources.union([.memoryTarget(id)]) : memoryEditResources
+    }
+
     func correctMemory(id: String, content: String) async -> Bool {
         guard !id.hasPrefix("local:") else { return false }
         guard await nativeCorrectionAllowsLegacyWrite(memoryID: id) else { return false }
-        return enqueueEdit("Memory correction", draft: content, resources: memoryEditResources.union([.memoryTarget(id)]), patch: { state in
+        return enqueueEdit("Memory correction", draft: content, resources: memoryEditResources(for: id), patch: { state in
             if let index = state.workspace?.memory.facts.firstIndex(where: { $0.id == id }) {
                 state.workspace?.memory.facts[index].content = content
             }
@@ -3813,7 +3822,7 @@ final class AppModel {
     func updateMemory(id: String, action: String, prominence: String? = nil, refreshAfterSave: Bool = true) async -> Bool {
         guard !id.hasPrefix("local:") else { return false }
         guard await nativeCorrectionAllowsLegacyWrite(memoryID: id) else { return false }
-        return enqueueEdit("Memory changes", draft: action + " " + (prominence ?? ""), resources: memoryEditResources.union([.memoryTarget(id)]), patch: { state in
+        return enqueueEdit("Memory changes", draft: action + " " + (prominence ?? ""), resources: memoryEditResources(for: id), patch: { state in
             switch action {
             case "forget", "reject", "archive":
                 state.workspace?.memory.facts.removeAll { $0.id == id }

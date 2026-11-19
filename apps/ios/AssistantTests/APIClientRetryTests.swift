@@ -5714,6 +5714,23 @@ extension APIClientRetryTests {
     }
 
     @MainActor
+    func testDefaultSavedNoteEditorUsesTheExistingUpdateRoute() async throws {
+        let id = "123e4567-e89b-42d3-a456-426614174101"
+        let model = try await notificationModel()
+        XCTAssertFalse(model.nativeMemoryCorrectionEnabled)
+        StubURLProtocol.prime([], paths: [
+            "/api/mobile/v1/memory/\(id)": [.success(status: 422, body: Data(#"{"error":"fixture"}"#.utf8))],
+        ])
+        await model.openNativeMemoryCorrection(memoryID: id)
+        XCTAssertNil(model.memoryCorrections.presentation)
+        let queued = await model.correctMemory(id: id, content: "Updated synthetic note")
+        XCTAssertTrue(queued)
+        await model.edits.settle()
+        let patches = zip(StubURLProtocol.attempts, StubURLProtocol.urls).filter { $0.0 == "PATCH" }
+        XCTAssertEqual(patches.map { $0.1.path }, ["/api/mobile/v1/memory/\(id)"])
+    }
+
+    @MainActor
     func testNativePendingCorrectionInterlocksSameTargetLegacyWritesAndOutboxRetryOnly() async throws {
         let memoryA = "123e4567-e89b-42d3-a456-426614174101"
         let memoryB = "123e4567-e89b-42d3-a456-426614174102"
