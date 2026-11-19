@@ -191,6 +191,8 @@ final class MobileControlsUITests: XCTestCase {
         let key = surface.identifier
         let nestedScroll = surface.descendants(matching: .scrollView).firstMatch
         let scrolling = surface.elementType == .scrollView ? surface : (nestedScroll.exists ? nestedScroll : surface)
+        var previousTarget: (identifier: String, minY: CGFloat)?
+        var stalledGestures = 0
         while true {
             try checkBudget()
             let viewport = scrolling.frame.intersection(app.frame)
@@ -201,9 +203,18 @@ final class MobileControlsUITests: XCTestCase {
                 return element.isHittable && (fullyVisible ? viewport.contains(frame) : viewport.intersects(frame))
             }
             guard let target = elements.first(where: { !visible($0) }) else { return }
-            guard target.exists, surfaceSwipes[key, default: 0] < 12 else { break }
+            guard target.exists, surfaceSwipes[key, default: 0] < 24 else { break }
             let frame = target.frame
             guard frame.minY.isFinite, frame.maxY.isFinite else { break }
+            let targetIdentity = target.identifier + "|" + target.label
+            if let previousTarget, previousTarget.identifier == targetIdentity,
+               abs(frame.minY - previousTarget.minY) < 2 {
+                stalledGestures += 1
+            } else {
+                stalledGestures = 0
+            }
+            guard stalledGestures < 3 else { break }
+            previousTarget = (targetIdentity, frame.minY)
             let displacement = scrollDisplacement(target: frame, viewport: viewport, fullyVisible: fullyVisible)
             let upward = displacement > 0
             let startY = upward ? viewport.maxY - 12 : viewport.minY + 12
@@ -218,21 +229,25 @@ final class MobileControlsUITests: XCTestCase {
             // target after every gesture, including when a return overshoots it.
             start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.15)
         }
-        try require(false, "Could not expose required native elements within 12 total controlled drags for this surface", app)
+        try require(false, "Could not expose required native elements within 24 total controlled drags with measurable progress for this surface", app)
     }
 
     private func scrollDisplacement(target: CGRect, viewport: CGRect, fullyVisible: Bool) -> CGFloat {
         let desired: CGFloat
         if !fullyVisible || target.height > viewport.height {
             desired = target.midY - viewport.midY
-        } else if target.minY < viewport.minY + 8 {
-            desired = target.minY - (viewport.minY + 8)
-        } else if target.maxY > viewport.maxY - 8 {
-            desired = target.maxY - (viewport.maxY - 8)
+        } else if target.minY < viewport.minY + 24 {
+            desired = target.minY - (viewport.minY + 24)
+        } else if target.maxY > viewport.maxY - 24 {
+            desired = target.maxY - (viewport.maxY - 24)
         } else {
             desired = target.midY - viewport.midY
         }
-        let distance = max(20, min(abs(desired), viewport.height * 0.65))
+        // Native scroll recognition consumes about 10pt before content moves.
+        // Compensate within the same bounded gesture, leaving a 24pt inset
+        // for precise alignment. Distant targets use a longer traversal so
+        // long AX5 journeys stay within the bounded traversal budget.
+        let distance = max(24, min(abs(desired) + 12, viewport.height * 0.85))
         return desired < 0 ? -distance : distance
     }
 
