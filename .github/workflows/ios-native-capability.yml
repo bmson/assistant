@@ -50,11 +50,11 @@ jobs:
           def save(name, value):
               (root / name).write_text(json.dumps(value, indent=2) + '\n')
           def observe_group(pid, timeout_seconds):
-              try:
-                  listed = subprocess.run(['/bin/ps','-axo','pgid='], env=env, capture_output=True, text=True, timeout=timeout_seconds, check=True)
-                  return str(pid) in listed.stdout.split(), None
-              except Exception as error:
-                  return None, repr(error)[:320]
+              # Signal 0 asks the kernel about this owned process group without
+              # sending a signal or spawning a potentially stalled ps process.
+              try: os.killpg(pid, 0); return True, None
+              except ProcessLookupError: return False, None
+              except OSError as error: return None, repr(error)
           def drain(process, secondary, normal_exit, drain_deadline):
               signals = []
               def note(error):
@@ -184,20 +184,24 @@ jobs:
               candidates = [(version(rt), d['name'], rt, d) for rt, ds in devices['devices'].items() if 'SimRuntime.iOS-' in rt for d in ds if d.get('isAvailable') and d['name'].startswith('iPhone') and version(rt) >= (26,)]
               if not candidates: raise RuntimeError('No available iOS >=26 iPhone template')
               _, _, runtime, template = max(candidates, key=lambda c:(c[0], c[1]))
-              name = 'Assistant-Capability-' + os.environ['GITHUB_RUN_ID'] + '-' + os.environ['GITHUB_RUN_ATTEMPT']
-              preexisting = [d for ds in devices['devices'].values() for d in ds]
-              if any(d['name']==name for d in preexisting): raise RuntimeError('Lease name already exists')
               if main_deadline-time.monotonic()<1800: raise RuntimeError('Insufficient admitted build/test/cleanup reserve')
-              lease = {'nameAbsentPreflight':True,'preexistingIDs':[d['udid'] for d in preexisting],'udid':None,'name':name,'runtime':runtime,'template':template,'createdByRun':os.environ['GITHUB_RUN_ID']}
-              save('lease.json', lease) # Durable intent precedes resource creation.
-              def bind_lease(text):
-                  udid = text.strip()
-                  if not re.fullmatch(r'[A-Fa-f0-9]{8}(?:-[A-Fa-f0-9]{4}){3}-[A-Fa-f0-9]{12}', udid): raise RuntimeError('Invalid created simulator UUID')
-                  if udid in lease['preexistingIDs']: raise RuntimeError('Created UUID was preexisting')
-                  lease['udid'] = udid; save('lease.json', lease)
-              udid = run('create-simulator', ['xcrun','simctl','create',name,template['deviceTypeIdentifier'],runtime], 10, bind_lease).strip()
-              run('build', ['xcodebuild','-project','apps/ios/Assistant.xcodeproj','-scheme','AssistantUIFixtures','-configuration','Debug','-destination','generic/platform=iOS Simulator','-derivedDataPath',str(build),'CODE_SIGNING_ALLOWED=NO','CODE_SIGNING_REQUIRED=NO','CODE_SIGN_IDENTITY=','build-for-testing'], 480)
-              run('boot-owned-simulator', ['xcrun','simctl','bootstatus',udid,'-b'], 240)
+              udid = template['udid']
+              bundles = ['com.baldvinsmarason.assistant.uitesthost','com.baldvinsmarason.assistant.uitesthost.tests.xctrunner']
+              lease = {'mode':'borrowed','udid':udid,'name':template['name'],'runtime':runtime,
+                  'template':template,'initialState':template['state'],'fixtureAppsAbsentPreflight':False,
+                  'createdByRun':os.environ['GITHUB_RUN_ID']}
+              if lease['initialState'] not in {'Booted','Shutdown'}: raise RuntimeError('Unsupported initial simulator state')
+              save('lease.json', lease)
+              # Use the same preinstalled destination/build/boot path as ordinary
+              # iOS CI, avoiding fresh-device migration. Never delete this device.
+              run('build', ['xcodebuild','-project','apps/ios/Assistant.xcodeproj','-scheme','AssistantUIFixtures','-configuration','Debug','-destination','id='+udid,'-derivedDataPath',str(build),'CODE_SIGNING_ALLOWED=NO','CODE_SIGNING_REQUIRED=NO','CODE_SIGN_IDENTITY=','build-for-testing'], 480)
+              boot = run('boot-borrowed-simulator', ['xcrun','simctl','bootstatus',udid,'-b'], 240)
+              if 'Data Migration Failed' in boot: raise RuntimeError('Simulator data migration failed; no test attempt')
+              app_list = root / 'fixture-app-preflight.plist'
+              app_list.write_text(run('fixture-app-preflight', ['xcrun','simctl','listapps',udid], 30))
+              apps = json.loads(run('fixture-app-preflight-json', ['/usr/bin/plutil','-convert','json','-o','-',str(app_list)], 10))
+              if not isinstance(apps,dict) or any(bundle in apps for bundle in bundles): raise RuntimeError('Fixture app already installed; no cleanup authority')
+              lease['fixtureAppsAbsentPreflight'] = True; save('lease.json', lease)
               products = build / 'Build/Products'
               runs = list(products.glob('*.xctestrun'))
               if len(runs) != 1: raise RuntimeError('Expected exactly one built xctestrun')
@@ -252,12 +256,10 @@ jobs:
           env={k:v for k,v in os.environ.items() if k in {'HOME','USER','LOGNAME','SHELL','TMPDIR','LANG','LC_ALL'}}
           env['PATH']='/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin'
           def present(pid):
-              rest=deadline-time.monotonic()
-              if rest<=0:return None
-              try:
-                  p=subprocess.run(['/bin/ps','-axo','pgid='],env=env,capture_output=True,text=True,timeout=min(1,rest),check=True)
-                  return str(pid) in p.stdout.split()
-              except Exception: return None
+              if deadline-time.monotonic()<=0:return None
+              try: os.killpg(pid, 0); return True
+              except ProcessLookupError: return False
+              except OSError: return None
           def call(args):
               remaining=deadline-time.monotonic()
               if remaining<=2:return 124,'Insufficient cleanup command/drain reserve'
@@ -295,6 +297,13 @@ jobs:
               text=output.decode(errors='replace')
               receipt['commands'].append({'args':args,'pid':p.pid,'exit':code,'closed':closed,'problem':problem,'detail':text[-2000:]})
               return code,text
+          def app_inventory(text):
+              path=root/'cleanup-app-inventory.plist';path.write_text(text)
+              code,encoded=call(['/usr/bin/plutil','-convert','json','-o','-',str(path)])
+              if code: raise RuntimeError('Cannot decode installed app inventory')
+              value=json.loads(encoded)
+              if not isinstance(value,dict): raise RuntimeError('Invalid installed app inventory')
+              return value
           try:
               lease=root/'lease.json'
               toolchain=root/'toolchain.json'
@@ -326,35 +335,49 @@ jobs:
                   receipt['retainedProcessGroup']={'pid':record['pid'],'observation':'absent' if final_group is False else 'present' if final_group is True else 'unknown','closed':final_group is False}
                   if final_group is not False: errors.append('Retained group presence/closure unknown')
               if lease.exists():
-                  owned=json.loads(lease.read_text());udid=owned['udid']
-                  if owned['createdByRun']!=os.environ['GITHUB_RUN_ID']: raise RuntimeError('Lease owner mismatch')
+                  borrowed=json.loads(lease.read_text());udid=borrowed['udid']
+                  if borrowed['createdByRun']!=os.environ['GITHUB_RUN_ID'] or borrowed['mode']!='borrowed': raise RuntimeError('Lease owner mismatch')
                   code,text=call(['xcrun','simctl','list','devices','--json'])
-                  if code: raise RuntimeError('Cannot inventory owned simulator')
+                  if code: raise RuntimeError('Cannot inventory borrowed simulator')
                   devices={d['udid']:dict(d,runtime=rt) for rt,ds in json.loads(text)['devices'].items() for d in ds}
-                  if udid is None:
-                      matches=[d for d in devices.values() if d['name']==owned['name'] and d['runtime']==owned['runtime'] and d.get('deviceTypeIdentifier')==owned['template']['deviceTypeIdentifier'] and d['udid'] not in owned['preexistingIDs']]
-                      if not owned['nameAbsentPreflight'] or len(matches)>1: raise RuntimeError('Unbound create intent')
-                      if not matches and any(d['name']==owned['name'] for d in devices.values()): raise RuntimeError('Create intent has unexpected device identity')
-                      if matches: udid=matches[0]['udid'];owned['udid']=udid;lease.write_text(json.dumps(owned,indent=2)+'\n')
                   device=devices.get(udid)
-                  if device and (device['name']!=owned['name'] or device['runtime']!=owned['runtime'] or device.get('deviceTypeIdentifier')!=owned['template']['deviceTypeIdentifier'] or udid in owned['preexistingIDs']): raise RuntimeError('Owned lease identity mismatch')
-                  if device and device['state']=='Booted':
+                  if not device or device['name']!=borrowed['name'] or device['runtime']!=borrowed['runtime'] or device.get('deviceTypeIdentifier')!=borrowed['template']['deviceTypeIdentifier']:
+                      raise RuntimeError('Borrowed simulator identity mismatch')
+                  bundles=['com.baldvinsmarason.assistant.uitesthost','com.baldvinsmarason.assistant.uitesthost.tests.xctrunner']
+                  if borrowed['fixtureAppsAbsentPreflight']:
+                      # The preflight proved these exact bundles were absent;
+                      # only these installed test resources belong to this run.
+                      if device['state']!='Booted': raise RuntimeError('Cannot inspect installed fixture resources on a stopped simulator')
                       code,running=call(['xcrun','simctl','spawn',udid,'launchctl','list'])
                       if code: errors.append('Cannot inspect fixture app processes')
                       else:
-                          for bundle in ['com.baldvinsmarason.assistant.uitesthost','com.baldvinsmarason.assistant.uitesthost.tests.xctrunner']:
+                          for bundle in bundles:
                               if bundle in running:
                                   code,detail=call(['xcrun','simctl','terminate',udid,bundle])
                                   if code: errors.append('Terminate failed: '+detail[-300:])
-                      # Continue owned closure even when a terminate command failed/timed out.
+                      code,text=call(['xcrun','simctl','listapps',udid])
+                      if code: errors.append('Cannot inventory installed fixture apps')
+                      else:
+                          apps=app_inventory(text)
+                          for bundle in bundles:
+                              if bundle in apps:
+                                  code,detail=call(['xcrun','simctl','uninstall',udid,bundle])
+                                  if code: errors.append('Fixture uninstall failed: '+detail[-300:])
+                      code,text=call(['xcrun','simctl','listapps',udid])
+                      absent=code==0 and not any(bundle in app_inventory(text) for bundle in bundles)
+                      receipt['fixtureBundlesAbsent']=absent
+                      if not absent: errors.append('Fixture app absence unverified')
+                  else: receipt['fixtureInstallationNotAuthorized']=True
+                  if borrowed['initialState']=='Shutdown' and device['state']=='Booted':
                       code,detail=call(['xcrun','simctl','shutdown',udid])
-                      if code: errors.append('Shutdown failed: '+detail[-300:])
-                  if device:
-                      code,detail=call(['xcrun','simctl','delete',udid])
-                      if code: errors.append('Delete failed: '+detail[-300:])
+                      if code: errors.append('Restore initial shutdown state failed: '+detail[-300:])
                   code,text=call(['xcrun','simctl','list','devices','--json'])
-                  if code or any(d['udid']==udid for ds in json.loads(text)['devices'].values() for d in ds): errors.append('Owned simulator absence unverified')
-                  receipt['ownedUUID']=udid
+                  restored=None if code else next((dict(d,runtime=rt) for rt,ds in json.loads(text)['devices'].items() for d in ds if d['udid']==udid),None)
+                  intact=restored is not None and restored['name']==borrowed['name'] and restored['runtime']==borrowed['runtime'] and restored.get('deviceTypeIdentifier')==borrowed['template']['deviceTypeIdentifier']
+                  receipt['borrowedSimulatorPreserved']=intact
+                  receipt['initialBootStateRestored']=intact and restored['state']==borrowed['initialState']
+                  receipt['borrowedUUID']=udid
+                  if not receipt['initialBootStateRestored']: errors.append('Borrowed simulator identity/initial state restoration unverified')
           except BaseException as error: errors.append(repr(error))
           finally:
               receipt['errors']=errors;receipt['deadlineExceeded']=time.monotonic()>deadline
