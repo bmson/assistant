@@ -1019,8 +1019,23 @@ state['assistant-agent']['env'].update(dict.fromkeys(
 open(p,'w').write(json.dumps(state))
 PYCASE
   wrapper_status=0
-  env "$failure=1" GCP_PROJECT="$PROJECT" IMAGE_TAG="$TAG" SKIP_IMAGE_BUILD=true ASSISTANT_MODULES=none \
-    TEST_BASIC5_CAPABILITY=true bash "$WRAPPER_ROOT/release.sh" >"$TEST_ROOT/wrapper.log" 2>&1 || wrapper_status=$?
+  # The dispatcher takes its target and run identity from the environment.
+  # Supply only fixture values, including when release.test.sh calls us from CI.
+  env -i PATH="$PATH" \
+    STUB_ROOT="$STUB_ROOT" STUB_RELEASE_CALLS="$STUB_RELEASE_CALLS" \
+    STUB_SERVICE_UPDATE_CALLS="$STUB_SERVICE_UPDATE_CALLS" STUB_ADMISSION_CALLS="$STUB_ADMISSION_CALLS" \
+    STUB_ADMISSION_COMMANDS="$STUB_ADMISSION_COMMANDS" \
+    GCP_PROJECT="$PROJECT" GCP_REGION="$REGION" ARTIFACT_REPOSITORY="$REPO" IMAGE_TAG="$TAG" \
+    GITHUB_ACTIONS="$GITHUB_ACTIONS" GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_REF="$GITHUB_REF" \
+    GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" GITHUB_WORKFLOW_REF="$GITHUB_WORKFLOW_REF" \
+    GITHUB_SHA="$GITHUB_SHA" GITHUB_WORKFLOW_SHA="$GITHUB_WORKFLOW_SHA" \
+    GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+    OWNER_RELEASE_BOOTSTRAP_RECEIPT="$OWNER_RELEASE_BOOTSTRAP_RECEIPT" \
+    OWNER_RELEASE_BOOTSTRAP_SHA256="$OWNER_RELEASE_BOOTSTRAP_SHA256" \
+    RELEASE_COMPONENTS="$RELEASE_COMPONENTS" RELEASE_PERSISTENCE_DRIVER="$RELEASE_PERSISTENCE_DRIVER" \
+    RELEASE_MANIFEST_PATH="$RELEASE_MANIFEST_PATH" SKIP_IMAGE_BUILD=true ASSISTANT_MODULES=none \
+    TEST_BASIC5_CAPABILITY=true "$failure=1" \
+    bash "$WRAPPER_ROOT/release.sh" >"$TEST_ROOT/wrapper.log" 2>&1 || wrapper_status=$?
   if [[ "$failure" == FAIL_AGENT_BUILD ]]; then
     [[ "$wrapper_status" == 1 && ! -s "$STUB_SERVICE_UPDATE_CALLS" ]] || { cat "$TEST_ROOT/wrapper.log"; fail 'pre-write rejection must remain an ordinary release failure'; }
     grep -q 'failed step(s)' "$TEST_ROOT/wrapper.log" || { cat "$TEST_ROOT/wrapper.log"; fail 'missing ordinary failure report'; }
