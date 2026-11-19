@@ -5895,6 +5895,15 @@ extension APIClientRetryTests {
         ])
     }
 
+    @MainActor
+    func testBudgetNoticeLinkRoutesOnlyTheRelativeCostsPath() throws {
+        let notice = AssistantMarkdown.inlineAttributed("Review or raise the limit in [Costs](/costs).")
+        let link = try XCTUnwrap(notice.runs.compactMap(\.link).first)
+        XCTAssertTrue(RootView.isNativeCostsLink(link))
+        XCTAssertFalse(RootView.isNativeCostsLink(try XCTUnwrap(URL(string: "https://example.test/costs"))))
+        XCTAssertFalse(RootView.isNativeCostsLink(try XCTUnwrap(URL(string: "/costs?other=1"))))
+    }
+
     func testAnswerReadyPushIsQuietInTheForeground() {
         XCTAssertTrue(NotificationManager.foregroundPresentationOptions(for: "ASSISTANT_UPDATE").isEmpty)
         XCTAssertEqual(

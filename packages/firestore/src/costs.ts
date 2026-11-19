@@ -738,7 +738,7 @@ export class FirestoreCostRepository implements CostRepository {
     };
   }
 
-  private async periodHolds(tx: Transaction, now: Date, held: number) {
+  async periodHolds(tx: Transaction, now: Date, held: number) {
     const dayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
     const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
     if (held === 0) return { dailyHeld: 0, monthlyHeld: 0 };
