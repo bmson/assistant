@@ -73,6 +73,7 @@
     "eval:models": "tsx scripts/eval-models.ts",
     "test:firestore": "tsx scripts/test-firestore.ts",
     "test:proactive-replay": "tsx scripts/proactive-replay.ts",
+    "mail:census": "tsx scripts/mail-pipeline-census.ts",
     "firestore:validate": "tsx scripts/validate-firestore.ts",
     "firestore:backup-smoke": "tsx scripts/firestore-backup-smoke.ts",
     "firestore:runtime-data-preflight": "tsx scripts/firestore-runtime-data-preflight.ts",

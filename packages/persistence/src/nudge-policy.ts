@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { notificationDeliveryKey } from './notification-delivery.js';
 
 /**
  * The nudge policy's storage-free half: the decision types and the owner-local
@@ -7,7 +8,7 @@ import { createHash } from 'node:crypto';
  * `evaluateOutOfBandPing` in core for the policy itself.
  */
 
-export function answerReadyPingId(agentId: string, channel: string): string {
+export function stableNudgePingId(agentId: string, channel: string): string {
   const hex = createHash('sha256')
     .update(JSON.stringify([agentId, channel]))
     .digest('hex');
@@ -93,6 +94,19 @@ export function ownerLocalMidnightUtc(timeZone: string, now: Date): Date {
   const midnightAsIfUtc = Date.UTC(year, month - 1, day);
   const guess = midnightAsIfUtc - tzOffsetMs(timeZone, new Date(midnightAsIfUtc));
   return new Date(midnightAsIfUtc - tzOffsetMs(timeZone, new Date(guess)));
+}
+
+/** All devices share a reservation for the episode within one owner-local day. */
+export function watchdogOutageNudgeChannel(
+  deliveryKey: string,
+  timeZone: string,
+  now: Date,
+): string {
+  return notificationDeliveryKey(
+    'watchdog-outage',
+    deliveryKey,
+    ownerLocalMidnightUtc(timeZone, now).toISOString(),
+  );
 }
 
 export function insideQuietHours(

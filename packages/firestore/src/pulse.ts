@@ -1,9 +1,12 @@
 import { createHash } from 'node:crypto';
 import {
   admittedBillEmailEvidence,
+  type CalendarRecoveryObservation,
+  calendarRecoveryCursor,
   commitmentDueMomentKey,
   commitmentIsActive,
   emailIngestReadable,
+  mergeCalendarRecovery,
   type PulseCalendarSnapshot,
   type PulseCommitment,
   type PulseMail,
@@ -144,6 +147,28 @@ export class FirestorePulseRepository implements PulseRepository {
       .get();
     if (snapshot.size > SNAPSHOT_LIMIT) throw new Error('Calendar snapshot scan exceeded bound');
     return snapshot.docs;
+  }
+
+  async recordCalendarRecovery(
+    agentId: string,
+    fence: string | null,
+    at: Date,
+    complete: boolean,
+    observations: readonly CalendarRecoveryObservation[],
+  ): Promise<void> {
+    const name = calendarRecoveryCursor(agentId);
+    const ref = this.store.doc('maintenanceCursors', name);
+    await this.store.db.runTransaction(async (tx) => {
+      const [owner, erasure, prior] = await tx.getAll(
+        this.store.doc('agents', agentId),
+        this.store.doc('privacyErasureJobs', agentId),
+        ref,
+      );
+      if (owner?.get('id') !== agentId || !erasure || erasureGeneration(erasure, agentId) !== fence)
+        return;
+      const cursor = mergeCalendarRecovery(prior?.get('cursor'), fence, at, complete, observations);
+      tx.set(ref, { name, cursor, updatedAt: at });
+    });
   }
 
   async calendarSnapshot(agentId: string): Promise<PulseCalendarSnapshot[]> {
@@ -513,28 +538,30 @@ export class FirestorePulseRepository implements PulseRepository {
       const prefs = await tx.get(this.store.doc('notificationPrefs', input.agentId));
       if (prefs.exists && prefs.get('agentId') !== input.agentId)
         throw new Error('Notification preferences belong to another owner');
-      const dailyCap = pulseDailyCap(
-        input.pacing.dailyCap,
-        (prefs.exists ? (prefs.get('ambientDailyCap') ?? null) : null) as number | null,
-      );
-      if (dailyCap === 0) return { status: 'daily-cap' };
-      const used = await tx.get(
-        this.store
-          .collection('proactiveMoments')
-          .where('agentId', '==', input.agentId)
-          .where('deliveredAt', '>=', input.pacing.windowSince)
-          .limit(dailyCap)
-          .count(),
-      );
-      if (used.data().count >= dailyCap) return { status: 'daily-cap' };
-      const recent = await tx.get(
-        this.store
-          .collection('proactiveMoments')
-          .where('agentId', '==', input.agentId)
-          .where('deliveredAt', '>=', input.pacing.gapSince)
-          .limit(1),
-      );
-      if (!recent.empty) return { status: 'min-gap' };
+      if (input.moment.kind !== 'sweep-recovery' && input.moment.kind !== 'watchdog-outage') {
+        const dailyCap = pulseDailyCap(
+          input.pacing.dailyCap,
+          (prefs.exists ? (prefs.get('ambientDailyCap') ?? null) : null) as number | null,
+        );
+        if (dailyCap === 0) return { status: 'daily-cap' };
+        const used = await tx.get(
+          this.store
+            .collection('proactiveMoments')
+            .where('agentId', '==', input.agentId)
+            .where('deliveredAt', '>=', input.pacing.windowSince)
+            .limit(dailyCap)
+            .count(),
+        );
+        if (used.data().count >= dailyCap) return { status: 'daily-cap' };
+        const recent = await tx.get(
+          this.store
+            .collection('proactiveMoments')
+            .where('agentId', '==', input.agentId)
+            .where('deliveredAt', '>=', input.pacing.gapSince)
+            .limit(1),
+        );
+        if (!recent.empty) return { status: 'min-gap' };
+      }
 
       const existingMessage = await tx.get(messageRef);
       if (existingMessage.exists)

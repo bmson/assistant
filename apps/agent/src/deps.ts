@@ -635,9 +635,10 @@ function policyGatedOutOfBand(
 ): OwnerNotifier {
   return {
     notifyOwner: async (input) => {
-      // Answer-ready evaluates the same policy at the push sender, including
-      // outbox retries. SMS does not handle this purpose.
-      if (input.purpose === 'answer-ready') return inner.notifyOwner(input);
+      // Push enforces these purposes at the sender, including outbox retries.
+      // SMS does not handle either purpose.
+      if (input.purpose === 'answer-ready' || input.purpose === 'watchdog-outage')
+        return inner.notifyOwner(input);
       const decision = await evaluateOutOfBandPing(policy, await owner(), {
         urgency: input.urgency ?? 'interrupt',
         ...(input.deliveryKey?.startsWith('curiosity-notice:')

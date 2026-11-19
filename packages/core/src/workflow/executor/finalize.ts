@@ -2,6 +2,7 @@ import { loadConfig } from '@assistant/config';
 import {
   createPostgresConversationSearchRepository,
   createPostgresExecutionEvidenceRepository,
+  createPostgresExecutionJobRepository,
   createPostgresGeneratedCardRepository,
   createPostgresNotificationsConversationRepository,
   type Db,
@@ -1041,7 +1042,40 @@ export async function stageModelFinalResponse(
           evidence,
         })
       : undefined;
+  const ownerTrigger = task.trigger as { source?: unknown; payload?: { text?: unknown } } | null;
+  const admittedMutationText =
+    task.type === 'chat_turn' &&
+    task.trust === 'owner' &&
+    ownerTrigger?.source === 'chat' &&
+    !isForwardedIngest(task)
+      ? typeof ownerTrigger.payload?.text === 'string'
+        ? ownerTrigger.payload.text
+        : ''
+      : undefined;
+  const pendingMutationApprovalToolCallIds = new Set<string>();
+  if (admittedMutationText !== undefined && state.pendingApprovals.length) {
+    const approvals = await (
+      deps.persistence?.executionJobs ?? createPostgresExecutionJobRepository(deps.db)
+    ).listPendingApprovals(
+      task.agentId,
+      task.id,
+      state.pendingApprovals.map((p) => p.approvalId),
+    );
+    for (const pendingApproval of state.pendingApprovals) {
+      if (
+        approvals.some(
+          (approval) =>
+            approval.id === pendingApproval.approvalId &&
+            approval.status === 'pending' &&
+            approval.toolCallId === pendingApproval.dbToolCallId,
+        )
+      )
+        pendingMutationApprovalToolCallIds.add(pendingApproval.dbToolCallId);
+    }
+  }
   const contractOptions = {
+    admittedMutationText,
+    pendingMutationApprovalToolCallIds,
     ...(publicScope ? { publicActivity: publicScope } : {}),
     ...(explicitSourceSelection ? { explicitSourceSelection } : {}),
     ...(memoryReadSelection ? { memoryReadSelection } : {}),

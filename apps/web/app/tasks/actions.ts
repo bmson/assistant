@@ -74,13 +74,15 @@ export async function cancelTask(taskId: string): Promise<void> {
   revalidateTaskViews(taskId);
 }
 
-/** Hide terminal activity from the default list without deleting any evidence. */
+/** Hide eligible activity from the default list without deleting any evidence. */
 export async function archiveTask(taskId: string): Promise<void> {
   await requireOwner();
   const outcome = await archiveTaskActivity(taskId);
   if (outcome.outcome === 'not_found') throw new Error('activity item not found');
   if (outcome.outcome === 'no_longer_retriable')
-    throw new Error('only completed, failed, or cancelled activity can be archived');
+    throw new Error(
+      'This activity cannot be archived while it is active or has a pending approval.',
+    );
   revalidateTaskViews(taskId);
   redirect('/tasks');
 }
@@ -94,16 +96,21 @@ export async function restoreTask(taskId: string): Promise<void> {
   redirect(`/tasks/${taskId}`);
 }
 
-/** Archive only terminal activity that has been quiet for at least 30 days. */
+/** Archive activity in the selected scope that has been quiet for at least 30 days. */
 export async function archiveOldTasks(formData: FormData): Promise<void> {
   await requireOwner();
   const rawOperationId = formData.get('operationId');
   const operationId = typeof rawOperationId === 'string' ? rawOperationId : undefined;
   if (operationId !== undefined && !/^[0-9a-f-]{36}$/i.test(operationId))
     throw new Error('Invalid archive operation. Refresh Activity and try again.');
-  const progress = await archiveOldTaskActivity(operationId);
+  const staleAttention = formData.get('scope') === 'stale-attention';
+  const progress = await archiveOldTaskActivity(
+    operationId,
+    staleAttention ? 'stale-attention' : 'terminal',
+  );
   revalidateTaskViews('');
   const query = new URLSearchParams({
+    ...(staleAttention ? { filter: 'needs-you' } : {}),
     archivedTotal: String(progress.archivedTotal),
     archiveComplete: String(progress.complete),
     ...(progress.operationId && !progress.complete

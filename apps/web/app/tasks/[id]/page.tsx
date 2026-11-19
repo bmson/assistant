@@ -114,6 +114,7 @@ export default async function TaskDetailPage({
     hasMoreTimeline,
     nextTimelineCursor,
     activeGrant,
+    hasPendingApproval,
     stuckWaiting,
   } = detail;
   // Downloadable artifacts this task produced (charts, exports, saved pages).
@@ -210,10 +211,15 @@ export default async function TaskDetailPage({
   const taskBudget = Number(task.budgetUsdLimit);
   const suggestedBudget = Math.ceil(Math.max(taskBudget * 2, Number(task.spentUsd) + 0.25) * 4) / 4;
   const stoppedForTaskBudget =
-    task.status === 'needs_attention' && task.progress.startsWith('budget: task budget');
+    !task.archivedAt &&
+    task.status === 'needs_attention' &&
+    task.progress.startsWith('budget: task budget');
   const terminal = TERMINAL_TASK_STATUSES.has(task.status);
   const correctableLookups =
-    task.status === 'needs_attention' && task.type === 'chat_turn' && task.trust === 'owner'
+    !task.archivedAt &&
+    task.status === 'needs_attention' &&
+    task.type === 'chat_turn' &&
+    task.trust === 'owner'
       ? (task.checklist?.items ?? [])
           .filter((item) => item.kind === 'lookup' && item.status === 'pending')
           .map(({ id: itemId, label }) => ({ id: itemId, label }))
@@ -258,7 +264,8 @@ export default async function TaskDetailPage({
               Review approval
             </Link>
           ) : null}
-          {(task.status === 'needs_attention' && !stoppedForTaskBudget) || stuckWaiting ? (
+          {!task.archivedAt &&
+          ((task.status === 'needs_attention' && !stoppedForTaskBudget) || stuckWaiting) ? (
             <form action={retryTask.bind(null, task.id)}>
               <SubmitButton variant="primary" pendingLabel="Retrying…">
                 Retry
@@ -281,7 +288,7 @@ export default async function TaskDetailPage({
             <form action={restoreTask.bind(null, task.id)}>
               <SubmitButton pendingLabel="Restoring…">Restore to Activity</SubmitButton>
             </form>
-          ) : terminal ? (
+          ) : terminal || (task.status === 'needs_attention' && !hasPendingApproval) ? (
             <form action={archiveTask.bind(null, task.id)}>
               <SubmitButton pendingLabel="Archiving…">Archive</SubmitButton>
             </form>

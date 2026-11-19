@@ -46,6 +46,7 @@ import {
   renderMemoryReadAnswer,
   validMemoryReadSelection,
 } from './memory-read-answer.js';
+import { guardMutationReply } from './mutation-receipt.js';
 import { personCalendarResponse } from './person-calendar.js';
 import { matchesHistoricalMemorySearch, type PersonalReadRequest } from './read-intent.js';
 import { effectiveReminders } from './reminder-state.js';
@@ -56,6 +57,8 @@ import {
   weeklyCalendarPlanResult,
 } from './weekly-calendar-plan.js';
 
+export { requestsDurableMutation } from './mutation-receipt.js';
+
 /**
  * The model writes prose, but the task/tool ledger is the authority for what
  * happened. This module is deliberately conservative: when a reply describes
@@ -64,6 +67,7 @@ import {
  */
 
 export interface ActionEvidence {
+  id?: string;
   toolName: string;
   status: string;
   args?: unknown;
@@ -98,6 +102,7 @@ type ActionKind =
   | 'research'
   | 'background'
   | 'memory'
+  | 'mutation'
   | 'approval';
 
 export interface ResponseContractResult {
@@ -140,6 +145,9 @@ interface ResponseContractOptions {
   memoryReadSelection?: MemoryReadSelection;
   explicitSourceSelection?: ExplicitSourceSelection;
   requestText?: string;
+  /** Raw owner request taken from this operation's admission, never from mutable prompt history. */
+  admittedMutationText?: string;
+  pendingMutationApprovalToolCallIds?: ReadonlySet<string>;
   urlCorpus?: string;
   /** Deterministically detected from the latest owner turn. */
   readRequest?: PersonalReadRequest | null;
@@ -675,6 +683,8 @@ function supports(
     // can still return saved:false (e.g. a forgotten/tombstoned fact).
     case 'memory':
       return usable.some(isDurableSave);
+    case 'mutation':
+      return false;
     case 'approval':
       // Genuine approval notices are posted by the executor when it parks the
       // task and do not pass through the model-final response contract.
@@ -932,6 +942,7 @@ const PLAIN_STEP: Record<ActionKind, string> = {
   research: 'the web lookup',
   background: 'setting up the follow-up',
   memory: 'saving that to memory',
+  mutation: 'the requested change',
   approval: 'the approval request',
 };
 
@@ -990,6 +1001,7 @@ const UNSUPPORTED_LABEL: Record<ActionKind, string> = {
   research: 'the requested research',
   background: 'the promised background work',
   memory: 'the requested memory update',
+  mutation: 'the requested change',
   approval: 'the claimed approval request',
 };
 
@@ -5045,6 +5057,16 @@ export function enforceResponseContract(
   opts?: ResponseContractOptions,
 ): ResponseContractResult {
   text = stripBackgroundNoticeEcho(text);
+  if (opts?.admittedMutationText !== undefined && !opts.publicActivity) {
+    const checked = guardMutationReply(
+      text,
+      opts.admittedMutationText,
+      evidence,
+      opts.pendingMutationApprovalToolCallIds,
+    );
+    if (checked?.blocked) return { ...checked, unsupported: ['mutation'] };
+    if (checked) text = checked.text;
+  }
   if (opts?.publicActivity) {
     // A generic fetched page has no occurrence-level evidence contract. Keep
     // the routing repair useful without calling page-wide substring matches a

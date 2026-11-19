@@ -29,6 +29,7 @@ export {
   probablePhoneCalendarDuplicate,
   sameCalendarOccurrence,
 } from './calendar-occurrence.js';
+export * from './calendar-recovery.js';
 export * from './call-sessions.js';
 export * from './card-form.js';
 export * from './card-form-admission.js';

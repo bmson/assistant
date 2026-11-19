@@ -3,6 +3,7 @@ import {
   createPostgresExecutionContextRepository,
   createPostgresExecutionEvidenceRepository,
   createPostgresExecutionJobRepository,
+  createPostgresTaskRepository,
 } from '@assistant/db';
 import type { CostRepository, ToolCallEffectOutcome } from '@assistant/persistence';
 import type { ModelMessage } from 'ai';
@@ -427,7 +428,17 @@ export async function runCodeJobPhase(
       },
       job,
       task,
-    );
+    ).catch(async (error) => {
+      if (job === 'briefing.compose') {
+        const store = deps.persistence?.tasks ?? createPostgresTaskRepository(db);
+        try {
+          await store.recordAbortedBriefing?.(lease);
+        } catch (recordError) {
+          console.error('Unable to record interrupted briefing', recordError);
+        }
+      }
+      throw error;
+    });
     if (!(await renewTaskLease(deps.persistence?.tasks ?? db, lease))) return LOST_LEASE;
     if (!outcome.done) {
       const fresh = await (
@@ -445,6 +456,7 @@ export async function runCodeJobPhase(
     const completed = await completeTask(deps.persistence?.tasks ?? db, lease, {
       status: 'done',
       progress: outcome.summary.slice(0, 500),
+      briefingOutcome: outcome.briefingOutcome,
     });
     if (!completed) return LOST_LEASE;
     return { outcome: 'done', detail: outcome.summary.slice(0, 200) };

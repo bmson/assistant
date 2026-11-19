@@ -20,6 +20,10 @@ export interface OwnerNoticeRepository {
   readonly kind: 'owner-notice-repository';
   /** Capture the erasure generation before a producer reads private sources. */
   observationFence?(agentId: string): Promise<string | null>;
+  readBriefingPublication?(
+    agentId: string,
+    taskId: string,
+  ): Promise<{ conversationId: string; messageId: string } | null>;
   post(input: {
     agentId: string;
     text: string;
@@ -39,6 +43,8 @@ export interface OwnerNoticeDecisionFenceInput {
   agentId: string;
   text: string;
   taskId?: string;
+  /** Bind one dashboard publication to this briefing task across retries. */
+  deduplicateBriefing?: boolean;
   extraParts?: readonly unknown[];
   now: Date;
   observationFence: string | null;
@@ -49,7 +55,7 @@ export interface OwnerNoticeDecisionFenceInput {
 }
 
 export type OwnerNoticeDecisionFenceResult =
-  | { status: 'posted'; conversationId: string }
+  | { status: 'posted'; conversationId: string; messageId?: string; replayed?: boolean }
   | {
       status: 'stale';
       inactiveSuggestionSourceRefs: string[];

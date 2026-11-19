@@ -2937,6 +2937,20 @@ describe('chat request and decision boundaries', () => {
     expect(scripted.stream).not.toHaveBeenCalled();
   });
 
+  it('keeps a tool-less mutation promise out of the stream and durable reply', async () => {
+    const draft = "I'll delete it now.";
+    const result = await turn('Delete the obsolete file.', {
+      draft,
+      triage: { needsAction: false },
+    });
+    const wire = await result.response.text();
+    expect(wire).not.toContain(draft);
+    expect(wire).toContain('couldn’t confirm the requested file removal');
+    expect(result.completions[0]?.messages[0]?.text).toContain('couldn’t confirm');
+    expect(stubs.queueAdmission).not.toHaveBeenCalled();
+    expect(result.object.mock.calls.filter(([role]) => role === 'rewrite')).toHaveLength(0);
+  });
+
   it('does not silently create another chat when the requested chat is unavailable', async () => {
     const result = await turn('Hello.', { draft: 'Hi' }, {}, { unavailableConversation: true });
     expect(result.response.status).toBe(404);

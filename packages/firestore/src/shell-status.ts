@@ -1,4 +1,9 @@
-import type { ShellStatusProjection, ShellStatusRepository } from '@assistant/persistence';
+import {
+  isActivityCanary,
+  needsYouTaskStatuses,
+  type ShellStatusProjection,
+  type ShellStatusRepository,
+} from '@assistant/persistence';
 import { FieldPath, type Query, type QueryDocumentSnapshot } from '@google-cloud/firestore';
 import { decodeMemoryRecord } from './memory-record.js';
 import { assertPrivacyErasureFenceUnchanged, readPrivacyErasureFence } from './privacy-erasure.js';
@@ -11,10 +16,10 @@ const MAX_PENDING_APPROVAL_SCAN = 100_000;
 
 async function scanPages(
   query: Query,
-  collection: 'memories',
+  collection: 'memories' | 'tasks',
   visit: (doc: QueryDocumentSnapshot) => void,
 ): Promise<void> {
-  const max = MAX_MEMORY_SCAN;
+  const max = collection === 'memories' ? MAX_MEMORY_SCAN : 25_000;
   let cursor: QueryDocumentSnapshot | undefined;
   let scanned = 0;
   while (true) {
@@ -28,6 +33,36 @@ async function scanPages(
     if (snapshot.size < PAGE_SIZE) return;
     cursor = snapshot.docs.at(-1);
   }
+}
+
+export async function countFirestoreNeedsYouTasks(owned: Query, agentId: string): Promise<number> {
+  const counts = await Promise.all(
+    needsYouTaskStatuses.map(async (status) => {
+      let count = 0;
+      await scanPages(
+        owned
+          .where('status', '==', status)
+          .where('archivedAt', '==', null)
+          .select('id', 'agentId', 'updatedAt', 'trigger'),
+        'tasks',
+        (doc) => {
+          const row = decodeRecord<{
+            id: string;
+            agentId: string;
+            updatedAt: Date;
+            trigger?: unknown;
+          }>(doc.data());
+          if (!row.id || documentKey(row.id) !== doc.id || row.agentId !== agentId)
+            throw new Error('Malformed or foreign shell Activity task');
+          if (!(row.updatedAt instanceof Date) || !Number.isFinite(row.updatedAt.getTime()))
+            throw new Error('Invalid owner activity task');
+          if (!isActivityCanary(row.trigger)) count++;
+        },
+      );
+      return count;
+    }),
+  );
+  return counts.reduce((total, count) => total + count, 0);
 }
 
 async function countPendingApprovals(
@@ -104,9 +139,8 @@ async function resolveShellAgent(
 }
 
 /**
- * Exact owner-facing shell counts. Task counts come from count queries; the memory
- * health figures still scan the owner's memories a page at a time, so that read grows
- * with the number of memories until durable aggregate counters replace it.
+ * Counts owner-visible current Needs You rows and usable memories in bounded pages.
+ * Running tasks use an aggregate query.
  */
 export class FirestoreShellStatusRepository implements ShellStatusRepository {
   readonly kind = 'shell-status-repository' as const;
@@ -125,17 +159,14 @@ export class FirestoreShellStatusRepository implements ShellStatusRepository {
 
     const fence = await readPrivacyErasureFence(this.store, ownerAgentId);
     const now = this.store.now();
-    // Counted, not scanned. This used to read every task the assistant had ever
-    // created (15,000+ in production) just to count two statuses, and it ran
-    // on every cache miss of the very first request the app makes. `agentId` and
-    // `status` equality is served by the existing indexes.
     const owned = this.store.collection('tasks').where('agentId', '==', ownerAgentId);
-    const [needsAttentionCount, runningCount, memoryHealth] = await Promise.all([
-      owned.where('status', '==', 'needs_attention').count().get(),
+    // Only the active Needs You status buckets are read. Canary suppression
+    // also applies to pre-projection rows, whose nested marker may be missing.
+    const [needsAttention, runningCount, memoryHealth] = await Promise.all([
+      countFirestoreNeedsYouTasks(owned, ownerAgentId),
       owned.where('status', '==', 'running').count().get(),
       this.readMemoryHealth(ownerAgentId, now),
     ]);
-    const needsAttention = needsAttentionCount.data().count;
     const running = runningCount.data().count;
     await assertPrivacyErasureFenceUnchanged(this.store, ownerAgentId, fence);
 
@@ -156,7 +187,7 @@ export class FirestoreShellStatusRepository implements ShellStatusRepository {
     };
   }
 
-  /** The one remaining scan: usable-memory counts need per-document expiry and quarantine checks. */
+  /** Usable-memory counts need per-document expiry and quarantine checks. */
   private async readMemoryHealth(
     ownerAgentId: string,
     now: Date,

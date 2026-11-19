@@ -1,3 +1,13 @@
+import type { MailHealthCounts, MailHealthWindow } from './proactive-health.js';
+
+export const ASSISTANT_HEALTH_MONITOR_SCHEDULE = {
+  name: 'assistant-health-monitor',
+  cron: '15 * * * *',
+  previousCron: '15 1 * * *',
+  revision: 2,
+  taskTemplate: { type: 'scheduled', budgetUsdLimit: '0.02', job: 'health.monitor' },
+} as const;
+
 /** Operational counts the deterministic health monitor turns into owner alerts. */
 export interface AssistantHealthObservations {
   /** GraphRAG sources quarantined after bounded retries. */
@@ -15,6 +25,8 @@ export interface AssistantHealthObservations {
 export interface AssistantHealthSignal {
   kind: string;
   detail: string;
+  /** Overrides the default reminder threshold and also applies after a reopen. */
+  notificationDueBefore?: Date;
 }
 
 /**
@@ -32,6 +44,7 @@ export interface AssistantHealthRepository {
     staleBefore: Date;
     qualitySince: Date;
   }): Promise<AssistantHealthObservations>;
+  observeMail?(agentId: string, window: MailHealthWindow): Promise<MailHealthCounts>;
   claim(input: {
     agentId: string;
     signals: readonly AssistantHealthSignal[];

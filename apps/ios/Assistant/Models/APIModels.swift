@@ -1306,15 +1306,18 @@ struct ActivityList: Codable, Sendable {
     let searchIncomplete: Bool?
     let scanned: Int?
     let captureStatus: String?
+    let needsYouCount: Int?
 
     init(items: [ActivityItem], archivedCount: Int, nextCursor: String? = nil,
-         searchIncomplete: Bool? = nil, scanned: Int? = nil, captureStatus: String? = nil) {
+         searchIncomplete: Bool? = nil, scanned: Int? = nil, captureStatus: String? = nil,
+         needsYouCount: Int? = nil) {
         self.items = items
         self.archivedCount = archivedCount
         self.nextCursor = nextCursor
         self.searchIncomplete = searchIncomplete
         self.scanned = scanned
         self.captureStatus = captureStatus
+        self.needsYouCount = needsYouCount
     }
 }
 
