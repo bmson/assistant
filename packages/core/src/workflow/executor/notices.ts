@@ -5,6 +5,7 @@ import {
   type TaskRow,
 } from '@assistant/db';
 import {
+  chatReplyOrigin,
   hasEffectiveNotificationDelivery,
   type MessageRepository,
   type NotificationDeliveryResult,
@@ -103,6 +104,10 @@ export async function postConversationNotice(
   extraParts: unknown[] = [],
 ): Promise<boolean> {
   if (!task.conversationId) return false;
+  const replyOrigin = chatReplyOrigin(task);
+  const parts = replyOrigin
+    ? [...extraParts, { type: 'data-turn-origin', data: replyOrigin }]
+    : extraParts;
   try {
     await persistMessage(db, {
       conversationId: task.conversationId,
@@ -111,9 +116,9 @@ export async function postConversationNotice(
       origin: 'assistant',
       // A decision card speaks for itself: no duplicated prose part. The prose
       // still lands in `text` (model history and channel bodies read that).
-      parts: carriesOwnCard(extraParts)
-        ? extraParts
-        : compactChatMessageParts(text, [{ type: 'text', text }, ...extraParts], task.id),
+      parts: carriesOwnCard(parts)
+        ? parts
+        : compactChatMessageParts(text, [{ type: 'text', text }, ...parts], task.id),
       text,
     });
     return true;

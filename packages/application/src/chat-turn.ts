@@ -70,6 +70,7 @@ import type {
 } from '@assistant/persistence';
 import {
   chatAdmissionPayload,
+  chatReplyOrigin,
   composerChecklistCancellationRequestHash,
   EMAIL_REVIEW_CHAT_BUDGET_PROFILE,
 } from '@assistant/persistence';
@@ -177,6 +178,7 @@ async function finishApplicationChatTask(
   },
 ): Promise<boolean> {
   const messages = [];
+  const replyOrigin = chatReplyOrigin(task);
   if (outcome.responseText !== undefined && task.conversationId) {
     messages.push({
       conversationId: task.conversationId,
@@ -187,6 +189,7 @@ async function finishApplicationChatTask(
       parts: assistantMessageParts(outcome.responseText, outcome.recall, {
         cues: outcome.cues,
         offCourse: outcome.offCourse,
+        replyOrigin,
       }),
       text: outcome.responseText,
     });
@@ -199,6 +202,7 @@ async function finishApplicationChatTask(
       origin: 'assistant' as const,
       parts: assistantMessageParts(outcome.failureNotice.text, undefined, {
         turnFailed: outcome.failureNotice.reason,
+        replyOrigin,
       }),
       text: outcome.failureNotice.text,
     });
