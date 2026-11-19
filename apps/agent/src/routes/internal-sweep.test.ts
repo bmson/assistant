@@ -52,6 +52,9 @@ vi.mock('@assistant/firestore', () => ({
   FirestoreScheduleRepository: class {
     readonly kind = 'schedule-repository';
     constructor(readonly store: unknown) {}
+    async retireDefaultMorningBrief() {
+      return 0;
+    }
   },
 }));
 vi.mock('../deps.js', () => ({

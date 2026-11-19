@@ -133,6 +133,8 @@ export async function runFirestoreSweep(
         );
         return 0;
       });
+      if (isCodeJobEnabled('briefing.compose') && !firestoreCodeJobUnavailable('briefing.compose'))
+        await scheduleRepository.retireDefaultMorningBrief(deps.config.FIRESTORE_AGENT_ID);
       const fired = await runDueSchedules(scheduleRepository, timezone, {
         // SQL-only jobs advance their schedule without creating a task.
         isJobEnabled: (job) => isCodeJobEnabled(job) && !firestoreCodeJobUnavailable(job),
