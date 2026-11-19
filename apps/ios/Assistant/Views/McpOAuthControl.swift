@@ -365,7 +365,7 @@ struct McpOAuthControl: View {
         guard accepts(context, current) else { return }
         let latest = model.pendingMcpSignInFlow(for: context)
         starting = model.mcpSignInAttemptIsStarting(context)
-        if latest != restored {
+        if let latest, latest != restored {
             pending = latest
             try await reconcile(context, flowId: latest, current: current)
         }

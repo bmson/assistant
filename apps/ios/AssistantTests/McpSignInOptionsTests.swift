@@ -401,6 +401,10 @@ extension McpSignInOptionsTests {
       XCTAssertEqual(snapshot.outcome, .expired)
       XCTAssertEqual(StubURLProtocol.attempts, ["GET", "GET"])
       XCTAssertTrue(model.clearMcpSignInFlow(flow, context: reopened))
+      XCTAssertNil(
+        model.pendingMcpSignInFlow(for: reopened),
+        "A terminal clear must not schedule a second grant read")
+      XCTAssertEqual(StubURLProtocol.attempts, ["GET", "GET"])
       let newerTicket = try XCTUnwrap(model.beginMcpSignInAttempt(reopened))
       let newerFlow = UUID().uuidString
       XCTAssertTrue(model.retainMcpSignInFlow(newerFlow, ticket: newerTicket, context: reopened))
