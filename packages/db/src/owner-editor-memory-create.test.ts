@@ -179,25 +179,22 @@ describe.skipIf(!enabled)('PostgreSQL owner-editor person-note creation', () => 
         });
       }
     }
+    const privacyGeneration = priorPrivacyGeneration?.cursor ?? null;
+    const cursor = epochCursor(ownerId, epochId, privacyGeneration);
     await db
       .insert(maintenanceCursors)
       .values({
         name: `owner-editor-epoch:${ownerId}`,
-        cursor: JSON.stringify({
-          ownerId,
-          epoch: epochId,
-          ready: true,
-          privacyGenerationDigest: ownerEditorPrivacyDigest(null),
-        }),
+        cursor,
       })
       .onConflictDoUpdate({
         target: maintenanceCursors.name,
-        set: { cursor: sqlEpochCursor(ownerId, epochId) },
+        set: { cursor },
       });
     const scope: OwnerEditorScope = {
       ownerId,
       epoch: epochId,
-      privacyGeneration: null,
+      privacyGeneration,
       command: 'create_owner_memory',
       operationId,
       targetId: contactId,
@@ -450,7 +447,7 @@ describe.skipIf(!enabled)('PostgreSQL owner-editor person-note creation', () => 
     const f = await prepareCase(`Retired scope note ${randomUUID()}`);
     await db
       .update(maintenanceCursors)
-      .set({ cursor: sqlEpochCursor(ownerId, randomUUID()) })
+      .set({ cursor: epochCursor(ownerId, randomUUID(), f.scope.privacyGeneration) })
       .where(eq(maintenanceCursors.name, `owner-editor-epoch:${ownerId}`));
     const retiredEpoch = await commitPostgresOwnerMemoryCreation(db, f.claim, f.prepared, f.now);
     expect(retiredEpoch).not.toMatchObject({ outcome: 'saved' });
@@ -693,11 +690,11 @@ describe.skipIf(!enabled)('PostgreSQL owner-editor person-note creation', () => 
   });
 });
 
-function sqlEpochCursor(ownerId: string, epoch: string) {
+function epochCursor(ownerId: string, epoch: string, privacyGeneration: string | null) {
   return JSON.stringify({
     ownerId,
     epoch,
     ready: true,
-    privacyGenerationDigest: ownerEditorPrivacyDigest(null),
+    privacyGenerationDigest: ownerEditorPrivacyDigest(privacyGeneration),
   });
 }
