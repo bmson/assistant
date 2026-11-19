@@ -1,5 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { configuredOwnerPhoneRecipientFingerprint } from '@assistant/config';
+import {
+  configuredOwnerPhoneRecipientFingerprint,
+  loadConfig,
+  mcpOAuthReleaseReady,
+} from '@assistant/config';
 import type {
   ApprovedToolCall,
   CachedToolCallInput,
@@ -25,6 +29,7 @@ import {
   phoneCallOwnerActionGrantBindingMatches,
   phoneCallOwnerActionGrantScopeFingerprint,
   phoneCallOwnerNumberGrantBindingMatches,
+  projectMcpOAuthApproval,
   reserveOwnerCallGrantUsage,
   sameDirectOwnerCallRequestBinding,
   toolCallReceiptKeyId,
@@ -378,7 +383,12 @@ export class FirestoreToolExecutionRepository implements ToolExecutionRepository
               connection.id === binding.connectionId &&
               connection.agentId === input.agentId &&
               mcpApprovalBindingFingerprint(
-                connection,
+                projectMcpOAuthApproval(
+                  connection,
+                  input.agentId,
+                  connection.oauthState,
+                  mcpOAuthReleaseReady(loadConfig(), 'agent'),
+                ),
                 String((input.args as { toolName?: unknown }).toolName),
               ) === binding.fingerprint,
           );

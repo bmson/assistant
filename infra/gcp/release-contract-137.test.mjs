@@ -1,12 +1,15 @@
+// Historical schema 137 release contract and migration journal.
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { createManifest, validateManifest } from './release-manifest.mjs';
 import { deriveSchemaVersion } from './release-schema-version.mjs';
 
-const contract = JSON.parse(await readFile(new URL('./release-contracts.json', import.meta.url)));
+const contract = JSON.parse(
+  await readFile(new URL('./fixtures/release-contracts.schema137.json', import.meta.url)),
+);
 const journal = JSON.parse(
-  await readFile(new URL('../../packages/db/drizzle/meta/_journal.json', import.meta.url)),
+  await readFile(new URL('./fixtures/postgres-journal.schema137.json', import.meta.url)),
 );
 const roles = ['agent', 'web', 'browser', 'code', 'processor'];
 function manifest(version, selected = roles) {

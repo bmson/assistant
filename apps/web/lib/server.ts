@@ -108,6 +108,7 @@ import { getProviderBilling } from '@assistant/application/provider-billing';
 import {
   estimatedCostApprovalEnabled,
   loadConfig,
+  mcpOAuthReleaseReady,
   parseFirestoreEmbeddingSpace,
   repoRoot,
   validateAgentPersistenceConfig,
@@ -147,6 +148,7 @@ import {
   createPostgresEstimatedCostTurnParking,
   createPostgresGeneratedCardRepository,
   createPostgresGoogleCalendarConnectionRepository,
+  createPostgresMcpOAuthRepository,
   createPostgresModelCatalogRepository,
   createPostgresModelConnectionRepository,
   createPostgresModelRoutingRepository,
@@ -158,6 +160,7 @@ import {
   documents,
   files,
   improvementProposals,
+  mcpConnections,
   type PostgresAgentResolutionStageObserver,
   skills,
   withPostgresPrivacyObservationFence,
@@ -170,6 +173,7 @@ import {
   createFirestoreEstimatedCostTurnParking,
   createFirestoreExecutionPersistence,
   createFirestoreGoogleCalendarConnectionRepository,
+  createFirestoreMcpOAuthRepository,
   createFirestoreProfileMemoryCommandPersistence,
   createFirestoreSettingsPersistence,
   createInstallationStore,
@@ -186,6 +190,7 @@ import {
   FirestoreImportOverviewRepository,
   FirestoreLocationPingRepository,
   FirestoreMcpConnectionMutationRepository,
+  FirestoreMcpConnectionReadRepository,
   FirestoreModelCatalogRepository,
   FirestoreModelConnectionRepository,
   FirestoreOwnerKnowledgeGraphFactRepository,
@@ -204,25 +209,39 @@ import {
   readPrivacyErasureFence,
 } from '@assistant/firestore';
 import { FirestoreSkillLibraryRepository } from '@assistant/firestore/skill-library';
-import type { SelfRepairRepository } from '@assistant/persistence';
 import {
+  allowsManualMcpCredential,
   embeddingSpaceIdentityKey,
   POSTGRES_EMBEDDING_DIMENSIONS,
   type RecallSurfacingRepository,
+  type SelfRepairRepository,
   validateEmbedding,
 } from '@assistant/persistence';
 import type { CardFormSubmission } from '@assistant/persistence/card-form';
 import { inspectMcpConnection } from '@assistant/tools/mcp';
 import {
+  inspectMcpAuthorization,
+  unavailableMcpAuthorization,
+} from '@assistant/tools/mcp-authorization';
+import { discoverMcpOAuthServers, McpOAuthError } from '@assistant/tools/mcp-oauth';
+import {
+  parseMcpOAuthRegistrations,
+  resolveMcpOAuthClient,
+} from '@assistant/tools/mcp-oauth-registration';
+import { createMcpOAuthService } from '@assistant/tools/mcp-oauth-service';
+import {
   GcsWorkspaceStore,
   LocalWorkspaceStore,
   type WorkspaceStore,
 } from '@assistant/tools/workspace';
-import { and, asc, desc, eq, gt, lt, or } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, lt, or, sql } from 'drizzle-orm';
 import { unstable_cache } from 'next/cache';
 import { cache } from 'react';
 import { isValidFormSessionScope } from '../app/auth-form-session-scope';
 import { estimatedCostProviderSource } from './estimated-cost-provider-source';
+import type { McpAuthorizationDiagnostic } from './mcp-authorization-types';
+import { mcpOAuthClientMetadata } from './mcp-oauth-client-metadata';
+import type { McpOAuthManagementService } from './mcp-oauth-wire';
 import {
   decodeMobileDocumentCursor,
   encodeMobileDocumentCursor,
@@ -350,18 +369,32 @@ export function getFirestoreInstallationStore() {
   return globalCache.__assistantFirestoreStore;
 }
 
+function oauthManagedRefresh(connectionId: string) {
+  return { connectionId, status: 'oauth_reconnect_to_refresh' as const };
+}
+
 /** Run guarded discovery through the shared SSRF-checked MCP transport. */
 export async function discoverFirestoreMcpConnection(connectionId: string) {
   const config = loadConfig();
   if (config.PERSISTENCE_DRIVER !== 'firestore')
     return { error: 'Firestore MCP discovery requires Firestore persistence.' };
-  const repository = new FirestoreMcpConnectionMutationRepository(
-    getFirestoreInstallationStore(),
-    config.FIRESTORE_AGENT_ID,
-  );
+  const store = getFirestoreInstallationStore();
+  const ownerId = config.FIRESTORE_AGENT_ID;
+  const repository = new FirestoreMcpConnectionMutationRepository(store, ownerId);
+  const checkOAuth = async () => {
+    const current = await new FirestoreMcpConnectionReadRepository(store, ownerId).getForTools(
+      ownerId,
+      connectionId,
+    );
+    return current?.enabled &&
+      !allowsManualMcpCredential(current.oauthState, { ownerId, connectionId }, current.endpoint)
+      ? oauthManagedRefresh(connectionId)
+      : null;
+  };
   try {
     const connection = await repository.beginDiscovery(connectionId);
-    if (!connection) return { error: 'MCP connection not found or disabled.' };
+    if (!connection)
+      return (await checkOAuth()) ?? { error: 'MCP connection not found or disabled.' };
     const result = await inspectMcpConnection(connection.endpoint, {
       bearerTokenEncrypted: connection.bearerTokenEncrypted,
     });
@@ -375,7 +408,9 @@ export async function discoverFirestoreMcpConnection(connectionId: string) {
         error: result.error ?? null,
       }))
     )
-      return { error: 'MCP connection changed while discovery was running.' };
+      return (
+        (await checkOAuth()) ?? { error: 'MCP connection changed while discovery was running.' }
+      );
     return {
       connectionId,
       status: result.status,
@@ -708,13 +743,29 @@ function createApplication(options: { profileMemory?: ProfileMemoryCommandPersis
   });
   const workspace = getWorkspace();
   const refreshMcpConnection = async (connectionId: string) => {
+    const checkOAuth = async () => {
+      const ownerId = await assertPostgresInstallationOwner(db);
+      const [row] = await db
+        .select({
+          enabled: mcpConnections.enabled,
+          endpoint: mcpConnections.endpoint,
+          oauthState: sql<unknown>`to_jsonb(${mcpConnections})->'oauth_state'`,
+        })
+        .from(mcpConnections)
+        .where(and(eq(mcpConnections.id, connectionId), eq(mcpConnections.agentId, ownerId)))
+        .limit(1);
+      return row?.enabled &&
+        !allowsManualMcpCredential(row.oauthState, { ownerId, connectionId }, row.endpoint)
+        ? oauthManagedRefresh(connectionId)
+        : null;
+    };
     const current = await getMcpConnection(db, connectionId);
-    if (!current) return { error: 'MCP connection not found.' };
+    if (!current) return (await checkOAuth()) ?? { error: 'MCP connection not found.' };
     const discovery = await inspectMcpConnection(current.endpoint, {
       bearerTokenEncrypted: current.bearerTokenEncrypted,
     });
     if (!(await saveMcpDiscovery(db, connectionId, discovery))) {
-      return { error: 'MCP connection not found.' };
+      return (await checkOAuth()) ?? { error: 'MCP connection not found.' };
     }
     return { connectionId, ...discovery };
   };
@@ -2119,5 +2170,163 @@ export function getGoogleCalendarConnectionService() {
   return createGoogleCalendarConnectionService({
     repository,
     config: googleCalendarOAuthConfig(config),
+  });
+}
+
+/** Read one configured-owner MCP reference. Credentials are never returned to diagnostics. */
+export async function readOwnerMcpAuthorizationConnection(
+  ownerId: string,
+  id: string,
+): Promise<{ id: string; ownerId: string; endpoint: string; enabled: boolean } | null> {
+  const config = loadConfig();
+  if (config.PERSISTENCE_DRIVER === 'firestore') {
+    if (validateAgentPersistenceConfig(config).length)
+      throw new Error('MCP diagnostics unavailable');
+    if (ownerId !== config.FIRESTORE_AGENT_ID) return null;
+    const repo = new FirestoreMcpConnectionReadRepository(
+      getFirestoreInstallationStore(),
+      config.FIRESTORE_AGENT_ID,
+    );
+    const row = await repo.getForTools(ownerId, id);
+    return row ? { id: row.id, ownerId, endpoint: row.endpoint, enabled: row.enabled } : null;
+  }
+  const db = getDb();
+  if ((await assertPostgresInstallationOwner(db)) !== ownerId) return null;
+  const [row] = await db
+    .select({
+      id: mcpConnections.id,
+      ownerId: mcpConnections.agentId,
+      endpoint: mcpConnections.endpoint,
+      enabled: mcpConnections.enabled,
+    })
+    .from(mcpConnections)
+    .where(and(eq(mcpConnections.id, id), eq(mcpConnections.agentId, ownerId)))
+    .limit(1);
+  return row ?? null;
+}
+
+/** The facade's declared wire type checks compatibility with the browser-safe DTO. */
+export async function inspectMcpAuthorizationEndpoint(
+  endpoint: string,
+  options: { signal?: AbortSignal },
+): Promise<McpAuthorizationDiagnostic> {
+  return inspectMcpAuthorization(endpoint, options);
+}
+export function unavailableMcpAuthorizationDiagnostic(
+  reason: 'connection_disabled',
+): McpAuthorizationDiagnostic {
+  return unavailableMcpAuthorization(reason);
+}
+
+/** Owner-facing MCP inventory for either store; no credential ciphertext is exposed. */
+export async function listOwnerMcpConnections() {
+  const config = loadConfig();
+  if (config.PERSISTENCE_DRIVER === 'firestore') {
+    if (validateAgentPersistenceConfig(config).length) throw new Error('MCP inventory unavailable');
+    return new FirestoreMcpConnectionReadRepository(
+      getFirestoreInstallationStore(),
+      config.FIRESTORE_AGENT_ID,
+    ).list(config.FIRESTORE_AGENT_ID);
+  }
+  const db = getDb();
+  await assertPostgresInstallationOwner(db);
+  return listMcpConnections(db);
+}
+
+function configuredMcpOAuth(config: ReturnType<typeof loadConfig>) {
+  if (
+    !mcpOAuthReleaseReady(config, 'web') ||
+    !/^[a-f0-9]{64}$/i.test(config.MCP_ENC_KEY) ||
+    (config.PERSISTENCE_DRIVER === 'firestore' && validateAgentPersistenceConfig(config).length)
+  ) {
+    return null;
+  }
+  const metadata = mcpOAuthClientMetadata(config.AUTH_URL);
+  if (!metadata) return null;
+  try {
+    return { metadata, registrations: parseMcpOAuthRegistrations(config.MCP_OAUTH_REGISTRATIONS) };
+  } catch {
+    return null;
+  }
+}
+
+export function isMcpOAuthConfigured(): boolean {
+  return configuredMcpOAuth(loadConfig()) !== null;
+}
+
+type McpOAuthOptions = Parameters<typeof createMcpOAuthService>[0];
+
+function composeMcpOAuthManagement(options: McpOAuthOptions): McpOAuthManagementService {
+  const service = createMcpOAuthService(options);
+  return {
+    ...service,
+    async verifyProvider(ownerId, connectionId) {
+      const status = await service.status(ownerId, connectionId);
+      if (!status?.signInAvailable) return status;
+      const connection = await options.readConnection(ownerId, connectionId);
+      const redirectUri = options.metadata.redirect_uris[0];
+      if (!connection?.enabled || !redirectUri) return { ...status, providerAvailable: false };
+      let providerAvailable: boolean;
+      try {
+        const servers = await discoverMcpOAuthServers(connection.endpoint);
+        providerAvailable = servers.some(
+          (server) =>
+            !!resolveMcpOAuthClient(server, {
+              hostedClientId: options.metadata.client_id,
+              redirectUri,
+              registrations: options.registrations,
+            }),
+        );
+      } catch (error) {
+        if (!(error instanceof McpOAuthError) || error.reason !== 'unsupported_client') throw error;
+        providerAvailable = false;
+      }
+      const latest = await options.readConnection(ownerId, connectionId);
+      if (!latest?.enabled || latest.endpoint !== connection.endpoint) return null;
+      const currentStatus = await service.status(ownerId, connectionId);
+      return currentStatus ? { ...currentStatus, providerAvailable } : null;
+    },
+  };
+}
+
+export function getMcpOAuthManagementService(): McpOAuthManagementService | null {
+  const config = loadConfig();
+  const configured = configuredMcpOAuth(config);
+  if (!configured) return null;
+  if (config.PERSISTENCE_DRIVER === 'firestore') {
+    const store = getFirestoreInstallationStore();
+    const ownerId = config.FIRESTORE_AGENT_ID;
+    const connections = new FirestoreMcpConnectionReadRepository(store, ownerId);
+    return composeMcpOAuthManagement({
+      repo: createFirestoreMcpOAuthRepository(store, ownerId),
+      ...configured,
+      resolveOwner: async () => ownerId,
+      readConnection: (requestedOwner, connectionId) =>
+        connections.getForTools(requestedOwner, connectionId),
+    });
+  }
+  const db = getDb();
+  return composeMcpOAuthManagement({
+    repo: createPostgresMcpOAuthRepository(db),
+    ...configured,
+    resolveOwner: () => assertPostgresInstallationOwner(db),
+    readConnection: async (ownerId, connectionId) => {
+      if ((await assertPostgresInstallationOwner(db)) !== ownerId) return null;
+      const [connection] = await db
+        .select({
+          id: mcpConnections.id,
+          name: mcpConnections.name,
+          status: mcpConnections.status,
+          enabled: mcpConnections.enabled,
+          serverName: mcpConnections.serverName,
+          tools: mcpConnections.tools,
+          endpoint: mcpConnections.endpoint,
+          bearerTokenEncrypted: mcpConnections.bearerTokenEncrypted,
+        })
+        .from(mcpConnections)
+        .where(and(eq(mcpConnections.id, connectionId), eq(mcpConnections.agentId, ownerId)))
+        .limit(1);
+      return connection ?? null;
+    },
   });
 }

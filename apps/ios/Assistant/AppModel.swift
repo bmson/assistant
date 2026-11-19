@@ -302,6 +302,7 @@ final class AppModel {
     private(set) var memoryReviewCount = 0
     private(set) var mcpConnections: [McpConnection] = []
     private(set) var mcpConnectionsLoaded = false
+    private(set) var mcpOAuthConfigured = false
     private(set) var modelProviders: ModelProviderSettings? {
         get { edits.visible.modelProviders }
         set { edits.updateRemote(resources: [.providers]) { $0.modelProviders = newValue } }
@@ -832,6 +833,20 @@ final class AppModel {
 
     func checklistCorrectionConnectionIsCurrent(ownerID: String, version: Int) -> Bool {
         activityConnectionRevision == version && client != nil && bootstrap?.identity.id == ownerID
+    }
+
+    func mcpSignInOptionsRequestContext(for connection: McpConnection) -> McpSignInOptionsRequestContext? {
+        guard let client, let ownerID = bootstrap?.identity.id,
+              mcpConnections.contains(where: { McpSignInOptionsIdentity($0) == McpSignInOptionsIdentity(connection) }) else { return nil }
+        return .init(ownerID: ownerID, version: activityConnectionRevision,
+                     identity: McpSignInOptionsIdentity(connection), client: client)
+    }
+
+    func mcpSignInOptionsConnectionIsCurrent(_ context: McpSignInOptionsRequestContext) -> Bool {
+        activityConnectionRevision == context.version && bootstrap?.identity.id == context.ownerID
+            && client?.configuration == context.client.configuration
+            && context.identity.enabled
+            && mcpConnections.contains(where: { McpSignInOptionsIdentity($0) == context.identity })
     }
 
     func googleCalendarRequestContext() -> GoogleCalendarRequestContext? {
@@ -1915,6 +1930,7 @@ final class AppModel {
         workspace = nil
         modelProviders = nil
         mcpConnections = []
+        mcpOAuthConfigured = false
         mcpConnectionsLoaded = false
         savedCards = []
         cachedCalls = nil
@@ -2973,6 +2989,10 @@ final class AppModel {
         _ = await (workspaceRead, peopleRead)
     }
 
+    func invalidateCostTrackingForUserRefresh() {
+        costTrackingRevision += 1
+    }
+
     @discardableResult
     func refreshWorkspace(reportFailure: Bool = true) async -> Bool {
         guard let client else { return false }
@@ -3518,6 +3538,7 @@ final class AppModel {
             let response = try await client.mcpConnections()
             guard connectionIsCurrent(client, version: version) else { return false }
             mcpConnections = response.connections
+            mcpOAuthConfigured = response.oauthConfigured == true
             mcpConnectionsLoaded = true
             return true
         } catch {
@@ -3533,8 +3554,13 @@ final class AppModel {
         }
     }
 
-    func updateMcpConnection(id: String, action: String) async -> Bool {
-        await mcpConnectionMutation { try await $0.updateMcpConnection(id: id, action: action) }
+    func updateMcpConnection(id: String, action: String) async -> (updated: Bool, requiresReconnect: Bool) {
+        var requiresReconnect = false
+        let updated = await mcpConnectionMutation {
+            let result = try await $0.updateMcpConnection(id: id, action: action)
+            requiresReconnect = result.requiresOAuthReconnectForRefresh
+        }
+        return (updated, updated && requiresReconnect)
     }
 
     func deleteMcpConnection(id: String) async -> Bool {

@@ -1,17 +1,62 @@
 import { randomUUID } from 'node:crypto';
 import { resetConfigForTest } from '@assistant/config';
-import { createInstallationStore } from '@assistant/firestore';
+import {
+  createFirestoreEstimatedCostApprovalRepository,
+  createInstallationStore,
+} from '@assistant/firestore';
 import { NextRequest } from 'next/server';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { AutoRefresh } from '@/app/auto-refresh';
+import { PendingSpendingOverview } from './pending-spending-overview';
 
-const mocks = vi.hoisted(() => ({ owner: vi.fn(), db: vi.fn(), revalidate: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  owner: vi.fn(),
+  db: vi.fn(),
+  revalidate: vi.fn(),
+  costService: vi.fn(),
+}));
 vi.mock('@/auth', () => ({ requireOwner: mocks.owner }));
-vi.mock('@/lib/server', () => ({ getDb: mocks.db, getBillingOverview: async () => [] }));
+vi.mock('@/lib/server', () => ({
+  getDb: mocks.db,
+  getBillingOverview: async () => [],
+  getEstimatedCostApprovalService: mocks.costService,
+}));
+vi.mock('next/navigation', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('next/navigation')>()),
+  useRouter: () => ({ refresh: vi.fn() }),
+}));
 vi.mock('next/cache', () => ({ revalidatePath: mocks.revalidate }));
 
 const emulatorHost = process.env.FIRESTORE_EMULATOR_HOST ?? '';
 const localEmulator = /^(?:127\.0\.0\.1|localhost):\d+$/.test(emulatorHost);
+
+it('renders the Costs refresh control and planned spending in the static router fixture', () => {
+  const html = renderToStaticMarkup(
+    <>
+      <AutoRefresh />
+      <PendingSpendingOverview
+        overview={{
+          ok: true,
+          requests: [],
+          tracking: {
+            observedAt: '2026-01-01T00:00:00Z',
+            complete: true,
+            recordedDailyMicros: 0,
+            recordedMonthlyMicros: 0,
+            totalHeldMicros: 0,
+            historicalUnknownMicros: 0,
+            pendingApprovalMicros: 0,
+            dailyPlannedExposureMicros: 0,
+            monthlyPlannedExposureMicros: 0,
+          },
+        }}
+      />
+    </>,
+  );
+  expect(html).toContain('Planned spending');
+  expect(html).toContain('No spending requests are waiting.');
+});
 
 describe.skipIf(!localEmulator)('Firestore costs page with PostgreSQL offline', () => {
   const installationId = `web-costs-${randomUUID()}`;
@@ -41,6 +86,9 @@ describe.skipIf(!localEmulator)('Firestore costs page with PostgreSQL offline', 
     mocks.db.mockImplementation(() => {
       throw new Error('PostgreSQL is unreachable');
     });
+    mocks.costService.mockImplementation(() =>
+      createFirestoreEstimatedCostApprovalRepository(store),
+    );
     page = await import('./page.js');
     actions = await import('./actions.js');
 
@@ -63,6 +111,64 @@ describe.skipIf(!localEmulator)('Firestore costs page with PostgreSQL offline', 
         softPct: 80,
       }),
       store.doc('coordination', 'budget-holds').set({ heldMicros: 20_000 }),
+      store.doc('estimatedCostRequests', 'operation-owner').set({
+        operationId: 'operation-owner',
+        installationId,
+        ownerId: agentId,
+        taskId: 'cost-task',
+        state: 'pending',
+        quote: {
+          type: 'estimated-cost-approval',
+          operationId: 'operation-owner',
+          taskId: 'cost-task',
+          requestText: 'Owner spending request',
+          quoteId: 'quote-owner',
+          quoteVersion: 'v1',
+          expiresAt: new Date(now.getTime() + 3_600_000).toISOString(),
+          nextAttemptMicros: 100_000,
+          allowanceMicros: 200_000,
+          recordedDailyMicros: 123_400,
+          recordedMonthlyMicros: 123_400,
+          totalHeldMicros: 20_000,
+          eligibleHistoricalUnknownMicros: 0,
+          pendingApprovalMicros: 200_000,
+          dailyCeilingMicros: 1_000_000,
+          monthlyCeilingMicros: 10_000_000,
+          dailyProjectedGrossMicros: 343_400,
+          monthlyProjectedGrossMicros: 343_400,
+          complete: true,
+          canApprove: true,
+        },
+      }),
+      store.doc('estimatedCostRequests', 'operation-foreign').set({
+        operationId: 'operation-foreign',
+        installationId,
+        ownerId: foreignAgentId,
+        taskId: 'foreign-task',
+        state: 'pending',
+        quote: {
+          type: 'estimated-cost-approval',
+          operationId: 'operation-foreign',
+          taskId: 'foreign-task',
+          requestText: 'Foreign private request',
+          quoteId: 'quote-foreign',
+          quoteVersion: 'v1',
+          expiresAt: new Date(now.getTime() + 3_600_000).toISOString(),
+          nextAttemptMicros: 100_000,
+          allowanceMicros: 200_000,
+          recordedDailyMicros: 123_400,
+          recordedMonthlyMicros: 123_400,
+          totalHeldMicros: 20_000,
+          eligibleHistoricalUnknownMicros: 0,
+          pendingApprovalMicros: 200_000,
+          dailyCeilingMicros: 1_000_000,
+          monthlyCeilingMicros: 10_000_000,
+          dailyProjectedGrossMicros: 343_400,
+          monthlyProjectedGrossMicros: 343_400,
+          complete: true,
+          canApprove: true,
+        },
+      }),
       store.doc('budgetPeriods', `day:${day}`).set({ spentMicros: 123_400 }),
       store.doc('budgetPeriods', `month:${month}`).set({ spentMicros: 123_400 }),
       store.doc('budgets', 'task_default').set({ scope: 'task_default', limitUsd: '0.50' }),
@@ -128,6 +234,10 @@ describe.skipIf(!localEmulator)('Firestore costs page with PostgreSQL offline', 
     expect(html).toContain('Update caps');
     expect(html).toContain('available provider billing feeds');
     expect(html).toContain('Assistant spending limits');
+    expect(mocks.costService).toHaveBeenCalled();
+    expect(html).toContain('Owner spending request');
+    expect(html).toContain('href="/costs/requests/operation-owner"');
+    expect(html).not.toContain('Foreign private request');
     expect(html).not.toContain('href="/tasks');
   });
 
@@ -175,9 +285,11 @@ describe.skipIf(!localEmulator)('Firestore costs page with PostgreSQL offline', 
   });
 
   it('requires owner authentication before reading costs', async () => {
+    mocks.costService.mockClear();
     mocks.owner.mockRejectedValueOnce(new Error('owner authentication required'));
     await expect(page.default()).rejects.toThrow('owner authentication required');
     expect(mocks.db).not.toHaveBeenCalled();
+    expect(mocks.costService).not.toHaveBeenCalled();
   });
 
   it('refuses a configured owner absent from the installation', async () => {

@@ -4,7 +4,11 @@ import {
   verifyEstimatedCostProvider,
 } from '../infra/gcp/estimated-cost-release-config.mjs';
 import { googleCalendarReleaseCallback } from '../infra/gcp/google-calendar-release-config.mjs';
-import { disabled, retiredCurrentCondition } from './owner-release-current-snapshot.js';
+import {
+  disabled,
+  retiredCurrentCondition,
+  retiredCurrentRevisionCondition,
+} from './owner-release-current-snapshot.js';
 import { revisionWithRequestedImage } from './owner-release-image-resolution.js';
 import {
   matchesNativeServiceDigest,
@@ -81,6 +85,7 @@ function environment(
   r: Obj,
   expectedCallback?: string,
   estimatedCost?: EstimatedCostReleaseProfile,
+  requireMcpOff = false,
 ): Record<string, string> {
   const containers = r.containers;
   requireNative(Array.isArray(containers) && containers.length === 1);
@@ -107,11 +112,18 @@ function environment(
       requireNative(callback !== undefined);
       result[name] = callback;
     }
+    if (name === 'MCP_OAUTH_ENABLED' && requireMcpOff) {
+      requireNative(
+        Object.keys(entry).sort().join(',') === 'name,value' && entry.value === 'false',
+      );
+      result[name] = 'false';
+    }
     if (name.startsWith('ASSISTANT_RELEASE_')) {
       requireNative(Object.keys(entry).sort().join(',') === 'name,value');
       result[name] = text(entry.value, /^[A-Za-z0-9_.:-]{1,128}$/);
     }
   }
+  requireNative(!requireMcpOff || result.MCP_OAUTH_ENABLED === 'false');
   return result;
 }
 function revisionProof(raw: unknown, name: string, c: Context): NativeProof {
@@ -125,7 +137,7 @@ function revisionProof(raw: unknown, name: string, c: Context): NativeProof {
       const v = nativeObject(condition);
       return (
         v.state === 'CONDITION_SUCCEEDED' ||
-        (reviewedCurrent?.preclosed && retiredCurrentCondition(v))
+        (reviewedCurrent?.preclosed && retiredCurrentRevisionCondition(v))
       );
     }),
   );
@@ -140,7 +152,7 @@ function revisionProof(raw: unknown, name: string, c: Context): NativeProof {
       (r.service === WEB_SERVICE || r.service === 'assistant-web') &&
       ready.length === 1 &&
       (ready[0]?.state === 'CONDITION_SUCCEEDED' ||
-        (reviewedCurrent?.preclosed && retiredCurrentCondition(ready[0] as Obj))) &&
+        (reviewedCurrent?.preclosed && retiredCurrentRevisionCondition(ready[0] as Obj))) &&
       (r.reconciling === undefined || r.reconciling === false),
   );
   const uid = text(r.uid, /^[A-Za-z0-9-]{1,128}$/),
@@ -148,6 +160,7 @@ function revisionProof(raw: unknown, name: string, c: Context): NativeProof {
       r,
       name === c.canonical ? undefined : c.releaseEnv.GOOGLE_CALENDAR_OAUTH_CALLBACK_URL,
       name === c.canonical ? undefined : c.estimatedCost,
+      name !== c.canonical && c.releaseEnv.MCP_OAUTH_ENABLED === 'false',
     ),
     pin = HISTORICAL_WEB_TAGS.find((p) => p.revision === name && p.revision === c.canonical);
   let image: string,

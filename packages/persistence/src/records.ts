@@ -137,6 +137,7 @@ export interface Records {
     status: string;
     endpoint: string;
     bearerTokenEncrypted: string | null;
+    oauthState?: unknown;
     enabled: boolean;
     serverName: string | null;
     serverVersion: string | null;

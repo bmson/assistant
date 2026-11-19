@@ -399,7 +399,9 @@ jobs:
             '{format:1,image:$image,registryManifestDigest:$digest,source:$source,localImageId:$localImageId,sbomSha256:$sbomSha256,workflowRef:$workflowRef,workflowSha:$workflowSha,runId:$runId,runAttempt:$runAttempt}' \
             > "sbom/${IMAGE_NAME}-build-receipt.json"
       - name: Install Cosign
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: v3.1.3
       - name: Sign the image and attach its SBOM attestation
         run: |
           IMAGE_ROOT="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT}/${ARTIFACT_REPOSITORY}"
@@ -555,7 +557,7 @@ jobs:
           retention-days: 14
       - name: Install the fixed signature verifier for the reviewed spending profile
         if: inputs.estimated_cost_release_profile != ''
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
         with:
           cosign-release: v3.1.3
           install-dir: ${{ runner.temp }}/estimated-cost-cosign
@@ -580,6 +582,14 @@ jobs:
         env:
           OWNER_TAG_RELEASE_SOURCE: ${{ needs.plan.outputs.sha }}
         run: pnpm exec tsx scripts/owner-web-release-operator-hold.ts --wait
+      - name: Check live Firestore pair compatibility before delivery guard mutations
+        if: steps.release_path.outputs.firestore_pair == 'true'
+        env:
+          IMAGE_TAG: ${{ needs.plan.outputs.sha }}
+          RELEASE_COMPONENTS: ${{ needs.plan.outputs.components }}
+          GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          GCP_DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+        run: bash infra/gcp/release-firestore.sh --compatibility-check-only
       - name: Release Firestore pair with delivery guard
         if: steps.release_path.outputs.firestore_pair == 'true'
         env:
@@ -667,6 +677,18 @@ jobs:
           path: ${{ runner.temp }}/owner-web-tag-barrier.json
           if-no-files-found: ignore
           retention-days: 90
+      - name: Archive bounded disabled-bootstrap agent successor evidence
+        if: always() && steps.release_path.outputs.firestore_pair == 'true'
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        with:
+          name: owner-bootstrap-agent-successor-${{ needs.plan.outputs.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/owner-bootstrap-agent-paused-peer.json
+            ${{ runner.temp }}/owner-bootstrap-agent-successor-attempted.json
+            ${{ runner.temp }}/owner-bootstrap-agent-successor-unknown.json
+            ${{ runner.temp }}/owner-bootstrap-agent-successor-observed_exact_successor.json
+          if-no-files-found: ignore
+          retention-days: 14
       - name: Keep only the current deployment
         if: vars.CURRENT_ONLY_CLEANUP == 'true'
         run: >-

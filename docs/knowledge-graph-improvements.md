@@ -61,7 +61,6 @@ Design uses the existing green-paper canvas (#eef5f0), white panels (#ffffff), l
 
 Validation: 211 repository test files / 1,904 passing tests; 160 passing native tests, followed by a passing targeted snapshot run after refining field labels and tree presentation. Typecheck, lint, architecture boundaries, and diff checks passed. `scripts/visual-qa/person-tree.ts` uses only synthetic local `_test` data to exercise persisted birthday edits, cleared year/notes, preserved lead time, invalid dates, nested expansion, cycles, focus/breadcrumb navigation, cancellation, source inspection, partial evidence removal, and phone overflow. The existing map interaction regression script also passed. Light/dark native screenshots were inspected. Native touch traversal and removal were not manually exercised on a physical phone. Requires a web release and a new iOS build; no production records were changed.
 
-
 ### iPhone force-directed relationship graph — September 7, 2026
 
 - A full-screen native canvas opens from People, a person’s Explore graph action, and Knowledge. Small nodes and subtle lines reveal connected clusters; node size reflects distinct neighbors. Drag individual nodes, pan the background, pinch or use zoom buttons, and fit the graph. Selecting a node highlights its neighborhood without resetting the viewport. Filters show people or a selected neighborhood; search reaches items beyond the current snapshot.

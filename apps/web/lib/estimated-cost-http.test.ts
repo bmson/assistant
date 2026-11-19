@@ -1,4 +1,5 @@
 import { createUnavailableEstimatedCostApprovalService } from '@assistant/application';
+import type { EstimatedCostApprovalService } from '@assistant/persistence';
 import { describe, expect, it, vi } from 'vitest';
 import { handleEstimatedCostHttp } from './estimated-cost-http';
 
@@ -24,6 +25,59 @@ const setup = () => ({
 });
 
 describe('estimated cost HTTP boundary', () => {
+  it('serves only the authenticated owner overview and never accepts filters or writes', async () => {
+    const deps = setup();
+    const service: EstimatedCostApprovalService = createUnavailableEstimatedCostApprovalService();
+    service.getOverview = vi.fn(async () => ({
+      ok: true as const,
+      requests: null,
+      tracking: {
+        observedAt: '2026-01-01T00:00:00Z',
+        complete: false,
+        recordedDailyMicros: null,
+        recordedMonthlyMicros: null,
+        totalHeldMicros: null,
+        historicalUnknownMicros: null,
+        pendingApprovalMicros: null,
+        dailyPlannedExposureMicros: null,
+        monthlyPlannedExposureMicros: null,
+      },
+    }));
+    deps.service.mockReturnValue(service);
+    const result = await handleEstimatedCostHttp(
+      new Request('https://example.test/overview'),
+      'overview',
+      deps,
+    );
+    expect(result.status).toBe(200);
+    expect(result.headers.get('cache-control')).toBe('no-store');
+    expect(await result.json()).toMatchObject({
+      ok: true,
+      requests: null,
+      tracking: { complete: false },
+    });
+    expect(service.getOverview).toHaveBeenCalledWith(actor);
+    expect(
+      (
+        await handleEstimatedCostHttp(
+          new Request('https://example.test/overview?ownerId=other'),
+          'overview',
+          deps,
+        )
+      ).status,
+    ).toBe(400);
+    expect((await handleEstimatedCostHttp(post({}), 'overview', deps)).status).toBe(405);
+    deps.authenticate.mockResolvedValue(false);
+    expect(
+      (
+        await handleEstimatedCostHttp(
+          new Request('https://example.test/overview'),
+          'overview',
+          deps,
+        )
+      ).status,
+    ).toBe(401);
+  });
   it('rejects a foreign origin before authentication and validates exact body keys', async () => {
     const deps = setup();
     deps.checkOrigin.mockReturnValue(false);

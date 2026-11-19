@@ -10,7 +10,7 @@ import {
   prepareFirestoreEstimatedCostBaseline,
   readbackFirestoreEstimatedCostBaseline,
 } from './estimated-cost-baseline-provision.js';
-import { InstallationStore } from './store.js';
+import { documentKey, InstallationStore } from './store.js';
 import { disposeStore, emulatorStore } from './test-store.js';
 
 const host = process.env.FIRESTORE_EMULATOR_HOST;
@@ -174,6 +174,28 @@ describe.skipIf(!host)('Firestore baseline provisioning on local emulator', () =
     await store.doc('coordination', 'budget-holds').set({ heldMicros: 100500 });
     await expect(prepared()).rejects.toThrow('rows');
   });
+  it('reads later pages and rejects active reservations on them', async () => {
+    const ids = Array.from({ length: 1001 }, (_, i) => `page-${String(i).padStart(5, '0')}`);
+    for (let offset = 0; offset < ids.length; offset += 250) {
+      const batch = store.db.batch();
+      for (const id of ids.slice(offset, offset + 250)) {
+        batch.create(store.doc('costReservations', id), {
+          id,
+          estimatedUsd: '0.000001',
+          status: 'reconciled',
+        });
+      }
+      await batch.commit();
+    }
+    const { census } = await inspectFirestoreEstimatedCostBaseline(store, context);
+    expect(census.reservations).toHaveLength(1002);
+    const last = ids.sort((a, b) => (documentKey(a) < documentKey(b) ? -1 : 1)).at(-1);
+    if (!last) throw new Error('Missing fixture');
+    await store.doc('costReservations', last).update({ status: 'held' });
+    await expect(inspectFirestoreEstimatedCostBaseline(store, context)).rejects.toThrow(
+      'Active reservation',
+    );
+  }, 30000);
   it('recovers the exact receipt after expiry and release change without authorizing another apply', async () => {
     const { witness, proposal } = await prepared();
     const receipt = await applyFirestoreEstimatedCostBaseline(store, context, witness, proposal);

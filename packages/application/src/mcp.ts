@@ -1,6 +1,6 @@
 import { getAgent } from '@assistant/core/chat';
 import { encryptMcpBearerToken } from '@assistant/core/mcp-secrets';
-import { type Db, mcpConnections } from '@assistant/db';
+import { type Db, manualMcpCredentialAvailable, mcpConnections } from '@assistant/db';
 import { and, asc, eq, sql } from 'drizzle-orm';
 
 export type McpConnectionStatus =
@@ -108,10 +108,12 @@ export async function createMcpConnection(
   }
   const agent = await getAgent(db);
   try {
-    const [connection] = await db
-      .insert(mcpConnections)
-      .values({ agentId: agent.id, name, endpoint, bearerTokenEncrypted, status: 'checking' })
-      .returning({ id: mcpConnections.id });
+    // Keep the legacy create path usable before the optional OAuth column is migrated.
+    const [connection] = await db.execute<{ id: string }>(sql`
+      INSERT INTO mcp_connections (agent_id, name, endpoint, bearer_token_encrypted)
+      VALUES (${agent.id}, ${name}, ${endpoint}, ${bearerTokenEncrypted})
+      RETURNING id
+    `);
     return connection ? { connectionId: connection.id } : { error: 'Unable to save connection.' };
   } catch (error) {
     const detail = error instanceof Error ? error.message : '';
@@ -140,7 +142,13 @@ export async function saveMcpDiscovery(
       lastError: discovery.error ?? null,
       updatedAt: sql`now()`,
     })
-    .where(and(eq(mcpConnections.id, connectionId), eq(mcpConnections.agentId, agent.id)))
+    .where(
+      and(
+        eq(mcpConnections.id, connectionId),
+        eq(mcpConnections.agentId, agent.id),
+        manualMcpCredentialAvailable(),
+      ),
+    )
     .returning({ id: mcpConnections.id });
   return rows.length === 1;
 }
@@ -154,7 +162,13 @@ export async function getMcpConnection(db: Db, connectionId: string) {
       bearerTokenEncrypted: mcpConnections.bearerTokenEncrypted,
     })
     .from(mcpConnections)
-    .where(and(eq(mcpConnections.id, connectionId), eq(mcpConnections.agentId, agent.id)));
+    .where(
+      and(
+        eq(mcpConnections.id, connectionId),
+        eq(mcpConnections.agentId, agent.id),
+        manualMcpCredentialAvailable(),
+      ),
+    );
   return connection ?? null;
 }
 

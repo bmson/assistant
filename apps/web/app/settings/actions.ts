@@ -140,8 +140,19 @@ export async function createMcpConnectionAction(input: {
   return {};
 }
 
+function mcpOAuthRefreshNotice(status?: string): { notice?: string } {
+  return status === 'oauth_reconnect_to_refresh'
+    ? {
+        notice:
+          'To refresh this service’s tools, reconnect its browser sign-in. Saved authorization is kept.',
+      }
+    : {};
+}
+
 /** Re-run MCP tool discovery without changing the saved endpoint. */
-export async function refreshMcpConnectionAction(id: string): Promise<{ error?: string }> {
+export async function refreshMcpConnectionAction(
+  id: string,
+): Promise<{ error?: string; notice?: string }> {
   await requireOwner();
   const config = loadConfig();
   if (config.PERSISTENCE_DRIVER === 'firestore') {
@@ -150,19 +161,19 @@ export async function refreshMcpConnectionAction(id: string): Promise<{ error?: 
     const result = await discoverFirestoreMcpConnection(id);
     if (!('status' in result)) return { error: result.error };
     revalidateSettings();
-    return {};
+    return mcpOAuthRefreshNotice(result.status);
   }
   const result = await getApplication().refreshMcpConnection(id);
   if (!('status' in result)) return { error: result.error };
   revalidateSettings();
-  return {};
+  return mcpOAuthRefreshNotice(result.status);
 }
 
 /** Disable or re-enable a saved MCP connection. Re-enabling inspects it again. */
 export async function setMcpConnectionEnabledAction(
   id: string,
   enabled: boolean,
-): Promise<{ error?: string }> {
+): Promise<{ error?: string; notice?: string }> {
   await requireOwner();
   const config = loadConfig();
   if (config.PERSISTENCE_DRIVER === 'firestore') {
@@ -176,6 +187,8 @@ export async function setMcpConnectionEnabledAction(
     if (enabled) {
       const discovery = await discoverFirestoreMcpConnection(id);
       if (!('status' in discovery)) return { error: discovery.error };
+      revalidateSettings();
+      return mcpOAuthRefreshNotice(discovery.status);
     }
     revalidateSettings();
     return {};
@@ -183,7 +196,7 @@ export async function setMcpConnectionEnabledAction(
   const result = await getApplication().setMcpConnectionEnabled(id, enabled);
   if ('error' in result) return { error: result.error };
   revalidateSettings();
-  return {};
+  return mcpOAuthRefreshNotice(result.status);
 }
 
 /** Forget a saved MCP endpoint and its discovered tool metadata. */

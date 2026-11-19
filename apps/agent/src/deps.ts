@@ -3,6 +3,7 @@ import {
   type Config,
   estimatedCostApprovalEnabled,
   loadConfig,
+  mcpOAuthReleaseReady,
   parseFirestoreEmbeddingSpace,
   repoRoot,
   validateAgentPersistenceConfig,
@@ -27,6 +28,7 @@ import {
   createPostgresConversationSearchRepository,
   createPostgresCostRepository,
   createPostgresExecutionPersistence,
+  createPostgresMcpOAuthRepository,
   createPostgresModelConnectionRepository,
   createPostgresOccasionToolReadRepository,
   createPostgresSelfRepairRepository,
@@ -35,6 +37,7 @@ import {
 } from '@assistant/db';
 import {
   createFirestoreExecutionPersistence,
+  createFirestoreMcpOAuthRepository,
   createInstallationStore,
   FirestoreAuditInvestigationRepository,
   FirestoreContactLookupRepository,
@@ -117,7 +120,9 @@ import {
   registerWeatherTool,
 } from '@assistant/tools/builtin';
 import { ToolDispatcher } from '@assistant/tools/dispatcher';
-import { registerMcpTools } from '@assistant/tools/mcp';
+import { type McpToolConnectionRecord, registerMcpTools } from '@assistant/tools/mcp';
+import { parseMcpOAuthRegistrations } from '@assistant/tools/mcp-oauth-registration';
+import { resolveMcpOAuthCredential } from '@assistant/tools/mcp-oauth-service';
 import { registerPhoneCalendarFallback } from '@assistant/tools/modules/google';
 import { ToolRegistry } from '@assistant/tools/registry';
 import {
@@ -160,6 +165,43 @@ export async function firestoreMaintenanceReady(deps: AgentDeps): Promise<boolea
   return checkFirestoreMaintenanceReady(deps.firestoreStore, deps.config.FIRESTORE_AGENT_ID);
 }
 
+function agentMcpOAuth(
+  config: Config,
+  makeRepo: () => ReturnType<typeof createPostgresMcpOAuthRepository>,
+) {
+  if (!mcpOAuthReleaseReady(config, 'agent')) return undefined;
+  const repo = makeRepo();
+  return {
+    repo,
+    async resolve(ownerId: string, connection: McpToolConnectionRecord) {
+      const base = new URL(config.AUTH_URL);
+      if (
+        base.protocol !== 'https:' ||
+        base.username ||
+        base.password ||
+        base.search ||
+        base.hash ||
+        base.pathname !== '/' ||
+        !connection.oauthGeneration
+      )
+        throw new Error('MCP OAuth is unavailable.');
+      return resolveMcpOAuthCredential(
+        repo,
+        { ownerId, connectionId: connection.id },
+        connection.endpoint,
+        connection.oauthGeneration,
+        {
+          metadata: {
+            client_id: new URL('/api/oauth/mcp/client-metadata', base).href,
+            redirect_uris: [new URL('/api/oauth/mcp/callback', base).href],
+          },
+          registrations: parseMcpOAuthRegistrations(config.MCP_OAUTH_REGISTRATIONS),
+        },
+      );
+    },
+  };
+}
+
 /**
  * The owner's MCP tools over Firestore connection snapshots. Registered in
  * every environment, as the PostgreSQL composition does; each call still
@@ -169,12 +211,20 @@ export function registerFirestoreMcpTools(
   registry: ToolRegistry,
   store: InstallationStore,
   agentId: string,
+  config?: Config,
 ): ToolRegistry {
   const connections = new FirestoreMcpConnectionReadRepository(store, agentId);
-  return registerMcpTools(registry, {
-    list: (ownerId) => connections.list(ownerId),
-    get: (ownerId, connectionId) => connections.getForTools(ownerId, connectionId),
-  });
+  return registerMcpTools(
+    registry,
+    {
+      list: (ownerId) => connections.list(ownerId),
+      get: (ownerId, connectionId) => connections.getForTools(ownerId, connectionId),
+    },
+    {
+      oauth:
+        config && agentMcpOAuth(config, () => createFirestoreMcpOAuthRepository(store, agentId)),
+    },
+  );
 }
 
 /**
@@ -866,6 +916,7 @@ export function composeFirestoreAgent(config: Config): AgentDeps {
     ),
     store,
     config.FIRESTORE_AGENT_ID,
+    config,
   );
   registerPortableGoalTools(registry, {
     goals: firestoreGoalTools(store, config.FIRESTORE_AGENT_ID),
@@ -1066,6 +1117,8 @@ export function buildDeps(): AgentDeps {
       }),
       createPostgresOccasionToolReadRepository(db),
     ),
+    undefined,
+    { oauth: agentMcpOAuth(config, () => createPostgresMcpOAuthRepository(db)) },
   );
   registerAuditTools(registry, createPostgresAuditInvestigationRepository(db));
   registerSelfRepairTools(registry, createPostgresSelfRepairRepository(db));

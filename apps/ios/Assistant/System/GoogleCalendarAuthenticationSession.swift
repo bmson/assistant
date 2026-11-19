@@ -42,9 +42,9 @@ final class GoogleCalendarAuthenticationSession: NSObject, ASWebAuthenticationPr
 
     init(factory: Factory? = nil) { self.factory = factory }
 
-    nonisolated static func hasExpectedCallbackRoute(_ url: URL) -> Bool {
+    nonisolated static func hasExpectedCallbackRoute(_ url: URL, host: String = "google-calendar") -> Bool {
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return false }
-        return components.scheme == "assistant-oauth" && components.host == "google-calendar"
+        return components.scheme == "assistant-oauth" && components.host == host
             && components.path == "/callback" && components.user == nil && components.password == nil
             && components.port == nil && components.fragment == nil
     }
@@ -53,6 +53,7 @@ final class GoogleCalendarAuthenticationSession: NSObject, ASWebAuthenticationPr
         authorizationURL: URL,
         expiresAt: Date,
         anchor: ASPresentationAnchor,
+        callbackHost: String = "google-calendar",
         validateCallback: @escaping @MainActor (URL) -> Bool
     ) async throws -> URL {
         guard operationID == nil else { throw GoogleCalendarAuthenticationError.alreadySigningIn }
@@ -75,7 +76,7 @@ final class GoogleCalendarAuthenticationSession: NSObject, ASWebAuthenticationPr
                     guard expiresAt > Date() else {
                         self.finish(.failure(GoogleCalendarAuthenticationError.expired), id: id); return
                     }
-                    guard let url, Self.hasExpectedCallbackRoute(url), validateCallback(url) else {
+                    guard let url, Self.hasExpectedCallbackRoute(url, host: callbackHost), validateCallback(url) else {
                         self.finish(.failure(GoogleCalendarAuthenticationError.invalidCallback), id: id); return
                     }
                     self.finish(.success(url), id: id)

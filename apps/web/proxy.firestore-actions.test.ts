@@ -18,6 +18,30 @@ describe('Firestore mobile and web ingress', () => {
     runtimeConfig.RESTORE_REHEARSAL = false;
   });
 
+  it('admits only the exact owner-authenticated MCP authorization diagnostic GET', () => {
+    const path = `/api/mobile/v1/mcp/${randomUUID()}/authorization`;
+    expect(status(path, 'GET')).toBe(200);
+    for (const method of ['POST', 'PUT', 'DELETE', 'PATCH']) expect(status(path, method)).toBe(503);
+    expect(status('/api/mobile/v1/mcp/not-a-uuid/authorization', 'GET')).toBe(503);
+    expect(status(`${path}/extra`, 'GET')).toBe(503);
+    runtimeConfig.RESTORE_REHEARSAL = true;
+    expect(status(path, 'GET')).toBe(503);
+  });
+  it('admits only the exact MCP OAuth lifecycle paths and methods', () => {
+    const path = `/api/mobile/v1/mcp/${randomUUID()}/oauth`;
+    for (const method of ['GET', 'POST', 'DELETE']) expect(status(path, method)).toBe(200);
+    for (const method of ['GET', 'DELETE']) expect(status(`${path}/flow`, method)).toBe(200);
+    expect(status('/api/oauth/mcp/callback', 'GET')).toBe(200);
+    expect(status('/api/oauth/mcp/callback', 'POST')).toBe(503);
+    expect(status('/api/mobile/v1/mcp/not-a-uuid/oauth', 'GET')).toBe(503);
+    expect(status(path, 'PATCH')).toBe(503);
+    expect(status(`${path}/flow`, 'POST')).toBe(503);
+    expect(status(`${path}/flow/extra`, 'DELETE')).toBe(503);
+    runtimeConfig.RESTORE_REHEARSAL = true;
+    expect(status(path, 'POST')).toBe(503);
+    expect(status('/api/oauth/mcp/callback', 'GET')).toBe(503);
+  });
+
   it('passes exact calendar snapshot writes to owner-authenticated portable handlers', () => {
     for (const method of ['GET', 'POST', 'PUT', 'DELETE'])
       expect(status('/api/mobile/v1/calendars', method)).toBe(200);

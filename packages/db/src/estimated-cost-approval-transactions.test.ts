@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createDb, type Db } from './client.js';
 import {
   createPostgresCostRepository,
+  createPostgresEstimatedCostApprovalRepository,
   lockCostLedger,
   readEstimatedCostView,
 } from './cost-repository.js';
@@ -320,6 +321,13 @@ describe('PostgreSQL independently parked spending permission', () => {
 
   it('parks A without a hold so B reserves and completes, then atomically approves only refreshed A', async () => {
     expect((await storePreparedPostgresQuote(db, prepared)).ok).toBe(true);
+    expect(
+      await createPostgresEstimatedCostApprovalRepository(db).getOverview?.(prepared.actor),
+    ).toMatchObject({
+      ok: true,
+      requests: [{ status: 'pending', operationId }],
+      tracking: { pendingApprovalMicros: 500_000 },
+    });
     const [a] = await db.select().from(tasks).where(eq(tasks.id, taskId));
     expect(a).toMatchObject({
       status: 'waiting_estimated_cost',
@@ -356,6 +364,13 @@ describe('PostgreSQL independently parked spending permission', () => {
     expect(result).toMatchObject({
       ok: true,
       receipt: { status: 'approved', allowanceMicros: 500_000 },
+    });
+    expect(
+      await createPostgresEstimatedCostApprovalRepository(db).getOverview?.(prepared.actor),
+    ).toMatchObject({
+      ok: true,
+      requests: [],
+      tracking: { pendingApprovalMicros: 0, totalHeldMicros: 6_000_000 },
     });
     const view = await readEstimatedCostView(db, prepared.actor, operationId);
     expect(view?.tracking).toMatchObject({

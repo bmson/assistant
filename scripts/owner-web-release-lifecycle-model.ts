@@ -262,10 +262,18 @@ function context(c: Context) {
         }),
       )
     : {};
+  const api3Bootstrap =
+    c.currentBinding?.preclosed && c.releaseEnv.ASSISTANT_RELEASE_API_CONTRACT === '3';
+  if (api3Bootstrap) assert(c.releaseEnv.MCP_OAUTH_ENABLED === 'false');
   assert(
     equal(
       Object.keys(c.releaseEnv).sort(),
-      [...ENV, ...(callback ? [callbackKey] : []), ...Object.keys(budgetEnv)].sort(),
+      [
+        ...ENV,
+        ...(callback ? [callbackKey] : []),
+        ...(api3Bootstrap ? ['MCP_OAUTH_ENABLED'] : []),
+        ...Object.keys(budgetEnv),
+      ].sort(),
     ),
   );
   for (const [key, value] of Object.entries(budgetEnv)) assert(c.releaseEnv[key] === value);

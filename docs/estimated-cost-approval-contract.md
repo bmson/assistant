@@ -6,6 +6,8 @@ A request that needs cost permission waits independently for approval or denial.
 
 The budget display distinguishes recorded usage costs, active reservations, uncertain historical reservations, and amounts awaiting approval. A planned-exposure total may include all of them, but pending estimates are not described as money spent or committed. Incomplete totals remain visibly incomplete.
 
+Costs shows current pending estimates and daily/monthly planned exposure, with links to each waiting request. Activity's Needs you filter includes requests waiting for cost permission and opens the exact request review. Expired requests remain discoverable without contributing an expired estimate to current pending totals; an incomplete request inventory is unavailable rather than an empty list.
+
 Approval authorizes a bounded cumulative internal allowance for the named original request. It is not a blanket policy change and is not an approval for tools or external actions. The request may ask again if its allowance is exhausted. Provider charges are not guaranteed by an internal estimate.
 
 ## Eligibility and financial scope

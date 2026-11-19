@@ -475,7 +475,7 @@ struct WorkspaceView: View {
         .assistantSubmenuChrome()
         .toolbarBackground(area == .skills ? .visible : .hidden, for: .navigationBar)
         .toolbarBackground(AssistantTheme.canvas(for: colorScheme), for: .navigationBar)
-        .refreshable { await refresh() }
+        .refreshable { await refresh(userInitiated: true) }
         .onDisappear { cancelFileImport() }
         .task(id: scenePhase) {
             guard scenePhase == .active else { return }
@@ -651,6 +651,7 @@ struct WorkspaceView: View {
     @ViewBuilder
     private func workspaceContent(_ workspace: WorkspaceResponse) -> some View {
         if let failedSection = area.availabilityKeys.first(where: { !workspace.isSectionAvailable($0) }) {
+            if area == .costs { EstimatedCostOverviewCard() }
             WorkspaceAvailabilityNotice(title: failedSection.capitalized)
                 .accessibilityIdentifier("workspace-section-unavailable-\(failedSection)")
         } else {
@@ -1007,6 +1008,7 @@ struct WorkspaceView: View {
                     providerBillingCard(report)
                 }
             }
+            EstimatedCostOverviewCard()
             sectionHeading("Assistant usage ledger")
             Text("Includes estimates used for spending limits. These limits do not cap your cloud bill. Ledger costs overlap provider billing and are not added to it.")
                 .font(.footnote)
@@ -3107,8 +3109,9 @@ struct WorkspaceView: View {
         }
     }
 
-    private func refresh() async {
+    private func refresh(userInitiated: Bool = false) async {
         guard !isLoading, workspaceActionInFlight == nil else { return }
+        if userInitiated && area == .costs { model.invalidateCostTrackingForUserRefresh() }
         isLoading = true
         let refreshed: Bool
         if area == .documents {

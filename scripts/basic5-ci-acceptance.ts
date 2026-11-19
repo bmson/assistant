@@ -1005,6 +1005,22 @@ function contentFreeCaseEntryDiagnostic(value: unknown): Basic5CiCaseEntryDiagno
   return { stage: diagnostic.stage, category: diagnostic.category };
 }
 
+function contentFreeCleanupCensusDiagnostic(value: unknown): Basic5CiCensusDiagnostic {
+  if (
+    !value ||
+    typeof value !== 'object' ||
+    Array.isArray(value) ||
+    Object.keys(value).length !== 2 ||
+    !Object.hasOwn(value, 'stage') ||
+    !Object.hasOwn(value, 'reason') ||
+    !CENSUS_STAGES.includes((value as Basic5CiCensusDiagnostic).stage) ||
+    !CENSUS_REASONS.includes((value as Basic5CiCensusDiagnostic).reason)
+  )
+    throw new Basic5CiHold('cleanup_census_diagnostic_invalid');
+  const diagnostic = value as Basic5CiCensusDiagnostic;
+  return { stage: diagnostic.stage, reason: diagnostic.reason };
+}
+
 /** Parse only the bounded version banner; output bytes themselves are never retained. */
 export function observeBasic5CiChromeVersion(result: {
   exitCode: number;
@@ -2129,6 +2145,7 @@ function contentFreeReceipt(record: Record<string, unknown>): Record<string, unk
     'preparationDiagnostic',
     'utilityChildDiagnostic',
     'caseEntryDiagnostic',
+    'cleanupCensusDiagnostic',
     'vitestDiagnostic',
     'elapsedSeconds',
   ]);
@@ -2168,6 +2185,10 @@ function contentFreeReceipt(record: Record<string, unknown>): Record<string, unk
     );
   if ('caseEntryDiagnostic' in clean)
     clean.caseEntryDiagnostic = contentFreeCaseEntryDiagnostic(clean.caseEntryDiagnostic);
+  if ('cleanupCensusDiagnostic' in clean)
+    clean.cleanupCensusDiagnostic = contentFreeCleanupCensusDiagnostic(
+      clean.cleanupCensusDiagnostic,
+    );
   if ('vitestDiagnostic' in clean)
     clean.vitestDiagnostic = contentFreeBasic5CiVitestDiagnostic(clean.vitestDiagnostic);
   if ('standaloneBuildDiagnostic' in clean)
@@ -2446,6 +2467,15 @@ export async function runBasic5CiAcceptance(
       } catch (error) {
         receipt.errorCode =
           error instanceof Basic5CiHold ? error.code : 'target_cleanup_unverified';
+        if (error instanceof Basic5CiHold && error.censusDiagnostic !== undefined) {
+          try {
+            receipt.cleanupCensusDiagnostic = contentFreeCleanupCensusDiagnostic(
+              error.censusDiagnostic,
+            );
+          } catch {
+            receipt.errorCode = 'cleanup_census_diagnostic_invalid';
+          }
+        }
         if (error instanceof Basic5CiHold && !error.operationSettled) {
           phaseOperationUnsettled = true;
           receipt.operationSettled = false;
@@ -2602,22 +2632,14 @@ export class RealBasic5CiOps implements Basic5CiOps {
       }
     };
     const snapshot = confirmedSnapshot ?? (await readSnapshot('snapshot'));
-    const confirmAbsence = async (pid: number, expected: LinuxSnapshot): Promise<Set<number>> => {
+    const missing = new Map<number, LinuxSnapshot>();
+    const recordAbsence = (expected: LinuxSnapshot) => {
       if (confirmedSnapshot)
         throw new Basic5CiCensusHold({
           stage: 'absence_confirmation',
           reason: 'convergence_exhausted',
         });
-      const fresh = await readSnapshot('absence_confirmation');
-      const present = fresh.get(pid);
-      if (present)
-        throw new Basic5CiCensusHold({
-          stage: 'absence_confirmation',
-          reason: changedProcessFact(expected, present) ?? 'absence_not_confirmed',
-        });
-      // Exactly one restart from positive absence. Retain all enrolled identities;
-      // a missing unverified parent never becomes ancestry for a new descendant.
-      return this.captureSession(root, deadline, fresh);
+      missing.set(expected.pid, expected);
     };
     const liveSession = new Set(
       [...snapshot.values()].filter((row) => row.sid === root.sid).map((row) => row.pid),
@@ -2643,6 +2665,27 @@ export class RealBasic5CiOps implements Basic5CiOps {
     } catch {
       throw new Basic5CiCensusHold({ stage: 'enrollment', reason: 'ancestry_unproven' });
     }
+    const recheckIdentity = async (expected: LinuxIdentity) => {
+      let current: LinuxIdentity | undefined;
+      try {
+        current = await proof.readBasic5LinuxProcessIdentity(expected.pid, expected);
+      } catch (error) {
+        // The helper attests a positive Z-state reread matching this full
+        // enrolled tuple. It supplies no replacement identity or signal authority.
+        if ((error as { code?: unknown } | null)?.code === 'known_process_terminal') return;
+        throw censusFailure('known_identity_read', error);
+      }
+      if (!current) return recordAbsence(expected);
+      const reason =
+        changedProcessFact(expected, current) ??
+        (current.exe !== expected.exe ? 'executable_changed' : undefined);
+      if (reason) throw new Basic5CiCensusHold({ stage: 'known_identity_compare', reason });
+    };
+    for (const pid of liveSession) {
+      const expected = this.ownedProcesses.get(pid);
+      if (expected) await recheckIdentity(expected);
+    }
+    const newlyEnrolled: LinuxIdentity[] = [];
     for (const pid of enrollmentOrder) {
       const row = snapshot.get(pid);
       if (!row)
@@ -2650,13 +2693,19 @@ export class RealBasic5CiOps implements Basic5CiOps {
           stage: 'new_identity_read',
           reason: 'snapshot_row_missing',
         });
+      // The order is based on candidate ancestry. Enroll only after the parent
+      // is verified, and defer its subtree if that proof is unavailable.
+      if (!this.ownedProcesses.has(row.ppid) || missing.has(row.ppid)) continue;
       let identity: LinuxIdentity | undefined;
       try {
         identity = await proof.readBasic5LinuxProcessIdentity(pid);
       } catch (error) {
         throw censusFailure('new_identity_read', error);
       }
-      if (!identity) return confirmAbsence(pid, row);
+      if (!identity) {
+        recordAbsence(row);
+        continue;
+      }
       const reason = changedProcessFact(row, identity);
       if (reason) throw new Basic5CiCensusHold({ stage: 'new_identity_compare', reason });
       if (identity.pgid <= 0 || identity.sid <= 0)
@@ -2665,25 +2714,22 @@ export class RealBasic5CiOps implements Basic5CiOps {
           reason: 'owned_process_identity_ineligible',
         });
       this.ownedProcesses.set(pid, identity);
+      newlyEnrolled.push(identity);
     }
-    for (const pid of liveSession) {
-      const expected = this.ownedProcesses.get(pid);
-      if (!expected)
-        throw new Basic5CiCensusHold({ stage: 'known_identity_read', reason: 'ancestry_unproven' });
-      let current: LinuxIdentity | undefined;
-      try {
-        current = await proof.readBasic5LinuxProcessIdentity(pid, expected);
-      } catch (error) {
-        // The helper attests a positive Z-state reread matching this full
-        // enrolled tuple. It supplies no replacement identity or signal authority.
-        if ((error as { code?: unknown } | null)?.code === 'known_process_terminal') continue;
-        throw censusFailure('known_identity_read', error);
+    for (const identity of newlyEnrolled) await recheckIdentity(identity);
+    if (missing.size) {
+      const fresh = await readSnapshot('absence_confirmation');
+      for (const [pid, expected] of missing) {
+        const present = fresh.get(pid);
+        if (present)
+          throw new Basic5CiCensusHold({
+            stage: 'absence_confirmation',
+            reason: changedProcessFact(expected, present) ?? 'absence_not_confirmed',
+          });
       }
-      if (!current) return confirmAbsence(pid, expected);
-      const reason =
-        changedProcessFact(expected, current) ??
-        (current.exe !== expected.exe ? 'executable_changed' : undefined);
-      if (reason) throw new Basic5CiCensusHold({ stage: 'known_identity_compare', reason });
+      // Exactly one restart. Keep enrolled identities and recheck ancestry for
+      // every surviving candidate, including any deferred descendants.
+      return this.captureSession(root, deadline, fresh);
     }
     return liveSession;
   }

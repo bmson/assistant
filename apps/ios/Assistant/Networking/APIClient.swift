@@ -138,7 +138,7 @@ private final class NativeCardFormProjectionReadiness: @unchecked Sendable {
     func setEnabled(_ value: Bool) { lock.withLock { enabled = value } }
 }
 
-struct APIClient: Sendable, GoogleCalendarConnectionService {
+struct APIClient: Sendable, GoogleCalendarConnectionService, McpSignInOptionsService {
     let configuration: APIConfiguration
     let clientID: String?
     /// A test seam. Production passes nothing and reads `Transport.shared` on
@@ -747,6 +747,13 @@ struct APIClient: Sendable, GoogleCalendarConnectionService {
 
     private static func isCorrectionIdentifier(_ value: String) -> Bool {
         value.utf8.count == 36 && UUID(uuidString: value) != nil
+    }
+
+    func estimatedCostOverview() async throws -> EstimatedCostOverviewResponse {
+        let url = configuration.baseURL.appending(path: "api/mobile/v1/chat/estimated-cost/overview")
+        let envelope = try await perform(makeRequest(url: url), as: EstimatedCostOverviewResponse.self)
+        guard envelope.isValid else { throw APIError.invalidResponse }
+        return envelope
     }
 
     func estimatedCostQuote(operationID: String) async throws -> EstimatedCostQuoteResponse {
@@ -1363,6 +1370,48 @@ struct APIClient: Sendable, GoogleCalendarConnectionService {
         try await get("api/mobile/v1/mcp")
     }
 
+    func mcpSignInOptions(id: String) async throws -> McpSignInOptionsResponse {
+        var request = makeRequest(url: configuration.baseURL.appending(path: "api/mobile/v1/mcp/\(id)/authorization"))
+        request.timeoutInterval = 25
+        return try await perform(request, as: McpSignInOptionsResponse.self)
+    }
+
+    func mcpOAuthStatus(id: String, verifyProvider: Bool = false) async throws -> McpOAuthStatus {
+        let route = configuration.baseURL.appending(path: "api/mobile/v1/mcp/\(id)/oauth")
+        var components = URLComponents(url: route, resolvingAgainstBaseURL: false)
+        if verifyProvider {
+            components?.queryItems = [.init(name: "verify", value: "provider")]
+        }
+        guard let url = components?.url else { throw URLError(.badURL) }
+        var request = makeRequest(url: url)
+        if verifyProvider { request.timeoutInterval = 30 }
+        return try await perform(request, as: McpOAuthStatus.self)
+    }
+
+    func startMcpOAuth(id: String) async throws -> McpOAuthStart {
+        var request = makeRequest(url: configuration.baseURL.appending(path: "api/mobile/v1/mcp/\(id)/oauth"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = Data("{}".utf8)
+        return try await perform(request, as: McpOAuthStart.self)
+    }
+
+    func mcpOAuthFlow(id: String, flowId: String, cancel: Bool) async throws -> McpOAuthFlow {
+        let route = configuration.baseURL.appending(path: "api/mobile/v1/mcp/\(id)/oauth/flow")
+        var components = URLComponents(url: route, resolvingAgainstBaseURL: false)
+        components?.queryItems = [.init(name: "flowId", value: flowId)]
+        guard let url = components?.url else { throw URLError(.badURL) }
+        var request = makeRequest(url: url)
+        request.httpMethod = cancel ? "DELETE" : "GET"
+        return try await perform(request, as: McpOAuthFlow.self)
+    }
+
+    func disconnectMcpOAuth(id: String) async throws {
+        var request = makeRequest(url: configuration.baseURL.appending(path: "api/mobile/v1/mcp/\(id)/oauth"))
+        request.httpMethod = "DELETE"
+        _ = try await perform(request, as: McpOAuthStatus.self)
+    }
+
     func createMcpConnection(name: String, endpoint: String, bearerToken: String?) async throws {
         var request = makeRequest(url: configuration.baseURL.appending(path: "api/mobile/v1/mcp"))
         request.httpMethod = "POST"
@@ -1373,14 +1422,14 @@ struct APIClient: Sendable, GoogleCalendarConnectionService {
         _ = try await perform(request, as: EmptyPayload.self)
     }
 
-    func updateMcpConnection(id: String, action: String) async throws {
+    func updateMcpConnection(id: String, action: String) async throws -> McpConnectionUpdateResponse {
         var request = makeRequest(
             url: configuration.baseURL.appending(path: "api/mobile/v1/mcp/\(id)")
         )
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         request.httpBody = try JSONEncoder().encode(["action": action])
-        _ = try await perform(request, as: EmptyPayload.self)
+        return try await perform(request, as: McpConnectionUpdateResponse.self)
     }
 
     func deleteMcpConnection(id: String) async throws {

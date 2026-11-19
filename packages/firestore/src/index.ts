@@ -75,6 +75,7 @@ export {
   FirestoreMcpConnectionMutationRepository,
   FirestoreMcpConnectionReadRepository,
 } from './mcp-connections.js';
+export * from './mcp-oauth-repository.js';
 export { embeddingSpaceKey, FirestoreMemoryRepository } from './memory.js';
 export { FirestoreMemoryConsolidationRepository } from './memory-consolidation.js';
 export { FirestoreMemoryEmbeddingRefreshRepository } from './memory-embedding-refresh.js';

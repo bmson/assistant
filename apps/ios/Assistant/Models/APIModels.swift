@@ -106,6 +106,20 @@ struct EstimatedCostBudgetTracking: Codable, Equatable, Sendable {
     }
 }
 
+struct EstimatedCostOverviewResponse: Codable, Sendable {
+    let ok: Bool
+    let requests: [EstimatedCostRequestProjection]?
+    let tracking: EstimatedCostBudgetTracking?
+
+    var isValid: Bool {
+        guard ok, let tracking, tracking.isValid else { return false }
+        guard let requests else { return true } // Missing inventory is not an empty inventory.
+        let ids = requests.map(\.operationId)
+        return ids.allSatisfy { !$0.isEmpty } && Set(ids).count == ids.count
+            && requests.allSatisfy { $0.isValid(for: $0.operationId) }
+    }
+}
+
 struct EstimatedCostQuoteResponse: Codable, Sendable {
     let ok: Bool
     let request: EstimatedCostRequestProjection?
@@ -1185,6 +1199,7 @@ struct ActivityItem: Codable, Identifiable, Sendable {
     let conversationId: String?
     let source: String?
     let externalEventId: String?
+    let estimatedCostOperationId: String?
 
     init(
         id: String,
@@ -1203,7 +1218,8 @@ struct ActivityItem: Codable, Identifiable, Sendable {
         createdAt: String? = nil,
         conversationId: String? = nil,
         source: String? = nil,
-        externalEventId: String? = nil
+        externalEventId: String? = nil,
+        estimatedCostOperationId: String? = nil
     ) {
         self.id = id
         self.type = type
@@ -1222,6 +1238,7 @@ struct ActivityItem: Codable, Identifiable, Sendable {
         self.conversationId = conversationId
         self.source = source
         self.externalEventId = externalEventId
+        self.estimatedCostOperationId = estimatedCostOperationId
     }
 
     var displayTitle: String {
@@ -1951,6 +1968,7 @@ struct ActivityStatusResponse: Codable, Sendable {
     let hasPendingApproval: Bool
     let hasActiveAutonomy: Bool
     let stuckWaiting: Bool
+    var estimatedCostOperationId: String? = nil
 }
 
 enum ActivityStatusReadOutcome: Sendable {
@@ -2017,8 +2035,15 @@ extension ActivityItem {
             createdAt: createdAt,
             conversationId: conversationId,
             source: source,
-            externalEventId: externalEventId
+            externalEventId: externalEventId,
+            estimatedCostOperationId: status.status == "waiting_estimated_cost" ? Self.validCostOperationID(status.estimatedCostOperationId) : nil
         )
+    }
+
+    private static func validCostOperationID(_ value: String?) -> String? {
+        guard let value, !value.isEmpty, value.utf8.count <= 128,
+              value.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 45 || $0 == 95 }) else { return nil }
+        return value
     }
 
     private static func activityDate(_ value: String) -> Date? {
@@ -3349,8 +3374,20 @@ struct ImprovementActionPresentation: Equatable, Sendable {
     }
 }
 
+struct McpConnectionUpdateResponse: Decodable, Sendable {
+    let status: String?
+
+    var requiresOAuthReconnectForRefresh: Bool { status == "oauth_reconnect_to_refresh" }
+}
+
 struct McpConnectionsResponse: Codable, Sendable {
     let connections: [McpConnection]
+    let oauthConfigured: Bool?
+
+    init(connections: [McpConnection], oauthConfigured: Bool? = nil) {
+        self.connections = connections
+        self.oauthConfigured = oauthConfigured
+    }
 }
 
 struct McpConnection: Codable, Identifiable, Sendable {

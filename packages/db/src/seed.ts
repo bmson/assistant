@@ -1,4 +1,5 @@
 import { loadConfig } from '@assistant/config';
+import { PROACTIVE_AWARENESS_SCHEDULE } from '@assistant/persistence';
 import { and, eq, sql } from 'drizzle-orm';
 import { createDb } from './client.js';
 import { modelDefaults, modelRoleDefaults, reconcileModelConfig } from './model-config.js';
@@ -206,6 +207,7 @@ await db.transaction(async (tx) => {
 // ── Default proactive schedules (next_run_at initialized by the first sweep) ─
 
 const scheduleSeed = [
+  PROACTIVE_AWARENESS_SCHEDULE,
   // 'morning-brief' (cron 30 7 * * *) was retired: it ran fifteen minutes
   // before 'daily-briefing' below, read the same calendar/mail tables with no
   // cross-surface dedupe, and duplicated every category daily-briefing already
