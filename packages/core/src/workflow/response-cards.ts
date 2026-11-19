@@ -436,6 +436,7 @@ export function calendarResponseCards(
           : 'consistent';
       return {
         kind: 'calendar-event' as const,
+        ...(timeZone ? { timeZone } : {}),
         id: `calendar-${group.map((entry) => `${string(entry.calendarId)}:${string(entry.eventId)}`).join('|')}`,
         ...(probableMatch ? { probableMatch: true } : {}),
         title:
@@ -1275,7 +1276,10 @@ export function searchResponseCards(evidence: ActionEvidence[]): ResponseCard[] 
 }
 
 /** Free/busy answers render the raw busy blocks; the owner reads the gaps. */
-export function availabilityResponseCards(evidence: ActionEvidence[]): ResponseCard[] {
+export function availabilityResponseCards(
+  evidence: ActionEvidence[],
+  ownerTimeZone?: string,
+): ResponseCard[] {
   return evidence.flatMap((row, index) => {
     if (!succeeded(row) || row.toolName !== 'calendar.availability') return [];
     const result = record(row.result);
@@ -1296,6 +1300,7 @@ export function availabilityResponseCards(evidence: ActionEvidence[]): ResponseC
     return [
       {
         kind: 'availability' as const,
+        ...(ownerTimeZone ? { timeZone: ownerTimeZone } : {}),
         id: `availability-${index}-${string(args?.timeMin)}`,
         timeMin: string(args?.timeMin),
         timeMax: string(args?.timeMax),
@@ -1604,6 +1609,7 @@ function calendarWriteResponseCards(
     return [
       {
         kind: 'calendar-event' as const,
+        ...(ownerTimeZone ? { timeZone: ownerTimeZone } : {}),
         id: `calendar-${string(result.eventId) || index}`,
         title,
         start,
@@ -1739,7 +1745,7 @@ export function responseCardsForFinal(input: {
         : synthesizedRead
           ? []
           : calendarResponseCards(input.evidence, input.readRequest, { ownerTimeZone })),
-      ...(synthesizedRead ? [] : availabilityResponseCards(input.evidence)),
+      ...(synthesizedRead ? [] : availabilityResponseCards(input.evidence, ownerTimeZone)),
       // Flight answers use mail only to reconcile the requested itinerary.
       // Do not turn every booking hit, historical message, or newsletter into
       // a second inbox result surface below the one calendar answer.

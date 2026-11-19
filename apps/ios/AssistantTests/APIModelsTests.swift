@@ -2812,6 +2812,21 @@ final class APIModelsTests: XCTestCase {
         XCTAssertEqual(message.text, "full diagnostic text")
     }
 
+    func testCalendarEventCardKeepsOwnerTimeAndDayAcrossMidnightUTC() {
+        let card = MessagePart(type: "data-card", data: .object([
+            "kind": .string("calendar-event"), "title": .string("Late meeting"),
+            "start": .string("2026-11-19T01:00:00Z"), "end": .string("2026-11-19T02:00:00Z"),
+            "timeZone": .string("America/Los_Angeles"), "time": .string("5:00 PM–6:00 PM"),
+        ]))
+        guard case let .event(_, start, time, _, _, _, _, _, _, timeZone)? = MessageResponseCard(part: card),
+              let timeZone else { return XCTFail("Expected a zoned calendar event") }
+        XCTAssertEqual(time, "5:00 PM–6:00 PM")
+        XCTAssertEqual(
+            CalendarEventPresentation.dateCaption(start, timeZone: timeZone, locale: Locale(identifier: "en_US_POSIX")),
+            "Wed, Nov 18, 2026"
+        )
+    }
+
     func testCalendarEventCardCarriesOnlyStructuredDetails() {
         let card = MessagePart(
             type: "data-card",
@@ -2825,7 +2840,7 @@ final class APIModelsTests: XCTestCase {
                 "meetingLink": .object(["url": .string("https://zoom.us/j/12345")]),
             ])
         )
-        guard case let .event(id, start, time, title, location, attendees, calendars, calendarLink, meetingLink)? = MessageResponseCard(part: card) else {
+        guard case let .event(id, start, time, title, location, attendees, calendars, calendarLink, meetingLink, _)? = MessageResponseCard(part: card) else {
             return XCTFail("Expected a structured event card")
         }
         XCTAssertEqual(id, "event-1")
@@ -2860,7 +2875,7 @@ final class APIModelsTests: XCTestCase {
             "start": .string("2026-09-19T00:00:00.000Z"), "allDay": .bool(true),
             "time": .string("All day")
         ]))
-        guard case let .event(_, start, time, _, _, _, _, _, _)? = MessageResponseCard(part: declaredAllDay) else {
+        guard case let .event(_, start, time, _, _, _, _, _, _, _)? = MessageResponseCard(part: declaredAllDay) else {
             return XCTFail("Expected all-day calendar card")
         }
         XCTAssertEqual(start, "2026-09-19")
@@ -3111,6 +3126,7 @@ final class APIModelsTests: XCTestCase {
             type: "data-card",
             data: .object([
                 "kind": .string("availability"), "id": .string("availability-1"),
+                "timeZone": .string("America/Los_Angeles"),
                 "timeMin": .string("2026-08-24T09:00:00-07:00"),
                 "timeMax": .string("2026-08-24T17:00:00-07:00"),
                 "busy": .array([
@@ -3126,10 +3142,11 @@ final class APIModelsTests: XCTestCase {
                 "note": .string("Some calendars did not return free/busy data."),
             ])
         )
-        guard case let .availability(_, timeMin, timeMax, busy, calendarsChecked, complete, note)? =
+        guard case let .availability(_, timeMin, timeMax, busy, calendarsChecked, complete, note, timeZone)? =
                 MessageResponseCard(part: availability) else {
             return XCTFail("Expected an availability card")
         }
+        XCTAssertEqual(timeZone?.identifier, "America/Los_Angeles")
         XCTAssertEqual(timeMin, "2026-08-24T09:00:00-07:00")
         XCTAssertEqual(timeMax, "2026-08-24T17:00:00-07:00")
         XCTAssertEqual(busy.count, 1)
@@ -5147,7 +5164,7 @@ extension APIModelsTests {
             if let complete { fields["complete"] = complete }
             if let busy { fields["busy"] = busy }
             let part = MessagePart(type: "data-card", data: .object(fields))
-            guard case let .availability(_, _, _, _, checked, isComplete, _)? = MessageResponseCard(part: part) else {
+            guard case let .availability(_, _, _, _, checked, isComplete, _, _)? = MessageResponseCard(part: part) else {
                 return nil
             }
             return (isComplete, checked)
@@ -5180,7 +5197,7 @@ extension APIModelsTests {
                 "complete": .bool(true),
                 "busy": busy,
             ]))
-            guard case let .availability(_, _, _, rows, _, complete, _)? = MessageResponseCard(part: part) else {
+            guard case let .availability(_, _, _, rows, _, complete, _, _)? = MessageResponseCard(part: part) else {
                 return nil
             }
             return (rows.count, complete)

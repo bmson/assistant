@@ -543,7 +543,9 @@ describe('response cards', () => {
           },
         ],
       }),
-    ).toMatchObject([{ kind: 'calendar-event', title: 'Planning', time }]);
+    ).toMatchObject([
+      { kind: 'calendar-event', title: 'Planning', time, timeZone: 'America/Los_Angeles' },
+    ]);
   });
 
   it('uses the returned calendar update time instead of the requested time', () => {
