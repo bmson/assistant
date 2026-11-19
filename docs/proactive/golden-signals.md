@@ -132,7 +132,9 @@ S14 tests quiet; S19 tests both an action and restraint; S23 checks data. The re
 
 With a local PostgreSQL test server and the Firestore emulator running, set `TEST_DATABASE_URL` to the loopback PostgreSQL connection and `FIRESTORE_EMULATOR_HOST` to the emulator address. Run `pnpm test:proactive-replay`. The command writes a Markdown scorecard and JSON evidence in `.artifacts/proactive-replay/`.
 
-The current slice measures timely delivery for S16 and S17 and suppression after payment for S14. It reads durable cards and acknowledgments from a simulated push service. S14 first establishes that the unpaid bill could be delivered. That setup and the generic-mail control are excluded from the recall and precision denominators. The scorecard lists every scenario in the table above for each driver, and reports the full coverage denominator separately from executed-subset scores. A covered case has replay evidence with a pass or fail result. An implemented case without evidence is awaiting evidence. The remaining scenarios are unimplemented. Production recall remains unmeasured.
+The current slice measures delivery timing for S13, S16, S17 and S24, and suppression after a source-matched payment for S14. It reads durable cards and ledger acknowledgments from a simulated push service. S13 measures each unpaid source on arrival day and again three days before its due date. Its same-day arrival control and S14's pre-payment setup confirm that a bill can be delivered. S24 checks an early sweep before the minimum source age, three next-morning sweeps, and a repeat sweep while the mail is still recent. Those controls and the generic-mail control are excluded from recall and precision.
+
+The scorecard distinguishes replay validation from product results. S13's lead-time findings are recorded as product outcomes, while the fixture and same-day control remain required in CI. The scorecard lists each scenario and driver. A covered case has replay evidence with a pass or fail result. An implemented case without evidence is awaiting evidence. The remaining scenarios are unimplemented. Production recall remains unmeasured.
 
 ## Adding scenarios (H2)
 
