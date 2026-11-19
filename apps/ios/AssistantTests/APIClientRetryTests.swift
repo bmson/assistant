@@ -5751,7 +5751,9 @@ extension APIClientRetryTests {
     @MainActor
     func testDefaultSavedNoteEditorUsesTheExistingUpdateRoute() async throws {
         let id = "123e4567-e89b-42d3-a456-426614174101"
-        let model = try await notificationModel()
+        let recoveryRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: recoveryRoot) }
+        let model = try await notificationModel(editRecoveryRoot: recoveryRoot)
         XCTAssertFalse(model.nativeMemoryCorrectionEnabled)
         StubURLProtocol.prime([], paths: [
             "/api/mobile/v1/memory/\(id)": [.success(status: 422, body: Data(#"{"error":"fixture"}"#.utf8))],
