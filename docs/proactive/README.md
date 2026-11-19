@@ -52,7 +52,7 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | ID  | Item                                                                   | Phase | Size | Depends on | Status                                                        |
 | --- | ---------------------------------------------------------------------- | ----- | ---- | ---------- | ------------------------------------------------------------- |
 | A1  | Reconcile cost holds; holds scoped to their period                     | 0     | L    | —          | in review (settlement and period-specific Costs warning)      |
-| A2  | Wake parked work when caps change; honest parked notice                | 0     | M    | —          | open                                                          |
+| A2  | Wake parked work when caps change; honest parked notice                | 0     | M    | —          | in review (cap-change wake and recorded spend/holds notice)   |
 | A3  | Outage watchdog and "while I was away" digest                          | 0     | M    | H4         | open                                                          |
 | A4  | Stop mirroring secondary-chat replies into the primary chat            | 0     | M    | —          | open                                                          |
 | A5  | Checklist dedupe ignores trailing punctuation                          | 0     | S    | —          | open                                                          |

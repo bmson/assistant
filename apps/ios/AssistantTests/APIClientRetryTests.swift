@@ -5859,6 +5859,15 @@ extension APIClientRetryTests {
         ])
     }
 
+    @MainActor
+    func testBudgetNoticeLinkRoutesOnlyTheRelativeCostsPath() throws {
+        let notice = AssistantMarkdown.inlineAttributed("Review or raise the limit in [Costs](/costs).")
+        let link = try XCTUnwrap(notice.runs.compactMap(\.link).first)
+        XCTAssertTrue(RootView.isNativeCostsLink(link))
+        XCTAssertFalse(RootView.isNativeCostsLink(try XCTUnwrap(URL(string: "https://example.test/costs"))))
+        XCTAssertFalse(RootView.isNativeCostsLink(try XCTUnwrap(URL(string: "/costs?other=1"))))
+    }
+
     func testNotificationDestinationRejectsMalformedOwnerAndNeverTreatsPathsAsConversationIDs() throws {
         XCTAssertNil(AssistantNotificationDestination(userInfo: ["route": "unknown"]))
         XCTAssertNil(AssistantNotificationDestination(userInfo: ["route": "chat", "agentId": 42]))
