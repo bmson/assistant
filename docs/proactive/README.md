@@ -107,7 +107,7 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | E6  | Internal notices out of the owner's chats                              | 3     | S    | A4         | open                                                          |
 | E7  | Per-person and per-day views                                           | 4     | M    | C6         | open                                                          |
 | E8  | Actionable push notifications                                          | 4     | M    | E4         | open                                                          |
-| E9  | More shows only meaningful automations                                 | 3     | S    | A10        | open                                                          |
+| E9  | More shows only meaningful automations                                 | 3     | S    | A10        | in review (native Automations list)                           |
 | F1  | Tools: `memory.forget`, `contacts.update`, `occasions.update`/`delete` | 2     | M    | —          | open                                                          |
 | F2  | Routing: topic watches, digests, cancel and delete paths               | 2     | M    | —          | open                                                          |
 | F3  | Reply integrity                                                        | 2     | M    | A4         | open                                                          |
