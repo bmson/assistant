@@ -1,5 +1,25 @@
 import type { ReplayCase } from './proactive-replay-score.js';
 
+const phoneAndTollWindow = {
+  deliveries: 1,
+  kind: 'bill-due',
+  earliestMinutes: 11 * 24 * 60 - 4 * 60,
+  latestMinutes: 11 * 24 * 60 + 4 * 60,
+} as const;
+
+const teacherMailWindow = {
+  deliveries: 1,
+  kind: 'mail-action',
+  earliestMinutes: 8 * 60,
+  latestMinutes: 12 * 60 - 1,
+} as const;
+
+export const teacherMessages = [
+  { tick: 'next morning library message', subject: 'Return the library permission slip' },
+  { tick: 'next morning science fair message', subject: 'Confirm the science fair table' },
+  { tick: 'next morning photo message', subject: 'Send the class photo selection' },
+] as const;
+
 export const replayCases = {
   practice: {
     id: 'S16',
@@ -54,6 +74,48 @@ export const replayCases = {
       'payment wins admission race': { deliveries: 0, phase: 'suppressed', reason: 'stale-source' },
     },
   },
+  billLeadTime: {
+    id: 'S13',
+    facts: {
+      phoneInvoiceSource: true,
+      tollInvoiceSource: true,
+      phoneDueAtWindow: true,
+      tollDueAtWindow: true,
+      sameDayInvoiceSource: true,
+    },
+    ticks: {
+      'phone bill before the reminder day': {
+        deliveries: 0,
+        phase: 'pending',
+        reason: 'no-candidates',
+      },
+      'toll bill before the reminder day': {
+        deliveries: 0,
+        phase: 'pending',
+        reason: 'no-candidates',
+      },
+      'phone bill reminder at T-3': phoneAndTollWindow,
+      'toll bill reminder at T-3': phoneAndTollWindow,
+      'late-arriving bill due today': {
+        deliveries: 1,
+        kind: 'bill-due',
+        earliestMinutes: 180,
+        latestMinutes: 300,
+        setup: true,
+      },
+    },
+  },
+  teachers: {
+    id: 'S24',
+    facts: { unreadSourceCount: 3, scriptedScores: 3 },
+    ticks: {
+      'before the next morning': { deliveries: 0, phase: 'pending', reason: 'no-candidates' },
+      'next morning library message': teacherMailWindow,
+      'next morning science fair message': teacherMailWindow,
+      'next morning photo message': teacherMailWindow,
+      'teacher mail replay': { deliveries: 0, phase: 'suppressed', reason: 'no-candidates' },
+    },
+  },
   control: {
     id: 'CONTROL-GENERIC-MAIL',
     facts: { eligible: true, scriptedScores: 1, wrongHeadReads: 1 },
@@ -82,7 +144,7 @@ interface ReplayCard {
 }
 
 /** Check owner-visible fixture facts, independently of ledger kind and key. */
-export function replayCardGrounded(caseId: string, card: ReplayCard): boolean {
+export function replayCardGrounded(caseId: string, card: ReplayCard, tick: string): boolean {
   switch (caseId) {
     case replayCases.practice.id:
       return (
@@ -103,6 +165,22 @@ export function replayCardGrounded(caseId: string, card: ReplayCard): boolean {
     case replayCases.bill.id:
       return (
         card.title === 'Invoice SYN-104' && card.summary === '$42.15 due on November 20, 2026.'
+      );
+    case replayCases.billLeadTime.id:
+      if (tick.startsWith('phone bill'))
+        return (
+          card.title === 'Invoice SYN-PHONE' && card.summary === '$39.00 due on December 6, 2026.'
+        );
+      if (tick.startsWith('toll bill'))
+        return (
+          card.title === 'Invoice SYN-TOLL' && card.summary === '$11.00 due on December 7, 2026.'
+        );
+      return (
+        card.title === 'Invoice SYN-TODAY' && card.summary === '$28.00 due on December 6, 2026.'
+      );
+    case replayCases.teachers.id:
+      return teacherMessages.some(
+        (message) => message.tick === tick && message.subject === card.title,
       );
     case replayCases.control.id:
       return card.title === 'Confirm volunteer roster';

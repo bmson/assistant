@@ -34,7 +34,7 @@ import {
   processMessage,
 } from '../../../packages/modules/src/google/email-sync.js';
 import { createIsolatedTestDatabase } from './isolated-test-database.fixture.js';
-import { replayCardGrounded, replayCases } from './proactive-replay-cases.js';
+import { replayCardGrounded, replayCases, teacherMessages } from './proactive-replay-cases.js';
 import { type ReplayTick, scoreReplayCase, writeReplayEvidence } from './proactive-replay-score.js';
 
 const RECEIVED = new Date('2026-11-18T23:01:00Z');
@@ -59,7 +59,7 @@ function forbidden<T>(name: string): T {
 describe('frozen proactive replay', () => {
   for (const driver of ['postgres', 'firestore'] as const) {
     it.skipIf(driver === 'firestore' && !process.env.FIRESTORE_EMULATOR_HOST)(
-      `replays practice, cancellation, and paid bill on ${driver}`,
+      `replays calendar, mail, and bill signals on ${driver}`,
       async () => {
         if (!process.env.ASSISTANT_TEST_TARGET_TOKEN || process.env.NODE_ENV === 'production')
           throw new Error('Use pnpm test with an isolated target');
@@ -115,6 +115,7 @@ describe('frozen proactive replay', () => {
               subject: string;
               body: string;
               at: Date;
+              unread?: true;
             }
           >([
             [
@@ -128,17 +129,17 @@ describe('frozen proactive replay', () => {
               },
             ],
           ]);
-          const threadHeads = new Map([['practice-thread', mailId]]);
+          const threadHeads = new Map<string, string>([['practice-thread', mailId]]);
           const provider = vi.fn(async (path: string) => {
             const id = /\/messages\/([^?]+)\?/.exec(path)?.[1];
             const fixture = id && fixtureMail.get(id);
             if (!fixture) throw new Error('Unexpected provider message');
-            const { threadId, from, subject, body, at } = fixture;
+            const { threadId, from, subject, body, at, unread } = fixture;
             return {
               id,
               threadId,
               internalDate: String(at.getTime()),
-              labelIds: ['INBOX'],
+              labelIds: unread ? ['INBOX', 'UNREAD'] : ['INBOX'],
               payload: {
                 headers: [
                   { name: 'From', value: `Fixture Sender <${from}>` },
@@ -175,7 +176,7 @@ describe('frozen proactive replay', () => {
           } as unknown as EmailSyncDeps;
           const sourceKey = `gmail:${mailId}`;
           const issuer = 'billing@example.test';
-          const known = new Map([
+          const known = new Map<string, 'known'>([
             [SENDER, 'known'],
             [issuer, 'known'],
           ] as const);
@@ -348,7 +349,8 @@ describe('frozen proactive replay', () => {
                     exactSource: moment.momentKey === sourceMomentKey,
                     elapsedMinutes: elapsed(moment.deliveredAt),
                     durableCard: card !== undefined,
-                    groundedCard: card !== undefined && replayCardGrounded(caseId, card),
+                    durablePushAcknowledged: moment.pinged,
+                    groundedCard: card !== undefined && replayCardGrounded(caseId, card, name),
                   };
                 })
                 .sort(
@@ -476,13 +478,17 @@ describe('frozen proactive replay', () => {
               ]),
             ]),
           );
-          const addBillMail = async (body: string, receivedAt: Date) => {
+          const addBillMail = async (
+            body: string,
+            receivedAt: Date,
+            subject = 'Fixture utility account',
+          ) => {
             const id = randomUUID();
             const threadId = `billing-${id}`;
             fixtureMail.set(id, {
               threadId,
               from: issuer,
-              subject: 'Fixture utility account',
+              subject,
               body,
               at: receivedAt,
             });
@@ -491,6 +497,12 @@ describe('frozen proactive replay', () => {
             const key = `gmail:${id}`;
             const row = await readIngest(key);
             await setIngestClock(row.id, receivedAt);
+            expect(row).toMatchObject({
+              channelMessageId: key,
+              providerMessageId: id,
+              providerThreadId: threadId,
+              providerReceivedAt: receivedAt,
+            });
             return { id, key, fact: admittedBillEmailEvidence(row) };
           };
           const activePulse = store ? persistence.pulse : postgresPulseRepository(db);
@@ -749,6 +761,156 @@ describe('frozen proactive replay', () => {
             next.key,
           ]);
 
+          const teacherCase = replayCases.teachers.id;
+          const teacherAt = at(55 * 60);
+          clock = teacherAt;
+          scriptedScore.mockClear();
+          const teacherSources = [];
+          for (const [index, teacher] of teacherMessages.entries()) {
+            const id = `teacher-${index}-${randomUUID()}`;
+            const threadId = `thread-${id}`;
+            const from = `teacher-${index}@example.test`;
+            known.set(from, 'known');
+            fixtureMail.set(id, {
+              threadId,
+              from,
+              subject: teacher.subject,
+              body: `Please complete this school request: ${teacher.subject}.`,
+              at: teacherAt,
+              unread: true,
+            });
+            threadHeads.set(threadId, id);
+            expect(await processMessage(genericDeps, agentId, owner.email, known, id)).toBe(
+              'triaged',
+            );
+            const key = `gmail:${id}`;
+            const row = await readIngest(key);
+            expect(row).toMatchObject({
+              providerMessageId: id,
+              providerThreadId: threadId,
+              providerReceivedAt: teacherAt,
+              channelMessageId: key,
+              subject: teacher.subject,
+            });
+            expect(emailIngestReadable(row)).toBe(true);
+            await setIngestClock(row.id, teacherAt);
+            teacherSources.push({ id, key, tick: teacher.tick });
+          }
+          evidence[teacherCase] = {
+            unreadSourceCount: teacherSources.filter(({ id }) => fixtureMail.get(id)?.unread)
+              .length,
+            scriptedScores: scriptedScore.mock.calls.length,
+          };
+          clock = at(57 * 60);
+          await observe(teacherCase, 'before the next morning', teacherAt, null, () =>
+            runPulse(pulseDeps, { agentId, now: clock }),
+          );
+          for (const [index, source] of teacherSources.entries()) {
+            clock = at(63 * 60 + 65 * index);
+            await observe(teacherCase, source.tick, teacherAt, `mail-action:${source.key}`, () =>
+              runPulse(pulseDeps, { agentId, now: clock }),
+            );
+            expect(await processMessage(genericDeps, agentId, owner.email, known, source.id)).toBe(
+              'skipped',
+            );
+          }
+          // The last source is younger than 12 hours and the 60-minute pulse gap has elapsed.
+          clock = at(66 * 60 + 15);
+          await observe(teacherCase, 'teacher mail replay', teacherAt, null, () =>
+            runPulse(pulseDeps, { agentId, now: clock }),
+          );
+
+          const billLeadCase = replayCases.billLeadTime.id;
+          const phoneAt = at(90 * 60);
+          const tollAt = at(114 * 60);
+          clock = phoneAt;
+          const phone = await addBillMail(
+            'Invoice SYN-PHONE: USD 39.00 is due on December 6, 2026.',
+            phoneAt,
+            'Phone bill ready',
+          );
+          if (phone.fact?.kind !== 'invoice') throw new Error('Missing phone bill source');
+          clock = at(94 * 60);
+          await observe(
+            billLeadCase,
+            'phone bill before the reminder day',
+            phoneAt,
+            `bill-due:${phone.fact.identity}`,
+            () => runPulse(pulseDeps, { agentId, now: clock }),
+          );
+          clock = tollAt;
+          const toll = await addBillMail(
+            'Invoice SYN-TOLL: USD 11.00 is due on December 7, 2026.',
+            tollAt,
+            'Electronic toll statement',
+          );
+          if (toll.fact?.kind !== 'invoice') throw new Error('Missing toll statement source');
+          clock = at(118 * 60);
+          await observe(
+            billLeadCase,
+            'toll bill before the reminder day',
+            tollAt,
+            `bill-due:${toll.fact.identity}`,
+            () => runPulse(pulseDeps, { agentId, now: clock }),
+          );
+          const observedBillFacts = {
+            phoneInvoiceSource:
+              phone.fact.invoiceId === 'SYN-PHONE' && phone.fact.dueDate === '2026-12-06',
+            tollInvoiceSource:
+              toll.fact.invoiceId === 'SYN-TOLL' && toll.fact.dueDate === '2026-12-07',
+            phoneDueAtWindow: false,
+            tollDueAtWindow: false,
+            sameDayInvoiceSource: false,
+          };
+          const elevenDays = 11 * 24 * 60;
+          clock = at(90 * 60 + elevenDays);
+          observedBillFacts.phoneDueAtWindow =
+            (await billStatus(agentId, phone.fact, clock)).kind === 'due';
+          await observe(
+            billLeadCase,
+            'phone bill reminder at T-3',
+            phoneAt,
+            `bill-due:${phone.fact.identity}`,
+            () => runPulse(pulseDeps, { agentId, now: clock }),
+          );
+          clock = at(114 * 60 + elevenDays);
+          observedBillFacts.tollDueAtWindow =
+            (await billStatus(agentId, toll.fact, clock)).kind === 'due';
+          await observe(
+            billLeadCase,
+            'toll bill reminder at T-3',
+            tollAt,
+            `bill-due:${toll.fact.identity}`,
+            () => runPulse(pulseDeps, { agentId, now: clock }),
+          );
+          const dueTodayAt = at(90 * 60 + 14 * 24 * 60);
+          clock = dueTodayAt;
+          const dueToday = await addBillMail(
+            'Invoice SYN-TODAY: USD 28.00 is due on December 6, 2026.',
+            dueTodayAt,
+            'Bill due today',
+          );
+          if (dueToday.fact?.kind !== 'invoice') throw new Error('Missing same-day bill source');
+          observedBillFacts.sameDayInvoiceSource =
+            dueToday.fact.invoiceId === 'SYN-TODAY' && dueToday.fact.dueDate === '2026-12-06';
+          evidence[billLeadCase] = observedBillFacts;
+          expect(observedBillFacts).toEqual(replayCases.billLeadTime.facts);
+          clock = new Date(dueTodayAt.getTime() + 4 * 60 * 60_000);
+          await observe(
+            billLeadCase,
+            'late-arriving bill due today',
+            dueTodayAt,
+            `bill-due:${dueToday.fact.identity}`,
+            () => runPulse(pulseDeps, { agentId, now: clock }),
+          );
+          // The same-day control must still work. S13's catalog-level lead-time outcome
+          // remains a measurement so a fix can turn a recorded miss into a pass.
+          const sameDay = scores().find(({ id }) => id === billLeadCase);
+          expect(sameDay).toMatchObject({ setupExpected: 1, setupMatches: 1, setupDeliveries: 1 });
+          expect(
+            sameDay?.findings.filter((finding) => finding.startsWith('late-arriving bill')),
+          ).toEqual([]);
+
           if (driver === 'postgres') {
             const ledger = await db
               .select()
@@ -764,7 +926,7 @@ describe('frozen proactive replay', () => {
               ]),
             );
           }
-          expect(scores().filter((item) => !item.passed)).toEqual([]);
+          expect(scores().filter((item) => !item.passed && item.id !== billLeadCase)).toEqual([]);
         } finally {
           try {
             writeReplayEvidence(driver, scores());

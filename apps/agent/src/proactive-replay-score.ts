@@ -16,6 +16,7 @@ export interface ReplayTick {
     exactSource: boolean;
     elapsedMinutes: number;
     durableCard: boolean;
+    durablePushAcknowledged: boolean;
     groundedCard: boolean;
   }>;
   ownerNotices: number;
@@ -63,7 +64,8 @@ export function scoreReplayCase(
       tick.moments.length !== expected.deliveries ||
       tick.ownerNotices !== expected.deliveries ||
       tick.pushSinkCalls !== expected.deliveries ||
-      tick.pushAcknowledged !== (expected.deliveries === 1)
+      tick.pushAcknowledged !== (expected.deliveries === 1) ||
+      tick.moments.some((moment) => moment.durablePushAcknowledged !== tick.pushAcknowledged)
     ) {
       findings.push(`${name}: logical delivery, sink call, or sink acknowledgment count differs`);
     }
@@ -93,7 +95,10 @@ export function scoreReplayCase(
       moment.elapsedMinutes <= expected.latestMinutes;
     if (moment && !onTime) findings.push(`${name}: durable moment outside the delivery window`);
     if (grounded && onTime) {
-      const credit = tick.pushSinkCalls === 1 && tick.pushAcknowledged ? 1 : 0.5;
+      const credit =
+        tick.pushSinkCalls === 1 && tick.pushAcknowledged && moment.durablePushAcknowledged
+          ? 1
+          : 0.5;
       matched += credit;
       if (expected.setup) {
         setupMatches += credit;

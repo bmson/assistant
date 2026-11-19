@@ -78,11 +78,13 @@ try {
     const expected = sum('expected') - sum('setupExpected');
     const delivered = sum('delivered') - sum('setupDeliveries');
     const matched = sum('matched') - sum('setupMatches');
+    const complete =
+      cases.length === expectedReplayIds.length &&
+      expectedReplayIds.every((id) => cases.some((entry) => entry.id === id));
     return {
       adapter,
-      passed:
-        cases.length === expectedReplayIds.length &&
-        expectedReplayIds.every((id) => cases.some((entry) => entry.id === id && entry.passed)),
+      complete,
+      passed: complete && cases.every((entry) => entry.passed),
       score: {
         matched,
         expected,
@@ -120,15 +122,17 @@ try {
       sourceAtEnd?.clean === true &&
       sourceAtEnd.revision === sourceAtStart.revision,
   };
-  const passed = result.status === 0 && adapters.every((adapter) => adapter.passed);
+  const validated = result.status === 0 && adapters.every((adapter) => adapter.complete);
+  const passed = validated && adapters.every((adapter) => adapter.passed);
   mkdirSync(outputDir, { recursive: true });
   writeFileSync(
     join(outputDir, 'benchmark-result.json'),
     `${JSON.stringify(
       {
-        version: 2,
+        version: 3,
         source,
         scope,
+        replayValidated: validated,
         executedSubsetPassed: passed,
         coverage,
         productionRecall: 'unmeasured',
@@ -151,7 +155,9 @@ try {
           : ' (local edits or revision change).')
       : 'Source revision unavailable.',
     '',
-    'The channel score reflects the fake push acknowledgment. The S14 due setup and generic control are scored separately from the executed subset’s precision and recall.',
+    'The channel score reflects the fake push acknowledgment and its durable ledger flag. The S13 same-day control, S14 due setup, and generic control are excluded from the executed subset’s precision and recall.',
+    '',
+    `Replay validation: ${validated ? 'complete' : 'failed'}. Executed product scenarios: ${passed ? 'all passed' : 'one or more failed or lack validated evidence'}.`,
     '',
     '## Golden-signal coverage',
     '',
@@ -199,7 +205,7 @@ try {
   }
   writeFileSync(join(outputDir, 'benchmark-result.md'), `${markdown.join('\n').trimEnd()}\n`);
   console.log(`Proactive replay scorecard written to ${outputDir}`);
-  process.exitCode = passed ? 0 : result.status || 1;
+  process.exitCode = validated ? 0 : result.status || 1;
 } finally {
   rmSync(evidenceDir, { recursive: true, force: true });
 }
