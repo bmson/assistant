@@ -135,7 +135,7 @@ enum SpeakableText {
         case let .agenda(title, subtitle, items):
             let lines = items.map { "\(spoken($0.time)): \(spoken($0.title))" }
             sentence = join([spoken(title), spoken(subtitle)] + lines)
-        case let .event(_, _, time, title, location, _, _, _, _):
+        case let .event(_, _, time, title, location, _, _, _, _, _):
             sentence = join([spoken(title), spoken(time), spoken(location)])
         case let .weather(location, temperature, condition, _, _, _):
             let place = location.isEmpty ? "" : "In \(spoken(location))"
@@ -162,7 +162,7 @@ enum SpeakableText {
             sentence = join([spoken(subject), count(messageCount, "message", "messages")])
         case let .sheetRows(_, sheetName, _, totalRows, _):
             sentence = join([spoken(sheetName), count(totalRows, "row", "rows")])
-        case let .availability(_, _, _, busy, calendarsChecked, complete, _):
+        case let .availability(_, _, _, busy, calendarsChecked, complete, _, _):
             if !busy.isEmpty {
                 let booked = count(busy.count, "booked block", "booked blocks")
                 sentence = complete

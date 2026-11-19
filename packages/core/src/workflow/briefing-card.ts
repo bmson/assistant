@@ -24,8 +24,8 @@ import {
  * `briefing` card for clients that know it, and as bold-labelled markdown
  * lists in the message text for clients that do not.
  *
- * Everything is pre-formatted in the owner's zone ("Today", "9:30 AM"), so no
- * client re-derives a time from a timestamp.
+ * The card includes owner-local text for clients that display these values
+ * directly and instant bounds for clients that format the text themselves.
  */
 
 export interface BriefingAgendaItem {
@@ -33,6 +33,8 @@ export interface BriefingAgendaItem {
   day: string;
   /** A local clock range, a date-aware multi-day range, or "All day". */
   time: string;
+  start?: string;
+  end?: string;
   title: string;
   location?: string;
   /** Why this event deserves a second look, when it does. */
@@ -235,19 +237,14 @@ export function agendaSection(input: {
         : note
           ? 'salient'
           : undefined;
+      const end = events.reduce(
+        (latest, event) => (Date.parse(event.end) > Date.parse(latest) ? event.end : latest),
+        representative.end,
+      );
       return {
         day: eventDay(representative, input.timeZone, input.now),
-        time: eventTime(
-          {
-            ...representative,
-            end: events.reduce(
-              (latest, event) => (Date.parse(event.end) > Date.parse(latest) ? event.end : latest),
-              representative.end,
-            ),
-          },
-          input.timeZone,
-          input.now,
-        ),
+        time: eventTime({ ...representative, end }, input.timeZone, input.now),
+        ...(!representative.allDay ? { start: representative.start, end } : {}),
         title: tidy(representative.summary) || 'Untitled event',
         ...(representative.location ? { location: tidy(representative.location) } : {}),
         ...(flag ? { flag } : {}),

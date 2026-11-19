@@ -107,6 +107,8 @@ describe('agendaSection', () => {
         {
           day: 'Today',
           time: '9:30 AM – 10:30 AM',
+          start: dentist.start,
+          end: dentist.end,
           title: 'Dentist',
           location: 'Laugavegur 12',
           flag: 'conflict',

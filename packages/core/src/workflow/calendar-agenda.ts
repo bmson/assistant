@@ -1069,6 +1069,7 @@ export function calendarAgendaCards(input: {
   events: ResponseCard[];
   request?: PersonalReadRequest | null;
   requestText?: string;
+  ownerTimeZone?: string;
 }): ResponseCard[] {
   if (!wantsCalendarAgenda(input.request, input.requestText)) return [];
   const rows = input.evidence.filter(
@@ -1092,7 +1093,7 @@ export function calendarAgendaCards(input: {
       usable.flatMap((row) => list(record(row.result).calendarsSearched).map(text)).filter(Boolean),
     ),
   ];
-  const zone = validZone(input.request?.timeZone) ?? validZone(input.events[0]?.calendarTimeZone);
+  const zone = validZone(input.ownerTimeZone) ?? validZone(input.request?.timeZone);
   const scope =
     names.length === 1
       ? (names[0] as string)
@@ -1204,6 +1205,12 @@ export function calendarAgendaCards(input: {
               : differences?.timeDiffers && event.probableMatch !== true
                 ? 'Time differs by source'
                 : eventTime(event, zone),
+          ...(event.allDay !== true &&
+          event.windowMembership !== 'source-date-only' &&
+          (!differences?.timeDiffers || event.probableMatch === true) &&
+          INSTANT.test(text(event.start))
+            ? { start: event.start, end: event.end }
+            : {}),
           title:
             differences?.titleDiffers && event.probableMatch !== true
               ? 'Title differs by source'
