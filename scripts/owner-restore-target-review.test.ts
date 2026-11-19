@@ -81,6 +81,7 @@ function fixture(now = fixedNow) {
     services: { agent, web },
   };
   const expected = {
+    maintenanceRunId: '78901',
     current,
     packSha256,
     buildRunId: buildRun,
@@ -91,6 +92,7 @@ function fixture(now = fixedNow) {
   const observed = (outcome: string) => ({ outcome, evidenceSha256: sha(outcome) });
   const target = (role: (typeof roles)[number]) => ({
     ...images[role],
+    image: `us-west1-docker.pkg.dev/bmson-assistant/assistant-release-recovery/${role}@${images[role].child}`,
     baselineUidSha256: current.services[role].proof.uid,
     baselineTemplateSha256: current.services[role].proof.templateSha256,
     rehearsalUidSha256: sha(`rehearsal-${role}-fresh-revision`),
@@ -99,6 +101,8 @@ function fixture(now = fixedNow) {
     format: 1,
     kind: 'owner-release-restore-target',
     purpose: 'restore-paused-original-runtime-pair',
+    maintenanceRunId: expected.maintenanceRunId,
+    maintenanceReceiptSha256: sha('completed maintenance receipt'),
     source,
     buildRunId: buildRun,
     buildAttempt: '1',
@@ -136,12 +140,17 @@ describe('independently signed original restore targets', () => {
       runId: run,
       buildRunId: buildRun,
       reviewSha256: sha(JSON.stringify(payload)),
-      targets: {
-        agent: { ...payload.targets.agent, image: `${repository}/agent@${images.agent.child}` },
-        web: { ...payload.targets.web, image: `${repository}/web@${images.web.child}` },
-      },
+      targets: payload.targets,
     });
     expect(() => assertRestoreTargetReviewFresh(result, result.expiresAt)).toThrow(/stale/);
+  });
+
+  it('rejects an otherwise valid signed child in the original cleanup-managed repository', () => {
+    const { expected, payload } = fixture();
+    payload.targets.agent.image = `${repository}/agent@${images.agent.child}`;
+    expect(() =>
+      verifyRestoreTargetReview(signed(payload), publicKey, expected, fixedNow),
+    ).toThrow();
   });
 
   it('requires a signature in the restore domain and pins the signer', () => {
@@ -164,6 +173,8 @@ describe('independently signed original restore targets', () => {
     { originalRunId: '44263661118' },
     { originalAttempt: '2' },
     { buildRunId: '789' },
+    { maintenanceRunId: '78902' },
+    { maintenanceReceiptSha256: '' },
     { buildAttempt: '2' },
     { packSha256: sha('replacement pack') },
     { bootstrapSha256: sha('replacement bootstrap') },
@@ -354,6 +365,7 @@ describe('independently signed original restore targets', () => {
         GCP_PROJECT: 'bmson-assistant',
         GCP_REGION: 'us-west1',
         GITHUB_RUN_ID: run,
+        ARCHIVE_MAINTENANCE_RUN_ID: '78901',
         RELEASE_PREBUILT_RUN_ID: buildRun,
         RELEASE_PREBUILT_IMAGES_PATH: build,
         OWNER_RELEASE_RESTORE_TARGET_PROOF: signed(bound),

@@ -34,11 +34,19 @@ same-API compatible Firestore release can reuse the verified build-only run's ar
 
 ## Restore target for the archived API 1 pair
 
+Freeze the merged operator and runtime source before dispatching the build-only run. The protected release checks that the workflow SHA, checkout SHA, candidate source and signed build receipts all match. A subsequent workflow repair requires a build at the repaired source and a review of that exact image pair.
+
+Keep each original linux/amd64 child under its component name in the private production Artifact Registry repository `us-west1-docker.pkg.dev/bmson-assistant/assistant-release-recovery`. Retain immutable tags and keep cleanup policies disabled there throughout the recovery window. The signed `targets.agent.image` and `targets.web.image` are the full role-specific references in this repository at the original child digests. The original signed parent and the candidate build remain bound to their source repository. Preserve independent read access to the private source pack, restore images, and operator evidence through the window.
+
+Once before-maintenance finishes, the reviewer signs its actual `maintenanceRunId` and `maintenanceReceiptSha256` together with the closed bootstrap. Compute the receipt digest with `bootstrapDigest` over the parsed maintenance receipt. This binds the exact observation even if another run observed the same images.
+
 The opt-in path also reads a second signed envelope from `OWNER_RELEASE_RESTORE_TARGET_PROOF`. Its presence selects qualification for the archived original pair. Stage the reviewed pack and pinned Cosign executable as described in `owner-editor-release-inventory.md`. A signed restore review covers the verified first-attempt candidate build, its API 3 recovery review, the exact drained bootstrap, the original image and revision per role, and the independently observed recovery targets.
 
 In the isolated rehearsal, import the two archived linux/amd64 children by digest, check each manifest and its config and layers, and start fresh, paused revisions under distinct UIDs. Exercise a failure before possible admission and a lost response after admission with delivery held. Retain the native readbacks for both cases. The independent reviewer signs the compact payload bytes prefixed with `owner-release-restore-target-v1` and one NUL byte. The protected transition rechecks both signatures, provider targets, and the native pair at each recovery checkpoint. The build run is known at review time. Each release decision records the actual dispatch run and attempt.
 
-The hosted workflow still needs an authenticated way to stage the private pack, the pinned verifier, and the independently signed restore review before this opt-in path can be exercised there.
+The protected deploy accepts the exact successful `archive_maintenance_run_id` and the separately signed `archive_restore_proof`. The before-maintenance run observes the original native pair and archive and grants no mutation authority. Its artifact binds the actual first attempt, the candidate build and review, and the recovery evidence digest that will be reused in the closed bootstrap. Deploy verifies that artifact by exact run and matches both immutable native identities and that recovery evidence digest to the closed bootstrap supplied with `bootstrap_snapshot` and `bootstrap_snapshot_sha256`.
+
+Hosted staging requires read access to the fixed private archive object at the reviewed generation and both executable runtime graphs at their fixed destination. The protected runner verifies the archive and registry readback before acquiring any delivery guard. The separately reviewed closure and drain and the current held native state remain required. The ordinary deployment path does not use the archive inputs.
 
 When a reviewed archived restore target is configured, the release keeps a private journal
 bound to the selected source, workflow run, and first attempt. The admission record is
@@ -46,7 +54,6 @@ written before the first potentially reachable unpaused successor. An interrupte
 a recovery decision for observation, with an API 3 forward-only boundary after possible
 admission. No decision receipt authorizes a compensating write or delivery resume.
 
-The workflow uploads only the start, admission, and outcome receipts. If the runner terminates
-before retaining the journal, treat the interrupted state as unknown. An absent receipt cannot
-authorize pre-admission restoration. Reconcile the exact provider state with read-only evidence
-before reviewing any further action.
+Before the first production hold, retain the original queue, scheduler and subscription settings with the closure and recovery evidence outside the deploy runner. The independently accessible recovery repository and archive generation allow the release owner to inspect the original images if that runner disappears.
+
+The workflow uploads the archive handoff and the release journal's start, admission and outcome receipts. If it terminates before upload, keep delivery held and treat admission as possible. Reconcile the actual dispatch's revisions, native routes and outstanding operations independently. Use the recorded prior delivery settings for any reviewed restoration. A missing journal or delivery setting leaves the corresponding action on hold.

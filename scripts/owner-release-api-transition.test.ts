@@ -385,6 +385,8 @@ describe('protected transition entry point', () => {
       const initial = {
         source,
         reviewSha256: 'f'.repeat(64),
+        maintenanceRunId: '678',
+        maintenanceReceiptSha256: 'a'.repeat(64),
         runId: '456',
         buildRunId: '789',
         candidateBuildSha256: '9'.repeat(64),

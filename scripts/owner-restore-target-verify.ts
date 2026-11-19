@@ -7,7 +7,10 @@ import {
   reviewedCurrentEnvironment,
 } from './owner-release-current-snapshot.js';
 import { registerImageResolution } from './owner-release-image-resolution.js';
-import { protectedRestoreTargetReview } from './owner-restore-target-review.js';
+import {
+  ARCHIVED_RESTORE_REPOSITORY,
+  protectedRestoreTargetReview,
+} from './owner-restore-target-review.js';
 import { tagHash } from './owner-web-tag-retirement.js';
 
 const roleNames = ['agent', 'web'] as const;
@@ -132,6 +135,8 @@ export function verifyArchivedOriginalNativePair(
   }
 }
 
+const maxRegistryGraphBytes = 256 * 1024 * 1024;
+
 function descriptor(value: unknown, mediaTypes: string[]) {
   const row = object(value);
   check(
@@ -140,6 +145,7 @@ function descriptor(value: unknown, mediaTypes: string[]) {
       typeof row.size === 'number' &&
       Number.isSafeInteger(row.size) &&
       row.size > 0 &&
+      row.size <= maxRegistryGraphBytes &&
       typeof row.mediaType === 'string' &&
       mediaTypes.includes(row.mediaType) &&
       row.urls === undefined &&
@@ -159,7 +165,7 @@ function roleReadSet(role: Role, target: Targets[Role], archive: ArchivedRoleEvi
       archive.child.length <= 16 * 1024 &&
       digest(archive.parent) === target.parent &&
       digest(archive.child) === target.child &&
-      target.image === `${host}/${repository}/${role}@${target.child}`,
+      target.image === `${ARCHIVED_RESTORE_REPOSITORY}/${role}@${target.child}`,
   );
   // The pack reader has already verified the complete executable graph.
   const manifest = object(JSON.parse(archive.child.toString('utf8')));
@@ -184,9 +190,8 @@ function roleReadSet(role: Role, target: Targets[Role], archive: ArchivedRoleEvi
   return { role, target, archive, blobs: [...unique] };
 }
 
-/** Fresh, fixed-repository availability checks. The archived graph supplied the
- * verified config and layer bytes. HEAD checks current blob availability, not
- * file contents, provider startup or permission to deploy.
+/** Observe the exact archived child and rehash every executable blob from the
+ * fixed recovery repository. Blob redirects stay within the reviewed HTTPS origin.
  */
 export async function recheckArchivedRestoreTargets(
   token: string,
@@ -195,71 +200,150 @@ export async function recheckArchivedRestoreTargets(
   request: typeof fetch = fetch,
   deadline = Date.now() + 60_000,
 ) {
+  const controller = new AbortController();
   try {
     check(/^[A-Za-z0-9._~-]{1,16384}$/.test(token));
     const reads = roleNames.map((role) => roleReadSet(role, targets[role], archives[role]));
+    const total = reads.reduce(
+      (bytes, role) => bytes + role.blobs.reduce((sum, [, size]) => sum + size, 0),
+      0,
+    );
+    check(total <= maxRegistryGraphBytes);
     await Promise.all(
       reads.map(async ({ role, target, archive, blobs }) => {
-        const base = `https://${host}/v2/${repository}/${role}`;
-        async function lookup(path: string, method: 'GET' | 'HEAD') {
-          const timeout = Math.min(deadline - Date.now(), 15_000);
-          check(timeout > 0);
-          return request(base + path, {
-            method,
+        const repo = ARCHIVED_RESTORE_REPOSITORY.slice(host.length + 1);
+        const base = `https://${host}/v2/${repo}/${role}`;
+        async function lookup(url: string, accept?: string) {
+          const timeout = deadline - Date.now();
+          check(timeout > 0 && !controller.signal.aborted);
+          return request(url, {
+            method: 'GET',
             cache: 'no-store',
-            redirect: 'error',
-            signal: AbortSignal.timeout(timeout),
+            redirect: accept ? 'error' : 'manual',
+            signal: AbortSignal.any([controller.signal, AbortSignal.timeout(timeout)]),
             headers: {
               Authorization: `Bearer ${token}`,
-              ...(method === 'GET' ? { Accept: manifestType } : {}),
+              'Accept-Encoding': 'identity',
+              ...(accept ? { Accept: accept } : {}),
             },
           });
         }
-        const response = await lookup(`/manifests/${target.child}`, 'GET');
-        if (
-          response.status !== 200 ||
-          !response.body ||
-          response.headers.get('content-type')?.split(';')[0]?.trim() !== manifestType
-        ) {
+
+        async function readBlob(id: string) {
+          const url = `${base}/blobs/${id}`;
+          const response = await lookup(url);
+          if (response.status !== 302) return response;
           void response.body?.cancel().catch(() => undefined);
-          check(false);
+          const location = response.headers.get('location');
+          check(
+            location &&
+              location.length <= 8192 &&
+              location.startsWith('/artifacts-downloads/') &&
+              /^[!-~]+$/.test(location) &&
+              !/[\\#]/.test(location),
+          );
+          const next = new URL(location, url);
+          check(
+            next.protocol === 'https:' &&
+              next.hostname === host &&
+              next.pathname.startsWith('/artifacts-downloads/') &&
+              !next.port &&
+              !next.username &&
+              !next.password &&
+              !next.hash,
+          );
+          // A second redirect is rejected by the body checker.
+          return lookup(next.href);
         }
-        const reader = response.body.getReader();
-        try {
-          let offset = 0;
-          for (;;) {
-            const { value, done } = await reader.read();
-            if (done) break;
-            check(
-              offset + value.length <= archive.child.length &&
-                archive.child.subarray(offset, offset + value.length).equals(value),
-            );
-            offset += value.length;
-          }
-          check(offset === archive.child.length && Date.now() < deadline);
-        } finally {
-          void reader.cancel().catch(() => undefined);
-        }
+
+        const manifest = await lookup(`${base}/manifests/${target.child}`, manifestType);
+        await checkRegistryBody(
+          manifest,
+          archive.child.length,
+          target.child,
+          deadline,
+          manifestType,
+        );
 
         for (let index = 0; index < blobs.length; index += 4) {
           await Promise.all(
             blobs.slice(index, index + 4).map(async ([id, size]) => {
-              const blob = await lookup(`/blobs/${id}`, 'HEAD');
-              void blob.body?.cancel().catch(() => undefined);
-              const declaredDigest = blob.headers.get('docker-content-digest');
-              check(
-                blob.status === 200 &&
-                  blob.headers.get('content-length') === String(size) &&
-                  (declaredDigest === null || declaredDigest === id) &&
-                  Date.now() < deadline,
-              );
+              const blob = await readBlob(id);
+              await checkRegistryBody(blob, size, id, deadline);
             }),
           );
         }
       }),
     );
   } catch {
+    controller.abort();
     // Provider errors may include private URLs or token-bearing transport details.
     throw new Error('Archived restore target is unavailable');
   }
+}
+
+async function checkRegistryBody(
+  response: Response,
+  size: number,
+  expectedDigest: string,
+  deadline: number,
+  mediaType?: string,
+) {
+  const declaredSize = response.headers.get('content-length');
+  const declaredDigest = response.headers.get('docker-content-digest');
+  if (
+    response.status !== 200 ||
+    !response.body ||
+    response.headers.get('content-encoding') !== null ||
+    (declaredSize !== null && declaredSize !== String(size)) ||
+    (declaredDigest !== null && declaredDigest !== expectedDigest) ||
+    (mediaType && response.headers.get('content-type')?.split(';')[0]?.trim() !== mediaType)
+  ) {
+    void response.body?.cancel().catch(() => undefined);
+    check(false);
+  }
+  const hash = createHash('sha256');
+  let count = 0;
+  const reader = response.body.getReader();
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      check(Date.now() < deadline);
+      if (done) break;
+      count += value.length;
+      check(count <= size);
+      hash.update(value);
+    }
+    check(count === size && `sha256:${hash.digest('hex')}` === expectedDigest);
+  } finally {
+    void reader.cancel().catch(() => undefined);
+  }
+}
+
+/** Check the authenticated archive's executable children before any native
+ * maintenance or promotion writes. The signed transition review separately
+ * binds these same digests to the resulting disabled bootstrap.
+ */
+export async function recheckReviewedArchivedRuntimeGraph(
+  token: string,
+  pack: ArchivedPack,
+  request: typeof fetch = fetch,
+  deadline = Date.now() + 60_000,
+) {
+  const target = (role: Role) => {
+    const { parent, child } = pack.roles[role];
+    const childDigest = digest(child);
+    return {
+      image: `${ARCHIVED_RESTORE_REPOSITORY}/${role}@${childDigest}`,
+      parent: digest(parent),
+      child: childDigest,
+    };
+  };
+  await recheckArchivedRestoreTargets(
+    token,
+    { agent: target('agent'), web: target('web') },
+    pack.roles,
+    request,
+    deadline,
+  );
 }

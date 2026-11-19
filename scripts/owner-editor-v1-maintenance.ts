@@ -9,6 +9,8 @@ import {
   runOwnerEditorMaintenance,
 } from '@assistant/firestore/owner-editor-maintenance';
 import { GoogleAuth } from 'google-auth-library';
+import { withHostedArchivedRuntimePack } from './owner-archived-runtime-hosted.js';
+import { observeArchivedRuntimePair } from './owner-archived-runtime-native.js';
 import {
   createReadOnlyGet,
   requiresBasicEditorPreflight,
@@ -22,8 +24,23 @@ import {
   maintenancePacketDigest,
   packetRecipient,
 } from './owner-editor-v1-packet.js';
+import { bootstrapDigest } from './owner-release-current-snapshot.js';
+import {
+  archivedOriginalReceiptBinding,
+  createBeforeMaintenanceReceipt,
+  protectedBeforeMaintenanceContext,
+  readTrustedMaintenanceRun,
+  writeBeforeMaintenanceReceipt,
+} from './owner-release-maintenance-run.js';
+import { recheckReviewedArchivedRuntimeGraph } from './owner-restore-target-verify.js';
 
-const modes = ['prepare-initialize', 'prepare-disable', 'dry-run', 'apply'] as const;
+const modes = [
+  'prepare-initialize',
+  'prepare-disable',
+  'dry-run',
+  'apply',
+  'before-maintenance',
+] as const;
 function boundedFile(path: string, max: number) {
   const stat = lstatSync(path);
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size > max)
@@ -51,6 +68,8 @@ export function verifyOperatorSource(
     throw new Error('Untrusted operator source');
   if (env.OWNER_EDITOR_MAINTENANCE_MODE?.startsWith('prepare-'))
     packetRecipient(env.OWNER_EDITOR_PACKET_RECIPIENT_PUBLIC_KEY ?? '');
+  if (env.OWNER_EDITOR_MAINTENANCE_MODE === 'before-maintenance')
+    protectedBeforeMaintenanceContext(env, head);
 }
 export function validateOperatorObservation(raw: unknown, env: NodeJS.ProcessEnv, now: number) {
   if (!raw || typeof raw !== 'object') throw new Error('Missing prerequisite observation');
@@ -80,6 +99,47 @@ export function validateOperatorObservation(raw: unknown, env: NodeJS.ProcessEnv
     throw new Error('Release prerequisites unproven');
   return receipt.services as Array<Record<string, unknown>>;
 }
+async function observeBeforeMaintenance(env: NodeJS.ProcessEnv, head: string) {
+  const { intent, runId } = protectedBeforeMaintenanceContext(env, head);
+  const githubToken = env.OWNER_RELEASE_MAINTENANCE_GITHUB_TOKEN ?? '';
+  const identity = verifyWifEnvironment(env, (path) => JSON.parse(boundedFile(path, 32768)));
+  const runIdentitySha256 = await readTrustedMaintenanceRun(runId, head, githubToken);
+  const auth = new GoogleAuth().fromJSON(JSON.parse(boundedFile(identity.file, 32768)));
+  const token = (await auth.getAccessToken()).token;
+  if (!token || !env.RUNNER_TEMP)
+    throw new Error('Protected before-maintenance identity unavailable');
+  const receipt = await withHostedArchivedRuntimePack(env, token, async (pack, binding) => {
+    if (
+      pack.sha256 !== intent.packSha256 ||
+      bootstrapDigest(pack.nativeBinding) !== intent.nativeBindingSha256 ||
+      binding.generation !== intent.generation ||
+      binding.objectSha256 !== intent.objectSha256
+    )
+      throw new Error('Reviewed original archive changed');
+    const deadline = Date.now() + 60_000;
+    const read = createReadOnlyGet(token, deadline);
+    const before = await observeArchivedRuntimePair(pack.nativeBinding, pack.roles, read);
+    await recheckReviewedArchivedRuntimeGraph(token, pack, fetch, deadline);
+    const after = await observeArchivedRuntimePair(pack.nativeBinding, pack.roles, read);
+    const confirmed = protectedBeforeMaintenanceContext(env, head);
+    if (
+      bootstrapDigest(before) !== bootstrapDigest(after) ||
+      bootstrapDigest(confirmed) !== bootstrapDigest({ intent, runId }) ||
+      (await readTrustedMaintenanceRun(runId, head, githubToken)) !== runIdentitySha256
+    )
+      throw new Error('Before-maintenance proof drifted');
+    return createBeforeMaintenanceReceipt({
+      intent,
+      runId,
+      runIdentitySha256,
+      archivedReadbackSha256: bootstrapDigest(after),
+      original: archivedOriginalReceiptBinding(pack),
+      observedAt: Date.now(),
+    });
+  });
+  writeBeforeMaintenanceReceipt(env.RUNNER_TEMP, receipt);
+}
+
 async function main() {
   if (process.argv[2] === '--packet-digest') {
     if (process.argv.length !== 4) throw new Error('Invalid digest arguments');
@@ -121,6 +181,9 @@ async function main() {
   );
   if (process.argv[2] === '--verify-source') return;
   const mode = env.OWNER_EDITOR_MAINTENANCE_MODE;
+  if (mode === 'before-maintenance') return observeBeforeMaintenance(env, head);
+  if (env.OWNER_RELEASE_BEFORE_MAINTENANCE_INTENT)
+    throw new Error('Unexpected before-maintenance intent');
   const isPrepare = mode === 'prepare-initialize' || mode === 'prepare-disable';
   const packetText = env.OWNER_EDITOR_V1_REVIEWED_PACKET;
   let reviewedPacket: ReturnType<typeof parseOwnerEditorMaintenancePacket> | undefined;

@@ -7,7 +7,7 @@ on:
         description: Reviewed operation (prepare and dry-run never write database data)
         type: choice
         required: true
-        options: [prepare-initialize, prepare-disable, dry-run, apply]
+        options: [prepare-initialize, prepare-disable, dry-run, apply, before-maintenance]
       release_sha:
         description: Exact reviewed current main SHA
         type: string
@@ -21,7 +21,13 @@ on:
         type: string
         required: false
 
+      before_maintenance_intent:
+        description: Independent signed archive and candidate review for the read-only before-maintenance check
+        type: string
+        required: false
+
 permissions:
+  actions: read
   contents: read
   id-token: write
 
@@ -43,6 +49,9 @@ jobs:
       OWNER_EDITOR_RELEASE_SHA: ${{ inputs.release_sha }}
       OWNER_EDITOR_PACKET_RECIPIENT_PUBLIC_KEY: ${{ inputs.recipient_public_key }}
       OWNER_EDITOR_V1_REVIEWED_PACKET_SHA256: ${{ inputs.reviewed_packet_sha256 }}
+      OWNER_RELEASE_BEFORE_MAINTENANCE_INTENT: ${{ inputs.before_maintenance_intent }}
+      OWNER_ARCHIVED_RUNTIME_GENERATION: ${{ vars.OWNER_ARCHIVED_RUNTIME_GENERATION }}
+      OWNER_ARCHIVED_RUNTIME_OBJECT_SHA256: ${{ vars.OWNER_ARCHIVED_RUNTIME_OBJECT_SHA256 }}
     steps:
       - name: Checkout trusted operator source
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -50,6 +59,7 @@ jobs:
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
       - name: Checkout approved index manifest as data
+        if: inputs.mode != 'before-maintenance'
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           ref: 04c17b04ab9d76d005b04121927c189baa6edaf9
@@ -72,9 +82,30 @@ jobs:
       - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db
         with:
           version: 576.0.0
+      - name: Install the pinned original image signature verifier
+        if: inputs.mode == 'before-maintenance'
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: v3.1.4
+          install-dir: ${{ github.workspace }}/.artifacts/archived-runtime-tools
+      - name: Observe the original pair and recoverability before maintenance
+        if: inputs.mode == 'before-maintenance'
+        env:
+          OWNER_RELEASE_MAINTENANCE_GITHUB_TOKEN: ${{ github.token }}
+        run: pnpm exec tsx scripts/owner-editor-v1-maintenance.ts
+      - name: Retain sanitized before-maintenance receipt
+        if: success() && inputs.mode == 'before-maintenance'
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        with:
+          name: owner-release-before-maintenance-${{ github.run_id }}-1
+          path: ${{ runner.temp }}/owner-release-before-maintenance.json
+          if-no-files-found: error
+          retention-days: 1
       - name: Refresh read-only recovery and index observation
+        if: inputs.mode != 'before-maintenance'
         run: pnpm exec tsx scripts/owner-editor-release-inventory.ts --collect
       - name: Execute bounded metadata operation
+        if: inputs.mode != 'before-maintenance'
         env:
           OWNER_EDITOR_V1_REVIEWED_PACKET: ${{ (inputs.mode == 'apply' || inputs.mode == 'dry-run') && secrets.OWNER_EDITOR_V1_REVIEWED_PACKET || '' }}
         run: pnpm exec tsx scripts/owner-editor-v1-maintenance.ts

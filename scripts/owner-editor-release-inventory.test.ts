@@ -236,6 +236,32 @@ describe('prerequisites pre-auth source and configuration binding', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+  it('routes archived observation only through the bound read-only job', () => {
+    const workflow = readFileSync(
+      new URL('../.github/workflows/owner-editor-release-inventory.yml', import.meta.url),
+      'utf8',
+    );
+    const archive = workflow.split('  archived-runtime:\n')[1]?.split('  recovery-pair:\n')[0];
+    if (!archive) throw new Error('archived-runtime job missing');
+    expect(archive).toContain("inputs.observation_mode == 'archived-runtime'");
+    expect(archive).toContain("github.ref == 'refs/heads/main' && github.run_attempt == 1");
+    expect(archive).toContain('OWNER_ARCHIVED_RUNTIME_INTAKE: hosted');
+    expect(archive).toContain('vars.OWNER_ARCHIVED_RUNTIME_GENERATION');
+    expect(archive).toContain('vars.OWNER_ARCHIVED_RUNTIME_OBJECT_SHA256');
+    expect(archive.indexOf('--verify-archived-source')).toBeLessThan(
+      archive.indexOf('google-github-actions/auth@'),
+    );
+    expect(archive.indexOf('sha256sum --check --status')).toBeLessThan(
+      archive.indexOf('google-github-actions/auth@'),
+    );
+    expect(archive.indexOf('--observe-archived-runtime')).toBeGreaterThan(
+      archive.indexOf('google-github-actions/auth@'),
+    );
+    expect(archive.match(/^\s+path: .+$/gm)?.map((line) => line.trim())).toEqual([
+      'path: owner-archived-runtime-observation.json',
+    ]);
+  });
+
   it('binds only the prerequisites job before normal-success auth and preserves recovery', () => {
     const workflow = readFileSync(
       new URL('../.github/workflows/owner-editor-release-inventory.yml', import.meta.url),
@@ -245,7 +271,7 @@ describe('prerequisites pre-auth source and configuration binding', () => {
     expect(fingerprint(recovery)).toBe(
       '3777df478f8a3c56fbf4bde98aace57a44d1406a3d678c19a7714ca9080e9dea',
     );
-    const observe = workflow.split('  observe:\n')[1]?.split('  recovery-pair:\n')[0];
+    const observe = workflow.split('  observe:\n')[1]?.split('  archived-runtime:\n')[0];
     if (!observe) throw new Error('observe job missing');
     for (const input of [
       'source_sha',

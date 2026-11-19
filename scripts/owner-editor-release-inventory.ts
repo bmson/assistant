@@ -743,7 +743,12 @@ async function observeArchivedOriginal(mark: InventoryStageMarker) {
   mark('archived_runtime_evidence');
   const { loadReviewedArchivedRuntimePack } = await import('./owner-archived-runtime-input.js');
   const { observeArchivedRuntimePair } = await import('./owner-archived-runtime-native.js');
-  const pack = await loadReviewedArchivedRuntimePack();
+  const hosted = process.env.OWNER_ARCHIVED_RUNTIME_INTAKE !== undefined;
+  const intake = hosted ? await import('./owner-archived-runtime-hosted.js') : undefined;
+  if (hosted && process.env.OWNER_ARCHIVED_RUNTIME_INTAKE !== 'hosted')
+    throw new Error('invalid archived runtime intake mode');
+  if (intake) intake.verifyArchiveObjectBinding(process.env);
+  const localPack = intake ? undefined : await loadReviewedArchivedRuntimePack();
   const { childEnv } = inventoryCredentialContext(mark);
   mark('access_token');
   const { stdout } = await exec('gcloud', ['auth', 'print-access-token', '--quiet'], {
@@ -752,17 +757,32 @@ async function observeArchivedOriginal(mark: InventoryStageMarker) {
     maxBuffer: 16384,
     killSignal: 'SIGKILL',
   });
-  mark('archived_runtime_observation');
-  const observed = await observeArchivedRuntimePair(
-    pack.nativeBinding,
-    pack.roles,
-    createReadOnlyGet(stdout.trim(), Date.now() + 60_000),
-  );
+  const token = stdout.trim();
+  async function observe(pack: Awaited<ReturnType<typeof loadReviewedArchivedRuntimePack>>) {
+    mark('archived_runtime_observation');
+    return {
+      packSha256: pack.sha256,
+      observation: await observeArchivedRuntimePair(
+        pack.nativeBinding,
+        pack.roles,
+        createReadOnlyGet(token, Date.now() + 60_000),
+      ),
+    };
+  }
+  mark('archived_runtime_evidence');
+  const observation = intake
+    ? await intake.withHostedArchivedRuntimePack(process.env, token, async (pack, binding) => ({
+        ...(await observe(pack)),
+        archiveObject: binding,
+      }))
+    : localPack
+      ? await observe(localPack)
+      : undefined;
+  if (!observation) throw new Error('invalid archive input');
   const receipt = {
     format: 1,
     kind: 'archived-original-runtime-observation',
-    packSha256: pack.sha256,
-    observation: observed,
+    ...observation,
     workflowSource: process.env.GITHUB_SHA,
     workflowRun: process.env.GITHUB_RUN_ID,
     observedAt: new Date().toISOString(),
@@ -779,6 +799,16 @@ async function observeArchivedOriginal(mark: InventoryStageMarker) {
 async function main(mark: InventoryStageMarker) {
   mark('arguments');
   const mode = process.argv[2];
+  if (process.argv.length === 3 && mode === '--verify-archived-source') {
+    mark('protected_context');
+    verifyPrerequisitesBinding(process.env);
+    mark('archived_runtime_evidence');
+    if (process.env.OWNER_ARCHIVED_RUNTIME_INTAKE !== 'hosted')
+      throw new Error('invalid archived runtime intake mode');
+    const { verifyArchiveObjectBinding } = await import('./owner-archived-runtime-hosted.js');
+    verifyArchiveObjectBinding(process.env);
+    return;
+  }
   if (process.argv.length === 3 && mode === '--observe-archived-runtime') {
     return observeArchivedOriginal(mark);
   }

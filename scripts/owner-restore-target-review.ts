@@ -23,6 +23,8 @@ const REGION = 'us-west1';
 const DATABASE = 'assistant-production';
 const REHEARSAL_PROJECT = 'friendly-vigil-514906-p2';
 const REPOSITORY = 'us-west1-docker.pkg.dev/bmson-assistant/assistant';
+export const ARCHIVED_RESTORE_REPOSITORY =
+  'us-west1-docker.pkg.dev/bmson-assistant/assistant-release-recovery';
 const WORKFLOW_REF = 'bmson/assistant/.github/workflows/deploy.yml@refs/heads/main';
 const TTL = 24 * 60 * 60 * 1000;
 const HASH = /^[0-9a-f]{64}$/;
@@ -54,6 +56,8 @@ type Target = {
 
 export type RestoreTargetReview = {
   reviewSha256: string;
+  maintenanceRunId: string;
+  maintenanceReceiptSha256: string;
   source: string;
   /** Actual first-attempt production dispatch. This ID does not exist at signing time. */
   runId: string;
@@ -66,6 +70,7 @@ export type RestoreTargetReview = {
 };
 
 type ExpectedReview = {
+  maintenanceRunId: string;
   current: BootstrapReceipt;
   packSha256: string;
   candidateBuildSha256: string;
@@ -154,9 +159,10 @@ export function verifyRestoreTargetReview(
 
   const value = object(
     parsePayload(payload),
-    'format,kind,purpose,source,buildRunId,buildAttempt,candidateBuildSha256,candidateReviewSha256,originalSource,originalRunId,originalAttempt,project,region,database,bootstrapSha256,packSha256,observedAt,expiresAt,targets,rehearsal',
+    'format,kind,purpose,source,buildRunId,buildAttempt,maintenanceRunId,maintenanceReceiptSha256,candidateBuildSha256,candidateReviewSha256,originalSource,originalRunId,originalAttempt,project,region,database,bootstrapSha256,packSha256,observedAt,expiresAt,targets,rehearsal',
   );
   const { current, runId, buildRunId } = expected;
+  const { maintenanceRunId, maintenanceReceiptSha256 } = value;
   const closedSha256 = bootstrapDigest(current);
   reviewedBootstrap(current, closedSha256, current.source);
   check(current.kind === 'disabled-bootstrap', 'current pair is not a drained bootstrap');
@@ -173,6 +179,11 @@ export function verifyRestoreTargetReview(
       value.source !== ORIGINAL_SOURCE &&
       value.buildRunId === buildRunId &&
       value.buildAttempt === '1' &&
+      matches(maintenanceRunId, RUN) &&
+      maintenanceRunId === expected.maintenanceRunId &&
+      maintenanceRunId !== runId &&
+      maintenanceRunId !== buildRunId &&
+      matches(maintenanceReceiptSha256, HASH) &&
       matches(value.candidateBuildSha256, HASH) &&
       value.candidateBuildSha256 === expected.candidateBuildSha256 &&
       matches(value.candidateReviewSha256, HASH) &&
@@ -219,13 +230,15 @@ export function verifyRestoreTargetReview(
   for (const role of ROLES) {
     const target = object(
       signedTargets[role],
-      'parent,child,baselineUidSha256,baselineTemplateSha256,rehearsalUidSha256',
+      'image,parent,child,baselineUidSha256,baselineTemplateSha256,rehearsalUidSha256',
     );
     const binding = current.services[role];
     const { parent, child } = ORIGINAL_IMAGES[role];
+    const image = `${ARCHIVED_RESTORE_REPOSITORY}/${role}@${child}`;
     const { baselineUidSha256, baselineTemplateSha256, rehearsalUidSha256 } = target;
     check(
-      target.parent === parent &&
+      target.image === image &&
+        target.parent === parent &&
         target.child === child &&
         binding.image === `${REPOSITORY}/${role}@${parent}` &&
         binding.proof.source === ORIGINAL_SOURCE &&
@@ -243,7 +256,7 @@ export function verifyRestoreTargetReview(
     uids.add(baselineUidSha256);
     uids.add(rehearsalUidSha256);
     targets[role] = {
-      image: `${REPOSITORY}/${role}@${child}`,
+      image,
       parent,
       child,
       baselineUidSha256,
@@ -255,6 +268,8 @@ export function verifyRestoreTargetReview(
 
   return {
     reviewSha256: createHash('sha256').update(payload).digest('hex'),
+    maintenanceRunId,
+    maintenanceReceiptSha256,
     source: current.source,
     runId,
     buildRunId,
@@ -295,6 +310,7 @@ export function protectedRestoreTargetReview(
   packSha256: string,
 ): RestoreTargetReview {
   const { GITHUB_RUN_ID: runId, RELEASE_PREBUILT_RUN_ID: buildRunId } = env;
+  const maintenanceRunId = env.ARCHIVE_MAINTENANCE_RUN_ID;
   check(
     env.GITHUB_ACTIONS === 'true' &&
       env.GITHUB_REPOSITORY === 'bmson/assistant' &&
@@ -310,6 +326,7 @@ export function protectedRestoreTargetReview(
       env.GCP_REGION === REGION &&
       matches(runId, RUN) &&
       matches(buildRunId, RUN) &&
+      matches(maintenanceRunId, RUN) &&
       matches(packSha256, HASH) &&
       typeof env.OWNER_RELEASE_RESTORE_TARGET_PROOF === 'string',
     'untrusted production dispatch',
@@ -324,6 +341,7 @@ export function protectedRestoreTargetReview(
       packSha256,
       candidateReviewSha256,
       candidateBuildSha256: build.candidateBuildSha256,
+      maintenanceRunId,
       buildRunId,
       runId,
     },

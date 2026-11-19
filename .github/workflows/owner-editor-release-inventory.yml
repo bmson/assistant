@@ -10,20 +10,21 @@ on:
         options:
           - prerequisites
           - recovery-pair
+          - archived-runtime
       prerequisites_source_sha:
-        description: Approved exact run, workflow and checkout SHA; required for prerequisites only
+        description: Approved exact run, workflow and checkout SHA; required for prerequisites and archived-runtime
         type: string
         required: false
       prerequisites_project_sha256:
-        description: Approved SHA256 of exact configured project bytes; prerequisites only
+        description: Approved SHA256 of exact configured project bytes; prerequisites and archived-runtime
         type: string
         required: false
       prerequisites_service_account_sha256:
-        description: Approved SHA256 of exact configured service account bytes; prerequisites only
+        description: Approved SHA256 of exact configured service account bytes; prerequisites and archived-runtime
         type: string
         required: false
       prerequisites_wif_provider_sha256:
-        description: Approved SHA256 of exact configured WIF provider bytes; prerequisites only
+        description: Approved SHA256 of exact configured WIF provider bytes; prerequisites and archived-runtime
         type: string
         required: false
       recovery_source_sha:
@@ -118,6 +119,61 @@ jobs:
           path: owner-editor-inventory-failure.encrypted.json
           if-no-files-found: ignore
           retention-days: 1
+
+  archived-runtime:
+    if: github.ref == 'refs/heads/main' && github.run_attempt == 1 && inputs.observation_mode == 'archived-runtime'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: production
+    env:
+      GCP_PROJECT: ${{ vars.GCP_PROJECT }}
+      GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+      GCP_DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+      OWNER_EDITOR_APPROVED_SOURCE_SHA: ${{ inputs.prerequisites_source_sha }}
+      OWNER_EDITOR_APPROVED_PROJECT_SHA256: ${{ inputs.prerequisites_project_sha256 }}
+      OWNER_EDITOR_APPROVED_SERVICE_ACCOUNT_SHA256: ${{ inputs.prerequisites_service_account_sha256 }}
+      OWNER_EDITOR_APPROVED_WIF_PROVIDER_SHA256: ${{ inputs.prerequisites_wif_provider_sha256 }}
+      OWNER_ARCHIVED_RUNTIME_INTAKE: hosted
+      OWNER_ARCHIVED_RUNTIME_GENERATION: ${{ vars.OWNER_ARCHIVED_RUNTIME_GENERATION }}
+      OWNER_ARCHIVED_RUNTIME_OBJECT_SHA256: ${{ vars.OWNER_ARCHIVED_RUNTIME_OBJECT_SHA256 }}
+    steps:
+      - name: Checkout trusted workflow source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Verify fixed archive binding and source before cloud authentication
+        run: OWNER_EDITOR_CHECKOUT_SHA="$(git rev-parse HEAD)" pnpm exec tsx scripts/owner-editor-release-inventory.ts --verify-archived-source
+      - name: Install hash-pinned Cosign from its immutable release
+        run: |
+          mkdir -p .artifacts/archived-runtime-tools
+          curl --proto '=https' --proto-redir '=https' --max-redirs 3 --fail --silent --show-error --location --max-time 45 --max-filesize 167772160 --output .artifacts/archived-runtime-tools/cosign https://github.com/sigstore/cosign/releases/download/v3.1.4/cosign-linux-amd64
+          echo '424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa  .artifacts/archived-runtime-tools/cosign' | sha256sum --check --status
+          chmod 0700 .artifacts/archived-runtime-tools/cosign
+      - name: Authenticate with existing protected WIF identity
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093
+        with:
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          project_id: ${{ env.GCP_PROJECT }}
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db
+        with:
+          version: 576.0.0
+      - name: Read and verify the exact reviewed archive and observe the original pair
+        run: OWNER_EDITOR_CHECKOUT_SHA="$(git rev-parse HEAD)" pnpm exec tsx scripts/owner-editor-release-inventory.ts --observe-archived-runtime
+      - name: Retain the sanitized original-runtime observation
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        with:
+          name: owner-archived-runtime-observation-${{ github.sha }}-${{ github.run_id }}
+          path: owner-archived-runtime-observation.json
+          if-no-files-found: error
+          retention-days: 14
 
   recovery-pair:
     if: github.ref == 'refs/heads/main' && github.run_attempt == 1 && inputs.observation_mode == 'recovery-pair'

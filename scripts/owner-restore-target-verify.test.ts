@@ -20,19 +20,21 @@ import { protectedWebTagCloud } from './owner-web-tag-cloud.js';
 
 const manifestType = 'application/vnd.oci.image.manifest.v1+json';
 const host = 'us-west1-docker.pkg.dev';
-const repository = 'bmson-assistant/assistant';
+const repository = 'bmson-assistant/assistant-release-recovery';
+const historicalRepository = 'bmson-assistant/assistant';
 const digest = (value: Buffer) => `sha256:${createHash('sha256').update(value).digest('hex')}`;
 
 function role(role: 'agent' | 'web') {
+  const bodies = [Buffer.alloc(256, 1), Buffer.alloc(4096, 2)] as const;
   const blobs = [
     {
-      digest: `sha256:${'1'.repeat(64)}`,
-      size: 256,
+      digest: digest(bodies[0]),
+      size: bodies[0].length,
       mediaType: 'application/vnd.oci.image.config.v1+json',
     },
     {
-      digest: `sha256:${'2'.repeat(64)}`,
-      size: 4096,
+      digest: digest(bodies[1]),
+      size: bodies[1].length,
       mediaType: 'application/vnd.oci.image.layer.v1.tar+gzip',
     },
   ];
@@ -72,7 +74,7 @@ function role(role: 'agent' | 'web') {
     parent: digest(parent),
     child: digest(child),
   };
-  return { archive, target, blobs };
+  return { archive, target, blobs, bodies };
 }
 
 function fixture(
@@ -82,18 +84,30 @@ function fixture(
     | 'no manifest media type'
     | 'missing layer'
     | 'wrong blob size'
-    | 'wrong blob digest',
+    | 'wrong blob digest'
+    | 'corrupt same-size layer'
+    | 'redirected layer'
+    | 'relative layer'
+    | 'redirect chain'
+    | 'untrusted same-origin path',
 ) {
   const agent = role('agent');
   const web = role('web');
   const request = vi.fn<typeof fetch>(async (input, init) => {
     const url = new URL(String(input));
-    const [, version, project, repo, roleName, type, digest] = url.pathname.split('/');
+    const redirected = url.pathname.startsWith('/artifacts-downloads/');
+    const [, version, project, repo, roleName, type, digest] = url.pathname
+      .replace(/^\/artifacts-downloads\//, '/v2/bmson-assistant/assistant-release-recovery/')
+      .split('/');
     expect(url.hostname).toBe(host);
-    expect([version, project, repo]).toEqual(['v2', 'bmson-assistant', 'assistant']);
+    expect([version, project, repo]).toEqual([
+      'v2',
+      'bmson-assistant',
+      'assistant-release-recovery',
+    ]);
     expect(init).toMatchObject({
       cache: 'no-store',
-      redirect: 'error',
+      redirect: type === 'manifests' ? 'error' : 'manual',
       headers: { Authorization: 'Bearer fixture' },
     });
     const current = roleName === 'agent' ? agent : web;
@@ -112,12 +126,39 @@ function fixture(
       });
     }
     expect(type).toBe('blobs');
-    expect(init?.method).toBe('HEAD');
-    const blob = current.blobs.find((expected) => digest === expected.digest);
+    expect(init?.method).toBe('GET');
+    const index = current.blobs.findIndex((expected) => digest === expected.digest);
+    const blob = current.blobs[index];
     if (!blob) throw new Error('Unexpected blob target');
-    if (blob.size === 4096 && defect === 'missing layer')
-      return new Response(null, { status: 404 });
-    return new Response(null, {
+    if (index === 1 && defect === 'missing layer') return new Response(null, { status: 404 });
+    if (index === 1 && defect === 'untrusted same-origin path')
+      return new Response(null, { status: 302, headers: { location: '/v2/unrelated' } });
+    if (index === 1 && defect === 'redirected layer')
+      return new Response(null, { status: 302, headers: { location: '//other.invalid/path' } });
+    if (
+      index === 1 &&
+      (defect === 'relative layer' || defect === 'redirect chain') &&
+      (!redirected || defect === 'redirect chain')
+    )
+      return new Response(null, {
+        status: 302,
+        headers: {
+          location: `/artifacts-downloads/${roleName}/blobs/${digest}?opaque=reviewed-fixture`,
+        },
+      });
+    const body = current.bodies[index];
+    if (!body) throw new Error('Missing test blob');
+    const corrupt = Buffer.from(body);
+    if (index === 1 && defect === 'corrupt same-size layer') corrupt.fill(0, 0, 1);
+    const bytes = new Uint8Array(corrupt);
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(bytes.subarray(0, 11));
+        controller.enqueue(bytes.subarray(11));
+        controller.close();
+      },
+    });
+    return new Response(stream, {
       headers: {
         'content-length': defect === 'wrong blob size' ? '1' : String(blob.size),
         'docker-content-digest':
@@ -137,7 +178,7 @@ describe('uncached deployed restore-target readback', () => {
     await expect(run()).resolves.toBeUndefined();
     await expect(run()).resolves.toBeUndefined();
     expect(request).toHaveBeenCalledTimes(12);
-    expect(request.mock.calls.filter(([, options]) => options?.method === 'GET')).toHaveLength(4);
+    expect(request.mock.calls.filter(([, options]) => options?.method === 'GET')).toHaveLength(12);
     expect(new Set(request.mock.calls.map(([url]) => url))).toHaveLength(6);
   });
 
@@ -148,8 +189,25 @@ describe('uncached deployed restore-target readback', () => {
     'missing layer',
     'wrong blob size',
     'wrong blob digest',
+    'corrupt same-size layer',
+    'redirected layer',
+    'redirect chain',
+    'untrusted same-origin path',
   ] as const)('rejects %s', async (defect) => {
     await expect(fixture(defect).run()).rejects.toThrow('Archived restore target is unavailable');
+  });
+
+  it('verifies a same-origin relative blob redirect without skipping the checksum', async () => {
+    const { request, run } = fixture('relative layer');
+    await expect(run()).resolves.toBeUndefined();
+    expect(request.mock.calls.filter(([url]) => String(url).includes('?opaque='))).toHaveLength(2);
+    expect(request.mock.calls.every(([url]) => new URL(String(url)).hostname === host)).toBe(true);
+  });
+
+  it('does not follow a foreign blob redirect even with matching headers', async () => {
+    const { request, run } = fixture('redirected layer');
+    await expect(run()).rejects.toThrow('Archived restore target is unavailable');
+    expect(request.mock.calls.every(([url]) => new URL(String(url)).hostname === host)).toBe(true);
   });
 
   it('validates the full pair before making a request', async () => {
@@ -196,7 +254,9 @@ describe('explicit protected archive preload', () => {
     for (const name of ['agent', 'web'] as const) {
       const target = targets[name];
       const uid = `fixture-${name}-uid`;
-      const image = target.image.replace(target.child, target.parent);
+      const image = target.image
+        .replace(repository, historicalRepository)
+        .replace(target.child, target.parent);
       const revision = `${basename}-${name}`;
       bindings[name] = {
         uid,
@@ -253,9 +313,10 @@ describe('explicit protected archive preload', () => {
     const wrongRevision = structuredClone(current);
     wrongRevision.services.web.proof.uid = 'a'.repeat(64);
     expect(() => registerReviewedArchivedOriginal(wrongRevision, pack)).toThrow();
-    const agentStatus = { name: 'agent-1', imageDigest: targets.agent.image };
+    const archivedAgentImage = targets.agent.image.replace(repository, historicalRepository);
+    const agentStatus = { name: 'agent-1', imageDigest: archivedAgentImage };
     const agent = {
-      containers: [{ name: 'agent-1', image: targets.agent.image }],
+      containers: [{ name: 'agent-1', image: archivedAgentImage }],
       containerStatuses: [agentStatus],
     };
     expect(() => verifyRevisionImage(agent, bindings.agent.image)).toThrow();

@@ -25,6 +25,7 @@ const originalManifest = '9ca6dcbb6a1c4b6e25ca6ea857c86ae1c3103a75d9a8e4e26af801
 const runId = '123457';
 const buildRunId = '123456';
 const repository = 'us-west1-docker.pkg.dev/bmson-assistant/assistant';
+const recoveryRepository = 'us-west1-docker.pkg.dev/bmson-assistant/assistant-release-recovery';
 const manifestType = 'application/vnd.oci.image.manifest.v1+json';
 const title = (role: Role) =>
   `projects/bmson-assistant/locations/us-west1/services/assistant-${role}`;
@@ -50,12 +51,12 @@ const archivePins = {
 function roleFixture(role: Role) {
   const config = {
     digest: digest(`${role}-configuration`),
-    size: 17,
+    size: Buffer.byteLength(`${role}-configuration`),
     mediaType: 'application/vnd.oci.image.config.v1+json',
   };
   const layer = {
     digest: digest(`${role}-layer`),
-    size: 19,
+    size: Buffer.byteLength(`${role}-layer`),
     mediaType: 'application/vnd.oci.image.layer.v1.tar+gzip',
   };
   const child = JSON.stringify({
@@ -189,6 +190,7 @@ function runFixture(root: string) {
   };
   const packSha256 = sha('synthetic archive parser boundary');
   const target = (role: Role) => ({
+    image: `${recoveryRepository}/${role}@${digest(native[role].child)}`,
     parent: digest(native[role].parent),
     child: digest(native[role].child),
     baselineUidSha256: current.services[role].proof.uid,
@@ -200,6 +202,8 @@ function runFixture(root: string) {
     format: 1,
     kind: 'owner-release-restore-target',
     purpose: 'restore-paused-original-runtime-pair',
+    maintenanceRunId: '98701',
+    maintenanceReceiptSha256: sha('completed maintenance receipt'),
     source,
     buildRunId,
     buildAttempt: '1',
@@ -356,13 +360,22 @@ function runFixture(root: string) {
   );
   const endpoints = Object.fromEntries(
     roles.flatMap((role) => {
-      const base = `https://us-west1-docker.pkg.dev/v2/bmson-assistant/assistant/${role}`;
+      const base = `https://us-west1-docker.pkg.dev/v2/bmson-assistant/assistant-release-recovery/${role}`;
       const { child, config, layer } = native[role];
       return [
-        [`${base}/manifests/${digest(child)}`, { method: 'GET', body: child, role }],
-        ...[config, layer].map((blob) => [
+        [
+          `${base}/manifests/${digest(child)}`,
+          { method: 'GET', body: child, role, kind: 'manifest' },
+        ],
+        ...[config, layer].map((blob, index) => [
           `${base}/blobs/${blob.digest}`,
-          { method: 'HEAD', size: blob.size, role },
+          {
+            method: 'GET',
+            body: `${role}-${index === 0 ? 'configuration' : 'layer'}`,
+            role,
+            kind: index === 0 ? 'config' : 'layer',
+            digest: blob.digest,
+          },
         ]),
       ];
     }),
@@ -385,8 +398,10 @@ function runFixture(root: string) {
       " if (!registry[url] || init.method !== registry[url].method) throw Error('unexpected Registry URL or method');",
       " fixtureLog('registry ' + init.method + ' ' + url);",
       ' const match = registry[url];',
-      " if (match.role === 'agent' && process.env.FIXTURE_REGISTRY_404 === match.method) return new Response(null, { status: 404 });",
-      ` return match.method === 'GET' ? new Response(match.body, {headers:{'content-type':${JSON.stringify(manifestType)}}}) : new Response(null, {headers:{'content-length':String(match.size)}});`,
+      " if (match.role === 'agent' && process.env.FIXTURE_REGISTRY_404 === match.kind) return new Response(null, { status: 404 });",
+      ` if (match.kind === 'manifest') return new Response(match.body, {headers:{'content-type':${JSON.stringify(manifestType)}}});`,
+      " const body = match.role === 'agent' && match.kind === 'layer' && process.env.FIXTURE_CORRUPT_LAYER === '1' ? 'x' + match.body.slice(1) : match.body;",
+      " return new Response(body, {headers:{'content-length':String(match.body.length),'docker-content-digest':match.digest}});",
       '};',
     ].join('\n'),
   );
@@ -405,6 +420,7 @@ function runFixture(root: string) {
     GCP_REGION: 'us-west1',
     GITHUB_RUN_ID: runId,
     RELEASE_PREBUILT_RUN_ID: buildRunId,
+    ARCHIVE_MAINTENANCE_RUN_ID: '98701',
     RELEASE_PREBUILT_IMAGES_PATH: from('verified-build.json'),
     OWNER_RELEASE_RESTORE_TARGET_PROOF: signed(payload),
     OWNER_RELEASE_BOOTSTRAP_RECEIPT: JSON.stringify(current),
@@ -432,14 +448,22 @@ function runFixture(root: string) {
     );
     return { child, trace: readFileSync(traceFile, 'utf8').trim().split('\n').filter(Boolean) };
   };
-  return { invoke, wrongPackProof: signed({ ...payload, packSha256: sha('other pack') }) };
+  const envelope = JSON.parse(dispatch.OWNER_RELEASE_RESTORE_TARGET_PROOF);
+  const badEvidence = structuredClone(payload);
+  badEvidence.rehearsal.importedBytes.evidenceSha256 = sha('changed evidence after signing');
+  envelope.payload = Buffer.from(JSON.stringify(badEvidence)).toString('base64url');
+  return {
+    invoke,
+    wrongPackProof: signed({ ...payload, packSha256: sha('other pack') }),
+    tamperedEvidenceProof: JSON.stringify(envelope),
+  };
 }
 
 describe('restore-target selector through normal process entry', () => {
   it('binds the signed target, reads archived Registry children, and refuses missing blobs or native drift', () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'restore-target-process-')));
     try {
-      const { invoke, wrongPackProof } = runFixture(root);
+      const { invoke, wrongPackProof, tamperedEvidenceProof } = runFixture(root);
       const good = invoke('good');
       expect(good.child.stderr, good.trace.join(',')).toBe('');
       expect(good.child.status).toBe(0);
@@ -448,11 +472,12 @@ describe('restore-target selector through normal process entry', () => {
       );
       expect(good.trace.slice(0, 3)).toEqual(['pack', 'hold', 'credential']);
       expect(good.trace.filter((entry) => entry.startsWith('native '))).toHaveLength(8);
-      expect(good.trace.filter((entry) => entry.startsWith('registry GET '))).toHaveLength(2);
-      expect(good.trace.filter((entry) => entry.startsWith('registry HEAD '))).toHaveLength(4);
+      expect(good.trace.filter((entry) => entry.startsWith('registry GET '))).toHaveLength(6);
       for (const [name, env] of [
-        ['missing-manifest', { FIXTURE_REGISTRY_404: 'GET' }],
-        ['missing-blob', { FIXTURE_REGISTRY_404: 'HEAD' }],
+        ['missing-manifest', { FIXTURE_REGISTRY_404: 'manifest' }],
+        ['missing-blob', { FIXTURE_REGISTRY_404: 'layer' }],
+        ['corrupt-layer', { FIXTURE_CORRUPT_LAYER: '1' }],
+        ['tampered-evidence', { OWNER_RELEASE_RESTORE_TARGET_PROOF: tamperedEvidenceProof }],
         ['wrong-pack', { OWNER_RELEASE_RESTORE_TARGET_PROOF: wrongPackProof }],
         ['drift', { FIXTURE_DRIFT: '1' }],
         ['empty-proof', { OWNER_RELEASE_RESTORE_TARGET_PROOF: '' }],
@@ -462,7 +487,8 @@ describe('restore-target selector through normal process entry', () => {
         expect(refused.child.stdout).toBe('');
         expect(refused.child.stderr).toMatch(/Keep delivery held/);
         if (name === 'empty-proof') expect(refused.trace).toEqual([]);
-        if (name === 'wrong-pack') expect(refused.trace).toEqual(['pack']);
+        if (name === 'wrong-pack' || name === 'tampered-evidence')
+          expect(refused.trace).toEqual(['pack']);
       }
     } finally {
       rmSync(root, { recursive: true, force: true });
