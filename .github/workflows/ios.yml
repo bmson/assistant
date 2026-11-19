@@ -42,6 +42,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       ios: ${{ steps.filter.outputs.ios }}
+      native_controls: ${{ steps.filter.outputs.native_controls }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -155,7 +156,7 @@ jobs:
       # PR-only matches the former standalone native workflow trigger.
       - name: Qualify native approval and disclosure controls
         id: native_controls
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && needs.changes.outputs.native_controls == 'true'
         timeout-minutes: 35
         env:
           DESTINATION_UDID: ${{ steps.simulator.outputs.udid }}

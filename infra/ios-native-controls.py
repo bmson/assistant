@@ -143,7 +143,7 @@ if sys.argv[1] == 'run':
         if os.environ['GITHUB_RUN_ATTEMPT'] != '1': raise RuntimeError('No rerun authority')
         head = run('source-head', ['git','rev-parse','HEAD'], 10).strip()
         if head != os.environ['EXPECTED_HEAD']: raise RuntimeError('Checkout pin mismatch')
-        paths = sorted(set(Path('apps/ios').rglob('*.swift')) | {Path('apps/ios/Assistant.xcodeproj/project.pbxproj'), Path('infra/ios-native-controls.py'), Path('.github/workflows/ios.yml'), Path('apps/ios/Assistant.xcodeproj/xcshareddata/xcschemes/AssistantUIFixtures.xcscheme')})
+        paths = sorted(set(Path('apps/ios').rglob('*.swift')) | {Path('apps/ios/Assistant.xcodeproj/project.pbxproj'), Path('infra/ios-native-controls.py'), Path('infra/ios-detect-changes.sh'), Path('infra/ios-detect-changes.test.sh'), Path('.github/workflows/ios.yml'), Path('apps/ios/Assistant.xcodeproj/xcshareddata/xcschemes/AssistantUIFixtures.xcscheme')})
         pins = {str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
         save('source.json', {'head':head,'pullRequestHead':os.environ['PR_HEAD'],'pins':pins,'qualificationVersion':3,'scope':'synthetic capability and 20-case accessibility matrix only'})
         if os.environ.get('RUNNER_ENVIRONMENT') != 'github-hosted': raise RuntimeError('Fixture ownership requires the disposable hosted job')
