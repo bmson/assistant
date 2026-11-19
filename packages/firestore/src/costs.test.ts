@@ -765,6 +765,26 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore atomic cost led
     expect((await costs.totals()).heldUsd).toBe(0.25);
   });
 
+  it('resumes a bounded scan past protected attempts with identical dispatch times', async () => {
+    const started = new Date(now.getTime() - 60 * 60_000);
+    for (let i = 0; i < 5; i++) {
+      const id = `protected-read-budget-${i}`;
+      await store.doc('costReservations', id).set({
+        id,
+        source: 'external_api',
+        status: 'unknown',
+        createdAt: started,
+        attemptStartedAt: started,
+      });
+    }
+    const marker = store.doc('maintenanceCursors', 'unknown-model-estimate-scan');
+    await costs.releaseStale(120, 1, 10);
+    expect((await marker.get()).get('cursor')).toEqual(expect.any(String));
+    await costs.releaseStale(120, 1, 10);
+    expect((await marker.get()).get('cursor')).toBeNull();
+    expect((await store.collection('costEvents').get()).empty).toBe(true);
+  });
+
   it('settles a stale ordinary model estimate once and corrects its settlement period', async () => {
     const taskId = 'estimate-correction-task';
     await store.doc('tasks', taskId).set({ spentUsd: '0', budgetUsdLimit: '1' });

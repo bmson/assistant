@@ -38,7 +38,13 @@ import {
   storedTaskBudgetToMicros,
   usdToMicros,
 } from '@assistant/persistence';
-import type { DocumentSnapshot, QueryDocumentSnapshot, Transaction } from '@google-cloud/firestore';
+import {
+  type DocumentSnapshot,
+  FieldPath,
+  type QueryDocumentSnapshot,
+  Timestamp,
+  type Transaction,
+} from '@google-cloud/firestore';
 import { withEmulatorTransactionRetry } from './emulator-transaction.js';
 import { firestoreEstimatedCostBaseline } from './estimated-cost-baseline.js';
 import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from './store.js';
@@ -1294,6 +1300,7 @@ export class FirestoreCostRepository implements CostRepository {
       .where('status', '==', 'unknown')
       .where('attemptStartedAt', '<=', estimateBefore)
       .orderBy('attemptStartedAt')
+      .orderBy(FieldPath.documentId())
       .select(
         'id',
         'status',
@@ -1309,11 +1316,22 @@ export class FirestoreCostRepository implements CostRepository {
       [];
     let settledAtEstimate = 0;
     let cursor: QueryDocumentSnapshot | undefined;
-    // A page can be entirely protected approval attempts. Continue past it so
-    // those liabilities cannot prevent a later ordinary attempt from settling.
-    while (settledAtEstimate < batch) {
-      const page = await (cursor ? unknown.startAfter(cursor) : unknown).limit(batch).get();
+    // Preserve progress across ticks even when protected attempts fill every page.
+    const name = 'unknown-model-estimate-scan';
+    const checkpoint = this.store.doc('maintenanceCursors', name);
+    const previous = await checkpoint.get();
+    const saved = previous.get('cursor') as string | undefined;
+    const position: [number, number, string] | undefined = saved ? JSON.parse(saved) : undefined;
+    let next: string | null = null;
+    for (let pages = 0; pages < 4 && settledAtEstimate < batch; pages++) {
+      const query = cursor
+        ? unknown.startAfter(cursor)
+        : position
+          ? unknown.startAfter(new Timestamp(position[0], position[1]), position[2])
+          : unknown;
+      const page = await query.limit(batch).get();
       for (const doc of page.docs) {
+        cursor = doc;
         const id: unknown = doc.get('id');
         if (typeof id !== 'string' || !id || doc.id !== documentKey(id)) continue;
         const startedAt = this.accountableUnknownAttempt(doc, now);
@@ -1337,8 +1355,19 @@ export class FirestoreCostRepository implements CostRepository {
           if (settledAtEstimate >= batch) break;
         }
       }
-      cursor = page.docs.at(-1);
-      if (!cursor || page.size < batch) break;
+      if (!page.size || !cursor || (page.size < batch && cursor.id === page.docs.at(-1)?.id)) {
+        next = null;
+        break;
+      }
+      const stamp = cursor.get('attemptStartedAt') as Timestamp;
+      next = JSON.stringify([stamp.seconds, stamp.nanoseconds, cursor.id]);
+    }
+    if ((saved ?? null) !== next) {
+      await this.store.db.runTransaction(async (tx) => {
+        const current = await tx.get(checkpoint);
+        if (current.get('cursor') !== saved) return;
+        tx.set(checkpoint, { name, cursor: next, updatedAt: now });
+      });
     }
     if (settledAtEstimate)
       console.info('Settled unknown model attempts at their internal estimates', {
