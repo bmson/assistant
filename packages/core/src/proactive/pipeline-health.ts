@@ -6,8 +6,12 @@ import {
   proactiveMoments,
   proactivePings,
 } from '@assistant/db';
-import type { ProactiveHealthCounts, ProactiveHealthRepository } from '@assistant/persistence';
-import { and, count, desc, eq, gte, isNull } from 'drizzle-orm';
+import {
+  PENDING_MAIL_ADMISSION_STAGES,
+  type ProactiveHealthCounts,
+  type ProactiveHealthRepository,
+} from '@assistant/persistence';
+import { and, count, desc, eq, gte, inArray, isNotNull, isNull, lt, sql } from 'drizzle-orm';
 
 /**
  * Is the proactive machinery actually alive?
@@ -35,19 +39,8 @@ import { and, count, desc, eq, gte, isNull } from 'drizzle-orm';
 const RECENT_HOURS = 24;
 const WEEK_HOURS = 24 * 7;
 
-export interface ProactiveHealth {
+export interface ProactiveHealth extends ProactiveHealthCounts {
   ingestMode: string;
-  /** Messages scored in the last day and the last week. */
-  mailScored24h: number;
-  mailScored7d: number;
-  lastMailAt: Date | null;
-  /** Proactive moments the pulse delivered in the last day. */
-  momentsDelivered24h: number;
-  /** Phone pings attempted, and how many the policy held back. */
-  pingsDelivered24h: number;
-  pingsHeld24h: number;
-  /** Registered, non-invalidated push devices. */
-  pushDevices: number;
   /** Owner-facing problems, most important first. Empty means healthy. */
   warnings: string[];
 }
@@ -59,6 +52,7 @@ export async function assessProactiveHealth(
 ): Promise<ProactiveHealth> {
   const now = input.now ?? new Date();
   const window = {
+    since6h: new Date(now.getTime() - 6 * 3600_000),
     since24h: new Date(now.getTime() - RECENT_HOURS * 3600_000),
     since7d: new Date(now.getTime() - WEEK_HOURS * 3600_000),
   };
@@ -74,29 +68,33 @@ export async function assessProactiveHealth(
 async function sqlProactiveCounts(
   db: Db,
   agentId: string,
-  { since24h, since7d }: { since24h: Date; since7d: Date },
+  { since6h, since24h, since7d }: { since6h: Date; since24h: Date; since7d: Date },
 ): Promise<ProactiveHealthCounts> {
-  const [scored24h, scored7d, latest, moments, pings, devices] = await Promise.all([
+  const readable = emailIngestReadableSql();
+  const [mail, latest, moments, pings, devices] = await Promise.all([
     db
-      .select({ value: count() })
+      .select({
+        mailReceived7d: count(),
+        mailScored24h:
+          sql<number>`count(*) filter (where ${and(readable, gte(emailIngest.createdAt, since24h))})`.mapWith(
+            Number,
+          ),
+        mailScored7d: sql<number>`count(*) filter (where ${readable})`.mapWith(Number),
+        mailProcessed7d:
+          sql<number>`count(*) filter (where ${and(readable, isNotNull(emailIngest.extractedAt))})`.mapWith(
+            Number,
+          ),
+        mailAwaitingAdmissionOver6h7d:
+          sql<number>`count(*) filter (where ${and(sql`${readable} is not true`, inArray(emailIngest.pipelineStage, PENDING_MAIL_ADMISSION_STAGES), lt(emailIngest.createdAt, since6h))})`.mapWith(
+            Number,
+          ),
+        mailPendingOver6h7d:
+          sql<number>`count(*) filter (where ${and(readable, isNull(emailIngest.extractedAt), lt(emailIngest.createdAt, since6h))})`.mapWith(
+            Number,
+          ),
+      })
       .from(emailIngest)
-      .where(
-        and(
-          eq(emailIngest.agentId, agentId),
-          emailIngestReadableSql(),
-          gte(emailIngest.createdAt, since24h),
-        ),
-      ),
-    db
-      .select({ value: count() })
-      .from(emailIngest)
-      .where(
-        and(
-          eq(emailIngest.agentId, agentId),
-          emailIngestReadableSql(),
-          gte(emailIngest.createdAt, since7d),
-        ),
-      ),
+      .where(and(eq(emailIngest.agentId, agentId), gte(emailIngest.createdAt, since7d))),
     db
       .select({ createdAt: emailIngest.createdAt })
       .from(emailIngest)
@@ -118,9 +116,10 @@ async function sqlProactiveCounts(
       .from(deviceTokens)
       .where(and(eq(deviceTokens.agentId, agentId), isNull(deviceTokens.invalidatedAt))),
   ]);
+  const counts = mail[0];
+  if (!counts) throw new Error('Mail health aggregation returned no result');
   return {
-    mailScored24h: Number(scored24h[0]?.value ?? 0),
-    mailScored7d: Number(scored7d[0]?.value ?? 0),
+    ...counts,
     lastMailAt: latest[0]?.createdAt ?? null,
     momentsDelivered24h: Number(moments[0]?.value ?? 0),
     pingsDelivered24h: pings.filter((row) => row.delivered).length,
@@ -137,22 +136,39 @@ async function sqlProactiveCounts(
 export function proactiveWarnings(
   health: Pick<
     ProactiveHealth,
-    'ingestMode' | 'mailScored7d' | 'pushDevices' | 'pingsDelivered24h' | 'pingsHeld24h'
+    | 'ingestMode'
+    | 'mailScored7d'
+    | 'mailPendingOver6h7d'
+    | 'mailAwaitingAdmissionOver6h7d'
+    | 'pushDevices'
+    | 'pingsDelivered24h'
+    | 'pingsHeld24h'
   >,
   googleEnabled: boolean,
 ): string[] {
   const warnings: string[] = [];
-  if (googleEnabled && health.ingestMode !== 'forwarded') {
+  if (googleEnabled && health.ingestMode !== 'forwarded' && health.mailScored7d === 0) {
     warnings.push(
       'EMAIL_INGEST_MODE is "direct", so mail forwarded from your own inbox is dropped as ' +
-        'unauthenticated or automated and never scored. Nothing will appear in your briefing, ' +
-        'and no important-mail alert can fire. Set EMAIL_INGEST_MODE=forwarded if you forward ' +
+        'unauthenticated or automated. Set EMAIL_INGEST_MODE=forwarded if you forward ' +
         'your mail here.',
     );
   } else if (googleEnabled && health.mailScored7d === 0) {
     warnings.push(
       'No mail has been scored in the last week. Check that Gmail sync is on ' +
         '(GMAIL_SYNC_ENABLED) and that your forwarding rule is still delivering.',
+    );
+  }
+  if (health.mailAwaitingAdmissionOver6h7d > 0) {
+    const count = health.mailAwaitingAdmissionOver6h7d;
+    warnings.push(
+      `${count} recent ${count === 1 ? 'message is' : 'messages are'} still in intake after six hours.`,
+    );
+  }
+  if (health.mailPendingOver6h7d > 0) {
+    const count = health.mailPendingOver6h7d;
+    warnings.push(
+      `${count} recent ${count === 1 ? 'message has' : 'messages have'} waited over six hours for email processing.`,
     );
   }
   if (health.pushDevices === 0) {

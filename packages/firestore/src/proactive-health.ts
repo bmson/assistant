@@ -1,5 +1,9 @@
 import type { ProactiveHealthCounts, ProactiveHealthRepository } from '@assistant/persistence';
-import { emailIngestReadable, type Records } from '@assistant/persistence';
+import {
+  emailIngestReadable,
+  PENDING_MAIL_ADMISSION_STAGES,
+  type Records,
+} from '@assistant/persistence';
 import type { QueryDocumentSnapshot } from '@google-cloud/firestore';
 import { FirestoreDeviceTokenRepository } from './device-tokens.js';
 import { decodeRecord, documentKey, type InstallationStore } from './store.js';
@@ -17,7 +21,7 @@ export class FirestoreProactiveHealthRepository implements ProactiveHealthReposi
 
   async counts(
     agentId: string,
-    window: { since24h: Date; since7d: Date },
+    window: { since6h: Date; since24h: Date; since7d: Date },
   ): Promise<ProactiveHealthCounts> {
     const [mailCounts, moments, deliveredPings, heldPings, devices] = await Promise.all([
       this.completeMailCounts(agentId, window),
@@ -54,8 +58,23 @@ export class FirestoreProactiveHealthRepository implements ProactiveHealthReposi
 
   private async completeMailCounts(
     agentId: string,
-    window: { since24h: Date; since7d: Date },
-  ): Promise<Pick<ProactiveHealthCounts, 'mailScored24h' | 'mailScored7d' | 'lastMailAt'>> {
+    window: { since6h: Date; since24h: Date; since7d: Date },
+  ): Promise<
+    Pick<
+      ProactiveHealthCounts,
+      | 'mailReceived7d'
+      | 'mailProcessed7d'
+      | 'mailPendingOver6h7d'
+      | 'mailAwaitingAdmissionOver6h7d'
+      | 'mailScored24h'
+      | 'mailScored7d'
+      | 'lastMailAt'
+    >
+  > {
+    let mailReceived7d = 0;
+    let mailProcessed7d = 0;
+    let mailPendingOver6h7d = 0;
+    let mailAwaitingAdmissionOver6h7d = 0;
     let mailScored24h = 0;
     let mailScored7d = 0;
     let lastMailAt: Date | null = null;
@@ -76,11 +95,22 @@ export class FirestoreProactiveHealthRepository implements ProactiveHealthReposi
           typeof row.id !== 'string' ||
           documentKey(row.id) !== doc.id ||
           row.agentId !== agentId ||
-          !(row.createdAt instanceof Date) ||
-          !emailIngestReadable(row)
+          !(row.createdAt instanceof Date)
         )
           continue;
+        mailReceived7d += 1;
+        if (!emailIngestReadable(row)) {
+          if (
+            row.createdAt < window.since6h &&
+            row.pipelineStage &&
+            PENDING_MAIL_ADMISSION_STAGES.includes(row.pipelineStage)
+          )
+            mailAwaitingAdmissionOver6h7d += 1;
+          continue;
+        }
         mailScored7d += 1;
+        if (row.extractedAt instanceof Date) mailProcessed7d += 1;
+        else if (row.createdAt < window.since6h) mailPendingOver6h7d += 1;
         if (row.createdAt >= window.since24h) mailScored24h += 1;
         if (lastMailAt === null || row.createdAt > lastMailAt) lastMailAt = row.createdAt;
       }
@@ -90,6 +120,14 @@ export class FirestoreProactiveHealthRepository implements ProactiveHealthReposi
     }
     if (scanned >= MAIL_SCAN_LIMIT)
       throw new Error('Proactive health mail scan exceeded its bounded window');
-    return { mailScored24h, mailScored7d, lastMailAt };
+    return {
+      mailReceived7d,
+      mailProcessed7d,
+      mailPendingOver6h7d,
+      mailAwaitingAdmissionOver6h7d,
+      mailScored24h,
+      mailScored7d,
+      lastMailAt,
+    };
   }
 }

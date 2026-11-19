@@ -28,6 +28,8 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore proactive healt
   it("counts only the owner's recent pipeline activity", async () => {
     for (const hours of [2, 30, 200]) await put('emailIngest', { agentId, createdAt: ago(hours) });
     await put('emailIngest', { agentId: randomUUID(), createdAt: ago(1) });
+    await put('emailIngest', { agentId, createdAt: ago(9), pipelineStage: 'message_persisted' });
+    await put('emailIngest', { agentId, createdAt: ago(8), extractedAt: ago(1) });
     await put('proactiveMoments', { agentId, deliveredAt: ago(3) });
     await put('proactiveMoments', { agentId, deliveredAt: ago(48) });
     await put('proactivePings', { agentId, delivered: true, createdAt: ago(1) });
@@ -45,12 +47,17 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore proactive healt
       });
 
     const counts = await new FirestoreProactiveHealthRepository(store).counts(agentId, {
+      since6h: ago(6),
       since24h: ago(24),
       since7d: ago(24 * 7),
     });
     expect(counts).toEqual({
-      mailScored24h: 1,
-      mailScored7d: 2,
+      mailScored24h: 2,
+      mailScored7d: 3,
+      mailReceived7d: 4,
+      mailProcessed7d: 1,
+      mailAwaitingAdmissionOver6h7d: 1,
+      mailPendingOver6h7d: 1,
       lastMailAt: ago(2),
       momentsDelivered24h: 1,
       pingsDelivered24h: 1,
@@ -72,6 +79,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore proactive healt
       messagePersisted: false,
     });
     const counts = await new FirestoreProactiveHealthRepository(store).counts(agentId, {
+      since6h: ago(6),
       since24h: ago(24),
       since7d: ago(168),
     });
