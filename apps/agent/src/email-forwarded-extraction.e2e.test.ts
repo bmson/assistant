@@ -311,8 +311,10 @@ for (const driver of ['postgres', 'firestore'] as const) {
           signals: [extractionBacklog],
           notified: false,
         });
+        const nextDayBacklog =
+          'Mail processing has waited over six hours: 1 in pending score, 1 awaiting extraction.';
         expect(await monitor(new Date(now.getTime() + 25 * HOUR))).toMatchObject({
-          signals: [extractionBacklog],
+          signals: [nextDayBacklog],
           notified: true,
         });
         let notices: string[];
@@ -342,7 +344,7 @@ for (const driver of ['postgres', 'firestore'] as const) {
         expect(notices).toEqual(
           expect.arrayContaining([
             expect.stringContaining(warning),
-            expect.stringContaining(extractionBacklog),
+            expect.stringContaining(nextDayBacklog),
           ]),
         );
         expect(notices.join(' ')).not.toContain(stuck.subject);
