@@ -52,6 +52,7 @@ const testEnv: NodeJS.ProcessEnv = {
 const files = [
   'packages/firestore',
   'packages/persistence',
+  'packages/core/src/workflow/goal-occurrence-guard.test.ts',
   'packages/application/src/owner-editor.integration.test.ts',
   'packages/application/src/mobile-owner-memory-correction.driver.integration.test.ts',
   'apps/agent/src/firestore-dispatch.test.ts',

@@ -96,6 +96,7 @@ export { createPostgresRecallFeedbackRepository } from './recall-feedback-reposi
 export { createPostgresRecallMetricsRepository } from './recall-metrics-repository.js';
 export { createPostgresRecallSurfacingRepository } from './recall-surfacing-repository.js';
 export { createPostgresReminderRepository } from './reminder-repository.js';
+export * from './research-assignment-repository.js';
 export { assertPostgresRestoreRehearsalReadOnly } from './restore-readonly.js';
 export { createPostgresScheduleRepository } from './schedule-repository.js';
 export * from './schema.js';

@@ -54,7 +54,7 @@ async function dropOwnedDatabase(
 }
 
 it.skipIf(!imagesReceipt)(
-  'qualifies the schema 138 migration image, runtime readiness, and generic write compatibility',
+  'qualifies the schema 139 migration image, runtime readiness, and generic write compatibility',
   async () => {
     assertAllocatedTestTarget({
       databaseUrl: process.env.DATABASE_URL,
@@ -82,7 +82,7 @@ it.skipIf(!imagesReceipt)(
       | undefined;
     try {
       await admin`SET statement_timeout = '15s'`;
-      prefixDir = await mkdtemp(join(tmpdir(), 'assistant-memory-witness-role-138-'));
+      prefixDir = await mkdtemp(join(tmpdir(), 'assistant-memory-witness-role-139-'));
       await admin.unsafe(`CREATE DATABASE "${target.databaseName}"`);
       created = true;
       await admin.unsafe(
@@ -96,13 +96,14 @@ it.skipIf(!imagesReceipt)(
       await client`SET statement_timeout = '30s'`;
 
       // The populated historical 0134 prefix remains unchanged. The current
-      // schema 138 image must apply its witness, Calendar, cost, and MCP OAuth tail.
+      // schema 139 image must apply its witness, Calendar, cost, and MCP OAuth tail.
       const forwardEntries = journal.entries.slice(135);
       expect(forwardEntries.map((entry: { tag: string }) => entry.tag)).toEqual([
         '0135_memory_write_witness',
         '0136_google_calendar_connections',
         '0137_estimated_cost_approval',
         '0138_mcp_oauth_state',
+        '0139_research_assignment_state',
       ]);
       const expectedForwardLedger = await Promise.all(
         forwardEntries.map(async (entry: { tag: string; when: number }) => ({
@@ -176,7 +177,7 @@ it.skipIf(!imagesReceipt)(
       });
       await client`SET statement_timeout = '15s'`;
       const firstForward = expectedForwardLedger[0];
-      if (!firstForward) throw new Error('Schema 138 forward migration tail is missing.');
+      if (!firstForward) throw new Error('Schema 139 forward migration tail is missing.');
       const forwardLedger = await client`
         SELECT hash,created_at::text AS "createdAt" FROM drizzle.__drizzle_migrations
         WHERE created_at >= ${firstForward.createdAt}
@@ -251,7 +252,7 @@ it.skipIf(!imagesReceipt)(
       const proofDirectory = process.env.ASSISTANT_MEMORY_WITNESS_PROOF_DIR;
       if (proofDirectory) {
         await writeFile(
-          join(proofDirectory, 'schema-138-forward-upgrade.json'),
+          join(proofDirectory, 'schema-139-forward-upgrade.json'),
           `${JSON.stringify(
             {
               prefixLastMigration: prefixEntries.at(-1)?.tag,

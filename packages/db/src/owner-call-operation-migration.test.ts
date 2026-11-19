@@ -297,24 +297,28 @@ beforeAll(async () => {
     const expectedCostHash = createHash('sha256')
       .update(await readFile(join(folder, '0137_estimated_cost_approval.sql')))
       .digest('hex');
-    const expectedFinalHash = createHash('sha256')
+    const expectedMcpHash = createHash('sha256')
       .update(await readFile(join(folder, '0138_mcp_oauth_state.sql')))
       .digest('hex');
-    expect(journal.entries.at(-1)?.tag).toBe('0138_mcp_oauth_state');
+    const expectedFinalHash = createHash('sha256')
+      .update(await readFile(join(folder, '0139_research_assignment_state.sql')))
+      .digest('hex');
+    expect(journal.entries.at(-1)?.tag).toBe('0139_research_assignment_state');
     const [endpoint] = await client`
       SELECT hash FROM drizzle.__drizzle_migrations ORDER BY id DESC LIMIT 1`;
     expect(endpoint?.hash).toBe(expectedFinalHash);
     const [ledgerCount] =
       await client`SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations`;
-    expect(ledgerCount?.count).toBe(139);
+    expect(ledgerCount?.count).toBe(140);
     const ledgerBeforeRerun = await client`
       SELECT hash,created_at::text AS "createdAt"
       FROM drizzle.__drizzle_migrations ORDER BY id`;
-    expect(ledgerBeforeRerun).toHaveLength(139);
-    expect(ledgerBeforeRerun.at(-5)?.hash).toBe(expectedOwnerMemoryHash);
-    expect(ledgerBeforeRerun.at(-4)?.hash).toBe(expectedWitnessHash);
-    expect(ledgerBeforeRerun.at(-3)?.hash).toBe(expectedCalendarHash);
-    expect(ledgerBeforeRerun.at(-2)?.hash).toBe(expectedCostHash);
+    expect(ledgerBeforeRerun).toHaveLength(140);
+    expect(ledgerBeforeRerun.at(-6)?.hash).toBe(expectedOwnerMemoryHash);
+    expect(ledgerBeforeRerun.at(-5)?.hash).toBe(expectedWitnessHash);
+    expect(ledgerBeforeRerun.at(-4)?.hash).toBe(expectedCalendarHash);
+    expect(ledgerBeforeRerun.at(-3)?.hash).toBe(expectedCostHash);
+    expect(ledgerBeforeRerun.at(-2)?.hash).toBe(expectedMcpHash);
     expect(ledgerBeforeRerun.at(-1)?.hash).toBe(expectedFinalHash);
     await client.end();
     client = undefined;

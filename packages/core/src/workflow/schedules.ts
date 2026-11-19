@@ -16,6 +16,7 @@ import {
   GOAL_SUPERSEDED_PROGRESS,
   type GoalRuntimeRepository,
   type GoalSessionState,
+  goalAutomationEligible,
   type ScheduleRepository,
   type TaskRepository,
 } from '@assistant/persistence';
@@ -372,6 +373,16 @@ export async function ensureGoalAutomation(
     .from(schedules)
     .where(and(eq(schedules.agentId, agent.id), eq(schedules.name, name)));
 
+  if (!goalAutomationEligible(goal)) {
+    if (existing?.enabled) {
+      await db
+        .update(schedules)
+        .set({ enabled: false, updatedAt: sql`now()` })
+        .where(eq(schedules.id, existing.id));
+    }
+    return existing;
+  }
+
   if (goal.status !== 'active' || goal.archivedAt) {
     if (existing?.enabled) {
       await db
@@ -589,7 +600,8 @@ export async function prepareGoalSession(
   if (!template.goalId) return { action: 'fire' };
   const state = await repositories.goals.sessionState(agentId, template.goalId);
   const { goal } = state;
-  if (goal?.status !== 'active' || goal.archivedAt) return { action: 'disable' };
+  if (goal?.status !== 'active' || goal.archivedAt || !goalAutomationEligible(goal))
+    return { action: 'disable' };
   const verdict = await goalAutomationGate(
     repositories.goals,
     agentId,
