@@ -2,6 +2,19 @@
 
 > Historical source inventory, last updated 2026-09-26. Route totals and classifications below are retained as a dated snapshot, not a current route-drift check or production receipt. Reconcile against `apps/web/app` and the proxy before relying on an individual row. See the [runtime support matrix](runtime-support-matrix.md) and [cutover checklist](firestore-cutover-checklist.md).
 
+## November 18 mobile additions
+
+| Route                                                                                                                                    | Firestore behavior                                                                                                                                                                  |
+| ---------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET`, `PATCH /api/mobile/v1/recall/sources/[sourceKey]`                                                                                 | Reads or updates a versioned recall preference through the existing repository. The mobile route validates the 64-character source key and checks the expected revision on updates. |
+| `GET /api/mobile/v1/memory/[id]/snapshot`                                                                                                | Reads one saved note through the owner-scoped snapshot handler.                                                                                                                     |
+| `POST /api/mobile/v1/memory/[id]/correction/authorize`, `POST …/correction/[operationId]/apply`, `GET …/correction/[operationId]/status` | Uses the existing mobile owner authorization, signed correction and operation status handlers.                                                                                      |
+| `GET /api/mobile/v1/workspace` and `GET /api/mobile/v1/workspace/sections/[section]`                                                     | The phone reads Costs in the workspace response and Memory through memory routes. Section pagination covers chats, skills, anomalies, improvements and import history.              |
+
+The [mobile route test](../apps/web/proxy.ios-routes.test.ts) resolves the URLs in the native client against the route handlers and exercises the Firestore proxy. Handler tests cover authentication, ownership and data access separately.
+
+## September 26 snapshot
+
 Reflects `apps/web` on the `claude/firestore-final-docs` branch (2026-09-26), which contains every port. It answers one question for every page, route handler, and Server Action: with `PERSISTENCE_DRIVER=firestore` and no `DATABASE_URL`, does it work without SQL? Production still runs on PostgreSQL; nothing here changes that composition.
 
 How the Firestore composition is gated:

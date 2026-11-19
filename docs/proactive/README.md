@@ -57,13 +57,13 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | A4  | Stop mirroring secondary-chat replies into the primary chat            | 0     | M    | —          | open                                                          |
 | A5  | Checklist dedupe ignores trailing punctuation                          | 0     | S    | —          | in review                                                     |
 | A6  | Guard against promises without a tool call                             | 2     | M    | —          | open                                                          |
-| A7  | Self-repair cadence respects its daily limit                           | 0     | S    | —          | open                                                          |
+| A7  | Self-repair cadence respects its daily limit                           | 0     | S    | —          | in review                                                     |
 | A8  | Truthful "Needs you" count; archive needs_attention in Firestore       | 1     | M    | —          | open                                                          |
-| A9  | Firestore parity for every route the phone calls                       | 1     | M    | —          | open (estimated-cost routes admitted in #934)                 |
+| A9  | Firestore parity for every route the phone calls                       | 1     | M    | —          | in review (native route and method checks)                    |
 | A10 | Retire `morning-brief` in Firestore                                    | 0     | S    | —          | in review                                                     |
 | A11 | Email pipeline: verify #910, census, stall alert                       | 0     | M    | —          | in progress (cause fixed in #910)                             |
 | A12 | Isolate QA from production; purge QA data                              | 1     | M    | —          | open                                                          |
-| A13 | Owner time zone in every card                                          | 0     | S    | —          | open                                                          |
+| A13 | Owner time zone in every card                                          | 0     | S    | —          | in review (time zones in calendar and briefing cards)         |
 | A14 | Brief calendar answers                                                 | 1     | M    | —          | open                                                          |
 | A15 | Each turn answers its own message                                      | 0     | M    | —          | open                                                          |
 | A16 | Weather plausibility                                                   | 0     | S    | —          | in review (hourly snow corroboration)                         |
