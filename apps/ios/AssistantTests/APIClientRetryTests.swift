@@ -868,6 +868,16 @@ final class APIClientRetryTests: XCTestCase {
         StubURLProtocol.beginTestCase(testCaseID)
     }
 
+    func testHealthPushOpensNoticingForItsOwner() throws {
+        let destination = try XCTUnwrap(AssistantNotificationDestination(userInfo: [
+            "route": "settings", "section": "noticing", "agentId": "owner"
+        ]))
+        XCTAssertEqual(destination.route, .noticing)
+        XCTAssertTrue(destination.belongsTo(ownerID: "owner"))
+        XCTAssertFalse(destination.belongsTo(ownerID: "another-owner"))
+        XCTAssertEqual(AssistantNotificationDestination(userInfo: ["route": "settings"])?.route, .settings)
+    }
+
     func testNoticingCanariesDistinguishSourcesFromSmsReservations() throws {
         let checks = try JSONDecoder().decode(NoticingHealth.Canaries.self, from: Data(#"""
         {

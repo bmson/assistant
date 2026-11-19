@@ -41,6 +41,12 @@ export interface PushChannelDeps {
   admitWatchdog?: (deliveryKey: string, now: Date) => Promise<PingDecision>;
 }
 
+function privatePushRoute(agentId: string, healthCanary: boolean): Record<string, string> {
+  return healthCanary
+    ? { route: 'settings', section: 'noticing', agentId }
+    : { route: 'chat', agentId };
+}
+
 export function healthCanaryAdmission(
   owner: () => Promise<{ id: string; timezone: string }>,
   policy: NudgePolicyRepository,
@@ -224,7 +230,7 @@ async function sendPushOutboxLeg(
       // The outbox owns retries so each attempt uses a fresh policy decision.
       ...(privateNotice ? { expiresAt: 0 } : expiresAt !== undefined ? { expiresAt } : {}),
       ...(privateNotice
-        ? { data: { route: 'chat', agentId: row.agentId } }
+        ? { data: privatePushRoute(row.agentId, healthCanary) }
         : alert.data && typeof alert.data === 'object'
           ? { data: alert.data as Record<string, string> }
           : {}),
@@ -327,8 +333,7 @@ export async function notifyOwnerByPush(
       ...(answerReady ? { purpose: 'answer-ready' as const } : {}),
       category: UPDATE_CATEGORY,
       data: {
-        route: 'chat',
-        agentId: agent.id,
+        ...privatePushRoute(agent.id, healthCanary),
         ...(!privateNotice && uuid(input.conversationId)
           ? { conversationId: input.conversationId as string }
           : {}),

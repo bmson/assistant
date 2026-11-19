@@ -138,6 +138,7 @@ enum AssistantRoute: String, Hashable, Identifiable, CaseIterable, Sendable {
     case skills
     case capabilities
     case settings
+    case noticing
     case costs
     case anomalies
     case improvements

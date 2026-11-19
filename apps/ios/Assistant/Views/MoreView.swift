@@ -1638,7 +1638,7 @@ extension MoreView {
 #endif
 
 
-private struct NoticingHealthView: View {
+struct NoticingHealthView: View {
     @Environment(AppModel.self) private var model
     @State private var health: NoticingHealth?
     @State private var loadFailed = false

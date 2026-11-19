@@ -282,6 +282,7 @@ struct RootView: View {
             case .skills: WorkspaceView(area: .skills)
             case .capabilities: WorkspaceView(area: .capabilities)
             case .settings: MoreView()
+            case .noticing: NoticingHealthView().id(model.activityConnectionVersion)
             case .costs: WorkspaceView(area: .costs)
             case .anomalies: WorkspaceView(area: .anomalies)
             case .improvements: WorkspaceView(area: .improvements)
