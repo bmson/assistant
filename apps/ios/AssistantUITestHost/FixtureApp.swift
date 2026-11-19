@@ -69,7 +69,7 @@ private struct FixtureRoot: View {
                     ScrollView {
                         ProactiveAlertContent(category: "calendar", urgency: "for_your_attention",
                             title: "Synthetic source listings need review",
-                            summary: "The source listings have different times. Review the original source before making a change.",
+                            summary: "The checked source listings have different times. Calendar RSVP does not establish who is attending or driving. Keep both listings visible and check the original source before making a change.",
                             startsAt: "", dueAt: "",
                             details: [.init(label: "Source qualification", value: "The phone calendar was not checked. These synthetic facts are not evidence of live calendar coverage.")],
                             actionSummary: "Read both original listings before deciding.")
