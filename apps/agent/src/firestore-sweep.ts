@@ -124,7 +124,10 @@ export async function runFirestoreSweep(
           deps.config.FIRESTORE_AGENT_ID,
           deps.config.SELF_REPAIR_DAILY_LIMIT,
         );
-      const fired = await runDueSchedules(new FirestoreScheduleRepository(store), timezone, {
+      const scheduleRepository = new FirestoreScheduleRepository(store);
+      if (isCodeJobEnabled('briefing.compose') && !firestoreCodeJobUnavailable('briefing.compose'))
+        await scheduleRepository.retireDefaultMorningBrief(deps.config.FIRESTORE_AGENT_ID);
+      const fired = await runDueSchedules(scheduleRepository, timezone, {
         // SQL-only jobs advance their schedule without creating a task.
         isJobEnabled: (job) => isCodeJobEnabled(job) && !firestoreCodeJobUnavailable(job),
         // Goal sessions pass the same gate as PostgreSQL. A goal whose state

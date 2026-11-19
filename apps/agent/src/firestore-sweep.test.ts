@@ -155,6 +155,37 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore maintenance swe
     expect(sqlAccesses).toEqual([]);
   });
 
+  it('retires the obsolete default before the normal scheduler can fire it', async () => {
+    const schedules = new FirestoreScheduleRepository(store);
+    const due = new Date(Date.now() - 60_000);
+    const old = await schedules.ensure({
+      agentId,
+      name: 'morning-brief',
+      cron: '30 7 * * *',
+      nextRunAt: due,
+      taskTemplate: {
+        type: 'scheduled',
+        budgetUsdLimit: '0.10',
+        instruction:
+          "Prepare the owner's morning brief. Check: (1) today's events on your calendar and the owner's free/busy, (2) recent email in your inbox needing attention (gmail.search newer_than:1d), (3) goals list — anything slipping, (4) upcoming occasions in the next several days (occasions.list) — birthdays or anniversaries to prepare for, (5) your own progress notes. Then send ONE concise brief via owner.notify: schedule, needs-attention items, any upcoming occasion, and what you plan to do today. No fluff.",
+      },
+    });
+    const daily = await schedules.ensure({
+      agentId,
+      name: 'daily-briefing',
+      cron: '45 7 * * *',
+      nextRunAt: due,
+      taskTemplate: { type: 'scheduled', budgetUsdLimit: '0.10', job: 'briefing.compose' },
+    });
+    expect(await runFirestoreSweep(deps)).toMatchObject({ report: { schedulesFired: 1 } });
+    expect((await store.doc('schedules', old.id).get()).get('enabled')).toBe(false);
+    expect((await store.doc('schedules', daily.id).get()).get('enabled')).toBe(true);
+    expect(
+      (await store.collection('tasks').get()).docs.map((doc) => doc.get('trigger.payload.job')),
+    ).toEqual(['briefing.compose']);
+    expect(sqlAccesses).toEqual([]);
+  });
+
   it('fires portable schedules past disabled jobs and a goal session whose goal is gone', async () => {
     const schedules = new FirestoreScheduleRepository(store);
     const due = new Date(Date.now() - 60_000);
