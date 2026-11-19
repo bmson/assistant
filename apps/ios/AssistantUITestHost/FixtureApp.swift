@@ -42,6 +42,7 @@ struct AssistantFixtureApp: App {
 
 private struct FixtureRoot: View {
     let arguments: FixtureArguments
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
     @State private var model: AppModel?
     @State private var failed = false
     @State private var ready = false
@@ -77,6 +78,7 @@ private struct FixtureRoot: View {
                 }
             } else { ProgressView("Preparing synthetic fixture") }
         }
+        .frame(maxWidth: arguments.textSize == .accessibility5 && verticalSizeClass != .compact ? 320 : .infinity)
         .environment(\.colorScheme, arguments.theme)
         .preferredColorScheme(arguments.theme)
         .environment(\.dynamicTypeSize, arguments.textSize)

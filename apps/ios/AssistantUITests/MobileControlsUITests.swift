@@ -1,7 +1,7 @@
 import XCTest
 import UIKit
 
-/// Contract: NATIVE-XCUI-SEAM-PLAN-001/CONTRACT.v2.1.json, SHA fc972018d21107f15a398fd3d83b5e6a04b33186d74d690ebd98f6f20e6f728e.
+/// Native controls qualification v3: capability plus bounded accessibility matrix.
 /// Synthetic component-host capability only; no production account or VoiceOver claim.
 @MainActor
 final class MobileControlsUITests: XCTestCase {
@@ -128,6 +128,9 @@ final class MobileControlsUITests: XCTestCase {
                     let landscape = orientation == .landscapeLeft
                     try require(landscape ? app.frame.width > app.frame.height : app.frame.height > app.frame.width,
                                 "Native orientation did not settle: \(key)", app)
+                    if !landscape && textSize == "AX5" {
+                        try require(surface.frame.width <= 320, "Narrow AX5 fixture must remain 320pt wide: \(key)", app)
+                    }
                     if fixture == "approvals" {
                         let actions = [surface.buttons["assistant.approvals.approval.approved"],
                                        surface.buttons["assistant.approvals.approval.denied"],

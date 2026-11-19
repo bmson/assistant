@@ -171,7 +171,7 @@ jobs:
               if head != os.environ['EXPECTED_HEAD']: raise RuntimeError('Checkout pin mismatch')
               paths = sorted(set(Path('apps/ios').rglob('*.swift')) | {Path('apps/ios/Assistant.xcodeproj/project.pbxproj'), Path('.github/workflows/ios-native-capability.yml'), Path('apps/ios/Assistant.xcodeproj/xcshareddata/xcschemes/AssistantUIFixtures.xcscheme')})
               pins = {str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
-              save('source.json', {'head':head,'pins':pins,'contractSHA256':'fc972018d21107f15a398fd3d83b5e6a04b33186d74d690ebd98f6f20e6f728e','scope':'synthetic one-off capability only'})
+              save('source.json', {'head':head,'pins':pins,'qualificationVersion':3,'scope':'synthetic capability and 20-case accessibility matrix only'})
               xcodes = list(Path('/Applications').glob('Xcode*.app'))
               version = lambda s: tuple(int(v) for v in re.findall(r'\d+', str(s)))
               if not xcodes: raise RuntimeError('No installed Xcode')
