@@ -345,27 +345,47 @@ async function collapsePageWithTaskHistory(
 function toUiMessages(rows: PersistedMessage[]): UIMessage[] {
   return rows
     .filter((row) => row.role === 'user' || row.role === 'assistant')
-    .map((row) => ({
-      id: row.id,
-      role: row.role as 'user' | 'assistant',
-      parts: compactChatMessageParts(
-        row.role === 'assistant' ? stripBackgroundNoticeEcho(row.text) : row.text,
-        (Array.isArray(row.parts) ? row.parts : []).map((part) =>
-          row.role === 'assistant' && part?.type === 'text' && typeof part.text === 'string'
-            ? { ...part, text: stripBackgroundNoticeEcho(part.text) }
-            : part,
-        ),
-        row.taskId ?? undefined,
-      ) as UIMessage['parts'],
-      // `taskId` rides along so hydration can resolve an approval summary
-      // written before the part carried its own approval ids — see
-      // hydrateChatApprovals. The client reads only `createdAt`.
-      metadata: {
-        createdAt: row.createdAt.toISOString(),
-        taskId: row.taskId ?? undefined,
-        channelMessageId: row.channelMessageId ?? undefined,
-      },
-    }));
+    .map((row) => {
+      const parts = Array.isArray(row.parts) ? row.parts : [];
+      const lineage =
+        row.role === 'assistant' && row.origin === 'assistant' && row.taskId
+          ? parts.find((part) => part?.type === 'data-turn-origin')?.data
+          : undefined;
+      const replyOrigin =
+        lineage && typeof lineage === 'object' && !Array.isArray(lineage)
+          ? (lineage as Record<string, unknown>)
+          : undefined;
+      const triggerMessageId = replyOrigin?.triggerMessageId;
+      const clientOperationId = replyOrigin?.clientOperationId;
+      return {
+        id: row.id,
+        role: row.role as 'user' | 'assistant',
+        parts: compactChatMessageParts(
+          row.role === 'assistant' ? stripBackgroundNoticeEcho(row.text) : row.text,
+          parts
+            .filter((part) => part?.type !== 'data-turn-origin')
+            .map((part) =>
+              row.role === 'assistant' && part?.type === 'text' && typeof part.text === 'string'
+                ? { ...part, text: stripBackgroundNoticeEcho(part.text) }
+                : part,
+            ),
+          row.taskId ?? undefined,
+        ) as UIMessage['parts'],
+        metadata: {
+          createdAt: row.createdAt.toISOString(),
+          taskId: row.taskId ?? undefined,
+          channelMessageId: row.channelMessageId ?? undefined,
+          ...(typeof triggerMessageId === 'string' && UUID_RE.test(triggerMessageId)
+            ? {
+                triggerMessageId,
+                ...(typeof clientOperationId === 'string' && UUID_RE.test(clientOperationId)
+                  ? { clientOperationId }
+                  : {}),
+              }
+            : {}),
+        },
+      };
+    });
 }
 
 /** Attach live approval and budget state to persisted custom message parts. */

@@ -14,7 +14,11 @@ import type {
   NotificationsConversationRepository,
   SkillContextRepository,
 } from '@assistant/persistence';
-import { finalChannelDelivery, finalChannelDeliveryReport } from '@assistant/persistence';
+import {
+  chatReplyOrigin,
+  finalChannelDelivery,
+  finalChannelDeliveryReport,
+} from '@assistant/persistence';
 import type { ModelMessage } from 'ai';
 import { z } from 'zod';
 import { assistantMessageParts, PROMPT_VERSION, persistMessage } from '../../chat.js';
@@ -237,7 +241,12 @@ async function persistFinalConversationOnce(
     taskId: task.id,
     role: 'assistant',
     origin: 'assistant',
-    parts: assistantMessageParts(body, recall, { contractNotice, cues, responseCards }),
+    parts: assistantMessageParts(body, recall, {
+      contractNotice,
+      cues,
+      responseCards,
+      replyOrigin: chatReplyOrigin(task),
+    }),
     text: body,
   };
   // Stop may have revoked the lease while the existence lookup was awaiting.

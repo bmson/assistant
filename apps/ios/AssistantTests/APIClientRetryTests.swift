@@ -137,6 +137,10 @@ final class StubURLProtocol: URLProtocol {
         }
     }
 
+    static func appendOutcome(_ outcome: Outcome, path: String) {
+        lock.withLock { pathOutcomes[path, default: []].append(outcome) }
+    }
+
     /// Parallel startup reads must not consume each other's response bodies.
     static func primeBootstrap(_ body: Data, overview: [Outcome] = [.success(status: 401, body: Data())],
                                queued: [Outcome] = []) {
@@ -7196,6 +7200,63 @@ extension APIClientRetryTests {
                            "The old connection's reply must not clear the replacement connection's error")
             model.scenePhaseDidChange(.background)
         }
+    }
+
+    @MainActor
+    func testTasklessPollKeepsCurrentProvisionalReplyAcrossAnUnrelatedAnswer() async throws {
+        let model = try await notificationModel()
+        let statusPath = "/api/mobile/v1/chat/status"
+        let chatPath = "/api/mobile/v1/chat"
+        let provisionalText = "Partial answer for the current turn"
+        let delta = try JSONSerialization.data(withJSONObject: [
+            "type": "text-delta", "delta": provisionalText,
+        ])
+        let other = ChatMessage(id: "other-answer", role: .assistant,
+            parts: [.init(type: "text", text: "Answer from the older approved turn")])
+        let unrelated = ChatUpdates(taskStatus: nil, messages: [other], refreshed: [], superseded: nil,
+            nextCursor: nil, hasMore: false, activity: [])
+        StubURLProtocol.prime([], paths: [
+            chatPath: [.stream(body: Data("data: \(String(decoding: delta, as: UTF8.self))\n\n".utf8))],
+            statusPath: [.success(status: 200, body: try JSONEncoder().encode(unrelated))],
+            "/api/mobile/v1/overview": [.success(status: 200, body: try overviewBody(pending: []))],
+            "/api/mobile/v1/workspace": [.success(status: 401, body: Data())],
+        ])
+        model.send("My current request")
+        let firstDeadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while !model.messages.contains(where: { $0.id.hasPrefix("stream-") && $0.text == provisionalText }),
+              ContinuousClock.now < firstDeadline { await Task.yield() }
+        XCTAssertTrue(model.messages.contains(where: { $0.id.hasPrefix("stream-") && $0.text == provisionalText }))
+        let index = try XCTUnwrap(StubURLProtocol.urls.firstIndex(where: { $0.path == chatPath }))
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: StubURLProtocol.bodies[index]) as? [String: Any])
+        let operationId = try XCTUnwrap(body["clientOperationId"] as? String)
+        let current = ChatMessage(id: "current-answer", role: .assistant,
+            parts: [.init(type: "text", text: "Matching durable answer")],
+            metadata: [
+                "taskId": .string("33333333-3333-4333-8333-333333333333"),
+                "clientOperationId": .string(operationId),
+            ])
+        let matching = ChatUpdates(taskStatus: nil, messages: [current], refreshed: [], superseded: nil,
+            nextCursor: nil, hasMore: false, activity: [])
+        StubURLProtocol.appendOutcome(
+            .held(status: 200, body: try JSONEncoder().encode(matching)), path: statusPath
+        )
+        StubURLProtocol.appendStream(Data("data: [DONE]\n\n".utf8), operationId: operationId)
+        let secondDeadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while !StubURLProtocol.isHoldingResponse(path: statusPath),
+              ContinuousClock.now < secondDeadline { await Task.yield() }
+        XCTAssertTrue(StubURLProtocol.isHoldingResponse(path: statusPath))
+        XCTAssertTrue(model.isSending)
+        XCTAssertTrue(model.messages.contains(where: { $0.id == other.id }))
+        XCTAssertTrue(model.messages.contains(where: { $0.id.hasPrefix("stream-") && $0.text == provisionalText }))
+        StubURLProtocol.releaseHeldResponse(path: statusPath)
+
+        let settleDeadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while model.isSending, ContinuousClock.now < settleDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertFalse(model.isSending)
+        XCTAssertTrue(model.messages.contains(where: { $0.id == current.id }))
+        XCTAssertFalse(model.messages.contains(where: { $0.id.hasPrefix("stream-") }))
     }
 
     @MainActor
