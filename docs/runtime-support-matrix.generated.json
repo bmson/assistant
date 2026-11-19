@@ -5,7 +5,7 @@
     "packages/config/src/index.ts": "563c98374b32afdf42eab148f4ac891cd0ecc0925387f7cc18b84ef208bd4381",
     "apps/agent/src/deps.ts": "6d04e93fb589b84b4e279c6f47e72b426c46c2376d600e5a51790c325092813d",
     "apps/agent/src/index.ts": "bc65b1a16ba83c6351a74e2c071189fb4288d5d3ec2c4425accc185da77fe6ab",
-    "apps/web/lib/server.ts": "2d6ebc1cb3244e1c0c0847f5f9d221e10d5fd6b77270e3fa148c7b5bef8ab821",
+    "apps/web/lib/server.ts": "d15613ac63f91adb8317a4e5ae11af4b8db2ba2df96f2bcf97367aef1235a28c",
     "apps/web/proxy.ts": "2bd4b31f35537ca7c61e030470792422b957687a0a345838bcbec111a21bbaae",
     "packages/db/drizzle/meta/_journal.json": "0641de27b704f13a1cbeddca9b19f5be1270b1abd380695150b84ec34415cfe7",
     "infra/gcp/release-contracts.json": "fc09b6cb5cc2c74ca9e7bf33b9be9ed11c0b7e20062fd2052e4dc5ad5864f75d"
@@ -231,7 +231,7 @@
     },
     "apps/web/app/api/mobile/v1/connections/google-calendar/connect/route.ts": {
       "methods": ["POST"],
-      "sha256": "67263185c06a899b6cccd81a73e9dd8dc6015e97722f7208fd323ba7c4b1c823"
+      "sha256": "6d1ce7a5092f6d8027b430889386dbe7908e14061570b3b65eaf1e840040be5b"
     },
     "apps/web/app/api/mobile/v1/connections/google-calendar/flow/route.ts": {
       "methods": ["DELETE", "GET"],
