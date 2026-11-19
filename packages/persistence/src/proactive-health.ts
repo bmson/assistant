@@ -24,7 +24,11 @@ export type MailHealthCounts = Pick<
   | 'mailScored24h'
   | 'mailScored7d'
   | 'lastMailAt'
-> & { mailStalledAdmissionByStage: Partial<Record<MailAdmissionStage, number>> };
+> & {
+  mailStalledAdmissionByStage: Partial<Record<MailAdmissionStage, number>>;
+  mailFreshIntake7d: number;
+  mailIntakeNeedsReview7d: number;
+};
 
 export interface MailHealthWindow {
   since6h: Date;

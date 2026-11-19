@@ -250,8 +250,35 @@ for (const driver of ['postgres', 'firestore'] as const) {
           if (store) await store.doc('emailIngest', stuck.id).update(patch);
           else await db.update(emailIngest).set(patch).where(eq(emailIngest.id, stuck.id));
         }
-        if (store) await store.doc('emailIngest', stuck.id).set(stuck);
-        else await db.insert(emailIngest).values(stuck);
+        const fresh = {
+          ...stuck,
+          id: randomUUID(),
+          channelMessageId: `gmail:fresh-${id}`,
+          pipelineStage: 'pending_score',
+          createdAt: now,
+        };
+        const review = {
+          ...stuck,
+          id: randomUUID(),
+          channelMessageId: `gmail:review-${id}`,
+          pipelineStage: 'needs_attention',
+        };
+        if (store) {
+          for (const row of [stuck, fresh, review]) await store.doc('emailIngest', row.id).set(row);
+        } else {
+          await db.insert(emailIngest).values([stuck, fresh, review]);
+        }
+        const stalledExtraction = await runScheduled('email.extract');
+        expect(stalledExtraction).toMatchObject({
+          outcome: 'done',
+          detail: expect.stringContaining(
+            '0 still pending extraction; recent intake (last 7 days): 1 stuck in scoring for over six hours, ' +
+              '1 still in intake within six hours, 1 in intake awaiting review',
+          ),
+        });
+        expect(stalledExtraction.detail).not.toContain(stuck.subject);
+        expect(stalledExtraction.detail).not.toContain(stuck.fromEmail);
+        expect(object).toHaveBeenCalledTimes(2);
 
         const warning = 'Mail processing has waited over six hours: 1 in scoring.';
         expect(await runScheduled('health.monitor')).toMatchObject({

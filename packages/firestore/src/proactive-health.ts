@@ -27,7 +27,12 @@ export class FirestoreProactiveHealthRepository implements ProactiveHealthReposi
 
   async counts(agentId: string, window: MailHealthWindow): Promise<ProactiveHealthCounts> {
     const [
-      { mailStalledAdmissionByStage: _stageCounts, ...mailCounts },
+      {
+        mailStalledAdmissionByStage: _stageCounts,
+        mailFreshIntake7d: _fresh,
+        mailIntakeNeedsReview7d: _review,
+        ...mailCounts
+      },
       moments,
       deliveredPings,
       heldPings,
@@ -70,6 +75,8 @@ export class FirestoreProactiveHealthRepository implements ProactiveHealthReposi
     let mailProcessed7d = 0;
     let mailPendingOver6h7d = 0;
     let mailAwaitingAdmissionOver6h7d = 0;
+    let mailFreshIntake7d = 0;
+    let mailIntakeNeedsReview7d = 0;
     const mailStalledAdmissionByStage: MailHealthCounts['mailStalledAdmissionByStage'] = {};
     const admissionStages = new Set<string>(PENDING_MAIL_ADMISSION_STAGES);
     let mailScored24h = 0;
@@ -111,14 +118,16 @@ export class FirestoreProactiveHealthRepository implements ProactiveHealthReposi
           continue;
         mailReceived7d += 1;
         if (!emailIngestReadable(row)) {
-          if (
-            row.createdAt < window.since6h &&
-            row.pipelineStage &&
-            admissionStages.has(row.pipelineStage)
-          ) {
-            mailAwaitingAdmissionOver6h7d += 1;
-            const stage = row.pipelineStage as MailAdmissionStage;
-            mailStalledAdmissionByStage[stage] = (mailStalledAdmissionByStage[stage] ?? 0) + 1;
+          if (row.pipelineStage === 'needs_attention') {
+            mailIntakeNeedsReview7d += 1;
+          } else if (row.pipelineStage && admissionStages.has(row.pipelineStage)) {
+            if (row.createdAt < window.since6h) {
+              mailAwaitingAdmissionOver6h7d += 1;
+              const stage = row.pipelineStage as MailAdmissionStage;
+              mailStalledAdmissionByStage[stage] = (mailStalledAdmissionByStage[stage] ?? 0) + 1;
+            } else {
+              mailFreshIntake7d += 1;
+            }
           }
           continue;
         }
@@ -140,6 +149,8 @@ export class FirestoreProactiveHealthRepository implements ProactiveHealthReposi
       mailPendingOver6h7d,
       mailAwaitingAdmissionOver6h7d,
       mailStalledAdmissionByStage,
+      mailFreshIntake7d,
+      mailIntakeNeedsReview7d,
       mailScored24h,
       mailScored7d,
       lastMailAt,

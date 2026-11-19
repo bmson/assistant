@@ -13,11 +13,14 @@ import type {
   AssistantHealthSignal,
   KnowledgeGraphSyncRepository,
 } from '@assistant/persistence';
-import { PENDING_MAIL_ADMISSION_STAGES } from '@assistant/persistence';
 import { and, eq, gte, inArray, isNull, lt, ne, notInArray, or, sql } from 'drizzle-orm';
 import { loadConfig } from '../config.js';
 import { pendingKnowledgeGraphSourceCount } from '../memory/knowledge-graph.js';
-import { mailHealthWindow, sqlMailHealthCounts } from '../proactive/pipeline-health.js';
+import {
+  mailHealthWindow,
+  mailIntakeStallDetails,
+  sqlMailHealthCounts,
+} from '../proactive/pipeline-health.js';
 import { notifyOwnerInNotifications } from './anomaly.js';
 
 /** A completed graph extraction may hold a five-minute lease; ten minutes is actionable. */
@@ -200,10 +203,7 @@ export async function runAssistantHealthMonitor(
     mustActRetries,
     degradedSteps,
   } = observed;
-  const mailIntake = PENDING_MAIL_ADMISSION_STAGES.flatMap((stage) => {
-    const count = mail?.mailStalledAdmissionByStage[stage] ?? 0;
-    return count > 0 ? [`${count} in ${stage.replaceAll('_', ' ')}`] : [];
-  });
+  const mailIntake = mailIntakeStallDetails(mail, 'health');
   const mailExtraction = mail?.mailPendingOver6h7d ?? 0;
   const stalledMail = [
     ...mailIntake,
