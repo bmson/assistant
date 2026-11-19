@@ -221,6 +221,9 @@ export function queuedRepairIssues(issues: RepairIssue[]): RepairIssue[] {
     );
 }
 
+/** Automatic repair task creation is paced independently of the daily dispatch allowance. */
+export const REPAIR_POLL_INTERVAL_MS = 15 * 60_000;
+
 /** Scheduling and atomic claims use the same rolling allowance and active-work fence. */
 export function repairQueueReady(issues: RepairIssue[], now: Date, dailyLimit: number): boolean {
   return repairClaimCandidate(issues, now, dailyLimit) !== null;
