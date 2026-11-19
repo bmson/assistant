@@ -17,6 +17,7 @@ import {
   reviewedBootstrap,
   scalingCheckpoint,
   verifiedRestoreReceipts,
+  verifyCanonicalBootstrapAgent,
   verifyCurrentSnapshot,
 } from './owner-release-bootstrap.js';
 import {
@@ -44,7 +45,8 @@ import {
 } from './owner-web-release-phase-receipts.js';
 import { bindCapturedRetirementToLifecycle } from './owner-web-release-retirement-binding.js';
 import { readProtectedWebTagArtifact } from './owner-web-tag-artifact.js';
-import { protectedWebTagCloud } from './owner-web-tag-cloud.js';
+import { protectedWebTagCloud, protectedWebTagCredential } from './owner-web-tag-cloud.js';
+import { nativeRetirementClient } from './owner-web-tag-native.js';
 import {
   extractCreationArchive,
   parseWebManifest,
@@ -772,6 +774,35 @@ export async function runWebTagAdmission(mode: string | undefined) {
     const receipts = openPrivateReleasePhaseReceipts(temp, receiptIdentity);
     const state = receipts.readCurrent();
     await verifyOperatorOwnedHold(state.context);
+    const manifestAgent = rec(rec(manifest.components).agent);
+    if (preclosed && bootstrap && manifestAgent.apiContract === 3) {
+      if (
+        !state.admissionPossible ||
+        state.context.currentBinding?.reviewedEvidenceSha256 !== bootstrapEvidence
+      )
+        throw new Error('Canonical API 3 agent is outside the reviewed admission phase');
+      const accepted: unknown = JSON.parse(
+        boundedFile(path('owner-bootstrap-agent-successor-observed_exact_successor.json')).toString(
+          'utf8',
+        ),
+      );
+      if (bootstrapDigest(accepted) !== state.agentSuccessorReceiptSha256)
+        throw new Error('Canonical API 3 agent receipt is unbound');
+      const expected = {
+        revision: `assistant-agent-r-${runId}-${runAttempt}-${source.slice(0, 8)}`,
+        image: String(manifestAgent.image),
+        source,
+        manifest: String(manifestDigest),
+        runId: String(runId),
+        attempt: String(runAttempt),
+      };
+      const reader = nativeRetirementClient(await protectedWebTagCredential());
+      const [live, revision] = await Promise.all([
+        reader.readAgentService(),
+        reader.readAgentRevision(expected.revision),
+      ]);
+      verifyCanonicalBootstrapAgent(bootstrap, live, revision, expected, accepted);
+    }
     const raw = await io.readService();
     const traffic = rec(raw).traffic;
     if (!Array.isArray(traffic)) throw new Error('Native agent readiness snapshot held');
