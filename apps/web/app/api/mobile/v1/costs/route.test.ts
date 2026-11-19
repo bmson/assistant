@@ -127,6 +127,7 @@ describe.skipIf(!localEmulator)(
             agentId: owner,
             type: 'adhoc',
             trust: 'owner',
+            trigger: { source: 'internal', payload: {} },
           });
           parked.push(task.id);
           await store.doc('tasks', task.id).update({ budgetUsdLimit: taskCap });
