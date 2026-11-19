@@ -620,7 +620,10 @@ jobs:
         env:
           GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           GCP_DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
-        run: pnpm exec tsx scripts/owner-editor-release-inventory.ts --release-preflight
+          RELEASE_SHA: ${{ needs.plan.outputs.sha }}
+        run: |
+          [[ "$(git rev-parse HEAD)" == "$RELEASE_SHA" ]]
+          pnpm exec tsx scripts/owner-editor-release-inventory.ts --release-preflight
       - name: Archive basic editor prerequisite observation
         if: always() && steps.release_path.outputs.firestore_pair == 'true'
         uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
