@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { loadConfig } from '@assistant/config';
 import { createPostgresModelRoutingRepository, type Db } from '@assistant/db';
 import {
+  budgetRetry,
   type CostBasis,
   type EmbeddingSpace,
   embeddingModelId,
@@ -1662,12 +1663,36 @@ export class ModelRouter {
     }
     const attempt = async (forceFallback: boolean) => {
       const route = await this.route(role, { ...opts, forceFallback });
-      if (!route.ok) return { ok: false as const, decision: route.decision };
+      if (!route.ok) {
+        const decision = route.decision;
+        if (decision.mode === 'block' && decision.scope && opts.taskId) {
+          const candidate = await this.prepareEstimatedCostCandidate(role, opts, toolCall).catch(
+            () => null,
+          );
+          if (candidate) {
+            return {
+              ok: false as const,
+              decision: {
+                ...decision,
+                budgetRetry: {
+                  scope: decision.scope,
+                  nextAttemptMicros: candidate.nextAttemptMicros,
+                  critical: candidate.critical,
+                },
+              },
+            };
+          }
+        }
+        return { ok: false as const, decision };
+      }
       const prepared = await this.reserveModelCall(role, route, opts, toolCall);
       if (!prepared.reservation.ok) {
         return {
           ok: false as const,
-          decision: reservationDecision(prepared.reservation.reason),
+          decision: {
+            ...reservationDecision(prepared.reservation.reason),
+            budgetRetry: budgetRetry(prepared.reservation.budget, opts.critical),
+          },
           route,
         };
       }
@@ -3015,7 +3040,12 @@ export class ModelRouter {
       taskId: opts.taskId,
       description: `embed:${roleRow.primaryModel} preflight`,
     });
-    if (!reservation.ok) throw new BudgetReservationError(reservation.reason, reservation.resumeAt);
+    if (!reservation.ok)
+      throw new BudgetReservationError(
+        reservation.reason,
+        reservation.resumeAt,
+        budgetRetry(reservation.budget),
+      );
 
     const started = Date.now();
     let providerSucceeded = false;

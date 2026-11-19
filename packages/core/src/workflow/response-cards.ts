@@ -652,6 +652,7 @@ export interface WeatherCardDay {
   lowC: number;
   highC: number;
   precipPct?: number;
+  precipitationType?: 'unspecified';
   description: string;
   symbol?: string;
 }
@@ -673,6 +674,9 @@ function weatherCardDay(
     lowC,
     highC,
     ...(precipPct === undefined ? {} : { precipPct }),
+    ...(day.dailyPrecipitationType === 'unspecified'
+      ? { precipitationType: 'unspecified' as const }
+      : {}),
     description,
     ...(symbol ? { symbol } : {}),
   };
@@ -712,7 +716,16 @@ export function weatherResponseCards(ambient?: string): ResponseCard[] {
     .map((day) => weatherDetail(day[1] ?? '', day[2] ?? '', day[2] ?? ''));
   const symbol = weatherSymbol(condition);
   const days = [
-    weatherCardDay('Today', { lowC: low, highC: high, precipProbabilityMax: rain }, condition),
+    weatherCardDay(
+      'Today',
+      {
+        lowC: low,
+        highC: high,
+        precipProbabilityMax: rain,
+        dailyPrecipitationType: precipName === 'precipitation' ? 'unspecified' : undefined,
+      },
+      condition,
+    ),
     ...coming.split(';').map((entry) => {
       const day =
         /^(\w+)\s+(-?\d+)–(-?\d+)°C,\s*([^,]+?)(?:,\s*(\d+)% chance of (?:rain|precipitation))?\.?$/.exec(

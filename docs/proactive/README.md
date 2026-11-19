@@ -52,7 +52,7 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | ID  | Item                                                                   | Phase | Size | Depends on | Status                                                        |
 | --- | ---------------------------------------------------------------------- | ----- | ---- | ---------- | ------------------------------------------------------------- |
 | A1  | Reconcile cost holds; holds scoped to their period                     | 0     | L    | —          | in review (settlement and period-specific Costs warning)      |
-| A2  | Wake parked work when caps change; honest parked notice                | 0     | M    | —          | open                                                          |
+| A2  | Wake parked work when caps change; honest parked notice                | 0     | M    | —          | in review (cap-change wake and recorded spend/holds notice)   |
 | A3  | Outage watchdog and "while I was away" digest                          | 0     | M    | H4         | open                                                          |
 | A4  | Stop mirroring secondary-chat replies into the primary chat            | 0     | M    | —          | in review (private answer-ready push)                         |
 | A5  | Checklist dedupe ignores trailing punctuation                          | 0     | S    | —          | in review                                                     |
@@ -60,7 +60,7 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | A7  | Self-repair cadence respects its daily limit                           | 0     | S    | —          | in review                                                     |
 | A8  | Truthful "Needs you" count; archive needs_attention in Firestore       | 1     | M    | —          | open                                                          |
 | A9  | Firestore parity for every route the phone calls                       | 1     | M    | —          | in review (native route and method checks)                    |
-| A10 | Retire `morning-brief` in Firestore                                    | 0     | S    | —          | open                                                          |
+| A10 | Retire `morning-brief` in Firestore                                    | 0     | S    | —          | in review                                                     |
 | A11 | Email pipeline: verify #910, census, stall alert                       | 0     | M    | —          | in progress (cause fixed in #910)                             |
 | A12 | Isolate QA from production; purge QA data                              | 1     | M    | —          | open                                                          |
 | A13 | Owner time zone in every card                                          | 0     | S    | —          | in review (time zones in calendar and briefing cards)         |

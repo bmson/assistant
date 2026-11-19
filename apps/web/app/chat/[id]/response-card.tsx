@@ -383,6 +383,7 @@ interface WeatherDay {
   lowC: number;
   highC: number;
   precipPct?: number;
+  precipitationType?: 'unspecified';
   description: string;
   symbol: string;
 }
@@ -401,6 +402,9 @@ function weatherDays(value: unknown): WeatherDay[] {
         lowC: Math.round(lowC),
         highC: Math.round(highC),
         ...(precipPct === undefined ? {} : { precipPct: Math.round(precipPct) }),
+        ...(entry.precipitationType === 'unspecified'
+          ? { precipitationType: 'unspecified' as const }
+          : {}),
         description: str(entry.description),
         symbol: str(entry.symbol),
       },
@@ -422,9 +426,11 @@ function WeatherDayList({ days }: { days: WeatherDay[] }) {
       {days.map((day) => {
         const Icon = weatherIcon(day.symbol);
         const rain = day.precipPct !== undefined && day.precipPct >= 30 ? `${day.precipPct}%` : '';
-        const precipitation = /snow|precipitation type uncertain|^unsettled$/i.test(day.description)
-          ? 'precipitation'
-          : 'rain';
+        const precipitation =
+          day.precipitationType === 'unspecified' ||
+          /snow|precipitation type uncertain|^unsettled$/i.test(day.description)
+            ? 'precipitation'
+            : 'rain';
         return (
           <li
             key={`${day.weekday}-${day.lowC}-${day.highC}`}
