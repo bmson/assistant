@@ -16,6 +16,7 @@ import {
   FirestoreTaskRepository,
 } from '@assistant/firestore';
 import {
+  createResearchAssignment,
   newTaskRecord,
   type Records,
   type ScheduleOccurrence,
@@ -59,6 +60,7 @@ for (const backend of ['postgres', 'firestore'] as const) {
           taintedOrigin: false,
           autonomy: true,
           archivedAt: null,
+          researchAssignment: null,
           createdAt: now,
           updatedAt: now,
         };
@@ -218,6 +220,134 @@ for (const backend of ['postgres', 'firestore'] as const) {
           ).toHaveLength(0);
         },
       );
+      it('rejects a research assignment at preparation and locked occurrence admission', async () => {
+        const researchGoal = {
+          ...goal,
+          researchAssignment: createResearchAssignment({
+            assignmentId: 'synthetic-assignment',
+            outcome: 'Synthetic research goal',
+            completionCondition: 'Owner reviews a shortlist',
+            now,
+          }),
+        };
+        if (db)
+          await db
+            .update(goals)
+            .set({ researchAssignment: researchGoal.researchAssignment })
+            .where(eq(goals.id, goal.id));
+        else
+          await store
+            ?.doc('goals', goal.id)
+            .update(encodeRecord({ researchAssignment: researchGoal.researchAssignment }));
+
+        const runtimeGoals = db
+          ? createPostgresGoalRuntimeRepository(db)
+          : new FirestoreGoalRuntimeRepository(store as InstallationStore, owner);
+        const prepared = await prepareGoalSession(
+          {
+            goals: runtimeGoals,
+            tasks: db
+              ? createPostgresTaskRepository(db)
+              : new FirestoreTaskRepository(store as InstallationStore),
+          },
+          owner,
+          { goalId: goal.id, conversationId: randomUUID() },
+        );
+        expect(prepared.action).toBe('disable');
+
+        const occurrenceWithCurrentResearchGoal: ScheduleOccurrence = {
+          ...occurrence,
+          goalGuard: {
+            goal: researchGoal,
+            openTasks: occurrence.goalGuard?.openTasks ?? [],
+            supersedeTaskIds: occurrence.goalGuard?.supersedeTaskIds ?? [],
+          },
+        };
+        expect(await repository.commitOccurrence(occurrenceWithCurrentResearchGoal)).toBeNull();
+        expect(await allTasks()).toHaveLength(1);
+        expect((await readTask()).status).toBe('needs_attention');
+      });
+      it('keeps legacy Firestore goals without the field eligible through locked admission', async () => {
+        if (backend === 'firestore') {
+          const { researchAssignment: _omitted, ...legacyGoal } = goal;
+          await store?.doc('goals', goal.id).set(encodeRecord(legacyGoal));
+        }
+        const runtimeGoals = db
+          ? createPostgresGoalRuntimeRepository(db)
+          : new FirestoreGoalRuntimeRepository(store as InstallationStore, owner);
+        const template = {
+          type: 'scheduled' as const,
+          goalId: goal.id,
+          instruction: 'Continue the goal',
+        };
+        const state = await runtimeGoals.sessionState(owner, goal.id);
+        expect(state.goal?.researchAssignment).toBe(backend === 'postgres' ? null : undefined);
+        const prepared = await prepareGoalSession(
+          {
+            goals: runtimeGoals,
+            tasks: db
+              ? createPostgresTaskRepository(db)
+              : new FirestoreTaskRepository(store as InstallationStore),
+          },
+          owner,
+          template,
+        );
+        expect(prepared.action).toBe('fire');
+        const legacyOccurrence: ScheduleOccurrence = {
+          ...occurrence,
+          goalGuard: prepared.goalGuard,
+        };
+        const committed = await repository.commitOccurrence(legacyOccurrence);
+        expect(committed?.task?.created).toBe(true);
+        expect(
+          (await allTasks()).filter(
+            (task) => task.externalEventId === legacyOccurrence.task?.externalEventId,
+          ),
+        ).toHaveLength(1);
+      });
+      it('fails closed for malformed non-null assignment data', async () => {
+        const malformedAssignment = { version: 1, scope: { purchaseAllowed: true } };
+        const malformedGoal = {
+          ...goal,
+          researchAssignment: malformedAssignment,
+        } as unknown as Records['goals'];
+        if (db)
+          await db
+            .update(goals)
+            .set({ researchAssignment: malformedAssignment as never })
+            .where(eq(goals.id, goal.id));
+        else
+          await store
+            ?.doc('goals', goal.id)
+            .update(encodeRecord({ researchAssignment: malformedAssignment }));
+
+        const runtimeGoals = db
+          ? createPostgresGoalRuntimeRepository(db)
+          : new FirestoreGoalRuntimeRepository(store as InstallationStore, owner);
+        const template = { goalId: goal.id, conversationId: randomUUID() };
+        const prepared = await prepareGoalSession(
+          {
+            goals: runtimeGoals,
+            tasks: db
+              ? createPostgresTaskRepository(db)
+              : new FirestoreTaskRepository(store as InstallationStore),
+          },
+          owner,
+          template,
+        );
+        expect(prepared.action).toBe('disable');
+        const malformedOccurrence: ScheduleOccurrence = {
+          ...occurrence,
+          goalGuard: {
+            goal: malformedGoal,
+            openTasks: occurrence.goalGuard?.openTasks ?? [],
+            supersedeTaskIds: occurrence.goalGuard?.supersedeTaskIds ?? [],
+          },
+        };
+        expect(await repository.commitOccurrence(malformedOccurrence)).toBeNull();
+        expect(await allTasks()).toHaveLength(1);
+        expect((await readTask()).status).toBe('needs_attention');
+      });
       it('commits exactly one replacement with supersession under concurrent sweepers', async () => {
         const results = await Promise.all([
           repository.commitOccurrence(occurrence),

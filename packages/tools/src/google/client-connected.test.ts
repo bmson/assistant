@@ -76,6 +76,7 @@ describe('GoogleClient connected credentials', () => {
       expect(requestFailed).toHaveBeenCalledExactlyOnceWith({
         status,
         body,
+        method: 'GET',
         accessToken: status === 401 ? 'fresh' : 'old',
         url,
       });
@@ -116,6 +117,7 @@ describe('GoogleClient connected credentials', () => {
     expect(requestFailed).toHaveBeenCalledExactlyOnceWith({
       status: 403,
       body,
+      method: 'GET',
       accessToken: 'same-token',
       credentialVersion: 7,
       url,

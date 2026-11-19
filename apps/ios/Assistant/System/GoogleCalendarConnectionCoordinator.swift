@@ -14,6 +14,8 @@ final class GoogleCalendarConnectionCoordinator {
     @ObservationIgnored private var isCurrent: () -> Bool = { false }
     @ObservationIgnored private var revision = 0
     @ObservationIgnored private var pendingFlowID: String?
+    @ObservationIgnored private var upgradeOrigin: GoogleCalendarStatus?
+    @ObservationIgnored private var upgradeCallbackCompleted = false
 
     init(authentication: GoogleCalendarAuthenticationSession? = nil) {
         self.authentication = authentication ?? GoogleCalendarAuthenticationSession()
@@ -27,6 +29,8 @@ final class GoogleCalendarConnectionCoordinator {
         status = nil
         notice = nil
         pendingFlowID = nil
+        upgradeOrigin = nil
+        upgradeCallbackCompleted = false
         couldNotCheck = false
         isBusy = false
     }
@@ -55,6 +59,26 @@ final class GoogleCalendarConnectionCoordinator {
             }
             let value = try await service.googleCalendarStatus(flowID: nil)
             guard accepts(version) else { return }
+            if let origin = upgradeOrigin {
+                guard value.account?.subject == origin.account?.subject,
+                      value.account?.email == origin.account?.email,
+                      value.connectionId == origin.connectionId else {
+                    couldNotCheck = true
+                    notice = "The account or connection changed during the permission upgrade. Reopen these settings to verify your personal Calendar connection before continuing."
+                    return
+                }
+                if value.canCreateEvents {
+                    notice = "Event creation is allowed for \(value.account?.email ?? "this account"). You’ll still review each event before it’s created."
+                    upgradeOrigin = nil
+                    upgradeCallbackCompleted = false
+                } else if pendingFlowID == nil {
+                    if upgradeCallbackCompleted {
+                        notice = "Event creation permission hasn’t been confirmed. Check your read connection below."
+                    }
+                    upgradeOrigin = nil
+                    upgradeCallbackCompleted = false
+                }
+            }
             status = value
             couldNotCheck = false
         } catch {
@@ -64,14 +88,27 @@ final class GoogleCalendarConnectionCoordinator {
     }
 
     func connect(anchor: ASPresentationAnchor) async {
+        await authorize(anchor: anchor, upgradingWriteAccess: false)
+    }
+
+    func upgradeWriteAccess(anchor: ASPresentationAnchor) async {
+        guard status?.canRequestEventCreation == true else { return }
+        await authorize(anchor: anchor, upgradingWriteAccess: true)
+    }
+
+    private func authorize(anchor: ASPresentationAnchor, upgradingWriteAccess: Bool) async {
         guard !isBusy, !couldNotCheck, let service, isCurrent(), status?.configured == true else { return }
         let version = revision
         isBusy = true
         notice = nil
         var startedFlow: String?
+        upgradeOrigin = upgradingWriteAccess ? status : nil
+        upgradeCallbackCompleted = false
         defer { if accepts(version) { isBusy = false } }
         do {
-            let response = try await service.connectGoogleCalendar()
+            let response = try await (upgradingWriteAccess
+                ? service.upgradeGoogleCalendarWriteAccess()
+                : service.connectGoogleCalendar())
             startedFlow = response.flowId
             guard accepts(version) else {
                 try? await service.cancelGoogleCalendarFlow(id: response.flowId)
@@ -100,8 +137,13 @@ final class GoogleCalendarConnectionCoordinator {
             let cancelled = error is CancellationError ||
                 (error as? ASWebAuthenticationSessionError)?.code == .canceledLogin
             if notice == nil {
-                notice = cancelled ? "Sign-in cancelled. Check your connection status below."
-                    : "Couldn’t confirm this sign-in. Refresh to check your connection."
+                if upgradingWriteAccess {
+                    notice = cancelled ? "Permission upgrade cancelled. Check your read connection below."
+                        : "Couldn’t confirm event creation permission. Refresh to check your existing connection."
+                } else {
+                    notice = cancelled ? "Sign-in cancelled. Check your connection status below."
+                        : "Couldn’t confirm this sign-in. Refresh to check your connection."
+                }
             }
         }
         guard accepts(version) else { return }
@@ -114,23 +156,41 @@ final class GoogleCalendarConnectionCoordinator {
             return
         }
         switch flow.outcome {
-        case "connected": notice = nil; pendingFlowID = nil
+        case "connected":
+            upgradeCallbackCompleted = upgradeOrigin != nil
+            notice = nil
+            pendingFlowID = nil
         case "pending", "processing": notice = "Sign-in is still being checked. Refresh to check again."
         case "denied", "cancelled":
-            notice = "Sign-in wasn’t completed. Check your connection status below."
+            notice = upgradeOrigin == nil
+                ? "Sign-in wasn’t completed. Check your connection status below."
+                : "Event creation permission wasn’t granted. Check your read connection below."
             pendingFlowID = nil
         case "missing_scope":
-            notice = "Calendar read access wasn’t granted. Reconnect and allow calendar read access."
+            notice = upgradeOrigin == nil
+                ? "Calendar read access wasn’t granted. Reconnect and allow calendar read access."
+                : "Event creation permission wasn’t granted. Check your read connection below."
             pendingFlowID = nil
-        case "expired": notice = "This sign-in expired. Try connecting again."; pendingFlowID = nil
+        case "expired":
+            notice = upgradeOrigin == nil ? "This sign-in expired. Try connecting again."
+                : "This permission upgrade expired. You can try allowing event creation again."
+            pendingFlowID = nil
         case "invalid_identity":
+            if let origin = upgradeOrigin {
+                notice = "Google couldn’t verify this permission upgrade for \(origin.account?.email ?? "your connected account"). Choose that same Google account when trying again. Check your read connection below."
+                pendingFlowID = nil
+                return
+            }
             notice = "Google sign-in couldn’t be verified. Try connecting again."
             if let email = status?.account?.email, !email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 notice = "Google sign-in couldn’t be verified. If you’re switching Google accounts, disconnect \(email) first, then connect the other account. Otherwise, try signing in again."
             }
             pendingFlowID = nil
         case "superseded": notice = "A newer sign-in replaced this attempt. Refresh to check your connection."; pendingFlowID = nil
-        default: notice = "Couldn’t complete Google sign-in. Try connecting again."; pendingFlowID = nil
+        default:
+            notice = upgradeOrigin == nil ? "Couldn’t complete Google sign-in. Try connecting again."
+                : "Couldn’t confirm event creation permission. Check your existing read connection below."
+            pendingFlowID = nil
         }
     }
 

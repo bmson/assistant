@@ -11,8 +11,8 @@ describe('agent image runtime dependency closure', () => {
       readFileSync(resolve(root, 'apps/agent/runtime-dependencies/package.json'), 'utf8'),
     ) as { dependencies: Record<string, string> };
     expect(runtime.dependencies).toEqual({
-      '@google-cloud/firestore': '9.4.0',
-      unpdf: '2.1.0',
+      '@google-cloud/firestore': '9.4.1',
+      unpdf: '2.2.1',
     });
 
     const lock = readFileSync(resolve(root, 'pnpm-lock.yaml'), 'utf8');
@@ -21,16 +21,16 @@ describe('agent image runtime dependency closure', () => {
       ?.split('\n  apps/')[0];
     expect(runtimeImporter).toContain(`    dependencies:
       '@google-cloud/firestore':
-        specifier: 9.4.0
-        version: 9.4.0
+        specifier: 9.4.1
+        version: 9.4.1
       unpdf:
-        specifier: 2.1.0
-        version: 2.1.0`);
+        specifier: 2.2.1
+        version: 2.2.1`);
 
     const coreImporter = lock.split('  packages/core:\n')[1]?.split('\n  packages/')[0];
     expect(coreImporter).toContain(`      unpdf:
-        specifier: ^2.1.0
-        version: 2.1.0`);
+        specifier: ^2.2.1
+        version: 2.2.1`);
   });
 
   it('ships the pnpm closure and leaves runtime JavaScript in the image scan', () => {

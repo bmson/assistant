@@ -35,6 +35,8 @@ export interface GoogleClientOptions {
       forceRefresh?: boolean,
       rejectedAccessToken?: string,
     ): Promise<string | { accessToken: string; credentialVersion: number }>;
+    /** Recheck connection capability immediately before each provider request. */
+    authorizeRequest?(url: string, method: string): Promise<void>;
     /** Final provider failure, after bounded 401 refresh/retries; never logged by the client. */
     requestFailed?(failure: {
       status: number;
@@ -42,6 +44,7 @@ export interface GoogleClientOptions {
       accessToken: string;
       credentialVersion?: number;
       url: string;
+      method?: string;
     }): Promise<void>;
     /** Secret bound to the connection identity and revision, never the access token. */
     cursorSecret: string;
@@ -297,6 +300,7 @@ export class GoogleClient {
         headers.set('content-type', 'application/json');
       headers.set('authorization', `Bearer ${token}`);
 
+      await this.opts.tokenProvider?.authorizeRequest?.(url, method);
       let res: Response;
       try {
         res = await this.fetchWithTimeout(url, { ...init, method, headers });
@@ -353,6 +357,7 @@ export class GoogleClient {
           body: text,
           accessToken: token,
           url,
+          method,
           ...(credential.credentialVersion !== undefined
             ? { credentialVersion: credential.credentialVersion }
             : {}),
@@ -439,6 +444,7 @@ export class GoogleClient {
           body: text,
           accessToken: token,
           url,
+          method,
           ...(credential.credentialVersion !== undefined
             ? { credentialVersion: credential.credentialVersion }
             : {}),

@@ -48,6 +48,7 @@ import { registerBrowserTools } from './browser/index.js';
 import { registerAuditTools } from './builtin/audit.js';
 import { registerSelfRepairTools } from './builtin/self-repair.js';
 import { ToolDispatcher } from './dispatcher.js';
+import { registerGitHubAppTools } from './github-app-tools.js';
 import { registerCalendarTools } from './google/calendar.js';
 import type { GoogleClient } from './google/client.js';
 import { registerDocsTools } from './google/docs.js';
@@ -2012,6 +2013,102 @@ describe('ToolDispatcher (integration)', () => {
     const numericPart = (code: string) => Number(code.replace(/^A(\d+)[A-Z]*$/, '$1'));
     expect(numericPart(second.shortCode)).toBeGreaterThan(numericPart(first.shortCode));
   });
+
+  it.for(['approved', 'edited', 'installation changed'] as const)(
+    'GitHub exact approval under taint and an autonomy grant: %s',
+    async (variant, testContext) => {
+      if (!dbUp) return testContext.skip();
+      let installationId = 42;
+      const selection = () => ({
+        appClientId: 'Iv1.synthetic',
+        installationId,
+        selectedRepositoryIds: [100],
+      });
+      const getPullRequest = vi.fn(async () => ({
+        repositoryId: 100,
+        number: 17,
+        title: 'Synthetic result',
+        state: 'open' as const,
+        draft: false,
+        merged: false,
+        updatedAt: '2026-11-18T12:00:00Z',
+        url: 'https://github.com/example/synthetic/pull/17',
+      }));
+      const registry = registerGitHubAppTools(new ToolRegistry(), {
+        resolveOwner: async () => agentId,
+        selection,
+        loadReader: async () => ({
+          selection: selection(),
+          reader: { getPullRequest, getRepository: vi.fn() },
+        }),
+      });
+      const dispatcher = new ToolDispatcher(db, registry);
+      const task = await makeTask('owner', 'chat_turn');
+      const grant = {
+        grantedAt: new Date().toISOString(),
+        grantedVia: 'composer' as const,
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+        revokedAt: null,
+      };
+      await db.update(tasks).set({ autonomyGrant: grant }).where(eq(tasks.id, task.id));
+      const granted = { ...task, autonomyGrant: grant };
+      const ctx = { ...ctxFor(granted), tainted: true };
+      const parked = await dispatcher.dispatch({
+        task: granted,
+        step: 1,
+        toolName: 'github.get_pull_request',
+        args: { pullRequestNumber: 17, _approvalGitHubScope: 'model-forgery' },
+        ctx,
+        provenance,
+      });
+      if (parked.kind !== 'awaiting_approval')
+        throw new Error(`Expected approval, got ${JSON.stringify(parked)}`);
+      expect(getPullRequest).not.toHaveBeenCalled();
+      const [pending] = await db
+        .select({ args: toolCalls.args })
+        .from(toolCalls)
+        .where(eq(toolCalls.id, parked.toolCallId));
+      expect(pending?.args).toMatchObject({
+        repositoryId: 100,
+        pullRequestNumber: 17,
+        _approvalGitHubScope: expect.stringMatching(/^[a-f0-9]{64}$/),
+      });
+      if (variant === 'installation changed') installationId = 43;
+      await db
+        .update(approvals)
+        .set({
+          status: 'approved',
+          ...(variant === 'edited'
+            ? {
+                resolutionPayload: {
+                  repositoryId: 100,
+                  pullRequestNumber: 18,
+                  _approvalGitHubScope: 'owner-edit-forgery',
+                },
+              }
+            : {}),
+        })
+        .where(eq(approvals.id, parked.approvalId));
+      await db
+        .update(toolCalls)
+        .set({ status: 'approved' })
+        .where(eq(toolCalls.id, parked.toolCallId));
+      const result = await dispatcher.executeApproved(parked.toolCallId, ctx);
+      if (variant === 'approved') {
+        expect(result).toMatchObject({
+          kind: 'executed',
+          result: { repositoryId: 100, number: 17 },
+        });
+        expect(getPullRequest).toHaveBeenCalledExactlyOnceWith(100, 17, ctx.signal);
+      } else {
+        expect(result).toMatchObject({
+          kind: 'failed',
+          error: expect.stringContaining('security binding'),
+        });
+        expect(getPullRequest).not.toHaveBeenCalled();
+      }
+    },
+  );
 
   it('executes an approved call once and returns the discriminated outcome', async (ctx) => {
     if (!dbUp) return ctx.skip();

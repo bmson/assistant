@@ -9,6 +9,7 @@ import {
 import { decryptStoredCredential, encryptStoredCredential } from '@assistant/core/mcp-secrets';
 import {
   GOOGLE_CALENDAR_READ_SCOPE,
+  GOOGLE_CALENDAR_WRITE_SCOPE,
   type GoogleCalendarConnectionRepository,
   type GoogleCalendarConnectionState,
   type GoogleCalendarFlowOutcome,
@@ -24,7 +25,12 @@ export interface GoogleCalendarStatus {
     | 'reconnect_required'
     | 'provider_unavailable';
   account: { subject: string; email: string } | null;
-  capabilities: { calendarRead: boolean };
+  connectionId: string | null;
+  capabilities: {
+    calendarRead: boolean;
+    /** Absent means this runtime cannot offer the write upgrade. */
+    calendarWrite?: boolean;
+  };
   flow: { id: string; outcome: GoogleCalendarFlowOutcome; expiresAt: string } | null;
 }
 export interface GoogleCalendarConnectResponse {
@@ -34,6 +40,8 @@ export interface GoogleCalendarConnectResponse {
 }
 export interface GoogleCalendarConnectionPorts {
   repository: GoogleCalendarConnectionRepository;
+  /** False until the separately qualified API-2/storage contract is active on this runtime. */
+  writeContractReady?: boolean;
   config: GoogleCalendarOAuthConfig | null;
   now?: () => Date;
   encrypt?: (value: string) => string;
@@ -51,6 +59,7 @@ export function googleCalendarStatus(
   state: GoogleCalendarConnectionState | null,
   configured: boolean,
   now = new Date(),
+  writeContractReady = false,
 ): GoogleCalendarStatus {
   const connection = state?.connection;
   const f = state?.flow;
@@ -58,7 +67,18 @@ export function googleCalendarStatus(
     configured,
     state: !configured ? 'unconfigured' : (connection?.status ?? 'disconnected'),
     account: connection?.account ?? null,
-    capabilities: { calendarRead: configured && connection?.status === 'connected' },
+    connectionId: connection?.id ?? null,
+    capabilities: {
+      calendarRead: configured && connection?.status === 'connected',
+      ...(writeContractReady
+        ? {
+            calendarWrite:
+              configured &&
+              connection?.status === 'connected' &&
+              connection.scopes.includes(GOOGLE_CALENDAR_WRITE_SCOPE),
+          }
+        : {}),
+    },
     flow: f
       ? {
           id: f.id,
@@ -78,33 +98,58 @@ export function createGoogleCalendarConnectionService(ports: GoogleCalendarConne
   const decrypt = ports.decrypt ?? decryptStoredCredential;
   const { repository, config } = ports;
   const status = async (ownerId: string) =>
-    googleCalendarStatus(await repository.get(ownerId), config !== null, now());
+    googleCalendarStatus(
+      await repository.get(ownerId),
+      config !== null,
+      now(),
+      ports.writeContractReady === true,
+    );
   return {
     status,
-    async connect(ownerId: string): Promise<GoogleCalendarConnectResponse> {
+    async connect(
+      ownerId: string,
+      capability?: 'calendarWrite',
+    ): Promise<GoogleCalendarConnectResponse> {
       if (!config) throw new GoogleCalendarOAuthError('disconnected');
+      if (capability === 'calendarWrite' && ports.writeContractReady !== true)
+        throw new GoogleCalendarOAuthError('provider_unavailable');
+      const prior =
+        capability === 'calendarWrite' ? (await repository.get(ownerId))?.connection : null;
+      if (capability === 'calendarWrite' && prior?.status !== 'connected')
+        throw new GoogleCalendarOAuthError('disconnected');
       const id = randomUUID();
       const verifier = randomBytes(32).toString('base64url');
       const nonce = randomBytes(32).toString('base64url');
       // Authenticated encrypted state avoids a second global owner lookup/index.
       const state = encrypt(
-        JSON.stringify({ ownerId, flowId: id, secret: randomBytes(32).toString('base64url') }),
+        JSON.stringify({
+          ownerId,
+          flowId: id,
+          secret: randomBytes(32).toString('base64url'),
+          ...(capability === 'calendarWrite' && prior
+            ? { capability, expectedConnectionId: prior.id }
+            : {}),
+        }),
       );
       const expiresAt = new Date(now().getTime() + 10 * 60_000).toISOString();
-      await repository.begin(ownerId, {
-        id,
-        stateHash: digest(state),
-        nonce,
-        verifierEncrypted: encrypt(verifier),
-        expiresAt,
-        outcome: 'pending',
-      });
+      await repository.begin(
+        ownerId,
+        {
+          id,
+          stateHash: digest(state),
+          nonce,
+          verifierEncrypted: encrypt(verifier),
+          expiresAt,
+          outcome: 'pending',
+        },
+        prior?.id,
+      );
       const url = new URL('https://accounts.google.com/o/oauth2/v2/auth');
       url.search = new URLSearchParams({
         client_id: config.clientId,
         redirect_uri: config.callbackUrl,
         response_type: 'code',
-        scope: `openid email ${GOOGLE_CALENDAR_READ_SCOPE}`,
+        scope: `openid email ${GOOGLE_CALENDAR_READ_SCOPE}${capability === 'calendarWrite' ? ` ${GOOGLE_CALENDAR_WRITE_SCOPE}` : ''}`,
         access_type: 'offline',
         prompt: 'consent select_account',
         include_granted_scopes: 'false',
@@ -113,6 +158,7 @@ export function createGoogleCalendarConnectionService(ports: GoogleCalendarConne
         code_challenge: createHash('sha256').update(verifier).digest('base64url'),
         code_challenge_method: 'S256',
       }).toString();
+      if (prior) url.searchParams.set('login_hint', prior.account.email);
       return { authorizationUrl: url.href, flowId: id, expiresAt };
     },
     async disconnect(ownerId: string) {
@@ -135,6 +181,8 @@ export function createGoogleCalendarConnectionService(ports: GoogleCalendarConne
       if (!state || state.length > 8192 || params.getAll('state').length !== 1)
         return { flowId: null, accepted: false };
       let ownerId: string, flowId: string;
+      let requestedCapability: 'calendarWrite' | undefined;
+      let expectedConnectionId: string | undefined;
       try {
         const payload = JSON.parse(decrypt(state)) as Record<string, unknown>;
         if (
@@ -143,6 +191,17 @@ export function createGoogleCalendarConnectionService(ports: GoogleCalendarConne
           typeof payload.secret !== 'string'
         )
           return { flowId: null, accepted: false };
+        if (payload.capability !== undefined && payload.capability !== 'calendarWrite')
+          return { flowId: null, accepted: false };
+        if (payload.capability === 'calendarWrite') {
+          if (
+            typeof payload.expectedConnectionId !== 'string' ||
+            !/^[a-f0-9-]{36}$/i.test(payload.expectedConnectionId)
+          )
+            return { flowId: null, accepted: false };
+          requestedCapability = payload.capability;
+          expectedConnectionId = payload.expectedConnectionId;
+        }
         ownerId = payload.ownerId;
         flowId = payload.flowId;
       } catch {
@@ -153,7 +212,16 @@ export function createGoogleCalendarConnectionService(ports: GoogleCalendarConne
       const finish = (
         outcome: GoogleCalendarFlowOutcome,
         credential: GoogleCalendarConnectionState['connection'] = null,
-      ) => repository.finish(ownerId, flowId, claimed.revision, outcome, credential, now());
+      ) =>
+        repository.finish(
+          ownerId,
+          flowId,
+          claimed.revision,
+          outcome,
+          credential,
+          now(),
+          expectedConnectionId,
+        );
       if (params.has('error')) {
         await finish(params.get('error') === 'access_denied' ? 'denied' : 'invalid_grant');
         return { flowId, accepted: false };
@@ -169,6 +237,8 @@ export function createGoogleCalendarConnectionService(ports: GoogleCalendarConne
         return { flowId, accepted: false };
       }
       try {
+        if (requestedCapability === 'calendarWrite' && ports.writeContractReady !== true)
+          throw new GoogleCalendarOAuthError('provider_unavailable');
         const tokens = await googleCalendarTokenRequest(
           new URLSearchParams({
             client_id: config.clientId,
@@ -180,8 +250,12 @@ export function createGoogleCalendarConnectionService(ports: GoogleCalendarConne
           }),
           ports.fetcher,
         );
-        const scopes = typeof tokens.scope === 'string' ? tokens.scope.split(/\s+/) : [];
-        if (!validGoogleCalendarScopes(scopes)) throw new GoogleCalendarOAuthError('missing_scope');
+        let scopes = typeof tokens.scope === 'string' ? tokens.scope.split(/\s+/) : [];
+        if (
+          !validGoogleCalendarScopes(scopes) ||
+          (requestedCapability === 'calendarWrite' && !scopes.includes(GOOGLE_CALENDAR_WRITE_SCOPE))
+        )
+          throw new GoogleCalendarOAuthError('missing_scope');
         if (typeof tokens.id_token !== 'string')
           throw new GoogleCalendarOAuthError('invalid_identity');
         const verify: NonNullable<GoogleCalendarConnectionPorts['verifyIdentity']> =
@@ -207,6 +281,11 @@ export function createGoogleCalendarConnectionService(ports: GoogleCalendarConne
         }
         const prior = await repository.get(ownerId);
         if (
+          requestedCapability !== 'calendarWrite' &&
+          !prior?.connection?.scopes.includes(GOOGLE_CALENDAR_WRITE_SCOPE)
+        )
+          scopes = scopes.filter((scope) => scope !== GOOGLE_CALENDAR_WRITE_SCOPE);
+        if (
           !identity.sub ||
           !identity.email ||
           identity.email_verified !== true ||
@@ -218,8 +297,17 @@ export function createGoogleCalendarConnectionService(ports: GoogleCalendarConne
           throw new GoogleCalendarOAuthError('invalid_grant');
         if (typeof tokens.expires_in !== 'number' || tokens.expires_in <= 0)
           throw new GoogleCalendarOAuthError('invalid_grant');
+        const priorConnection = prior?.connection;
+        if (
+          requestedCapability === 'calendarWrite' &&
+          (!priorConnection || priorConnection.id !== expectedConnectionId)
+        )
+          throw new GoogleCalendarOAuthError('disconnected');
         const credential = {
-          id: flowId,
+          id:
+            requestedCapability === 'calendarWrite' && priorConnection
+              ? priorConnection.id
+              : flowId,
           credentialVersion: 0,
           refreshLease: null,
           accessTokenEncrypted: encrypt(tokens.access_token as string),
@@ -230,7 +318,10 @@ export function createGoogleCalendarConnectionService(ports: GoogleCalendarConne
           scopes,
           refreshTokenEncrypted: encrypt(tokens.refresh_token),
           status: 'connected' as const,
-          connectedAt: now().toISOString(),
+          connectedAt:
+            requestedCapability === 'calendarWrite' && priorConnection
+              ? priorConnection.connectedAt
+              : now().toISOString(),
         };
         try {
           await probeGoogleCalendar(tokens.access_token as string, ports.fetcher);

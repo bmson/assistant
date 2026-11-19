@@ -5,7 +5,16 @@ struct GoogleCalendarStatus: Codable, Equatable, Sendable {
         let subject: String
         let email: String
     }
-    struct Capabilities: Codable, Equatable, Sendable { let calendarRead: Bool }
+    struct Capabilities: Codable, Equatable, Sendable {
+        let calendarRead: Bool
+        // Absence means the server predates optional event creation.
+        let calendarWrite: Bool?
+
+        init(calendarRead: Bool, calendarWrite: Bool? = nil) {
+            self.calendarRead = calendarRead
+            self.calendarWrite = calendarWrite
+        }
+    }
     struct Flow: Codable, Equatable, Sendable {
         let id: String
         let outcome: String
@@ -16,6 +25,27 @@ struct GoogleCalendarStatus: Codable, Equatable, Sendable {
     let account: Account?
     let capabilities: Capabilities
     let flow: Flow?
+    let connectionId: String?
+
+    init(configured: Bool, state: String, account: Account?, capabilities: Capabilities,
+         flow: Flow?, connectionId: String? = nil) {
+        self.configured = configured
+        self.state = state
+        self.account = account
+        self.capabilities = capabilities
+        self.flow = flow
+        self.connectionId = connectionId
+    }
+
+    var canCreateEvents: Bool { isReady && capabilities.calendarWrite == true && hasConnectionIdentity }
+
+    var canRequestEventCreation: Bool {
+        isReady && capabilities.calendarWrite == false && hasConnectionIdentity
+    }
+
+    private var hasConnectionIdentity: Bool {
+        connectionId?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+    }
 
     var isReady: Bool {
         configured && state == "connected" && capabilities.calendarRead && hasConfirmedAccount
@@ -53,6 +83,7 @@ struct GoogleCalendarConnectResponse: Codable, Sendable {
 protocol GoogleCalendarConnectionService: Sendable {
     func googleCalendarStatus(flowID: String?) async throws -> GoogleCalendarStatus
     func connectGoogleCalendar() async throws -> GoogleCalendarConnectResponse
+    func upgradeGoogleCalendarWriteAccess() async throws -> GoogleCalendarConnectResponse
     func cancelGoogleCalendarFlow(id: String) async throws
     func disconnectGoogleCalendar() async throws
 }

@@ -1,5 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import type { GoogleCalendarConnectionRepository } from '@assistant/persistence';
+import {
+  GOOGLE_CALENDAR_READ_SCOPE,
+  GOOGLE_CALENDAR_WRITE_SCOPE,
+  type GoogleCalendarConnectionRepository,
+} from '@assistant/persistence';
 import { eq } from 'drizzle-orm';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createDb, type Db } from './client.js';
@@ -29,6 +33,93 @@ describe('PostgreSQL personal Calendar connection', () => {
   });
   afterEach(async () => {
     if (db && owner) await db.delete(agents).where(eq(agents.id, owner));
+  });
+
+  it('retains a read grant through cancelled upgrades and fences an old refresh after a successful write upgrade', async () => {
+    const at = new Date('2026-11-18T09:00:00Z');
+    const initial = {
+      id: randomUUID(),
+      stateHash: 'c'.repeat(64),
+      nonce: 'initial',
+      verifierEncrypted: 'sealed',
+      expiresAt: '2026-11-18T10:00:00Z',
+      outcome: 'pending' as const,
+    };
+    await repo.begin(owner, initial);
+    const claimed = required(await repo.consume(owner, initial.id, initial.stateHash, at));
+    const credential = {
+      id: initial.id,
+      credentialVersion: 0,
+      accessTokenEncrypted: 'sealed-read',
+      accessTokenExpiresAt: '2026-11-18T11:00:00Z',
+      refreshLease: null,
+      account: { subject: 'subject', email: 'owner@example.com' },
+      refreshTokenEncrypted: 'sealed-refresh',
+      scopes: ['openid', 'email', GOOGLE_CALENDAR_READ_SCOPE],
+      status: 'connected' as const,
+      connectedAt: at.toISOString(),
+    };
+    expect(
+      await repo.finish(owner, initial.id, claimed.revision, 'connected', credential, at),
+    ).toBe(true);
+    const upgrade = {
+      ...initial,
+      id: randomUUID(),
+    };
+    await repo.begin(owner, upgrade, credential.id);
+    const cancelled = required(await reopened.consume(owner, upgrade.id, upgrade.stateHash, at));
+    expect(await repo.cancel(owner, upgrade.id)).toBe(true);
+    expect(
+      await reopened.finish(
+        owner,
+        upgrade.id,
+        cancelled.revision,
+        'connected',
+        { ...credential, scopes: [...credential.scopes, GOOGLE_CALENDAR_WRITE_SCOPE] },
+        at,
+      ),
+    ).toBe(false);
+    expect((await reopened.get(owner))?.connection).toEqual(credential);
+    const next = { ...upgrade, id: randomUUID() };
+    await reopened.begin(owner, next, credential.id);
+    const nextClaim = required(await repo.consume(owner, next.id, next.stateHash, at));
+    const leaseId = randomUUID();
+    expect((await reopened.acquireRefresh(owner, credential.id, leaseId, at, true)).kind).toBe(
+      'claimed',
+    );
+    expect(
+      await repo.finish(
+        owner,
+        next.id,
+        nextClaim.revision,
+        'connected',
+        {
+          ...credential,
+          scopes: [...credential.scopes, GOOGLE_CALENDAR_WRITE_SCOPE],
+          refreshTokenEncrypted: 'sealed-write-refresh',
+        },
+        at,
+        credential.id,
+      ),
+    ).toBe(true);
+    expect(
+      await reopened.completeRefresh(
+        owner,
+        credential.id,
+        leaseId,
+        credential.credentialVersion,
+        credential,
+      ),
+    ).toBe(false);
+    expect((await reopened.get(owner))?.connection).toMatchObject({
+      id: credential.id,
+      credentialVersion: 1,
+      refreshLease: null,
+      scopes: [...credential.scopes, GOOGLE_CALENDAR_WRITE_SCOPE],
+    });
+    await expect(repo.begin(owner, { ...upgrade, id: randomUUID() }, randomUUID())).rejects.toThrow(
+      'changed',
+    );
   });
 
   it('persists expiry, single-use claims, and disconnect fences across repository instances', async () => {

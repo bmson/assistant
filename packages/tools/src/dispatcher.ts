@@ -103,6 +103,15 @@ const OWNER_READ_PROHIBITION_SOURCES: Readonly<Record<string, readonly string[]>
     'old conversations',
     'anything up',
   ],
+  github: [
+    'github',
+    'repository',
+    'repositories',
+    'repo',
+    'repos',
+    'pull request',
+    'pull requests',
+  ],
   gmail: [
     'gmail',
     'email',
@@ -925,14 +934,24 @@ export class ToolDispatcher {
 
     // The model-facing schema strips internal binding metadata. Restore only
     // the original dispatcher snapshot, never one supplied in edited arguments.
-    if (call.toolName === 'mcp.call') {
+    const bindingArgument =
+      registered.tool.approvalBindingArgument ??
+      (call.toolName === 'mcp.call' ? '_approvalMcpScope' : undefined);
+    if (bindingArgument) {
       const original = call.args as Record<string, unknown> | null;
-      if (original?._approvalMcpScope) {
-        (parsed.data as Record<string, unknown>)._approvalMcpScope = original._approvalMcpScope;
+      if (original && Object.hasOwn(original, bindingArgument)) {
+        (parsed.data as Record<string, unknown>)[bindingArgument] = original[bindingArgument];
       }
     }
 
     const approvedArgs = parsed.data as Record<string, unknown>;
+    if (call.toolName === 'calendar.create_event') {
+      const original = call.args as Record<string, unknown> | null;
+      if (original?.account === 'personal' && approvedArgs.account !== 'personal')
+        return failApproved('personal Calendar account changed; request fresh approval');
+      if (approvedArgs.account === 'personal' && original?._approvalCalendarScope)
+        approvedArgs._approvalCalendarScope = original._approvalCalendarScope;
+    }
     // Re-run mandatory identity/scope preparation on the approved payload.
     // Legacy calls without a binding fail closed; cosmetic preparation remains
     // deliberately limited to the pre-approval path.
@@ -1181,6 +1200,15 @@ export class ToolDispatcher {
           deliveryStatus: 'unknown',
           ...(err instanceof PartialGoogleArtifactError
             ? { externalEffect: err.progress, partialCompletion: true }
+            : {}),
+          ...(err instanceof PartialGoogleArtifactError && err.progress.kind === 'calendar_event'
+            ? {
+                reconciliation: {
+                  toolName: 'calendar.reconcile_event_creation',
+                  taskId: ctx.taskId,
+                  toolCallId,
+                },
+              }
             : {}),
           retrySuppressed: true,
           note: 'The provider may have accepted this mutation; do not retry automatically.',
@@ -1866,7 +1894,10 @@ export class ToolDispatcher {
     // decided per-call. Enforced here at match time (not just at policy
     // creation) so a hand-inserted or legacy allow row for such a tool still
     // fails closed. The taint gate below still overrides ordinary policy allow.
+    const personalCalendarCreation =
+      input.toolName === 'calendar.create_event' && args.account === 'personal';
     const policyAllows =
+      !personalCalendarCreation &&
       policyMatch?.effect === 'allow' &&
       (registered.flags.blanketAllowIneligible !== true ||
         registered.flags.scopedAllowTemplates?.includes(policyMatch?.policy.templateKey ?? '') ===
@@ -1917,6 +1948,7 @@ export class ToolDispatcher {
     // is still reserved on the autonomous path — both stay enforced.
     const grant = computedTier === 'approval' ? activeAutonomyGrant(input.task, Date.now()) : null;
     const grantApplied =
+      !personalCalendarCreation &&
       !(reviewOnlyPhoneProposal && !expectedPhoneCallOwnerActionGrant) &&
       grant !== null &&
       !autonomyFloorBlocks({
@@ -2325,6 +2357,15 @@ export class ToolDispatcher {
           deliveryStatus: 'unknown',
           ...(err instanceof PartialGoogleArtifactError
             ? { externalEffect: err.progress, partialCompletion: true }
+            : {}),
+          ...(err instanceof PartialGoogleArtifactError && err.progress.kind === 'calendar_event'
+            ? {
+                reconciliation: {
+                  toolName: 'calendar.reconcile_event_creation',
+                  taskId: input.task.id,
+                  toolCallId: row.id,
+                },
+              }
             : {}),
           retrySuppressed: true,
           note: 'The provider may have accepted this mutation; do not retry automatically.',

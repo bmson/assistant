@@ -185,16 +185,13 @@ including reverse request ordering, overlapping cleanup tokens, thread/owner/
 configuration/cursor changes, and the original local notice destination.
 This is independent policy evidence, not UIKit, APNs or lock-screen validation.
 
-
 ### Utility follow-up evidence, 3 October 2026
 
 The More, provider, Workspace, memory-data and shared failure-helper sources pass Swift syntax parsing and whitespace checks. A Foundation host harness passed six checks using the actual provider-default reconciliation methods: first seed, one/both local edits surviving refresh, untouched defaults following the server, acknowledged choices becoming clean, and empty defaults. A second Foundation host harness passed six checks using the actual writing-voice load method: nil read does not permit editing, retry loads all saved fields, a loaded draft is not overwritten, reads do not overlap a save or another read, and cancellation does not publish a profile. Logs: `/tmp/assistant-provider-default-check.log` and `/tmp/assistant-writing-voice-check.log`. These isolate state policy; they do not execute SwiftUI controls. After all native source changes settled, the coordinated Xcode 27 generic iOS Simulator arm64 `build-for-testing` completed with `TEST BUILD SUCCEEDED` (code signing disabled; DerivedData `/tmp/assistant-ios-audit-build`). App, Live Activity extension and all XCTest sources compiled together. Final diagnostic log: `/tmp/assistant-ios-utility-validation.log`. The first attempt identified MainActor isolation errors in stream callback guards; the root agent moved those checks into actor-isolated receivers, and the retry passed. The original log remains `/tmp/assistant-ios-utility-initial-failure.log`. No runtime was installed and no screenshots, VoiceOver traversal, physical audio or touch checks were performed.
 
 Remaining utility work includes independent freshness for Documents overview, searchable locale/time-zone selection, locale-aware cost entry, richer reminder timing, and uniform recovery for legacy person/date/correction Forms. Grouped hierarchy, disclosure keyboard behavior, disabled-control announcements and saved-but-test-failed provider setup require rendered/device verification.
 
-
 The final account-identity follow-up also compiled successfully in the same generic arm64 test build. Authenticated bootstrap replacing an owner behind the same server address and key now advances the connection generation and clears private state. The new regression source exercises draft/cache reset, rejection of an older held overview, refusal of an old draft scope, and stability for a repeated unchanged identity. Final log remains `/tmp/assistant-ios-utility-validation.log`; the preceding utility build is preserved as `/tmp/assistant-ios-utility-pre-identity-validation.log`. These XCTest cases compile and have not executed in this environment.
-
 
 ### Native message and self-improvement scenarios, 3 October 2026
 

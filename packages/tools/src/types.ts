@@ -111,6 +111,8 @@ export interface AssistantTool<S extends z.ZodType = z.ZodType, Out = unknown> {
     ctx: ToolContext,
     phase: 'dispatch' | 'approved',
   ) => Promise<z.infer<S>>;
+  /** Private field restored from the original recorded arguments on approval. */
+  approvalBindingArgument?: string;
   /** Human-readable action line shown on approval cards. */
   approvalSummary?: (args: z.infer<S>) => string;
   idempotencyKey?: (args: z.infer<S>, ctx: ToolContext) => string;
@@ -150,6 +152,8 @@ export interface ToolFlags {
   writesMemory?: boolean;
   /** Reads owner-private data such as mail, calendars, memory, goals, or files. */
   confidentialRead?: boolean;
+  /** Available only to owner-trust tasks, including during direct dispatch. */
+  ownerOnly?: boolean;
   /** Mutates the owner's private workspace. */
   writesWorkspace?: boolean;
   /** Writes private assistant state outside the workspace (for example Gmail drafts). */

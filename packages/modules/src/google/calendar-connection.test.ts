@@ -6,6 +6,7 @@ import {
   createGoogleCalendarConnectionRepository,
   emptyGoogleCalendarConnection,
   GOOGLE_CALENDAR_READ_SCOPE,
+  GOOGLE_CALENDAR_WRITE_SCOPE,
   type GoogleCalendarConnectionState,
 } from '@assistant/persistence';
 import { ToolRegistry } from '@assistant/tools/registry';
@@ -54,7 +55,7 @@ describe('optional personal Google Calendar composition', () => {
     { modules: 'calendar,google', order: [calendarModule, googleModule] },
     { modules: 'google,calendar', order: [googleModule, calendarModule] },
   ])(
-    'installs personal read tools without the legacy bot token for $modules',
+    'installs personal read/create/reconciliation without the legacy bot token for $modules',
     ({ modules, order }) => {
       vi.spyOn(console, 'warn').mockImplementation(() => {});
       const ctx = context(loadConfig({ ...settings, ASSISTANT_MODULES: modules }));
@@ -66,8 +67,10 @@ describe('optional personal Google Calendar composition', () => {
           .sort(),
       ).toEqual([
         'calendar.availability',
+        'calendar.create_event',
         'calendar.list_calendars',
         'calendar.list_events',
+        'calendar.reconcile_event_creation',
         'calendar.search_events',
       ]);
     },
@@ -113,6 +116,78 @@ describe('optional personal Google Calendar composition', () => {
       personalCalendarAccountResolver(withoutConfiguration, ctx.persistence)?.('owner'),
     ).rejects.toThrow('unavailable');
   });
+  it.each([false, true])(
+    'keeps version-2 reads usable and permits personal provider POST only with the new release gate=%s',
+    async (gate) => {
+      vi.stubEnv('MCP_ENC_KEY', settings.MCP_ENC_KEY);
+      resetConfigForTest();
+      for (const [key, value] of Object.entries({
+        ASSISTANT_RELEASE_API_CONTRACT: gate ? '2' : '1',
+        ASSISTANT_RELEASE_AGENT_API_MIN: '2',
+        ASSISTANT_RELEASE_AGENT_API_MAX: '2',
+        ASSISTANT_RELEASE_SCHEMA_DRIVER: 'firestore',
+        ASSISTANT_RELEASE_SCHEMA_VERSION: '2',
+        ASSISTANT_RELEASE_SCHEMA_MIN: '2',
+        ASSISTANT_RELEASE_SCHEMA_MAX: '2',
+      }))
+        vi.stubEnv(key, value);
+      const config = loadConfig({
+        ...settings,
+        ASSISTANT_MODULES: 'calendar',
+        BOT_GOOGLE_REFRESH_TOKEN: 'unchanged',
+      });
+      let state: GoogleCalendarConnectionState = {
+        ...emptyGoogleCalendarConnection('owner'),
+        version: 2,
+        adopted: true,
+        connection: {
+          id: randomUUID(),
+          credentialVersion: 0,
+          refreshLease: null,
+          account: { subject: 'subject', email: 'owner@example.com' },
+          refreshTokenEncrypted: encryptStoredCredential('refresh'),
+          accessTokenEncrypted: encryptStoredCredential('access'),
+          accessTokenExpiresAt: new Date(Date.now() + 3600000).toISOString(),
+          scopes: ['openid', 'email', GOOGLE_CALENDAR_READ_SCOPE, GOOGLE_CALENDAR_WRITE_SCOPE],
+          status: 'connected',
+          connectedAt: new Date().toISOString(),
+        },
+      };
+      const repository = createGoogleCalendarConnectionRepository({
+        read: async () => structuredClone(state),
+        async update(_owner, change) {
+          const next = change(structuredClone(state));
+          state = next.state;
+          return next.result;
+        },
+      });
+      const fetcher = vi
+        .spyOn(globalThis, 'fetch')
+        .mockImplementation(async () => Response.json({ id: 'synthetic' }));
+      const account = await personalCalendarAccountResolver(config, {
+        googleCalendarConnection: repository,
+      } as unknown as ExecutionPersistence)?.('owner');
+      if (!account) throw Error('Expected personal account');
+      expect(account.calendarWrite).toBe(gate);
+      const url = 'https://www.googleapis.com/calendar/v3/calendars/selected/events';
+      await expect(account.client.api(url)).resolves.toMatchObject({ id: 'synthetic' });
+      fetcher.mockClear();
+      if (gate) {
+        await expect(
+          account.client.api(url, { method: 'POST', body: '{}' }),
+        ).resolves.toMatchObject({ id: 'synthetic' });
+        expect(fetcher).toHaveBeenCalledOnce();
+        vi.stubEnv('ASSISTANT_RELEASE_API_CONTRACT', '1');
+        fetcher.mockClear();
+      }
+      await expect(account.client.api(url, { method: 'POST', body: '{}' })).rejects.toThrow(
+        'event-write',
+      );
+      expect(fetcher).not.toHaveBeenCalled();
+      expect(state.connection?.status).toBe('connected');
+      expect(config.BOT_GOOGLE_REFRESH_TOKEN).toBe('unchanged');
+    },
+  );
   it.each([
     [401, '', 'reconnect_required', 'roster'],
     [403, 'insufficientPermissions', 'reconnect_required', 'roster'],

@@ -214,7 +214,6 @@ dispatcher); the `release.sh` health poll asserts module readiness from `/ready`
 served SHA; canary definitions move onto the module contract so a converted module proves
 itself in production.
 
-
 ## Implementation status
 
 Steps one and two of the roadmap are implemented, and the wizard from step three is in place.
