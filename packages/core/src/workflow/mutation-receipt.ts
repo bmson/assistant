@@ -1,3 +1,4 @@
+import { normalizeReminderText, reminderTextMatchesQuery } from '@assistant/persistence';
 import { extractOwnerIntent, ownerIntentPlannerSegments } from './owner-intent.js';
 import type { ActionEvidence } from './response-contract.js';
 
@@ -27,6 +28,7 @@ type Receipt = {
   target: Target;
   identity: string;
   name: string;
+  matchedQuery?: string;
   change?: string;
   replaceFrom?: string;
 };
@@ -242,8 +244,20 @@ function mutationReceipts(evidence: readonly ActionEvidence[]): Receipt[] {
       return [];
     if (row.toolName === 'reminder.cancel' && result.cancelled === true) {
       const identity = string(result.reminderId);
-      if (identity && (!args.reminderId || args.reminderId === identity))
-        return [{ operation: 'remove', target: 'reminder', identity, name: string(result.text) }];
+      if (identity && (!args.reminderId || args.reminderId === identity)) {
+        const name = string(result.text);
+        const query = string(args.query);
+        // A positive cancellation by query means the tool resolved a unique reminder.
+        // Older receipts can omit its text. When present, it must corroborate the query.
+        const matchedQuery =
+          !args.reminderId &&
+          query &&
+          (!name ||
+            reminderTextMatchesQuery(normalizeReminderText(name), normalizeReminderText(query)))
+            ? query
+            : undefined;
+        return [{ operation: 'remove', target: 'reminder', identity, name, matchedQuery }];
+      }
     }
     if (row.toolName === 'watch.cancel' && result.cancelled === true) {
       const identity = string(result.watchId);
@@ -327,7 +341,9 @@ function matches(mutation: Mutation, receipt: Receipt): boolean {
         (receipt.target !== 'document' || mutation.replaceFrom === receipt.replaceFrom))) &&
     (mutation.identityCandidate === receipt.identity ||
       mutation.terms === normalize(receipt.name) ||
-      mutation.terms === targetTerms(receipt.name, receipt.target))
+      mutation.terms === targetTerms(receipt.name, receipt.target) ||
+      (receipt.matchedQuery !== undefined &&
+        mutation.terms === targetTerms(receipt.matchedQuery, receipt.target)))
   );
 }
 

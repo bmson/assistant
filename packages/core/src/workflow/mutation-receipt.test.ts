@@ -73,6 +73,19 @@ describe('terminal mutation receipts', () => {
     expect(check('Done.', ownerRequest, [row]).blocked).toBe(true);
   });
 
+  it.each([undefined, 'Bring sunglasses'])(
+    'honors the uniquely resolved reminder query for receipt text %s',
+    (text) => {
+      const row = { ...cancellation, result: { cancelled: true, reminderId: 'reminder-a', text } };
+      expect(check('I cancelled the sunglasses reminder.', ownerRequest, [row]).blocked).toBe(
+        false,
+      );
+      expect(
+        check('I cancelled the passport reminder.', 'Cancel the passport reminder.', [row]).blocked,
+      ).toBe(true);
+    },
+  );
+
   it('does not let a completed action on one checklist item stand in for another', () => {
     const result = check('Done.', 'Cancel the sunglasses reminder and delete the obsolete file.', [
       cancellation,
