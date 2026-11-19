@@ -153,7 +153,6 @@ The agent registers `/internal/tasks/execute`, `/internal/sweep`, and `/internal
 
 An independent Cloud Scheduler job checks sweep and scheduled briefing health every five minutes. Cloud Monitoring uses the job’s failure logs to alert the owner by email even when the agent cannot answer. A reachable agent can also request one push per incident when either check is stale. The health thresholds are 30 minutes for sweeps and 26 hours for daily briefings. Probe frequency and monitoring delivery add time after the threshold.
 
-
 **Keep the default `poller` until this optional profile passes a disposable real-cloud rehearsal.** The checked-in Firestore agent has Cloud Tasks composition and local regressions, but mocked Terraform plans and locally signed tokens do not prove platform forwarding or delivery. The installer does not select this profile yet. Qualification must exercise actual queue delivery and Scheduler invocation, cold-start dispatch, retry/outbox recovery, and rejection of the wrong service, route, and caller without owner data or external effects. Scheduler jobs are billed per job beyond the free allowance, and each sweep cold-starts the agent if it is idle.
 
 ### Runtime IAM summary
