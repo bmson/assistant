@@ -28,6 +28,7 @@ import {
   CalendarDays,
   Car,
   CheckCircle2,
+  CircleHelp,
   Clock,
   Cloud,
   CloudDrizzle,
@@ -300,6 +301,7 @@ function DetailRows({ items }: { items: Array<{ label: string; value: string }> 
  * to the one glyph this card has always used.
  */
 const WEATHER_ICONS: Record<string, typeof CloudSun> = {
+  uncertain: CircleHelp,
   clear: Sun,
   'partly-cloudy': CloudSun,
   cloudy: Cloud,
@@ -420,11 +422,14 @@ function WeatherDayList({ days }: { days: WeatherDay[] }) {
       {days.map((day) => {
         const Icon = weatherIcon(day.symbol);
         const rain = day.precipPct !== undefined && day.precipPct >= 30 ? `${day.precipPct}%` : '';
+        const precipitation = /snow|precipitation type uncertain|^unsettled$/i.test(day.description)
+          ? 'precipitation'
+          : 'rain';
         return (
           <li
             key={`${day.weekday}-${day.lowC}-${day.highC}`}
             className="grid grid-cols-[3.25rem_1.25rem_2.5rem_2rem_minmax(2.5rem,1fr)_2rem] items-center gap-2 whitespace-nowrap tabular-nums"
-            aria-label={`${day.weekday}, ${day.description}, low ${day.lowC}°, high ${day.highC}°${rain ? `, ${rain} chance of rain` : ''}`}
+            aria-label={`${day.weekday}, ${day.description}, low ${day.lowC}°, high ${day.highC}°${rain ? `, ${rain} chance of ${precipitation}` : ''}`}
           >
             <span className="font-medium text-strong" aria-hidden="true">
               {day.weekday}
@@ -456,11 +461,17 @@ function WeatherDayList({ days }: { days: WeatherDay[] }) {
 }
 
 /** Wind, humidity, and rain chance as one quiet row of icon-led readings. */
-function WeatherMetrics({ current }: { current: Raw }) {
+function WeatherMetrics({
+  current,
+  precipitationLabel,
+}: {
+  current: Raw;
+  precipitationLabel: string;
+}) {
   const readings = [
     { label: 'Wind', value: num(current.windKmh), unit: ' km/h', Icon: Wind },
     { label: 'Humidity', value: num(current.humidity), unit: '%', Icon: Droplets },
-    { label: 'Rain chance', value: num(current.precipPct), unit: '%', Icon: Umbrella },
+    { label: precipitationLabel, value: num(current.precipPct), unit: '%', Icon: Umbrella },
   ].filter((reading) => reading.value !== undefined);
   if (!readings.length) return null;
   return (
@@ -503,7 +514,16 @@ function WeatherCard({ data }: { data: Raw }) {
         </p>
         {caption ? <p className="shrink-0 text-xs text-muted">{caption}</p> : null}
       </div>
-      {forecast.length && reading ? <WeatherMetrics current={reading} /> : null}
+      {forecast.length && reading ? (
+        <WeatherMetrics
+          current={reading}
+          precipitationLabel={
+            current.some((detail) => detail.label === 'Precipitation chance')
+              ? 'Precipitation chance'
+              : 'Rain chance'
+          }
+        />
+      ) : null}
       {metrics.length > 0 ? (
         <div className="mt-2">
           <DetailRows items={metrics} />
