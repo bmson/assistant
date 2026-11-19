@@ -43,9 +43,11 @@ final class MobileControlsUITests: XCTestCase {
         try revealTogether([approve, deny, more], surface: approvalSurface, app: app)
         try capture(app, "approval-actions-before-assertions")
         for action in [approve, deny, more] {
-            try require(action.elementType == .button && action.frame.height >= 44,
-                        "Native action must be a button with an accessibility frame at least 44pt high", app)
-            try require(action.isHittable && app.frame.intersects(action.frame),
+            let frame = action.frame
+            let hittable = action.isHittable
+            try require(action.elementType == .button && meetsMinimumTargetHeight(frame),
+                        "Native action must be a 44pt button: \(targetMeasurement(action, frame: frame, hittable: hittable))", app)
+            try require(hittable && app.frame.intersects(frame),
                         "Every approval action must be visible and hittable", app)
         }
         try require(precedes(approve.frame, deny.frame) && precedes(deny.frame, more.frame),
@@ -120,8 +122,10 @@ final class MobileControlsUITests: XCTestCase {
                         }
                         for action in actions {
                             try revealTogether([action], surface: surface, app: app)
-                            try require(action.frame.height >= 44 && action.isHittable,
-                                        "Action must expose a hittable 44pt native frame: \(key)", app)
+                            let frame = action.frame
+                            let hittable = action.isHittable
+                            try require(meetsMinimumTargetHeight(frame) && hittable,
+                                        "Hittable 44pt target \(key): \(targetMeasurement(action, frame: frame, hittable: hittable))", app)
                         }
                         try capture(app, key + "-last-action-reached")
                         let geometry = XCTAttachment(string: frames.map { String(describing: $0) }.joined(separator: "\n"))
@@ -135,7 +139,10 @@ final class MobileControlsUITests: XCTestCase {
                         try require(details.waitForExistence(timeout: waitBudget()), "Details missing: \(key)", app)
                         try require(facts.count == 0 && summaries.count == 0, "Details must begin collapsed: \(key)", app)
                         try revealTogether([details], surface: surface, app: app)
-                        try require(details.frame.height >= 44 && details.isHittable, "Details target below 44pt: \(key)", app)
+                        let detailFrame = details.frame
+                        let detailHittable = details.isHittable
+                        try require(meetsMinimumTargetHeight(detailFrame) && detailHittable,
+                                    "44pt Details \(key): \(targetMeasurement(details, frame: detailFrame, hittable: detailHittable))", app)
                         details.tap()
                         try require(facts.firstMatch.waitForExistence(timeout: waitBudget()) && facts.count == 1 && summaries.count == 1,
                                     "Expansion must show exact fact and summary once: \(key)", app)
@@ -190,6 +197,19 @@ final class MobileControlsUITests: XCTestCase {
             if upwards { surface.swipeUp() } else { surface.swipeDown() }
         }
         try require(false, "Could not expose required native elements within 12 total swipes for this surface", app)
+    }
+
+    /// Coordinate conversion can subtract fractional screen origins from each
+    /// other, returning 44.nextDown for a 44pt frame. Allow only eight ULPs of
+    /// those coordinates, never a pixel-sized or point-sized target deficit.
+    private func meetsMinimumTargetHeight(_ frame: CGRect) -> Bool {
+        guard frame.minY.isFinite, frame.maxY.isFinite, frame.height.isFinite else { return false }
+        let tolerance = 8 * max(44, max(abs(frame.minY), abs(frame.maxY))).ulp
+        return frame.height + tolerance >= 44
+    }
+
+    private func targetMeasurement(_ element: XCUIElement, frame: CGRect, hittable: Bool) -> String {
+        "label=\(element.label), type=\(element.elementType.rawValue), height=\(String(format: "%.17g", Double(frame.height))), minY=\(String(format: "%.17g", Double(frame.minY))), maxY=\(String(format: "%.17g", Double(frame.maxY))), hittable=\(hittable)"
     }
 
     /// Row-major order for the default flow layout, using same-viewport native frames.
