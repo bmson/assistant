@@ -90,4 +90,17 @@ assert job.index('Reject main push reruns without BASIC5 acceptance') < job.inde
 assert re.search(r'Reject main push reruns without BASIC5 acceptance.*?exit 1', job, re.S)
 assert re.search(r"Verify four BASIC5 saves.*?if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.run_attempt == 1.*?run: pnpm exec tsx scripts/basic5-ci-acceptance.ts", job, re.S)
 print('automatic release and BASIC5 rerun admission checks passed')
+
+archive_name = '      - name: Archive reviewed restore decision journal\n'
+assert deploy.count(archive_name) == 1
+before, following = deploy.split(archive_name)
+assert before.rfind('      - name:') == before.index('      - name: Archive bounded disabled-bootstrap agent successor evidence\n')
+archive = following.split('      - name:', 1)[0]
+assert "if: always() && steps.release_path.outputs.firestore_pair == 'true'" in archive
+path = archive.split('          path: |\n', 1)[1].split('          if-no-files-found:', 1)[0]
+directory = '${{ runner.temp }}/owner-release-recovery-${{ github.run_id }}-${{ github.run_attempt }}/'
+assert [line.strip() for line in path.splitlines()] == [directory + suffix for suffix in ('start.json', 'admission.json', 'outcome.json')]
+assert 'name: owner-release-recovery-${{ needs.plan.outputs.sha }}-${{ github.run_id }}-${{ github.run_attempt }}' in archive
+assert 'if-no-files-found: ignore' in archive
+print('reviewed restore journal archive scope passed')
 PY

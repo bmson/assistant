@@ -133,7 +133,14 @@ case "$args" in
     printf '[{"name":"projects/test-project/locations/us/backups/b1","database":"projects/test-project/databases/assistant-production","state":"READY","snapshotTime":"%s"}]\n' "$snapshot" ;;
   *'scheduler jobs describe'*) echo 'name: job' ;;
   *'scheduler jobs update'*) ;;
-  *'run services update'*) capture_traffic_tag "$@" ;;
+  *'run services update'*)
+    capture_traffic_tag "$@"
+    if [[ "${STUB_RESTORE_LOST_CREATE:-0}" == 1 && "$args" == *'update assistant-agent'*'--revision-suffix'* ]]; then
+      # Represent an applied create whose transport reply was lost.
+      printf '%s\n' 'revision-created-without-reply' >"$STUB_CALLS.applied"
+      exit 1
+    fi
+    ;;
   *'run services update-traffic'*) ;;
   *'run jobs describe assistant-browser'*'--format=json'*)
     node -e '
@@ -166,6 +173,17 @@ STUB
 cat >"$TEST_ROOT/bin/pnpm" <<'STUB'
 #!/usr/bin/env bash
 printf 'pnpm %s\n' "$*" >>"$STUB_CALLS"
+if [[ "${1:-} ${2:-} ${3:-} ${4:-}" == 'exec tsx scripts/owner-release-restore-target.ts --verify' ]]; then
+  [[ "${STUB_RESTORE_VERIFY_STATUS:-1}" == 0 ]] || exit "${STUB_RESTORE_VERIFY_STATUS:-1}"
+  case "$5" in
+    before_mutation) decision=verified ;;
+    pre_admission_restore) decision=rehydrate_original_children ;;
+    *) exit 2 ;;
+  esac
+  printf '{"format":1,"source":"%s","runId":"%s","attempt":"%s","decision":"%s"}\n' \
+    "$IMAGE_TAG" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$decision"
+  exit 0
+fi
 exit "${STUB_INDEX_STATUS:-0}"
 STUB
 
@@ -430,6 +448,45 @@ run_transition_precheck disabled || fail "verified transition should complete th
 if grep -Ev '^gcloud run (services|revisions) describe |^pnpm exec tsx scripts/owner-release-api-transition.ts$' "$STUB_CALLS"; then
   fail "transition precheck issued an unexpected provider command"
 fi
+
+# The normal dispatcher keeps the opt-in path closed on an unproven target,
+# including when the readonly verifier has lost or denied its observation.
+reset
+reviewed_dispatch() (
+  set_valid_basic5_context
+  export GCP_PROJECT=bmson-assistant GCP_REGION=us-west1 ARTIFACT_REPOSITORY=assistant
+  export IMAGE_TAG="$GITHUB_SHA" RELEASE_COMPONENTS=agent,web SKIP_IMAGE_BUILD=true
+  export RUNNER_TEMP="$TEST_ROOT" OWNER_RELEASE_RESTORE_TARGET_PROOF=fixture
+  export OWNER_RELEASE_BOOTSTRAP_RECEIPT='{"format":1,"kind":"disabled-bootstrap","source":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}'
+  export OWNER_RELEASE_BOOTSTRAP_SHA256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  bash "$ROOT/release.sh"
+)
+reviewed_dispatch_status=0
+reviewed_dispatch >"$TEST_ROOT/reviewed-dispatch.log" 2>&1 || reviewed_dispatch_status=$?
+if [[ "$reviewed_dispatch_status" != 75 ]]; then
+  cat "$TEST_ROOT/reviewed-dispatch.log" >&2
+  fail "unproven restore verifier must stop normal release for observation (got $reviewed_dispatch_status)"
+fi
+grep -Fxq 'pnpm exec tsx scripts/owner-release-restore-target.ts --verify before_mutation' "$STUB_CALLS" ||
+  fail 'normal release did not invoke the review verifier'
+if rg -q '^gcloud (run (services|jobs) update|scheduler jobs update|builds submit)' "$STUB_CALLS"; then
+  fail 'unproven restore verifier allowed a service, job, or Scheduler mutation'
+fi
+
+reset
+reviewed_dispatch_status=0
+STUB_RESTORE_VERIFY_STATUS=0 STUB_RESTORE_LOST_CREATE=1 reviewed_dispatch >"$TEST_ROOT/reviewed-lost.log" 2>&1 || reviewed_dispatch_status=$?
+if [[ "$reviewed_dispatch_status" != 75 || ! -f "$STUB_CALLS.applied" ]]; then
+  cat "$TEST_ROOT/reviewed-lost.log" >&2
+  fail "lost paused-agent create response must stop normal release after the attempted create (got $reviewed_dispatch_status)"
+fi
+if rg -q '^gcloud (run services update-traffic|run jobs update|scheduler jobs update)' "$STUB_CALLS"; then
+  fail 'lost create response allowed traffic, worker or Scheduler mutation'
+fi
+node -e '
+  const r=require(process.argv[1]);
+  if(r.decision!=="rehydrate_original_children" || r.observationRequired!==true || r.mutationAuthorized!==false)process.exit(1)
+' "$TEST_ROOT/owner-release-recovery-12345-1/outcome.json" || fail 'lost response lacked a read-only recovery outcome'
 
 # Valid protected metadata cannot authorize BASIC5 with the wrong driver or
 # component scope. Both refusals must happen before any provider call.

@@ -66,6 +66,10 @@ fi
 if [[ "$#" == 1 ]]; then
   exit 0
 fi
+if [[ -n "${OWNER_RELEASE_RESTORE_TARGET_PROOF+x}" && "${SKIP_IMAGE_BUILD:-false}" != true ]]; then
+  echo 'Reviewed restore target requires pre-built release images; no build was started.' >&2
+  exit 2
+fi
 # A daily backup schedule leaves at most ~24h between recovery points.
 BACKUP_MAX_AGE_HOURS="${FIRESTORE_BACKUP_MAX_AGE_HOURS:-26}"
 
@@ -424,6 +428,10 @@ if step "Verifying agent configuration" verify_agent_configuration; then
   fi
 else
   record_failure "Service promotion skipped — agent configuration unverified"
+  if [[ -n "${OWNER_RELEASE_RESTORE_TARGET_PROOF+x}" ]]; then
+    echo 'Reviewed release stopped before staging; delivery must remain held.' >&2
+    exit "$RELEASE_STAGED_OBSERVATION_REQUIRED"
+  fi
 fi
 
 if [[ "$RELEASE_COMPONENTS" == agent,web ]]; then

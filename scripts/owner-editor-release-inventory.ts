@@ -737,27 +737,13 @@ function inventoryCredentialContext(mark: InventoryStageMarker) {
   return { identity, childEnv };
 }
 
-// The pack digest binds the reviewed private pair, including its native baseline.
-// A new historical pair or a changed baseline requires a separately reviewed digest.
-const ARCHIVED_RUNTIME_PACK_SHA256 =
-  'cbf60ddcd176546d5944536e2aef3619acd2d8623b3c8dc699ec10e2886a0b94';
-
 async function observeArchivedOriginal(mark: InventoryStageMarker) {
   mark('protected_context');
   verifyPrerequisitesBinding(process.env);
-  const runnerTemp = process.env.RUNNER_TEMP;
-  if (!runnerTemp) throw new Error('missing protected runner directory');
   mark('archived_runtime_evidence');
-  const { readArchivedRuntimePack } = await import('./owner-archived-runtime-pack.js');
-  const { verifyArchivedRuntimeProvenance } = await import(
-    './owner-archived-runtime-provenance.js'
-  );
+  const { loadReviewedArchivedRuntimePack } = await import('./owner-archived-runtime-input.js');
   const { observeArchivedRuntimePair } = await import('./owner-archived-runtime-native.js');
-  const pack = await readArchivedRuntimePack(
-    resolve(runnerTemp, 'owner-archived-runtime-pack'),
-    ARCHIVED_RUNTIME_PACK_SHA256,
-  );
-  await verifyArchivedRuntimeProvenance(pack.roles, pack.trustedRoot);
+  const pack = await loadReviewedArchivedRuntimePack();
   const { childEnv } = inventoryCredentialContext(mark);
   mark('access_token');
   const { stdout } = await exec('gcloud', ['auth', 'print-access-token', '--quiet'], {
@@ -832,6 +818,12 @@ async function main(mark: InventoryStageMarker) {
     process.env,
     candidateSource ?? process.env.GITHUB_SHA ?? '',
   );
+  if (releasePreflight) {
+    const { preloadArchivedOriginalForProtectedRelease } = await import(
+      './owner-restore-target-verify.js'
+    );
+    await preloadArchivedOriginalForProtectedRelease(process.env, candidateSource);
+  }
   const started = Date.now();
   const { identity, childEnv } = inventoryCredentialContext(mark);
   let retainedBytes = 0;

@@ -621,6 +621,8 @@ jobs:
           GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           GCP_DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
           RELEASE_SHA: ${{ needs.plan.outputs.sha }}
+          IMAGE_TAG: ${{ needs.plan.outputs.sha }}
+          RELEASE_COMPONENTS: ${{ needs.plan.outputs.components }}
         run: |
           [[ "$(git rev-parse HEAD)" == "$RELEASE_SHA" ]]
           pnpm exec tsx scripts/owner-editor-release-inventory.ts --release-preflight
@@ -758,6 +760,17 @@ jobs:
             ${{ runner.temp }}/owner-bootstrap-agent-successor-attempted.json
             ${{ runner.temp }}/owner-bootstrap-agent-successor-unknown.json
             ${{ runner.temp }}/owner-bootstrap-agent-successor-observed_exact_successor.json
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Archive reviewed restore decision journal
+        if: always() && steps.release_path.outputs.firestore_pair == 'true'
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        with:
+          name: owner-release-recovery-${{ needs.plan.outputs.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/owner-release-recovery-${{ github.run_id }}-${{ github.run_attempt }}/start.json
+            ${{ runner.temp }}/owner-release-recovery-${{ github.run_id }}-${{ github.run_attempt }}/admission.json
+            ${{ runner.temp }}/owner-release-recovery-${{ github.run_id }}-${{ github.run_attempt }}/outcome.json
           if-no-files-found: ignore
           retention-days: 14
       - name: Keep only the current deployment

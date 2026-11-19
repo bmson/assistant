@@ -196,8 +196,21 @@ function reviewInput(review: Review) {
     );
   }
 }
+export type RecoveryNativeContext = Pick<
+  Review,
+  | 'original'
+  | 'images'
+  | 'source'
+  | 'manifest'
+  | 'runId'
+  | 'ownerId'
+  | 'installationId'
+  | 'costProfile'
+  | 'pausedTemplates'
+>;
+
 function verifyCandidateTemplate(
-  review: Review,
+  review: RecoveryNativeContext,
   role: Role,
   template: Obj,
   agentUri: string,
@@ -230,7 +243,7 @@ function verifyCandidateTemplate(
   );
 }
 
-function readRole(review: Review, role: Role, native: Native, agentUri: string) {
+function readRole(review: RecoveryNativeContext, role: Role, native: Native, agentUri: string) {
   const original = review.original.services[role];
   const service = object(native.service);
   const resource = `${SERVICE_ROOT}${role}`;
@@ -378,6 +391,82 @@ function readRole(review: Review, role: Role, native: Native, agentUri: string) 
     pausedTemplate,
     revisionObjects,
   };
+}
+
+/** Inspect the same native routing and revision evidence used by the forward planner.
+ * An unpaused successor, even at zero traffic, closes the pre-admission restore path.
+ */
+export function verifyRestoreCheckpointPair(
+  review: RecoveryNativeContext,
+  pair: Snapshots,
+  checkpoint:
+    | 'before_admission'
+    | 'before_web_resume'
+    | 'pre_admission_restore'
+    | 'post_admission_forward',
+) {
+  const agentUri = text(
+    object(pair.agent.service).uri,
+    /^https:\/\/assistant-agent-[a-z0-9]+-uw\.a\.run\.app$/,
+  );
+  for (const role of roles) {
+    const state = readRole(review, role, pair[role], agentUri);
+    const original = review.original.services[role];
+    const revision = object(state.revisionObjects[original.revision]);
+    const template = semanticTemplate(revision, original.image, original.revision);
+    requireProof(bootstrapDigest(template) === original.proof.templateSha256);
+    if (checkpoint === 'post_admission_forward') continue;
+    const resumed = `assistant-${role}-r-${review.runId}-1-${review.source.slice(0, 8)}`;
+    const beforeWebResume = checkpoint === 'before_web_resume';
+    const expected = beforeWebResume && role === 'agent' ? resumed : state.paused;
+    requireProof(
+      Object.keys(state.revisionObjects).every(
+        (id) =>
+          id === original.revision ||
+          id === state.paused ||
+          (beforeWebResume && role === 'agent' && id === resumed),
+      ),
+    );
+    if (state.rows.some((row) => row.revision === original.revision))
+      requireProof(disabled(state.service));
+    if (checkpoint === 'pre_admission_restore') continue;
+
+    requireProof(state.latest === expected && state.ready === expected);
+    const conditions = state.revisionObjects[expected]?.conditions;
+    requireProof(
+      Array.isArray(conditions) &&
+        conditions.length <= 16 &&
+        conditions.map(object).filter((c) => c.type === 'Ready').length === 1 &&
+        conditions
+          .map(object)
+          .every(
+            (c) =>
+              c.state === 'CONDITION_SUCCEEDED' &&
+              c.reason === undefined &&
+              c.revisionReason === undefined,
+          ),
+    );
+    const candidateTag = `candidate-${review.runId}-1`;
+    if (!beforeWebResume && role === 'agent') {
+      requireProof(
+        state.canonical === original.revision &&
+          state.rows.length === 2 &&
+          state.rows.some(
+            (row) => row.tag === candidateTag && row.revision === state.paused && row.percent === 0,
+          ),
+      );
+    } else {
+      requireProof(
+        state.canonical === expected &&
+          matching(state.service.scaling, original.automaticScaling) &&
+          object(state.service.terminalCondition).state === 'CONDITION_SUCCEEDED' &&
+          state.rows.every(
+            (row) =>
+              row.revision === expected && (row.tag === undefined || row.tag === candidateTag),
+          ),
+      );
+    }
+  }
 }
 
 /** Plan one etag-bound action. Completion always requires a new native snapshot. */

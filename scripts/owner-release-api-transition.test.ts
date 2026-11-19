@@ -1,7 +1,11 @@
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as recovery from '../infra/gcp/api3-recovery-proof.mjs';
 import * as metadata from './estimated-cost-release-native-read.js';
 import * as spending from './estimated-cost-release-profile.js';
+import * as input from './owner-archived-runtime-input.js';
+import type { ArchivedRoleEvidence } from './owner-archived-runtime-pack.js';
 import {
   verifyDrainedApiTransition,
   verifyProductionApiTransition,
@@ -9,6 +13,8 @@ import {
 } from './owner-release-api-transition.js';
 import { type BootstrapReceipt, bootstrapDigest } from './owner-release-current-snapshot.js';
 import * as images from './owner-release-image-resolution.js';
+import * as restoreReview from './owner-restore-target-review.js';
+import * as restoreTarget from './owner-restore-target-verify.js';
 import * as holds from './owner-web-release-operator-hold.js';
 import * as credentials from './owner-web-tag-cloud.js';
 import { tagHash } from './owner-web-tag-retirement.js';
@@ -195,6 +201,7 @@ describe('protected transition entry point', () => {
 
   function protectedRun() {
     const pair = scenario();
+    vi.stubEnv('OWNER_RELEASE_RESTORE_TARGET_PROOF', undefined);
     for (const [key, value] of Object.entries({
       GITHUB_ACTIONS: 'true',
       GITHUB_REPOSITORY: 'bmson/assistant',
@@ -223,6 +230,53 @@ describe('protected transition entry point', () => {
     return { pair, credential };
   }
 
+  function mockBase(pair: ReturnType<typeof scenario>) {
+    vi.spyOn(spending, 'reviewedEstimatedCostReleaseProfile').mockReturnValue({
+      ...scope,
+      format: 1,
+      mode: 'compatible-off',
+      source,
+      projectId: 'bmson-assistant',
+      providerSecret: 'fixture',
+      providerVersion: '1',
+      reviewedAt: new Date(0).toISOString(),
+      expiresAt: new Date(1000).toISOString(),
+    });
+    const hold = vi.spyOn(holds, 'verifyOperatorOwnedHold').mockResolvedValue({
+      source,
+      runId: '456',
+      attempt: '1',
+      currentJob: 'release',
+      deployWorkflowId: 1,
+      cleanupWorkflowId: 2,
+      workspaceImportWorkflowId: 3,
+      cleanupVariable: 'false',
+    });
+    const read = vi.fn(async (url: string) => {
+      for (const native of Object.values(pair.native)) {
+        if (url === `https://run.googleapis.com/v2/${native.service.name}`) return native.service;
+        if (url === `https://run.googleapis.com/v2/${native.revision.name}`) return native.revision;
+      }
+      throw new Error('Unexpected provider read');
+    });
+    vi.spyOn(metadata, 'estimatedCostMetadataRead').mockReturnValue(read);
+    return { hold, read };
+  }
+
+  it('the executable CLI fails closed with a sanitized message outside the protected invocation', () => {
+    const cli = fileURLToPath(new URL('./owner-release-api-transition.ts', import.meta.url));
+    const result = spawnSync(process.execPath, ['--import', 'tsx', cli], {
+      env: { OWNER_RELEASE_RESTORE_TARGET_PROOF: 'untrusted proof contents' },
+      encoding: 'utf8',
+      timeout: 15_000,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toBe(
+      'The reviewed drained Firestore API transition could not be verified.\n',
+    );
+  });
+
   it('holds before cloud access when an independent recovery review is missing', async () => {
     const { credential } = protectedRun();
     const hold = vi.spyOn(holds, 'verifyOperatorOwnedHold');
@@ -242,37 +296,8 @@ describe('protected transition entry point', () => {
         if (outcome === 'expired review') throw new Error('expired review');
         return outcome === 'same review' ? { source } : { source, replacement: true };
       });
-      vi.spyOn(spending, 'reviewedEstimatedCostReleaseProfile').mockReturnValue({
-        ...scope,
-        format: 1,
-        mode: 'compatible-off',
-        source,
-        projectId: 'bmson-assistant',
-        providerSecret: 'fixture',
-        providerVersion: '1',
-        reviewedAt: new Date(0).toISOString(),
-        expiresAt: new Date(1000).toISOString(),
-      });
-      vi.spyOn(holds, 'verifyOperatorOwnedHold').mockResolvedValue({
-        source,
-        runId: '456',
-        attempt: '1',
-        currentJob: 'release',
-        deployWorkflowId: 1,
-        cleanupWorkflowId: 2,
-        workspaceImportWorkflowId: 3,
-        cleanupVariable: 'false',
-      });
+      const { read } = mockBase(pair);
       vi.spyOn(images, 'createImageResolutionReader').mockReturnValue(async () => {});
-      const read = vi.fn(async (url: string) => {
-        for (const native of Object.values(pair.native)) {
-          if (url === `https://run.googleapis.com/v2/${native.service.name}`) return native.service;
-          if (url === `https://run.googleapis.com/v2/${native.revision.name}`)
-            return native.revision;
-        }
-        throw new Error('Unexpected provider read');
-      });
-      vi.spyOn(metadata, 'estimatedCostMetadataRead').mockReturnValue(read);
       const preflight = verifyProductionApiTransition();
       if (outcome === 'same review') await expect(preflight).resolves.toBeUndefined();
       else await expect(preflight).rejects.toThrow();
@@ -281,6 +306,142 @@ describe('protected transition entry point', () => {
       expect(Math.max(...read.mock.invocationCallOrder)).toBeLessThan(
         Math.max(...review.mock.invocationCallOrder),
       );
+    },
+  );
+  it('rejects an explicitly empty or malformed archive review without falling back', async () => {
+    const { pair, credential } = protectedRun();
+    const { hold, read } = mockBase(pair);
+    vi.spyOn(recovery, 'protectedRecoveryReview').mockReturnValue({ source });
+    const load = vi.spyOn(input, 'loadReviewedArchivedRuntimePack').mockResolvedValue({
+      sha256: 'e'.repeat(64),
+      nativeBinding: {},
+      trustedRoot: Buffer.from('{}'),
+      roles: testArchivedRoles(),
+    });
+    const approval = vi
+      .spyOn(restoreReview, 'protectedRestoreTargetReview')
+      .mockImplementation(() => {
+        throw new Error('malformed archive review');
+      });
+    const ordinary = vi.spyOn(images, 'createImageResolutionReader');
+
+    vi.stubEnv('OWNER_RELEASE_RESTORE_TARGET_PROOF', '');
+    await expect(verifyProductionApiTransition()).rejects.toThrow('Drained API transition held');
+    expect(load).not.toHaveBeenCalled();
+
+    vi.stubEnv('OWNER_RELEASE_RESTORE_TARGET_PROOF', 'malformed');
+    await expect(verifyProductionApiTransition()).rejects.toThrow('malformed archive review');
+    expect(approval).toHaveBeenCalledOnce();
+    expect(ordinary).not.toHaveBeenCalled();
+    expect(hold).not.toHaveBeenCalled();
+    expect(credential).not.toHaveBeenCalled();
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  function testArchivedRoles() {
+    const role = (name: string): ArchivedRoleEvidence => ({
+      parent: Buffer.from(`parent-${name}`),
+      child: Buffer.from(`child-${name}`),
+      receipt: Buffer.from('{}'),
+      signature: Buffer.from('{}'),
+      sbom: Buffer.from('{}'),
+    });
+    return { agent: role('agent'), web: role('web') };
+  }
+
+  it.each([
+    'confirmed',
+    'restore target gone',
+    'native drift',
+    'review changed',
+    'expired',
+  ] as const)(
+    'rechecks deployable targets and both old revisions in the normal transition entry point (%s)',
+    async (outcome) => {
+      const { pair } = protectedRun();
+      const { read } = mockBase(pair);
+      const independent = vi.spyOn(recovery, 'protectedRecoveryReview').mockReturnValue({ source });
+      const ordinary = vi.spyOn(images, 'createImageResolutionReader');
+      vi.stubEnv('OWNER_RELEASE_RESTORE_TARGET_PROOF', 'signed fixture');
+      const roles = testArchivedRoles();
+      const pack = {
+        sha256: 'e'.repeat(64),
+        nativeBinding: {},
+        trustedRoot: Buffer.from('{}'),
+        roles,
+      };
+      vi.spyOn(input, 'loadReviewedArchivedRuntimePack').mockResolvedValue(pack);
+      function target(name: 'agent' | 'web') {
+        const { binding } = pair.native[name];
+        return {
+          image: binding.image,
+          parent: 'parent',
+          child: 'child',
+          baselineUidSha256: binding.proof.uid,
+          baselineTemplateSha256: binding.proof.templateSha256,
+          rehearsalUidSha256: 'f'.repeat(64),
+        };
+      }
+      const initial = {
+        source,
+        reviewSha256: 'f'.repeat(64),
+        runId: '456',
+        buildRunId: '789',
+        candidateBuildSha256: '9'.repeat(64),
+        observedAt: 0,
+        expiresAt: 1000,
+        targets: { agent: target('agent'), web: target('web') },
+      };
+      const approval = vi
+        .spyOn(restoreReview, 'protectedRestoreTargetReview')
+        .mockReturnValueOnce(initial)
+        .mockReturnValue(
+          outcome === 'review changed' ? { ...initial, reviewSha256: '0'.repeat(64) } : initial,
+        );
+      const fresh = vi
+        .spyOn(restoreReview, 'assertRestoreTargetReviewFresh')
+        .mockImplementationOnce(() => {});
+      fresh.mockImplementation(() => {
+        if (outcome === 'expired') throw new Error('expired restore review');
+      });
+      const register = vi
+        .spyOn(restoreTarget, 'registerReviewedArchivedOriginal')
+        .mockImplementation(() => {});
+      const native = vi
+        .spyOn(restoreTarget, 'verifyArchivedOriginalNativePair')
+        .mockImplementation(() => {});
+      const targets = vi
+        .spyOn(restoreTarget, 'recheckArchivedRestoreTargets')
+        .mockImplementation(async () => {
+          if (outcome === 'restore target gone') throw new Error('missing restore target');
+          if (outcome === 'native drift') pair.native.agent.service.reconciling = true;
+        });
+      const run = verifyProductionApiTransition();
+      if (outcome === 'confirmed') await expect(run).resolves.toBeUndefined();
+      else await expect(run).rejects.toThrow();
+      expect(register).toHaveBeenCalledWith(pair.receipt, pack);
+      expect(ordinary).not.toHaveBeenCalled();
+      expect(targets).toHaveBeenCalledWith(
+        'fixture',
+        initial.targets,
+        roles,
+        expect.any(Function),
+        expect.any(Number),
+      );
+      expect(read).toHaveBeenCalledTimes(outcome === 'restore target gone' ? 4 : 8);
+      expect(Math.min(...read.mock.invocationCallOrder)).toBeGreaterThan(
+        register.mock.invocationCallOrder[0] ?? 0,
+      );
+      expect(targets.mock.invocationCallOrder[0]).toBeGreaterThan(
+        read.mock.invocationCallOrder[3] ?? 0,
+      );
+      expect(native).toHaveBeenCalledTimes(
+        outcome === 'restore target gone' || outcome === 'native drift' ? 1 : 2,
+      );
+      expect(approval).toHaveBeenCalledTimes(
+        outcome === 'restore target gone' || outcome === 'native drift' ? 1 : 2,
+      );
+      if (outcome === 'confirmed') expect(independent).toHaveBeenCalledTimes(2);
     },
   );
 });

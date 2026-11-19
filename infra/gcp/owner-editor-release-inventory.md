@@ -61,4 +61,4 @@ Stage the reviewed private directory at `$RUNNER_TEMP/owner-archived-runtime-pac
 
 The CLI verifies the complete pair before obtaining an access token. It checks the observed service and revision identities, configuration, image digests and routing, then rereads the services to detect drift. On success it writes `owner-archived-runtime-observation.json` exclusively. The receipt identifies the observer run, the original release and the pack. This observation proves historical runtime identity at the time of the reads. Service startup, restoration from a recovery target, and promotion each require separate evidence.
 
-This increment provides the CLI. The hosted workflow still uses its existing modes. Staging the private evidence on a hosted runner and authorizing a live observation belong to the release operator. Existing collection, release and rollback paths retain their registry checks.
+The release operator stages the private evidence before a hosted observation. The separate restore-target mode used by a protected paired release is documented in `api3-recovery-qualification.md`.

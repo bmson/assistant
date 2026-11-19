@@ -182,6 +182,15 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 cat >"$TEST_ROOT/bin/pnpm" <<'PY'
 #!/usr/bin/env python3
 import json,os,sys
+if sys.argv[1:5]==['exec','tsx','scripts/owner-release-restore-target.ts','--verify']:
+ stage=sys.argv[5]
+ with open(os.environ['STUB_ADMISSION_CALLS'],'a') as f: f.write('restore-review:'+stage+'\n')
+ if os.getenv('FAIL_RESTORE_REVIEW')==stage: sys.exit(1)
+ decision={'before_mutation':'verified','before_admission':'verified','before_web_resume':'verified',
+  'pre_admission_restore':'rehydrate_original_children','post_admission_forward':'api3_forward_only'}[stage]
+ print(json.dumps({'format':1,'source':os.environ['IMAGE_TAG'],'runId':os.environ['GITHUB_RUN_ID'],
+  'attempt':os.environ['GITHUB_RUN_ATTEMPT'],'decision':decision}))
+ sys.exit(0)
 with open(os.environ['STUB_ADMISSION_COMMANDS'],'a') as f:
  f.write(json.dumps({'source':os.getenv('OWNER_TAG_RELEASE_SOURCE'),
   'manifestPath':os.getenv('OWNER_TAG_MANIFEST_PATH'),
@@ -914,6 +923,10 @@ release_bootstrap_scaling() {
   printf 'bootstrap:%s:%s:%s\n' "$1" "$2" "$3" >>"$STUB_ADMISSION_CALLS"
   if [[ "$1" == --bootstrap-agent-resume ]]; then
     [[ "${basic_editor_admission_possible:-false}" == true ]] || fail 'seal admission before the reachable agent successor create'
+    if [[ -n "${OWNER_RELEASE_RESTORE_TARGET_PROOF+x}" ]]; then
+      [[ -s "$RUNNER_TEMP/owner-release-recovery-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/admission.json" ]] ||
+        fail 'durable admission marker must precede the reachable agent successor create'
+    fi
     printf 'bootstrap-agent-admission:true\n' >>"$STUB_ADMISSION_CALLS"
     [[ "${FAIL_BOOTSTRAP_AGENT_STALE:-0}" != 1 ]] || return 0
     python3 - "$STUB_ROOT/state.json" "$3" <<'PYCASE'
@@ -1131,6 +1144,61 @@ reset_case; prepare_firestore_state
 export FAIL_BOOTSTRAP_UNKNOWN=1
 if release_staged_services >/dev/null 2>&1; then fail 'unknown scaling restoration must fail closed'; fi
 if rg -q '^native-phase:restoreC' "$STUB_ADMISSION_CALLS"; then fail 'unknown scaling outcome resumed legacy traffic'; fi
+unset FAIL_BOOTSTRAP_UNKNOWN
+
+assert_reviewed_recovery() {
+  local expected="$1" status=0 journal="$RUNNER_TEMP/owner-release-recovery-${GITHUB_RUN_ID}-1"
+  RELEASE_DRAINED_API_TRANSITION=true release_staged_services >"$TEST_ROOT/reviewed-release.log" 2>&1 || status=$?
+  [[ "$status" == 75 ]] || fail "reviewed interruption must stop for observation ($status)"
+  python3 - "$journal" "$expected" "$TAG" "$GITHUB_RUN_ID" <<'PYCASE' || { cat "$TEST_ROOT/reviewed-release.log" "$STUB_ADMISSION_CALLS" >&2; fail 'incorrect reviewed recovery outcome'; }
+import json,sys
+from pathlib import Path
+root=Path(sys.argv[1]); outcome=json.loads((root/'outcome.json').read_text()); expected=sys.argv[2]
+assert outcome['decision']==expected and outcome['source']==sys.argv[3],outcome
+assert outcome['runId']==sys.argv[4] and outcome['attempt']=='1',outcome
+assert outcome['observationRequired'] and not outcome['mutationAuthorized'],outcome
+assert (root/'admission.json').exists()==(expected=='api3_forward_only'),list(root.iterdir())
+assert (root/'outcome.json').stat().st_mode & 0o777 == 0o600
+PYCASE
+  if rg -q '^native-phase:(restoreC|repauseP|closeR)|^traffic:assistant-agent:agent-old=100' "$STUB_ADMISSION_CALLS"; then
+    fail 'reviewed interruption executed an unqualified compensating mutation'
+  fi
+}
+
+reset_case; prepare_firestore_state
+export GITHUB_EVENT_NAME=workflow_dispatch GITHUB_RUN_ID=12361 RUNNER_TEMP="$TEST_ROOT"
+export OWNER_RELEASE_RESTORE_TARGET_PROOF='fixture-reviewed-pair' FAIL_WEB_PROMOTE=1
+assert_reviewed_recovery rehydrate_original_children
+grep -q '^restore-review:pre_admission_restore$' "$STUB_ADMISSION_CALLS" || fail 'pre-admission selection skipped review'
+: >"$STUB_ADMISSION_CALLS"
+if release_staged_services >/dev/null 2>&1; then fail 'same attempt must not restart'; fi
+if rg -q '^stage:|^native-phase:|^traffic:' "$STUB_ADMISSION_CALLS"; then fail 'restart reached mutations'; fi
+
+reset_case; prepare_firestore_state
+export GITHUB_EVENT_NAME=workflow_dispatch GITHUB_RUN_ID=12362 FAIL_BOOTSTRAP_AGENT_RESUME=1
+assert_reviewed_recovery api3_forward_only
+grep -q '^restore-review:post_admission_forward$' "$STUB_ADMISSION_CALLS" || fail 'post-admission selection skipped review'
+if rg -q '^restore-review:pre_admission_restore$' "$STUB_ADMISSION_CALLS"; then fail 'lost admission request selected API 1'; fi
+
+reset_case; prepare_firestore_state
+export GITHUB_EVENT_NAME=workflow_dispatch GITHUB_RUN_ID=12365 FAIL_RESTORE_REVIEW=before_web_resume
+assert_reviewed_recovery api3_forward_only
+grep -q '^restore-review:before_web_resume$' "$STUB_ADMISSION_CALLS" || fail 'web resume skipped its own exact review'
+grep -q '^restore-review:post_admission_forward$' "$STUB_ADMISSION_CALLS" || fail 'rejected web resume skipped forward-only selection'
+if rg -q '^native-phase:createR$|^restore-review:pre_admission_restore$' "$STUB_ADMISSION_CALLS"; then
+  fail 'failed web resume checkpoint created an unpaused web or selected API 1'
+fi
+unset FAIL_RESTORE_REVIEW
+
+reset_case; prepare_firestore_state
+export GITHUB_EVENT_NAME=workflow_dispatch GITHUB_RUN_ID=12363 FAIL_ADMISSION_CAPTURE=1 FAIL_RESTORE_REVIEW=pre_admission_restore
+assert_reviewed_recovery observation_required
+
+reset_case; prepare_firestore_state
+export GITHUB_EVENT_NAME=workflow_dispatch GITHUB_RUN_ID=12364 FAIL_RESTORE_REVIEW=before_mutation
+if release_staged_services >/dev/null 2>&1; then fail 'invalid or expired restore review must refuse staging'; fi
+if rg -q '^stage:|^native-phase:|^traffic:' "$STUB_ADMISSION_CALLS"; then fail 'unverified restore review reached mutations'; fi
+unset FAIL_RESTORE_REVIEW OWNER_RELEASE_RESTORE_TARGET_PROOF RUNNER_TEMP
 unset FAIL_BOOTSTRAP_UNKNOWN OWNER_RELEASE_BOOTSTRAP_RECEIPT OWNER_RELEASE_BOOTSTRAP_SHA256
 bash "$ROOT/google-calendar-release-config.test.sh"
 echo 'staged release protocol tests passed'
