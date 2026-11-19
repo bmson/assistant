@@ -18,40 +18,20 @@ import { markAttentionNotified } from '../machine.js';
 import { GOAL_BLOCKED_PREFIX } from '../schedules.js';
 import type { ExecutorDeps } from './types.js';
 
-/**
- * Tell the owner their answer has landed, on the one turn nothing else does.
- *
- * Every other owner-facing task type is delivered by a channel: an SMS turn
- * answers by SMS, an email turn by email. A dashboard chat turn has no
- * channel — the answer is written into the thread and the client is expected
- * to come and find it. That works while someone is looking at the thread, and
- * not at all otherwise: on a locked phone the app's own idle poll is not
- * running, and a local notification raised while it IS running is suppressed
- * as a non-attention category anyway. So the reply arrived in silence.
- *
- * Deliberately `ambient`: the work is done and nothing is waiting on a
- * decision, which is what separates this from the needs-attention ping. The
- * app suppresses this category while it is in the foreground, so someone
- * already reading the reply is not told about it twice.
- *
- * Best-effort by contract, like every other notifier leg: the answer is
- * already durably in the thread, and a push outage must never fail a task
- * that succeeded.
- */
+/** Best-effort push for a reply already saved in its original chat. */
 export async function notifyOwnerOfDeliveredAnswer(
   deps: ExecutorDeps,
   task: TaskRow,
   text: string,
 ): Promise<boolean> {
-  if (!deps.notifyOwner) return false;
-  const body = text.trim();
-  if (!body) return false;
+  if (!deps.notifyOwner || !task.conversationId || !text.trim()) return false;
   const result = await deps
     .notifyOwner({
       deliveryKey: notificationDeliveryKey('task-answer', task.id),
       taskId: task.id,
       conversationId: task.conversationId,
-      text: body,
+      purpose: 'answer-ready',
+      text: 'Your reply is ready.',
       urgency: 'ambient',
     })
     .catch((err) => {

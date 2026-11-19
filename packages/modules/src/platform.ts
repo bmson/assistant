@@ -63,6 +63,7 @@ export interface OwnerNotifier {
     text: string;
     /** Stable logical notice identity, reused when the source event is replayed. */
     deliveryKey?: string;
+    purpose?: 'answer-ready';
     taskId?: string;
     /**
      * The dashboard thread that already owns this notice, when one exists.

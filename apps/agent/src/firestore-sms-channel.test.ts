@@ -187,6 +187,12 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         ),
       ).toMatchObject({ status: 'accepted' });
       expect(sent).toEqual([{ to: OWNER_PHONE, body: 'Two meetings and a dentist visit.' }]);
+      await expect(
+        notifyOwnerBySms(deps, { purpose: 'answer-ready', taskId: row.id, text: 'Private answer' }),
+      ).resolves.toEqual({
+        legs: [{ channel: 'sms', status: 'skipped', reason: 'push-only-notice' }],
+      });
+      expect(sent).toHaveLength(1);
       const changedOwnerPhone = {
         ...deps,
         config: { ...deps.config, OWNER_PHONE: '+18885559999' },

@@ -231,10 +231,13 @@ final class NotificationManager: NSObject, ObservableObject, UNUserNotificationC
         // Notifications are normally suppressed while the app is active, but a
         // decision request is worth a banner even then: the owner may be on a
         // different screen and the work is parked until they respond.
-        if notification.request.content.categoryIdentifier == Self.attentionCategory {
-            return [.banner, .sound]
-        }
-        return []
+        Self.foregroundPresentationOptions(for: notification.request.content.categoryIdentifier)
+    }
+
+    nonisolated static func foregroundPresentationOptions(
+        for category: String
+    ) -> UNNotificationPresentationOptions {
+        category == attentionCategory ? [.banner, .sound] : []
     }
 
     nonisolated func userNotificationCenter(
