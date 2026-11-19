@@ -28,6 +28,7 @@ export function guardDraft(
 ): { corrected: boolean; text: string } {
   const checked = enforceResponseContract(text, evidence, {
     requestText: opts?.requestText,
+    admittedMutationText: opts?.requestText,
     readRequest: opts?.readRequest,
     ...(opts?.urlCorpus === undefined ? {} : { urlCorpus: opts.urlCorpus }),
   });

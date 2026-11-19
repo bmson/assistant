@@ -706,6 +706,127 @@ describe('executor end-to-end (integration, scripted model)', () => {
     expect(answer?.[0]?.parts.every((part) => part.type !== 'data-turn-origin')).toBe(true);
   });
 
+  it.each([
+    {
+      request: 'Delete the obsolete file.',
+      draft: "I'll delete it now.",
+      receipt: null,
+      status: 'needs_attention',
+    },
+    {
+      request: 'Cancel the sunglasses reminder.',
+      draft: 'I removed the sunglasses reminder.',
+      receipt: true,
+      status: 'done',
+    },
+    {
+      request: 'Cancel the sunglasses reminder.',
+      draft: 'I removed the sunglasses reminder.',
+      receipt: false,
+      status: 'needs_attention',
+    },
+  ])('publishes $status for the current mutation receipt through the executor', async (fixture) => {
+    if (!dbUp) throw new Error('Database unavailable');
+    const chat = createPostgresApplicationChatPersistence(db);
+    const conversation = await chat.createConversation(agentId);
+    createdConversationIds.push(conversation.id);
+    const admitted = await chat.admitChatTurn({
+      agentId,
+      conversationId: conversation.id,
+      clientOperationId: randomUUID(),
+      requestHash: createHash('sha256').update(fixture.request).digest('hex'),
+      text: fixture.request,
+      autonomous: false,
+      force: false,
+      spoken: false,
+    });
+    if (admitted.kind !== 'admitted' || !admitted.lease) throw new Error('Expected admitted turn');
+    const taskId = admitted.task.id;
+    createdTaskIds.push(taskId);
+    await expect(
+      chat.queueAdmittedChatTurn({
+        agentId,
+        task: admitted.lease,
+        triagedActionable: false,
+      }),
+    ).resolves.toMatchObject({ id: taskId });
+
+    let calls = 0;
+    const registry = new ToolRegistry();
+    registry.register(
+      {
+        name: 'reminder.cancel',
+        description: 'Synthetic cancellation of one reminder',
+        inputSchema: z.object({ query: z.literal('sunglasses') }),
+        risk: 'autonomous',
+        acceptsUntrustedInput: false,
+        execute: async () => {
+          calls += 1;
+          if (!fixture.receipt) throw new Error('Synthetic provider interruption');
+          return { cancelled: true, reminderId: 'synthetic-sunglasses', text: 'Sunglasses' };
+        },
+      },
+      { privateWrite: true },
+    );
+    let proposed = false;
+    const router = {
+      async object() {
+        return {
+          ok: true,
+          modelId: 'fake/a6',
+          degraded: false,
+          object: {
+            action: fixture.receipt === null ? 'reply' : 'workflow',
+            reasoning: '',
+            steps: fixture.receipt === null ? [] : ['Check request'],
+            missingInfo: [],
+          },
+        };
+      },
+      async embeddingSpace() {
+        return { provider: 'synthetic', model: 'a6', dimensions: 1536, revision: 'test' };
+      },
+      async embed(texts: string[]) {
+        return texts.map(() => new Array(1536).fill(0));
+      },
+      async step() {
+        const propose = !proposed && fixture.receipt !== null;
+        proposed = true;
+        return {
+          ok: true,
+          modelId: 'fake/a6',
+          degraded: false,
+          text: propose ? '' : fixture.draft,
+          toolCalls: propose
+            ? [
+                {
+                  toolCallId: 'call_cancel',
+                  toolName: 'reminder.cancel',
+                  input: { query: 'sunglasses' },
+                },
+              ]
+            : [],
+        };
+      },
+    } as unknown as ModelRouter;
+    const result = await executeTask(
+      { db, router, dispatcher: new ToolDispatcher(db, registry) },
+      taskId,
+    );
+    expect(result.outcome).toBe(fixture.status);
+    expect(calls).toBe(fixture.receipt === null ? 0 : 1);
+    const final = await db
+      .select()
+      .from(messages)
+      .where(and(eq(messages.taskId, taskId), eq(messages.role, 'assistant')));
+    expect(final).toHaveLength(1);
+    if (fixture.receipt) expect(final[0]?.text).toBe(fixture.draft);
+    else {
+      expect(final[0]?.text).toContain('couldn’t confirm');
+      expect(final[0]?.text).not.toContain(fixture.draft);
+    }
+  });
+
   it('turns a model-invented approval notice into a real approval record', async (ctx) => {
     if (!dbUp) return ctx.skip();
     const key = `phantom-approval-${Date.now()}`;
