@@ -145,8 +145,8 @@ internal.post('/sweep/watchdog', async (c) => {
       try {
         const deps = buildDeps();
         const { publishSweepOutage } = await import('../sweep-recovery.js');
-        // This is an interrupt and bypasses ambient pacing. Only phone legs
-        // use the existing durable per-device key here, since chat is already saved.
+        // Chat is saved independently. Push checks the owner's policy on each
+        // attempt using the same durable per-device key.
         const notify: Parameters<typeof publishSweepOutage>[3] = (input) =>
           deps.modules.ownerNotifier.notifyOwner(input);
         if (config.PERSISTENCE_DRIVER === 'firestore') {

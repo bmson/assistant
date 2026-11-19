@@ -11,7 +11,7 @@ import {
   FirestorePulseRepository,
   type InstallationStore,
 } from '@assistant/firestore';
-import { emailIngestReadable, type Records } from '@assistant/persistence';
+import { emailIngestReadable, type Records, WATCHDOG_OUTAGE_TEXT } from '@assistant/persistence';
 import { publicCardText } from '@assistant/persistence/card-privacy';
 import { and, desc, eq, gt, inArray, lte } from 'drizzle-orm';
 import type { SweepRecovery } from './sweep-heartbeat.js';
@@ -203,11 +203,6 @@ export function publishFirestoreSweepRecovery(
   });
 }
 
-const OUTAGE_TEXT = {
-  sweep: 'Scheduled checks have been unavailable for at least 30 minutes.',
-  briefing: 'The daily briefing is overdue. No scheduled briefing has completed within 26 hours.',
-};
-
 export async function publishSweepOutage(
   admission: Admission,
   agentId: string,
@@ -216,12 +211,13 @@ export async function publishSweepOutage(
     text: string;
     conversationId: null;
     urgency: 'interrupt';
+    purpose: 'watchdog-outage';
     deliveryKey: string;
   }) => Promise<unknown>,
   now = new Date(),
 ) {
   const { key, reason } = episode;
-  const text = OUTAGE_TEXT[reason];
+  const text = WATCHDOG_OUTAGE_TEXT[reason];
   const observationFence = await admission.observationFence(agentId);
   const result = await admission.admitNotice({
     agentId,
@@ -234,7 +230,13 @@ export async function publishSweepOutage(
   if (result.status === 'persisted' || result.status === 'already-said') {
     // Persisted notices can outlive a crash before the first push attempt.
     // The per-device outbox claims this stable key and handles safe retries.
-    await notify({ text, conversationId: null, urgency: 'interrupt', deliveryKey: key });
+    await notify({
+      text,
+      conversationId: null,
+      urgency: 'interrupt',
+      purpose: 'watchdog-outage',
+      deliveryKey: key,
+    });
   }
   return result.status;
 }

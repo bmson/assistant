@@ -1,4 +1,9 @@
-import type { NotificationOutboxLeg, NotificationOutboxRepository } from '@assistant/persistence';
+import {
+  type NotificationOutboxLeg,
+  type NotificationOutboxRepository,
+  notificationDeliveryKey,
+  WATCHDOG_OUTAGE_TEXT,
+} from '@assistant/persistence';
 import { AmbiguousApnsDeliveryError, type ApnsClient } from '@assistant/tools/modules/push';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -101,6 +106,9 @@ function channel() {
       notificationOutbox,
       admitAnswerReady: vi
         .fn<NonNullable<PushChannelDeps['admitAnswerReady']>>()
+        .mockResolvedValue({ deliver: true }),
+      admitWatchdog: vi
+        .fn<NonNullable<PushChannelDeps['admitWatchdog']>>()
         .mockResolvedValue({ deliver: true }),
       owner: async () => ({ id: 'owner', name: 'Ada' }),
     },
@@ -287,4 +295,76 @@ describe('answer-ready push delivery', () => {
     expect(reject).toHaveBeenCalledTimes(3);
     expect([...rows.values()][0]).toMatchObject({ status: 'failed', retryable: false });
   });
+});
+
+const watchdog = {
+  purpose: 'watchdog-outage' as const,
+  deliveryKey: 'watchdog-outage:1795000000000',
+  conversationId,
+  taskId,
+  text: 'Synthetic private detail',
+};
+
+describe('watchdog push policy', () => {
+  it('holds an initial watchdog during quiet hours and never sends its private detail', async () => {
+    const { deps, send, rows } = channel();
+    deps.admitWatchdog.mockResolvedValue({ deliver: false, reason: 'quiet-hours' });
+    await expect(notifyOwnerByPush(deps, watchdog)).resolves.toMatchObject({
+      legs: [{ status: 'skipped', reason: 'quiet-hours' }],
+    });
+    await notifyOwnerByPush(deps, watchdog);
+    expect(deps.admitWatchdog).toHaveBeenCalledExactlyOnceWith(
+      notificationDeliveryKey('outbox', 'owner', watchdog.deliveryKey),
+      expect.any(Date),
+    );
+    expect(send).not.toHaveBeenCalled();
+    expect(JSON.stringify([...rows.values()])).not.toContain(watchdog.text);
+  });
+
+  it('sends a generic watchdog once to an eligible device and leaves approval delivery independent', async () => {
+    const { deps, send } = channel();
+    await notifyOwnerByPush(deps, watchdog);
+    await notifyOwnerByPush(deps, watchdog);
+    expect(send).toHaveBeenCalledExactlyOnceWith({
+      token: 'synthetic',
+      environment: 'sandbox',
+      title: 'Assistant',
+      body: 'Scheduled checks need attention. Open Assistant for details.',
+      category: 'ASSISTANT_UPDATE',
+      expiresAt: 0,
+      data: { route: 'chat', agentId: 'owner' },
+    });
+    deps.admitWatchdog.mockResolvedValue({ deliver: false, reason: 'daily-cap' });
+    await notifyApprovalsByPush(deps, [{ taskId, shortCode: 'A1B2', summary: 'Review the draft' }]);
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(deps.admitWatchdog).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['quiet-hours', 'daily-cap'] as const)(
+    'checks %s on an old queued push delivery',
+    async (reason) => {
+      const { deps, rows } = channel();
+      const attempt = vi.fn(async () => ({ ok: false, status: 503 }));
+      deps.apns = { configured: () => true, send: attempt } as unknown as ApnsClient;
+      deps.admitWatchdog
+        .mockResolvedValueOnce({ deliver: true })
+        .mockResolvedValue({ deliver: false, reason });
+      await notifyOwnerByPush(deps, watchdog);
+      const [entry] = rows.entries();
+      if (!entry) throw new Error('Missing watchdog push');
+      const [key, row] = entry;
+      rows.set(key, {
+        ...row,
+        payload: {
+          title: 'Older heading',
+          body: WATCHDOG_OUTAGE_TEXT.sweep,
+          category: 'ASSISTANT_UPDATE',
+          data: { route: 'chat', agentId: 'owner' },
+        },
+      });
+      await drainPushNotificationOutbox(deps, new Date(row.createdAt.getTime() + 60_000));
+      expect(attempt).toHaveBeenCalledOnce();
+      expect(rows.get(key)).toMatchObject({ status: 'skipped', result: { reason } });
+    },
+  );
 });

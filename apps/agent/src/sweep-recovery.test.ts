@@ -66,8 +66,9 @@ function durablePush(
   agentId: string,
   provider: () => void,
 ): Alert {
-  return async ({ deliveryKey, urgency, text }) => {
+  return async ({ deliveryKey, urgency, purpose, text }) => {
     expect(urgency).toBe('interrupt');
+    expect(purpose).toBe('watchdog-outage');
     return sendNotificationOutboxLeg(
       repo,
       {
