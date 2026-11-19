@@ -7,13 +7,31 @@ import {
   proactivePings,
 } from '@assistant/db';
 import {
+  EMAIL_EXTRACTION_ALWAYS_ELIGIBLE,
+  EMAIL_EXTRACTION_EXCLUDED,
+  EMAIL_EXTRACTION_MIN_IMPORTANCE,
   type MailHealthCounts,
   type MailHealthWindow,
+  mailExtractionWindowState,
   PENDING_MAIL_ADMISSION_STAGES,
   type ProactiveHealthCounts,
   type ProactiveHealthRepository,
 } from '@assistant/persistence';
-import { and, count, desc, eq, gte, inArray, isNotNull, isNull, lt, sql } from 'drizzle-orm';
+import {
+  and,
+  count,
+  desc,
+  eq,
+  gte,
+  inArray,
+  isNotNull,
+  isNull,
+  lt,
+  lte,
+  notInArray,
+  or,
+  sql,
+} from 'drizzle-orm';
 
 /**
  * Is the proactive machinery actually alive?
@@ -68,23 +86,47 @@ export function mailHealthWindow(now: Date): MailHealthWindow {
     since6h: new Date(now.getTime() - 6 * 3600_000),
     since24h: new Date(now.getTime() - RECENT_HOURS * 3600_000),
     since7d: new Date(now.getTime() - WEEK_HOURS * 3600_000),
+    until: now,
   };
 }
 
 export async function sqlMailHealthCounts(
   db: Db,
   agentId: string,
-  { since6h, since24h, since7d }: MailHealthWindow,
+  {
+    since6h,
+    since24h,
+    since7d,
+    until = new Date(since24h.getTime() + 24 * 3600_000),
+  }: MailHealthWindow,
 ): Promise<MailHealthCounts> {
   const readable = emailIngestReadableSql();
   const unreadable = sql`${readable} is not true`;
   const stalled = and(unreadable, lt(emailIngest.createdAt, since6h));
-  const [mail, latest] = await Promise.all([
+  const eligible = and(
+    readable,
+    notInArray(emailIngest.category, EMAIL_EXTRACTION_EXCLUDED),
+    or(
+      gte(emailIngest.importance, EMAIL_EXTRACTION_MIN_IMPORTANCE),
+      inArray(emailIngest.category, EMAIL_EXTRACTION_ALWAYS_ELIGIBLE),
+    ),
+  );
+  const intake24h = and(
+    eligible,
+    gte(emailIngest.createdAt, since24h),
+    lte(emailIngest.createdAt, until),
+  );
+  const [mail, latest, completed] = await Promise.all([
     db
       .select({
         mailReceived7d: count(),
         mailScored24h:
           sql<number>`count(*) filter (where ${and(readable, gte(emailIngest.createdAt, since24h))})`.mapWith(
+            Number,
+          ),
+        mailEligibleIntake24h: sql<number>`count(*) filter (where ${intake24h})`.mapWith(Number),
+        eligiblePastGrace:
+          sql<number>`count(*) filter (where ${and(intake24h, lt(emailIngest.createdAt, since6h), isNull(emailIngest.extractedAt))})`.mapWith(
             Number,
           ),
         mailScored7d: sql<number>`count(*) filter (where ${readable})`.mapWith(Number),
@@ -116,7 +158,7 @@ export async function sqlMailHealthCounts(
           )}
         )`,
         mailPendingOver6h7d:
-          sql<number>`count(*) filter (where ${and(readable, isNull(emailIngest.extractedAt), lt(emailIngest.createdAt, since6h))})`.mapWith(
+          sql<number>`count(*) filter (where ${and(eligible, isNull(emailIngest.extractedAt), lt(emailIngest.createdAt, since6h))})`.mapWith(
             Number,
           ),
       })
@@ -128,11 +170,30 @@ export async function sqlMailHealthCounts(
       .where(and(eq(emailIngest.agentId, agentId), emailIngestReadableSql()))
       .orderBy(desc(emailIngest.createdAt))
       .limit(1),
+    db
+      .select({ n: count() })
+      .from(emailIngest)
+      .where(
+        and(
+          eq(emailIngest.agentId, agentId),
+          eligible,
+          gte(emailIngest.extractedAt, since24h),
+          lte(emailIngest.extractedAt, until),
+        ),
+      ),
   ]);
   const counts = mail[0];
   if (!counts) throw new Error('Mail health aggregation returned no result');
+  const { eligiblePastGrace, ...tallied } = counts;
+  const mailExtractionCompleted24h = completed[0]?.n ?? 0;
   return {
-    ...counts,
+    ...tallied,
+    mailExtractionCompleted24h,
+    mailExtraction24hState: mailExtractionWindowState(
+      tallied.mailEligibleIntake24h,
+      mailExtractionCompleted24h,
+      eligiblePastGrace,
+    ),
     lastMailAt: latest[0]?.createdAt ?? null,
   };
 }

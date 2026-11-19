@@ -1,3 +1,4 @@
+import { mailExtractionWindowState } from '@assistant/persistence';
 import { describe, expect, it } from 'vitest';
 import { proactiveWarnings } from './pipeline-health.js';
 
@@ -69,4 +70,19 @@ describe('proactiveWarnings', () => {
       [],
     );
   });
+});
+
+describe('24-hour mail extraction evidence', () => {
+  it.each([
+    [0, 0, 0, 'no_eligible_mail'],
+    [0, 1, 0, 'processed'],
+    [1, 0, 0, 'within_grace'],
+    [1, 0, 1, 'stalled'],
+    [1, null, 1, 'unavailable'],
+  ] as const)(
+    'classifies intake %s, completions %s and older backlog %s',
+    (intake, completed, pastGrace, state) => {
+      expect(mailExtractionWindowState(intake, completed, pastGrace)).toBe(state);
+    },
+  );
 });

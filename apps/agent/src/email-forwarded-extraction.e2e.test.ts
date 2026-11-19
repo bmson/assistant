@@ -17,6 +17,10 @@ import { type EmailSyncDeps, processMessage } from '@assistant/modules';
 import { type ExecutionPersistence, embeddingSpaceIdentityKey } from '@assistant/persistence';
 import { and, eq } from 'drizzle-orm';
 import { expect, it, vi } from 'vitest';
+import {
+  mailHealthWindow,
+  sqlMailHealthCounts,
+} from '../../../packages/core/src/proactive/pipeline-health.js';
 import { runAssistantHealthMonitor } from '../../../packages/core/src/workflow/health-monitor.js';
 import type { InstallationStore } from '../../../packages/firestore/src/store.js';
 import { disposeStore, emulatorStore } from '../../../packages/firestore/src/test-store.js';
@@ -234,11 +238,22 @@ for (const driver of ['postgres', 'firestore'] as const) {
         expect(object).toHaveBeenCalledTimes(2);
 
         const now = new Date();
+        const counts = () => {
+          const window = mailHealthWindow(now);
+          return store
+            ? persistence.assistantHealth?.observeMail?.(agentId, window)
+            : sqlMailHealthCounts(db, agentId, window);
+        };
+        expect(await counts()).toMatchObject({
+          mailEligibleIntake24h: 1,
+          mailExtractionCompleted24h: 1,
+          mailExtraction24hState: 'processed',
+        });
         const stuck = {
           id: randomUUID(),
           agentId,
           channelMessageId: `gmail:stalled-${id}`,
-          category: 'unknown',
+          category: 'travel',
           importance: 1,
           fromEmail: 'private@example.test',
           subject: 'Synthetic private subject must never appear in alerts',
@@ -268,6 +283,33 @@ for (const driver of ['postgres', 'firestore'] as const) {
         } else {
           await db.insert(emailIngest).values([stuck, fresh, review]);
         }
+        const completedOld = {
+          ...stuck,
+          id: randomUUID(),
+          channelMessageId: `gmail:old-completed-${id}`,
+          pipelineStage: 'complete',
+          createdAt: new Date(now.getTime() - 8 * 24 * HOUR),
+          extractedAt: now,
+        };
+        const bulk = {
+          ...completedOld,
+          id: randomUUID(),
+          channelMessageId: `gmail:bulk-${id}`,
+          category: 'bulk',
+          importance: 5,
+          createdAt: now,
+        };
+        if (store) {
+          for (const row of [completedOld, bulk]) await store.doc('emailIngest', row.id).set(row);
+        } else {
+          await db.insert(emailIngest).values([completedOld, bulk]);
+        }
+        expect(await counts()).toMatchObject({
+          mailEligibleIntake24h: 1,
+          mailExtractionCompleted24h: 2,
+          mailExtraction24hState: 'processed',
+        });
+
         const stalledExtraction = await runScheduled('email.extract');
         expect(stalledExtraction.outcome).toBe('done');
         const recorded = await persistence.executionContext?.getTask(
@@ -288,7 +330,7 @@ for (const driver of ['postgres', 'firestore'] as const) {
         const warning = 'Mail processing has waited over six hours: 1 in scoring.';
         expect(await runScheduled('health.monitor')).toMatchObject({
           outcome: 'done',
-          detail: 'health monitor: notified owner about 1 signal(s)',
+          detail: expect.stringMatching(/^health monitor: notified owner about [1-9]\d* signal/),
         });
         expect(await monitor(new Date(now.getTime() + HOUR))).toMatchObject({
           signals: [warning],
@@ -340,7 +382,9 @@ for (const driver of ['postgres', 'firestore'] as const) {
               )
           ).map(({ text }) => text);
         }
-        expect(notices).toHaveLength(2);
+        expect(notices.filter((text) => text.includes('Mail processing has waited'))).toHaveLength(
+          2,
+        );
         expect(notices).toEqual(
           expect.arrayContaining([
             expect.stringContaining(warning),
@@ -350,6 +394,23 @@ for (const driver of ['postgres', 'firestore'] as const) {
         expect(notices.join(' ')).not.toContain(stuck.subject);
         expect(notices.join(' ')).not.toContain(stuck.fromEmail);
         expect(notices.join(' ')).not.toContain(syntheticBody);
+
+        if (store) {
+          const legacyId = randomUUID();
+          await store.doc('emailIngest', legacyId).set({
+            id: legacyId,
+            agentId,
+            createdAt: now,
+            pipelineStage: 'complete',
+            category: 'travel',
+            importance: 1,
+          });
+          expect(await counts()).toMatchObject({
+            mailEligibleIntake24h: 3,
+            mailExtractionCompleted24h: null,
+            mailExtraction24hState: 'unavailable',
+          });
+        }
       } finally {
         if (store) await disposeStore(store);
         else await db.$client.end();

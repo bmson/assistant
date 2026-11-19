@@ -6,6 +6,16 @@ export interface ProactiveHealthCounts {
   mailPendingOver6h7d: number;
   mailAwaitingAdmissionOver6h7d: number;
   mailScored24h: number;
+  /** Eligible readable rows received during the trailing 24 hours. */
+  mailEligibleIntake24h?: number | null;
+  /** Eligible rows stamped during the same window, regardless of arrival time. */
+  mailExtractionCompleted24h?: number | null;
+  mailExtraction24hState?:
+    | 'no_eligible_mail'
+    | 'processed'
+    | 'within_grace'
+    | 'stalled'
+    | 'unavailable';
   mailScored7d: number;
   lastMailAt: Date | null;
   momentsDelivered24h: number;
@@ -22,6 +32,9 @@ export type MailHealthCounts = Pick<
   | 'mailPendingOver6h7d'
   | 'mailAwaitingAdmissionOver6h7d'
   | 'mailScored24h'
+  | 'mailEligibleIntake24h'
+  | 'mailExtractionCompleted24h'
+  | 'mailExtraction24hState'
   | 'mailScored7d'
   | 'lastMailAt'
 > & {
@@ -34,6 +47,18 @@ export interface MailHealthWindow {
   since6h: Date;
   since24h: Date;
   since7d: Date;
+  until?: Date;
+}
+
+export function mailExtractionWindowState(
+  intake: number | null | undefined,
+  completed: number | null | undefined,
+  pastGrace: number,
+): NonNullable<ProactiveHealthCounts['mailExtraction24hState']> {
+  if (intake == null || completed == null) return 'unavailable';
+  if (completed > 0) return 'processed';
+  if (intake === 0) return 'no_eligible_mail';
+  return pastGrace > 0 ? 'stalled' : 'within_grace';
 }
 
 /** The counts behind the proactive-health view. The warnings stay in core. */

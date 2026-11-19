@@ -5,8 +5,10 @@ import type {
   ProactiveHealthRepository,
 } from '@assistant/persistence';
 import {
+  eligibleEmailExtraction,
   emailIngestReadable,
   type MailAdmissionStage,
+  mailExtractionWindowState,
   PENDING_MAIL_ADMISSION_STAGES,
   type Records,
 } from '@assistant/persistence';
@@ -15,6 +17,22 @@ import { FirestoreDeviceTokenRepository } from './device-tokens.js';
 import { decodeRecord, documentKey, type InstallationStore } from './store.js';
 
 const MAIL_SCAN_LIMIT = 10_000;
+const MAIL_HEALTH_FIELDS = [
+  'id',
+  'agentId',
+  'createdAt',
+  'pipelineStage',
+  'ingestMode',
+  'authenticated',
+  'admittedSourceId',
+  'admittedSourceKind',
+  'messagePersisted',
+  'scoreStatus',
+  'scoreOutcome',
+  'category',
+  'importance',
+  'extractedAt',
+];
 
 /** The proactive-health counts on Firestore, through aggregation queries. */
 export class FirestoreProactiveHealthRepository implements ProactiveHealthRepository {
@@ -79,6 +97,11 @@ export class FirestoreProactiveHealthRepository implements ProactiveHealthReposi
     let mailIntakeNeedsReview7d = 0;
     const mailStalledAdmissionByStage: MailHealthCounts['mailStalledAdmissionByStage'] = {};
     const admissionStages = new Set<string>(PENDING_MAIL_ADMISSION_STAGES);
+    const until = window.until ?? new Date(window.since24h.getTime() + 24 * 3600_000);
+    let mailEligibleIntake24h = 0;
+    let mailExtractionCompleted24h = 0;
+    let eligiblePastGrace = 0;
+    let extractionEvidenceMissing = false;
     let mailScored24h = 0;
     let mailScored7d = 0;
     let lastMailAt: Date | null = null;
@@ -90,20 +113,7 @@ export class FirestoreProactiveHealthRepository implements ProactiveHealthReposi
         .where('agentId', '==', agentId)
         .where('createdAt', '>=', window.since7d)
         .orderBy('createdAt', 'desc')
-        .select(
-          'id',
-          'agentId',
-          'createdAt',
-          'pipelineStage',
-          'ingestMode',
-          'authenticated',
-          'admittedSourceId',
-          'admittedSourceKind',
-          'messagePersisted',
-          'scoreStatus',
-          'scoreOutcome',
-          'extractedAt',
-        )
+        .select(...MAIL_HEALTH_FIELDS)
         .limit(Math.min(250, MAIL_SCAN_LIMIT - scanned));
       if (cursor) query = query.startAfter(cursor);
       const page = await query.get();
@@ -132,8 +142,22 @@ export class FirestoreProactiveHealthRepository implements ProactiveHealthReposi
           continue;
         }
         mailScored7d += 1;
-        if (row.extractedAt instanceof Date) mailProcessed7d += 1;
-        else if (row.createdAt < window.since6h) mailPendingOver6h7d += 1;
+        const eligible = eligibleEmailExtraction(row);
+        const inIntakeWindow = row.createdAt >= window.since24h && row.createdAt <= until;
+        const pastGrace = row.createdAt < window.since6h;
+        if (eligible && inIntakeWindow) {
+          mailEligibleIntake24h += 1;
+          if (row.extractedAt === null && pastGrace) eligiblePastGrace += 1;
+          if (row.extractedAt !== null && !(row.extractedAt instanceof Date))
+            extractionEvidenceMissing = true;
+        }
+        if (row.extractedAt instanceof Date) {
+          mailProcessed7d += 1;
+          if (eligible && row.extractedAt >= window.since24h && row.extractedAt <= until)
+            mailExtractionCompleted24h += 1;
+        } else if (eligible && row.extractedAt === null && pastGrace) {
+          mailPendingOver6h7d += 1;
+        }
         if (row.createdAt >= window.since24h) mailScored24h += 1;
         if (lastMailAt === null || row.createdAt > lastMailAt) lastMailAt = row.createdAt;
       }
@@ -143,7 +167,19 @@ export class FirestoreProactiveHealthRepository implements ProactiveHealthReposi
     }
     if (scanned >= MAIL_SCAN_LIMIT)
       throw new Error('Proactive health mail scan exceeded its bounded window');
+    const olderCompletions = await this.countOlderCompletions(agentId, window, until);
+    const completed =
+      extractionEvidenceMissing || olderCompletions === null
+        ? null
+        : mailExtractionCompleted24h + olderCompletions;
     return {
+      mailEligibleIntake24h,
+      mailExtractionCompleted24h: completed,
+      mailExtraction24hState: mailExtractionWindowState(
+        mailEligibleIntake24h,
+        completed,
+        eligiblePastGrace,
+      ),
       mailReceived7d,
       mailProcessed7d,
       mailPendingOver6h7d,
@@ -155,5 +191,37 @@ export class FirestoreProactiveHealthRepository implements ProactiveHealthReposi
       mailScored7d,
       lastMailAt,
     };
+  }
+
+  /** Recent completions of older mail are outside the existing arrival scan. */
+  private async countOlderCompletions(
+    agentId: string,
+    window: MailHealthWindow,
+    until: Date,
+  ): Promise<number | null> {
+    const query = this.store
+      .collection('emailIngest')
+      .where('agentId', '==', agentId)
+      .where('extractedAt', '>=', window.since24h)
+      .where('extractedAt', '<=', until)
+      .where('createdAt', '<', window.since7d)
+      .orderBy('extractedAt')
+      .orderBy('createdAt')
+      .select(...MAIL_HEALTH_FIELDS);
+    let cursor: QueryDocumentSnapshot | undefined;
+    let scanned = 0;
+    let count = 0;
+    do {
+      const page = await (cursor ? query.startAfter(cursor) : query).limit(250).get();
+      for (const doc of page.docs) {
+        const row = decodeRecord<Partial<Records['emailIngest']>>(doc.data());
+        if (!row.id || documentKey(row.id) !== doc.id || row.agentId !== agentId) return null;
+        if (emailIngestReadable(row) && eligibleEmailExtraction(row)) count += 1;
+      }
+      if (page.size < 250) return count;
+      scanned += page.size;
+      cursor = page.docs.at(-1);
+    } while (scanned < MAIL_SCAN_LIMIT);
+    return null;
   }
 }
