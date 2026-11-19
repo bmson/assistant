@@ -7086,17 +7086,17 @@ extension APIClientRetryTests {
             parts: [.init(type: "text", text: "The existing visible result is refreshed with task identity.")],
             metadata: ["taskId": .string(taskId)]
         )
-        let cases: [(String, [ChatMessage], [ChatMessage], [String]?, String?, Bool, Bool)] = [
+        let cases: [(String, [ChatMessage], [ChatMessage], [String]?, String?, Bool)] = [
             // The bootstrap includes an older visible assistant message. A
             // new tool-only row must not pair with it to announce a reply.
-            ("historical-text-plus-tool-only", [toolOnly], [], nil, nil, false, false),
-            ("retracted", [exactReply], [], [exactReply.id], nil, false, false),
-            ("foreign-task", [foreignReply], [], nil, nil, false, true),
-            ("newer-error", [exactReply], [], nil, "A newer connection issue.", false, true),
-            ("refreshed-existing-exact-reply", [], [alreadyVisibleReply], nil, nil, true, false),
+            ("historical-text-plus-tool-only", [toolOnly], [], nil, nil, false),
+            ("retracted", [exactReply], [], [exactReply.id], nil, false),
+            ("foreign-task", [foreignReply], [], nil, nil, false),
+            ("newer-error", [exactReply], [], nil, "A newer connection issue.", false),
+            ("refreshed-existing-exact-reply", [], [alreadyVisibleReply], nil, nil, true),
         ]
 
-        for (name, rows, refreshed, superseded, newerError, clearsNotice, expectNotification) in cases {
+        for (name, rows, refreshed, superseded, newerError, clearsNotice) in cases {
             let recorder = LocalNotificationRecorder()
             let model = try await notificationModel(scheduleLocalNotification: { title, body, route, approvalId, agentID, conversationID in
                 await recorder.schedule(
@@ -7127,7 +7127,7 @@ extension APIClientRetryTests {
             } else {
                 XCTAssertEqual(model.errorMessage, "This task is marked complete, but its reply has not appeared yet.", name)
             }
-            XCTAssertEqual(!recorder.entries.isEmpty, expectNotification, name)
+            XCTAssertTrue(recorder.entries.isEmpty, "Idle polling must leave reply notifications to the server: \(name)")
             if name == "retracted" {
                 XCTAssertFalse(model.messages.contains(where: { $0.id == exactReply.id }))
             }
