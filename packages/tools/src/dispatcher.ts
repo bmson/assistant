@@ -33,16 +33,19 @@ import type {
   ApprovalPolicyAuthority,
   ApprovalPolicyRepository,
   ApprovalRepository,
+  BudgetRetry,
   CostRepository,
   ExpectedMcpApprovalBinding,
   ExpectedOwnerAutonomyGrantBinding,
   ExpectedOwnerCallActionGrantBinding,
   ExpectedPhoneCallOwnerNumberGrantBinding,
   Records,
+  ReserveOutcome,
   ToolExecutionRepository,
 } from '@assistant/persistence';
 import {
   approvalPolicyFingerprint,
+  budgetRetry,
   hasAmbiguousOrWithdrawnPhoneCallOwnerAction,
   ownerPhoneProposalNeedsApproval,
   PROACTIVE_AWARENESS_SCHEDULE,
@@ -591,7 +594,7 @@ export type DispatchOutcome =
     }
   | { kind: 'rejected'; reason: string }
   /** Pre-flight reservation failed — the executor parks the task as waiting_budget. */
-  | { kind: 'budget_blocked'; reason: string; resumeAt: Date };
+  | { kind: 'budget_blocked'; reason: string; resumeAt: Date; budgetRetry?: BudgetRetry };
 
 /** Tools whose recipient must be provenance-checked before an autonomous send. */
 const RECIPIENT_TOOLS = new Set([
@@ -631,7 +634,7 @@ type ToolReservation =
       description: string;
       evidence?: import('@assistant/persistence').CostEvidence;
     }
-  | { ok: false; reason: string; resumeAt: Date };
+  | Extract<ReserveOutcome, { ok: false }>;
 
 function cacheKey(agentId: string, toolName: string, args: Record<string, unknown>): string {
   return createHash('sha256')
@@ -818,7 +821,7 @@ export class ToolDispatcher {
         requestedArgumentsVerified: false;
       }
     | { kind: 'failed'; error: string }
-    | { kind: 'budget_blocked'; reason: string; resumeAt: Date }
+    | { kind: 'budget_blocked'; reason: string; resumeAt: Date; budgetRetry?: BudgetRetry }
   > {
     const compactReceipt = await this.executionRepository.findReceiptByToolCallId?.(
       ctx.agentId,
@@ -1056,6 +1059,7 @@ export class ToolDispatcher {
         kind: 'budget_blocked',
         reason: reserved.reason,
         resumeAt: reserved.resumeAt,
+        budgetRetry: budgetRetry(reserved.budget),
       };
     }
     const decision = {
@@ -2191,7 +2195,12 @@ export class ToolDispatcher {
     // strand a budget hold until the stale-reservation sweeper runs.
     const reserved = await this.reserveForTool(registered, args, input.task.id);
     if (reserved && !reserved.ok) {
-      return { kind: 'budget_blocked', reason: reserved.reason, resumeAt: reserved.resumeAt };
+      return {
+        kind: 'budget_blocked',
+        reason: reserved.reason,
+        resumeAt: reserved.resumeAt,
+        budgetRetry: budgetRetry(reserved.budget),
+      };
     }
     if (reserved?.ok) decision.reservationId = reserved.reservationId;
 

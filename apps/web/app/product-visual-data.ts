@@ -314,6 +314,7 @@ export function createProductVisualData(empty: boolean) {
         ],
     hasMoreTimeline: false,
     activeGrant: null,
+    hasPendingApproval: false,
     stuckWaiting: false,
   };
   const calls: CallView[] = empty

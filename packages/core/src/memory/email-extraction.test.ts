@@ -707,13 +707,13 @@ describe('runEmailIngestExtraction', () => {
     });
   });
 
-  it('spends no extraction call on routine mail but still drains the ledger', async (ctx) => {
+  it('spends no extraction call on bulk mail even if marked high importance but still drains the ledger', async (ctx) => {
     if (!dbUp) return ctx.skip();
     await withIsolatedEmailDatabase(async (scope) => {
       const row = await ingestRow(
         {
           category: 'bulk',
-          importance: 1,
+          importance: 5,
           body: 'Our summer sale is here, with lots of things in it for you to buy today.',
           id: 'newsletter',
         },

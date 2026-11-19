@@ -160,6 +160,8 @@ resource "google_project_service" "runtime" {
     ], local.cloud_tasks ? [
     "cloudscheduler.googleapis.com",
     "cloudtasks.googleapis.com",
+    "logging.googleapis.com",
+    "monitoring.googleapis.com",
   ] : [])) : toset([])
 
   project            = var.project_id
@@ -239,11 +241,12 @@ resource "google_cloud_run_v2_service" "agent" {
   ingress              = "INGRESS_TRAFFIC_ALL"
   invoker_iam_disabled = false
   # Cloud Run IAM and the application independently verify the same signed
-  # route-bound token in Authorization. Register only the two callback routes;
+  # route-bound token in Authorization. Register only the callback routes;
   # accepting the service URL at IAM does not make it valid for either route.
   custom_audiences = local.cloud_tasks ? [
     "${local.deterministic_agent_url}/internal/tasks/execute",
     "${local.deterministic_agent_url}/internal/sweep",
+    "${local.deterministic_agent_url}/internal/sweep/watchdog",
   ] : []
   deletion_protection = true
   labels              = local.runtime_labels
@@ -493,6 +496,94 @@ resource "google_cloud_scheduler_job" "sweep" {
   depends_on = [
     google_cloud_run_v2_service_iam_member.agent_internal_invoker,
   ]
+}
+
+resource "google_cloud_scheduler_job" "sweep_watchdog" {
+  for_each = local.internal_invoker
+
+  project          = var.project_id
+  region           = var.region
+  name             = "${var.installation_id}-sweep-watchdog"
+  description      = "Independent sweep and briefing health probe."
+  schedule         = "*/5 * * * *"
+  time_zone        = "Etc/UTC"
+  attempt_deadline = "30s"
+
+  retry_config {
+    retry_count = 0
+  }
+
+  http_target {
+    http_method = "POST"
+    uri         = "${local.deterministic_agent_url}/internal/sweep/watchdog"
+
+    oidc_token {
+      service_account_email = google_service_account.internal_invoker[each.key].email
+      audience              = "${local.deterministic_agent_url}/internal/sweep/watchdog"
+    }
+  }
+
+  depends_on = [google_cloud_run_v2_service_iam_member.agent_internal_invoker]
+}
+
+resource "google_logging_metric" "sweep_watchdog_errors" {
+  for_each = local.internal_invoker
+
+  project     = var.project_id
+  name        = "${var.installation_id}-sweep-watchdog-errors"
+  description = "Failed independent Assistant scheduler health probes."
+  filter      = <<-FILTER
+    resource.type="cloud_scheduler_job"
+    resource.labels.job_id="${google_cloud_scheduler_job.sweep_watchdog[each.key].name}"
+    resource.labels.location="${var.region}"
+    severity>=ERROR
+    jsonPayload."@type"="type.googleapis.com/google.cloud.scheduler.logging.AttemptFinished"
+  FILTER
+
+  metric_descriptor {
+    metric_kind = "DELTA"
+    value_type  = "INT64"
+  }
+
+  depends_on = [google_project_service.runtime]
+}
+
+resource "google_monitoring_notification_channel" "sweep_watchdog_email" {
+  for_each = local.internal_invoker
+
+  project      = var.project_id
+  display_name = "${var.installation_id} Assistant owner email"
+  type         = "email"
+  labels       = { email_address = var.owner_email }
+
+  depends_on = [google_project_service.runtime]
+}
+
+resource "google_monitoring_alert_policy" "sweep_watchdog" {
+  for_each = local.internal_invoker
+
+  project               = var.project_id
+  display_name          = "${var.installation_id} Assistant scheduled checks unavailable"
+  combiner              = "OR"
+  notification_channels = [google_monitoring_notification_channel.sweep_watchdog_email[each.key].name]
+
+  conditions {
+    display_name = "Independent scheduler health probe failed"
+    condition_threshold {
+      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.sweep_watchdog_errors[each.key].name}\" AND resource.type=\"cloud_scheduler_job\""
+      comparison      = "COMPARISON_GT"
+      threshold_value = 0
+      duration        = "0s"
+      aggregations {
+        alignment_period   = "600s"
+        per_series_aligner = "ALIGN_SUM"
+      }
+    }
+  }
+
+  alert_strategy {
+    auto_close = "1800s"
+  }
 }
 
 output "web_service_account_email" {

@@ -1,3 +1,5 @@
+import type { CalendarRecoveryObservation } from './calendar-recovery.js';
+import type { PracticeChangeMailFact } from './practice-change-mail.js';
 import type { SituationPackView } from './situations-schema.js';
 
 /** A rescheduled deadline is a new observation, unlike a retry of the same deadline. */
@@ -30,6 +32,7 @@ export interface PulseMail {
   category: string;
   importance: number;
   obligationStatus?: string;
+  practiceChange?: PracticeChangeMailFact;
   securityIncidentId?: string | null;
   securityRevision?: number | null;
   securityDisposition?: string | null;
@@ -47,6 +50,7 @@ export interface PulseEmailSourceFence {
   threadId: string;
   providerMessageId: string;
   obligationVersion: number;
+  practiceChange?: PracticeChangeMailFact;
 }
 
 export interface PulseCommitment {
@@ -114,7 +118,10 @@ export function validatePulseNotice(input: PulseNoticeInput): void {
     const expectedKey = input.securityIncident
       ? `security-incident:${input.securityIncident.id}:r${input.securityIncident.revision}`
       : `mail-action:${source.channelMessageId}`;
-    if (input.moment.kind !== 'mail-action' || input.moment.key !== expectedKey)
+    if (
+      input.moment.kind !== (source.practiceChange ? 'practice-change' : 'mail-action') ||
+      input.moment.key !== expectedKey
+    )
       throw new Error('Pulse email source does not match the moment');
   }
   const dates = [input.now, input.pacing.gapSince, input.pacing.windowSince];
@@ -174,6 +181,13 @@ export interface PulseRepository {
   ambientDailyCap(agentId: string): Promise<number | null>;
   /** Keys of every moment of this kind already delivered. */
   momentKeys(agentId: string, kind: string): Promise<string[]>;
+  recordCalendarRecovery?(
+    agentId: string,
+    fence: string | null,
+    at: Date,
+    complete: boolean,
+    observations: readonly CalendarRecoveryObservation[],
+  ): Promise<void>;
   calendarSnapshot(agentId: string): Promise<PulseCalendarSnapshot[]>;
   /**
    * Bring the stored snapshot up to date with one successful read: drop the
@@ -191,7 +205,7 @@ export interface PulseRepository {
   ): Promise<void>;
   /**
    * Actionable mail at or above `minImportance` ingested inside
-   * `[since, until]` that no finished task has picked up, not already admitted to the moment ledger, ordered by importance, age and identity.
+   * `[since, until]` or an authenticated practice change received by now, not already admitted to the moment ledger, ordered by importance, age and identity.
    */
   actionableMail(
     agentId: string,

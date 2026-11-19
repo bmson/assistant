@@ -244,7 +244,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
 
       expect(await runJob()).toBe(
         'email extraction: 2 saved (1 recallable, 1 awaiting review), 0 duplicate, 1 occasion(s), ' +
-          'from 2 message(s) (1 routine), 0 still pending',
+          'from 2 message(s) (1 routine), 0 still pending extraction',
       );
       expect(prompts).toHaveLength(1);
       const memories = await store.collection('memories').get();

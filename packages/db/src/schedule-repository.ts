@@ -10,6 +10,7 @@ import {
   GOAL_TASK_TERMINAL,
   goalOccurrenceIsCurrent,
   occurrenceIsCurrent,
+  reactivatedBriefingTemplate,
   scheduleBatch,
   scheduleCanRun,
   scheduleMatches,
@@ -146,9 +147,15 @@ export function createPostgresScheduleRepository(db: Db): ScheduleRepository {
         const current = await lockedSchedule(tx, scheduleId);
         if (!current || current.agentId !== agentId || current.name.startsWith('reminder:'))
           return false;
+        const taskTemplate = reactivatedBriefingTemplate(current, enabled, new Date());
         const [updated] = await tx
           .update(schedules)
-          .set({ enabled, ...(enabled ? { nextRunAt: null } : {}), updatedAt: sql`now()` })
+          .set({
+            enabled,
+            ...(enabled ? { nextRunAt: null } : {}),
+            ...(taskTemplate ? { taskTemplate } : {}),
+            updatedAt: sql`now()`,
+          })
           .where(and(eq(schedules.id, scheduleId), eq(schedules.agentId, agentId)))
           .returning({ id: schedules.id });
         return Boolean(updated);

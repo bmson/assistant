@@ -131,12 +131,11 @@ Shared rules for every brief:
 
 **Already fixed in code (#910).** Readers use `emailIngestReadable` (`packages/persistence/src/email-ingest-readiness.ts`), which admits authenticated direct-mode sources at `message_persisted` with a prepared score. Extraction reads automated bodies from `emailObserverSources`, and forwarded observation includes archived mail. See [current-system.md §3.2](current-system.md#32-mail).
 
-**Remaining change.**
+**Implementation.** Scheduled extraction now reports the readable backlog separately from fresh intake, items awaiting review and messages stalled in each intake stage for over six hours. The default hourly health monitor raises a counts-only warning and throttles repeated delivery to once per 24 hours. The forwarded-mail fixture exercises scheduled extraction against both databases.
 
-1. **Verify after deploy.** Extraction reports more than 0 per run, and the backlog the audit measured drains. The owner runs this check in production; record only counts.
-2. **Census.** A read-only diagnostic (reuse the patterns of the existing census scripts in `scripts/`) that counts `emailIngest` rows by `pipelineStage`, `ingestMode`, `admittedSourceKind`, `scoreStatus`, age, and whether `extractedAt` is `null`, missing or set. Firestore `== null` queries never match a missing field.
-3. **Visible stalls.** The extraction pending counter (`packages/firestore/src/email-extraction.ts`, around `:323`) and its PostgreSQL twin report rows that are _not_ readable, by stage, as `N stuck in <stage>` instead of `0 still pending`.
-4. **Alert.** A health warning when ingest continues but no row becomes readable for 6 hours (H4).
+**Census.** Run `pnpm mail:census --help` for the read-only diagnostic. Its counts cover pipeline stage, ingest mode, source kind, score status, age, and the extraction marker. Firestore distinguishes absent fields from explicit nulls. A scan that reaches its configured limit reports whether more rows remain.
+
+**Production acceptance.** Record daily counts of eligible mail, extracted rows, and outstanding backlog after release. A day without eligible mail is recorded separately.
 
 **Tests.** Emulator and PostgreSQL tests: a row stuck in `scoring` past its lease is counted as stuck; a readable direct row is extracted once; the census counts every stage.
 

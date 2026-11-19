@@ -1,14 +1,18 @@
 import { createHash } from 'node:crypto';
 import {
+  type CalendarRecoveryObservation,
+  calendarRecoveryCursor,
   commitmentDueMomentKey,
   commitmentIsActive,
   emailIngestReadable,
+  mergeCalendarRecovery,
   type PulseCalendarSnapshot,
   type PulseCommitment,
   type PulseMail,
   type PulseNoticeInput,
   type PulseNoticeOutcome,
   type PulseRepository,
+  practiceChangeFromMail,
   pulseDailyCap,
   type Records,
   type SuggestionRecord,
@@ -143,6 +147,28 @@ export class FirestorePulseRepository implements PulseRepository {
     return snapshot.docs;
   }
 
+  async recordCalendarRecovery(
+    agentId: string,
+    fence: string | null,
+    at: Date,
+    complete: boolean,
+    observations: readonly CalendarRecoveryObservation[],
+  ): Promise<void> {
+    const name = calendarRecoveryCursor(agentId);
+    const ref = this.store.doc('maintenanceCursors', name);
+    await this.store.db.runTransaction(async (tx) => {
+      const [owner, erasure, prior] = await tx.getAll(
+        this.store.doc('agents', agentId),
+        this.store.doc('privacyErasureJobs', agentId),
+        ref,
+      );
+      if (owner?.get('id') !== agentId || !erasure || erasureGeneration(erasure, agentId) !== fence)
+        return;
+      const cursor = mergeCalendarRecovery(prior?.get('cursor'), fence, at, complete, observations);
+      tx.set(ref, { name, cursor, updatedAt: at });
+    });
+  }
+
   async calendarSnapshot(agentId: string): Promise<PulseCalendarSnapshot[]> {
     return (await this.snapshotDocs(agentId)).flatMap((doc) => {
       const row = decodeRecord<Records['calendarEventSnapshots']>(doc.data());
@@ -239,7 +265,7 @@ export class FirestorePulseRepository implements PulseRepository {
       .where('agentId', '==', agentId)
       .where('actionable', '==', true)
       .where('createdAt', '>=', input.since)
-      .where('createdAt', '<=', input.until)
+      .where('createdAt', '<=', input.now)
       .where('importance', '>=', input.minImportance)
       .orderBy('importance', 'desc')
       .orderBy('createdAt', 'asc')
@@ -258,6 +284,9 @@ export class FirestorePulseRepository implements PulseRepository {
         if (typeof row.id !== 'string' || documentKey(row.id) !== doc.id || row.agentId !== agentId)
           continue;
         if (!emailIngestReadable(row)) continue;
+        const practiceChange = practiceChangeFromMail(row);
+        if (!practiceChange && row.createdAt > input.until) continue;
+        if (practiceChange && new Date(practiceChange.iso) <= input.now) continue;
         if (!row.providerThreadId) continue;
         if (row.obligationStatus === 'resolved' || row.obligationStatus === 'superseded') continue;
         if (
@@ -340,6 +369,7 @@ export class FirestorePulseRepository implements PulseRepository {
           category: row.category,
           importance: row.importance,
           obligationStatus: row.obligationStatus ?? 'unknown',
+          ...(practiceChange ? { practiceChange } : {}),
           ...security,
         });
         if (rows.length >= input.limit) return rows;
@@ -470,6 +500,8 @@ export class FirestorePulseRepository implements PulseRepository {
           (current.obligationVersion ?? 0) !== source.obligationVersion ||
           !current.actionable ||
           !emailIngestReadable(current) ||
+          (source.practiceChange !== undefined &&
+            practiceChangeFromMail(current)?.dateEvidence !== source.practiceChange.dateEvidence) ||
           !['unknown', 'open', 'snoozed'].includes(current.obligationStatus ?? 'unknown') ||
           (current.obligationStatus === 'snoozed' &&
             current.obligationSnoozedUntil &&
@@ -480,28 +512,30 @@ export class FirestorePulseRepository implements PulseRepository {
       const prefs = await tx.get(this.store.doc('notificationPrefs', input.agentId));
       if (prefs.exists && prefs.get('agentId') !== input.agentId)
         throw new Error('Notification preferences belong to another owner');
-      const dailyCap = pulseDailyCap(
-        input.pacing.dailyCap,
-        (prefs.exists ? (prefs.get('ambientDailyCap') ?? null) : null) as number | null,
-      );
-      if (dailyCap === 0) return { status: 'daily-cap' };
-      const used = await tx.get(
-        this.store
-          .collection('proactiveMoments')
-          .where('agentId', '==', input.agentId)
-          .where('deliveredAt', '>=', input.pacing.windowSince)
-          .limit(dailyCap)
-          .count(),
-      );
-      if (used.data().count >= dailyCap) return { status: 'daily-cap' };
-      const recent = await tx.get(
-        this.store
-          .collection('proactiveMoments')
-          .where('agentId', '==', input.agentId)
-          .where('deliveredAt', '>=', input.pacing.gapSince)
-          .limit(1),
-      );
-      if (!recent.empty) return { status: 'min-gap' };
+      if (input.moment.kind !== 'sweep-recovery' && input.moment.kind !== 'watchdog-outage') {
+        const dailyCap = pulseDailyCap(
+          input.pacing.dailyCap,
+          (prefs.exists ? (prefs.get('ambientDailyCap') ?? null) : null) as number | null,
+        );
+        if (dailyCap === 0) return { status: 'daily-cap' };
+        const used = await tx.get(
+          this.store
+            .collection('proactiveMoments')
+            .where('agentId', '==', input.agentId)
+            .where('deliveredAt', '>=', input.pacing.windowSince)
+            .limit(dailyCap)
+            .count(),
+        );
+        if (used.data().count >= dailyCap) return { status: 'daily-cap' };
+        const recent = await tx.get(
+          this.store
+            .collection('proactiveMoments')
+            .where('agentId', '==', input.agentId)
+            .where('deliveredAt', '>=', input.pacing.gapSince)
+            .limit(1),
+        );
+        if (!recent.empty) return { status: 'min-gap' };
+      }
 
       const existingMessage = await tx.get(messageRef);
       if (existingMessage.exists)

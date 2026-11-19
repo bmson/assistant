@@ -409,7 +409,7 @@ export async function notifyOwnerBySms(
     deliveryKey?: string;
   },
 ): Promise<NotificationDeliveryResult> {
-  if (input.purpose === 'answer-ready')
+  if (input.purpose === 'answer-ready' || input.purpose === 'watchdog-outage')
     return notificationLeg('sms', 'skipped', 'push-only-notice');
   if (input.purpose !== 'task-attention' && input.purpose !== 'leave-now')
     return notificationLeg('sms', 'skipped', 'unsolicited-sms-category-not-allowed');

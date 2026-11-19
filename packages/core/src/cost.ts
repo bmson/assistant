@@ -133,6 +133,7 @@ export async function emitBudgetNotices(
     {
       name: 'daily' as const,
       spent: totals.dailySpentUsd,
+      held: totals.dailyHeldUsd,
       limit: totals.dailyLimitUsd,
       periodKey: new Date().toISOString().slice(0, 10),
       expiresAt: nextDailyReset(),
@@ -140,6 +141,7 @@ export async function emitBudgetNotices(
     {
       name: 'monthly' as const,
       spent: totals.monthlySpentUsd,
+      held: totals.monthlyHeldUsd,
       limit: totals.monthlyLimitUsd,
       periodKey: new Date().toISOString().slice(0, 7),
       expiresAt: nextMonthlyReset(),
@@ -149,19 +151,26 @@ export async function emitBudgetNotices(
   for (const period of periods) {
     if (!Number.isFinite(period.limit) || period.limit <= 0) continue;
     const pct = (period.spent / period.limit) * 100;
-    const crossed = [...NOTIFY_THRESHOLDS].reverse().find((t) => pct >= t);
+    const exposure = period.spent + (period.held ?? 0);
+    const crossed =
+      exposure >= period.limit ? 100 : [...NOTIFY_THRESHOLDS].reverse().find((t) => pct >= t);
     if (!crossed) continue;
 
     const cacheKey = `budget-notice:${period.name}:${crossed}:${period.periodKey}`;
+    const heldDetail =
+      period.held === undefined
+        ? ' with holds unavailable'
+        : ` and $${period.held.toFixed(2)} held`;
     const text =
       crossed >= 100
-        ? `Budget: the ${period.name} cap is exhausted ($${period.spent.toFixed(2)} of $${period.limit.toFixed(2)}). Non-critical work is parked as waiting_budget and resumes when the ${period.name} period resets; owner chat keeps a small carve-out. Raise the cap on the [Costs page](/costs) if you want work to continue now.`
+        ? `Budget: non-critical work may pause. $${period.spent.toFixed(2)} recorded as spend${heldDetail} against the $${period.limit.toFixed(2)} ${period.name} limit. Review or raise the limit in [Costs](/costs).`
         : `Budget: ${Math.round(pct)}% of the ${period.name} cap used ($${period.spent.toFixed(2)} of $${period.limit.toFixed(2)}).`;
+    const reportedPct = crossed === 100 ? (exposure / period.limit) * 100 : pct;
     if (portable) {
       // The dedupe key and the Notifications message commit together.
       const posted = await portable.maintenance.postBudgetNotice({
         cacheKey,
-        pct: Math.round(pct),
+        pct: Math.round(reportedPct),
         expiresAt: period.expiresAt,
         text,
       });
@@ -176,7 +185,7 @@ export async function emitBudgetNotices(
       .values({
         cacheKey,
         toolName: 'budget.notice',
-        result: { pct: Math.round(pct) },
+        result: { pct: Math.round(reportedPct) },
         expiresAt: period.expiresAt,
       })
       .onConflictDoNothing();

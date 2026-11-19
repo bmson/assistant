@@ -36,6 +36,7 @@ import {
   FirestoreTaskActivityRepository,
 } from '@assistant/firestore';
 import type {
+  ActivityArchiveScope,
   PendingChecklistCancellationInput,
   PendingChecklistCancellationOutcome,
   PendingChecklistCorrectionInput,
@@ -127,14 +128,20 @@ export function restoreTaskActivity(taskId: string): Promise<TaskActivityCommand
   return restoreActivity(getDb(), taskId);
 }
 
-export function archiveOldTaskActivity(operationId?: string) {
+export function archiveOldTaskActivity(operationId?: string, scope?: ActivityArchiveScope) {
   const firestore = firestoreActivityCommands();
   if (firestore) {
-    return operationId
-      ? archiveOldActivityWithRepository(firestore.repository, firestore.agentId, 30, operationId)
+    return operationId || scope
+      ? archiveOldActivityWithRepository(
+          firestore.repository,
+          firestore.agentId,
+          30,
+          operationId,
+          scope,
+        )
       : archiveOldActivityWithRepository(firestore.repository, firestore.agentId);
   }
-  return archiveOldActivity(getDb());
+  return scope ? archiveOldActivity(getDb(), 30, scope) : archiveOldActivity(getDb());
 }
 
 /** Re-queue a stalled task (needs_attention → pending). */

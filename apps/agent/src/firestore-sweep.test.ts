@@ -23,6 +23,8 @@ import {
 } from '../../../packages/firestore/src/test-store.js';
 import type { AgentDeps } from './deps.js';
 import { runFirestoreSweep } from './firestore-sweep.js';
+import { internal } from './routes/internal.js';
+import { readFirestoreSweepHealth } from './sweep-heartbeat.js';
 
 describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore maintenance sweep', () => {
   const agentId = randomUUID();
@@ -114,6 +116,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore maintenance swe
 
   afterEach(async () => {
     await disposeStore(store);
+    vi.useRealTimers();
     vi.unstubAllEnvs();
     vi.restoreAllMocks();
     resetConfigForTest();
@@ -138,6 +141,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore maintenance swe
         awarenessSchedulesCreated: 1,
         schedulesFired: 0,
         budgetNotices: 0,
+        capChangeWakes: 0,
         messagesEmbedded: 0,
         purgedExpired: 0,
         agedHistory: 0,
@@ -394,6 +398,70 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore maintenance swe
     expect(firestoreCodeJobUnavailable('not.a.job')).toBeNull();
   });
 
+  it('records a quiet pass, reports an outage at 30 minutes and recovers after a named failure', async () => {
+    vi.stubEnv('INTERNAL_AUTH_MODE', 'shared-secret');
+    vi.stubEnv('INTERNAL_API_SECRET', 'synthetic-firestore-health');
+    vi.stubEnv('PERSISTENCE_DRIVER', 'firestore');
+    vi.stubEnv('GCP_PROJECT', 'demo-assistant-test');
+    vi.stubEnv('ASSISTANT_WORKSPACE_ID', store.installationId);
+    vi.stubEnv('FIRESTORE_AGENT_ID', agentId);
+    resetConfigForTest();
+    const headers = { authorization: 'Bearer synthetic-firestore-health' };
+    const health = async () => {
+      vi.setSystemTime(now);
+      const response = await internal.request('/sweep/health', { headers });
+      const { health } = (await response.json()) as { health: { ok: boolean } };
+      expect(response.status).toBe(health.ok ? 200 : 503);
+      return health;
+    };
+    const clock = () => now;
+    expect(await health()).toMatchObject({
+      ok: false,
+      state: 'missing',
+      briefing: { state: 'missing' },
+    });
+    await new FirestoreScheduleRepository(store).ensure({
+      agentId,
+      name: 'daily-briefing',
+      enabled: false,
+      cron: '0 8 * * *',
+      nextRunAt: null,
+      taskTemplate: { job: 'briefing.compose' },
+    });
+    expect(await runFirestoreSweep(deps, { clock })).toMatchObject({
+      report: { schedulesFired: 0 },
+    });
+    expect(await health()).toMatchObject({ ok: true, state: 'healthy', failedSteps: [], ageMs: 0 });
+
+    now = new Date(now.getTime() + 30 * 60_000 - 1);
+    expect(await health()).toMatchObject({ ok: true, state: 'healthy' });
+    now = new Date(now.getTime() + 1);
+    expect(await health()).toMatchObject({ ok: false, state: 'stale', ageMs: 1_800_000 });
+    await store.doc('agents', agentId).update({ timezone: 'Invalid/Timezone' });
+    expect(await runFirestoreSweep(deps, { clock })).toMatchObject({
+      report: { schedulesFired: 0, portableStep: 1 },
+    });
+    expect(await health()).toMatchObject({
+      ok: false,
+      state: 'failed',
+      failedSteps: ['readScheduleTimezone'],
+      skippedSteps: ['ensureAwarenessSchedule', 'runDueSchedules'],
+    });
+    expect(portableStepRuns).toBe(2);
+
+    now = new Date(now.getTime() + 10 * 60_000);
+    await store.doc('agents', agentId).update({ timezone: 'America/Los_Angeles' });
+    expect(await runFirestoreSweep(deps, { clock })).toMatchObject({
+      report: { schedulesFired: 0 },
+    });
+    expect(await health()).toMatchObject({ ok: true, state: 'healthy', failedSteps: [], ageMs: 0 });
+    expect(
+      (await store.collection('proactiveMoments').get()).docs.map((doc) => doc.get('kind')),
+    ).toEqual(['sweep-recovery']);
+    expect((await store.collection('messages').get()).docs).toHaveLength(1);
+    expect(sqlAccesses).toEqual([]);
+  }, 30_000);
+
   it('runs nothing while an imported workspace awaits activation', async () => {
     await store.doc('coordination', 'migration').set({ status: 'pending_activation' });
     await persistence().costs.reserve({ source: 'model', estimatedUsd: 0.2 });
@@ -405,6 +473,13 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore maintenance swe
     });
     expect((await persistence().costs.totals()).heldUsd).toBe(0.2);
     expect(portableStepRuns).toBe(0);
+    expect(await readFirestoreSweepHealth(store, agentId, now)).toEqual({
+      ok: false,
+      state: 'inactive',
+    });
+    expect(
+      (await store.collection('maintenanceCursors').get()).docs.map((doc) => doc.get('name')),
+    ).not.toContain('scheduler-sweep-heartbeat-v1');
     expect(sqlAccesses).toEqual([]);
   });
 

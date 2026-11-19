@@ -28,6 +28,7 @@ export {
   probablePhoneCalendarDuplicate,
   sameCalendarOccurrence,
 } from './calendar-occurrence.js';
+export * from './calendar-recovery.js';
 export * from './call-sessions.js';
 export * from './card-form.js';
 export * from './card-form-admission.js';
@@ -133,6 +134,7 @@ export * from './phone-call-owner-action-grant.js';
 export * from './phone-call-owner-action-intent.js';
 export * from './phone-call-owner-intent.js';
 export * from './phone-call-owner-number-grant.js';
+export * from './practice-change-mail.js';
 export * from './privacy-erasure.js';
 export * from './privacy-export.js';
 export * from './proactive-awareness.js';

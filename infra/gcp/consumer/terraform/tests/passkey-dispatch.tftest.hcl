@@ -72,6 +72,7 @@ run "passkey_runtime_needs_no_oauth_client_and_uses_deterministic_origin" {
     condition = (
       length(google_cloud_tasks_queue.agent) == 0 &&
       length(google_cloud_scheduler_job.sweep) == 0 &&
+      length(google_cloud_scheduler_job.sweep_watchdog) == 0 &&
       length(google_service_account.internal_invoker) == 0 &&
       google_cloud_run_v2_service.agent["current"].scaling[0].min_instance_count == 1 &&
       one([for env in google_cloud_run_v2_service.agent["current"].template[0].containers[0].env : env.value if env.name == "QUEUE_DRIVER"]) == "local"
@@ -155,9 +156,12 @@ run "cloud_tasks_dispatch_is_least_privilege_and_scales_to_zero" {
       google_cloud_scheduler_job.sweep["current"].http_target[0].oidc_token[0].audience == "https://pilot-agent-123456789012.us-west1.run.app/internal/sweep" &&
       google_cloud_scheduler_job.sweep["current"].http_target[0].oidc_token[0].service_account_email == "pilot-invoker@consumer-test-project.iam.gserviceaccount.com" &&
       google_cloud_scheduler_job.sweep["current"].schedule == "* * * * *" &&
+      google_cloud_scheduler_job.sweep_watchdog["current"].http_target[0].oidc_token[0].audience == "https://pilot-agent-123456789012.us-west1.run.app/internal/sweep/watchdog" &&
+      google_cloud_scheduler_job.sweep_watchdog["current"].schedule == "*/5 * * * *" &&
       toset(google_cloud_run_v2_service.agent["current"].custom_audiences) == toset([
         "https://pilot-agent-123456789012.us-west1.run.app/internal/tasks/execute",
         "https://pilot-agent-123456789012.us-west1.run.app/internal/sweep",
+        "https://pilot-agent-123456789012.us-west1.run.app/internal/sweep/watchdog",
       ])
     )
     error_message = "Both callback routes must have explicit Cloud Run custom audiences matching the route-bound application validator."

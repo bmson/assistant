@@ -31,6 +31,20 @@ export function reminderScheduleTemplate(value: unknown): ReminderScheduleTempla
   return (value ?? {}) as ReminderScheduleTemplate;
 }
 
+export function normalizeReminderText(value: string): string {
+  return value
+    .toLocaleLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .replace(/\b(?:the|a|an|reminder)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** Both values use the reminder resolver's normalization. */
+export function reminderTextMatchesQuery(text: string, query: string): boolean {
+  return Boolean(text && query) && (text.includes(query) || query.includes(text));
+}
+
 export function reminderScheduleIsActive(row: Records['schedules']): boolean {
   const template = reminderScheduleTemplate(row.taskTemplate);
   if (template.reminderCancelledAt || template.reminderDeliveredAt) return false;

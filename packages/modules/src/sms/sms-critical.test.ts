@@ -186,6 +186,11 @@ describe('owner-facing SMS pings are budget-critical', () => {
   it('never relays generic owner notice text or starts an SMS attempt', async () => {
     const deps = fakeDeps();
     const send = vi.spyOn(deps.twilio, 'send');
+    await expect(
+      notifyOwnerBySms(deps, { purpose: 'watchdog-outage', text: 'Synthetic outage' }),
+    ).resolves.toEqual({
+      legs: [{ channel: 'sms', status: 'skipped', reason: 'push-only-notice' }],
+    });
     await expect(notifyOwnerBySms(deps, { text: 'Private unsolicited message' })).resolves.toEqual({
       legs: [{ channel: 'sms', status: 'skipped', reason: 'unsolicited-sms-category-not-allowed' }],
     });

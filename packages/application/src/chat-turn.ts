@@ -48,6 +48,7 @@ import {
 } from '@assistant/core/workflow/owner-intent';
 import { detectPersonalReadRequest } from '@assistant/core/workflow/read-intent';
 import { RequestChecklistSchema } from '@assistant/core/workflow/request-checklist-schema';
+import { requestsDurableMutation } from '@assistant/core/workflow/response-contract';
 import {
   clearGoalBlockedOnOwnerReply,
   goalIdForConversation,
@@ -1568,6 +1569,7 @@ export async function handleChatTurn(
     conversationLocal ||
     requestedReplySentenceLimit(userText) !== undefined ||
     requestedReplyWordLimit(userText) !== undefined;
+  const bufferUntilGuarded = needsReplyReview || requestsDurableMutation(userText);
   const guardCache = new Map<
     string,
     Promise<{ corrected: boolean; text: string; incomplete?: boolean }>
@@ -1686,7 +1688,7 @@ export async function handleChatTurn(
             responseText: guarded.text,
             recall: recallSources,
             privacyObservationGeneration,
-            cues: guarded.corrected || needsReplyReview ? undefined : stripped.cues,
+            cues: guarded.corrected || bufferUntilGuarded ? undefined : stripped.cues,
             offCourse: actionOffCourse,
           });
           if (!completed) throw new Error('Chat completion was fenced before publication');
@@ -1752,7 +1754,7 @@ export async function handleChatTurn(
       // re-emits them as data-* parts, so the face reacts mid-stream while the
       // streamed text stays byte-identical to what onComplete persists.
       const parts = okOutcome.toUIMessageStream({ sendFinish: false });
-      if (needsReplyReview) {
+      if (bufferUntilGuarded) {
         // Consume the draft to completion without exposing unreviewed fragments.
         // The completion callback and this pump await the same cached review.
         for await (const _part of parts as unknown as AsyncIterable<StreamChunk>) {

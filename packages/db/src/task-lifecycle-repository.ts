@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type {
   ScheduledFollowUpInput,
   TaskLease,
+  TaskOutcome,
   TaskRepository,
   TaskWake,
 } from '@assistant/persistence';
@@ -12,6 +13,7 @@ import {
   redactTerminalArrivalTask,
 } from '@assistant/persistence';
 import { and, desc, eq, inArray, isNull, lt, lte, notInArray, or, sql } from 'drizzle-orm';
+import { savePostgresBriefingWatchdog } from './briefing-watchdog.js';
 import type { Db } from './client.js';
 import { missionReports, type TaskRow, tasks } from './schema.js';
 import { createTask } from './task-creation-repository.js';
@@ -173,7 +175,7 @@ export async function sleepTask(
 export async function completeTask(
   db: Db,
   taskOrId: TaskLease | string,
-  outcome: { status: 'done' | 'failed' | 'cancelled'; progress?: string },
+  outcome: TaskOutcome,
 ): Promise<boolean> {
   if (typeof taskOrId === 'string' && outcome.status !== 'cancelled')
     throw new Error('Administrative completion requires cancellation');
@@ -201,8 +203,11 @@ export async function completeTask(
         parentTaskId: tasks.parentTaskId,
         trigger: tasks.trigger,
         externalEventId: tasks.externalEventId,
+        createdAt: tasks.createdAt,
       });
     if (!updated) return false;
+    if (outcome.status === 'done' && outcome.briefingOutcome)
+      await savePostgresBriefingWatchdog(tx, updated, outcome.briefingOutcome);
 
     const arrivalRedaction = redactTerminalArrivalTask(
       updated.trigger,
@@ -274,6 +279,17 @@ export async function completeTask(
       .values(report)
       .onConflictDoNothing({ target: missionReports.id });
     return true;
+  });
+}
+
+async function recordAbortedBriefing(db: Db, lease: TaskLease): Promise<void> {
+  await db.transaction(async (tx) => {
+    const [task] = await tx
+      .select()
+      .from(tasks)
+      .where(and(activeLease(lease), eq(tasks.agentId, lease.agentId)))
+      .for('update');
+    if (task) await savePostgresBriefingWatchdog(tx, task, { kind: 'aborted' });
   });
 }
 
@@ -519,6 +535,7 @@ export async function findDueTasks(db: Db, limit = 10): Promise<TaskRow[]> {
 export function createPostgresTaskRepository(db: Db): TaskRepository {
   return {
     ...createPostgresTaskLeaseRepository(db),
+    recordAbortedBriefing: (task) => recordAbortedBriefing(db, task),
     async getTask(taskId) {
       if (!taskId) return null;
       const [task] = await db.select().from(tasks).where(eq(tasks.id, taskId)).limit(1);

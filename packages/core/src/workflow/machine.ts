@@ -171,8 +171,13 @@ export async function parkForBudget(
   task: TaskLease,
   state: TaskState,
   resumeAt: Date,
+  budgetRetry?: import('@assistant/persistence').BudgetRetry,
 ): Promise<boolean> {
-  return lifecycle(db).parkForBudget(task, state, resumeAt);
+  return lifecycle(db).parkForBudget(
+    task,
+    { ...state, budgetRetry: budgetRetry ?? null },
+    resumeAt,
+  );
 }
 
 /** Sleep until runAfter (mission wake cadence, retries with backoff, timed waits). */
@@ -188,7 +193,7 @@ export async function sleepTask(
 export function completeTask(
   db: Db | TaskRepository,
   task: TaskLease,
-  outcome: { status: 'done' | 'failed' | 'cancelled'; progress?: string },
+  outcome: import('@assistant/persistence').TaskOutcome,
 ): Promise<boolean>;
 /** Administrative cancellation does not need an executor lease. */
 export function completeTask(
@@ -199,7 +204,7 @@ export function completeTask(
 export async function completeTask(
   db: Db | TaskRepository,
   taskOrId: TaskLease | string,
-  outcome: { status: 'done' | 'failed' | 'cancelled'; progress?: string },
+  outcome: import('@assistant/persistence').TaskOutcome,
 ): Promise<boolean> {
   return lifecycle(db).completeTask(taskOrId, outcome);
 }

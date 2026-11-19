@@ -193,6 +193,11 @@ export default async function CostsPage() {
             </section>
           ) : null}
 
+          {totals.heldUsd > 0 ? (
+            <p className="mt-5 text-sm text-muted">
+              {formatUsd(totals.heldUsd.toFixed(4))} in unresolved estimates across all periods.
+            </p>
+          ) : null}
           <DispatchingCostAttempts summary={dashboard.dispatchingAttempts} />
           <UnknownCostAttempts summary={dashboard.unknownAttempts} />
 

@@ -97,6 +97,40 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore schedule name m
     await disposeStore(store);
   });
 
+  it('updates only an enabled unchanged default health monitor cadence', async () => {
+    const now = new Date('2026-11-18T08:00:00Z');
+    const nextAt = new Date('2026-11-18T08:15:00Z');
+    const repo = new FirestoreScheduleRepository(store);
+    const template = { type: 'scheduled', job: 'health.monitor', budgetUsdLimit: '0.02' };
+    const name = 'assistant-health-monitor';
+    for (const edited of ['untouched', 'paused', 'edited', 'unmanaged']) {
+      const agentId = randomUUID();
+      const id = randomUUID();
+      const cron = edited === 'edited' ? '15 2 * * *' : '15 1 * * *';
+      const changed = edited === 'untouched';
+      await store.doc('agents', agentId).set({ id: agentId });
+      await store.doc('schedules', id).set(
+        encodeRecord({
+          ...scheduleRow({ id, agentId, name, now }),
+          cron,
+          enabled: edited !== 'paused',
+          taskTemplate: template,
+          seedTemplateKey: edited === 'unmanaged' ? null : `assistant.schedule.${name}`,
+          seedTemplateRevision: edited === 'unmanaged' ? null : 1,
+          seedDefinition: { cron: '15 1 * * *', taskTemplate: template },
+        }),
+      );
+      await repo.updateDefaultHealthMonitorCadence(agentId, nextAt);
+      const row = await store.doc('schedules', id).get();
+      expect(row.get('cron'), edited).toBe(changed ? '15 * * * *' : cron);
+      expect(row.get('nextRunAt').toDate(), edited).toEqual(
+        changed ? nextAt : new Date(now.getTime() + 60_000),
+      );
+      expect(row.get('enabled')).toBe(edited !== 'paused');
+    }
+    expect((await store.collection('schedules').get()).size).toBe(4);
+  });
+
   it('adopts an existing complete schedule document without a name key', async () => {
     const now = new Date();
     const agentId = randomUUID();

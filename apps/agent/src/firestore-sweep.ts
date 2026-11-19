@@ -8,6 +8,7 @@ import {
   firestoreCodeJobUnavailable,
   getTaskQueue,
   isCodeJobEnabled,
+  nextRun,
   prepareGoalSession,
   purgeAgedHistory,
   purgeExpired,
@@ -17,8 +18,12 @@ import {
   resumeResolvedApprovalTasks,
   runDueSchedules,
 } from '@assistant/core';
-import { FirestoreOutbox, FirestoreScheduleRepository } from '@assistant/firestore';
-import type { TaskQueue } from '@assistant/persistence';
+import {
+  FirestoreBudgetCapsRepository,
+  FirestoreOutbox,
+  FirestoreScheduleRepository,
+} from '@assistant/firestore';
+import { ASSISTANT_HEALTH_MONITOR_SCHEDULE, type TaskQueue } from '@assistant/persistence';
 import { ensureAwarenessSchedule } from './awareness-schedule.js';
 import {
   type AgentDeps,
@@ -28,6 +33,11 @@ import {
 } from './deps.js';
 import { executorDeps } from './executor-deps.js';
 import { ensureRepairSchedule } from './repair-schedule.js';
+import {
+  acknowledgeFirestoreSweepRecovery,
+  recordFirestoreSweepHeartbeat,
+} from './sweep-heartbeat.js';
+import { publishFirestoreSweepRecovery } from './sweep-recovery.js';
 
 export type FirestoreSweepResult =
   | { ready: false; error: string }
@@ -47,8 +57,10 @@ export type FirestoreSweepResult =
  */
 export async function runFirestoreSweep(
   deps: AgentDeps,
-  options: { queue?: TaskQueue } = {},
+  options: { queue?: TaskQueue; clock?: () => Date } = {},
 ): Promise<FirestoreSweepResult> {
+  const clock = options.clock ?? (() => new Date());
+  const startedAt = clock();
   let ready = false;
   try {
     ready = await firestoreMaintenanceReady(deps);
@@ -62,6 +74,7 @@ export async function runFirestoreSweep(
   const maintenance = persistence?.maintenance;
   if (!store || persistence?.driver !== 'firestore' || !maintenance)
     return { ready: false, error: 'Firestore maintenance persistence is unavailable' };
+  const failedSteps: string[] = [];
   let timezone: string | undefined;
   try {
     const owner = await store.doc('agents', deps.config.FIRESTORE_AGENT_ID).get();
@@ -72,20 +85,28 @@ export async function runFirestoreSweep(
       typeof configured === 'string' &&
       configured.trim()
     )
-      timezone = configured;
+      try {
+        new Intl.DateTimeFormat('en-US', { timeZone: configured });
+        timezone = configured;
+      } catch {
+        // Run non-scheduling maintenance, with a named heartbeat failure.
+      }
   } catch (err) {
     console.error('Firestore schedule timezone read failed', err);
   }
-  if (!timezone) return { ready: false, error: 'Firestore agent timezone is unavailable' };
+  if (!timezone) failedSteps.push('readScheduleTimezone');
+  const skippedSteps = timezone ? [] : ['ensureAwarenessSchedule', 'runDueSchedules'];
 
-  const step = async (name: string, fn: () => Promise<number>): Promise<number> => {
+  const attempt = async <T>(name: string, fn: () => Promise<T>, fallback: T): Promise<T> => {
     try {
       return await fn();
     } catch (err) {
+      failedSteps.push(name);
       console.error(`sweep step failed: ${name}`, err);
-      return 0;
+      return fallback;
     }
   };
+  const step = (name: string, fn: () => Promise<number>) => attempt(name, fn, 0);
   let releasedReservations = 0;
   let reservationsMarkedUnknown = 0;
   const report: Record<string, number> = {
@@ -115,10 +136,13 @@ export async function runFirestoreSweep(
     expiredWatches: await step('expireWatches', () =>
       persistence.watches.expire(deps.config.FIRESTORE_AGENT_ID, new Date()),
     ),
-    awarenessSchedulesCreated: await step('ensureAwarenessSchedule', () =>
-      ensureAwarenessSchedule(store, deps.config.FIRESTORE_AGENT_ID, new Date()),
-    ),
+    awarenessSchedulesCreated: timezone
+      ? await step('ensureAwarenessSchedule', () =>
+          ensureAwarenessSchedule(store, deps.config.FIRESTORE_AGENT_ID, new Date()),
+        )
+      : 0,
     schedulesFired: await step('runDueSchedules', async () => {
+      if (!timezone) return 0;
       if (deps.config.SELF_REPAIR_ENABLED)
         await ensureRepairSchedule(
           store,
@@ -126,6 +150,13 @@ export async function runFirestoreSweep(
           deps.config.SELF_REPAIR_DAILY_LIMIT,
         );
       const scheduleRepository = new FirestoreScheduleRepository(store);
+      await step('updateDefaultHealthMonitorCadence', async () => {
+        await scheduleRepository.updateDefaultHealthMonitorCadence(
+          deps.config.FIRESTORE_AGENT_ID,
+          nextRun(ASSISTANT_HEALTH_MONITOR_SCHEDULE.cron, timezone, new Date()),
+        );
+        return 0;
+      });
       if (isCodeJobEnabled('briefing.compose') && !firestoreCodeJobUnavailable('briefing.compose'))
         await scheduleRepository.retireDefaultMorningBrief(deps.config.FIRESTORE_AGENT_ID);
       const fired = await runDueSchedules(scheduleRepository, timezone, {
@@ -142,6 +173,7 @@ export async function runFirestoreSweep(
               template,
             );
           } catch (err) {
+            failedSteps.push('prepareGoalSession');
             console.error(`goal schedule preparation failed: ${row.name}`, err);
             return { action: 'skip' };
           }
@@ -160,6 +192,12 @@ export async function runFirestoreSweep(
             deps.config.FIRESTORE_AGENT_ID,
           )
         ).length,
+    ),
+    capChangeWakes: await step(
+      'resumeBudgetCapWakes',
+      async () =>
+        (await new FirestoreBudgetCapsRepository(store).resumeWakes(deps.config.FIRESTORE_AGENT_ID))
+          .length,
     ),
     // Vectors are written only in the configured Firestore embedding space,
     // and only while the embed role still produces that space.
@@ -203,6 +241,10 @@ export async function runFirestoreSweep(
     );
   }
   if (deps.config.QUEUE_DRIVER === 'cloudtasks') {
+    if (
+      !(await attempt('checkWakeDispatchReadiness', () => firestoreMaintenanceReady(deps), false))
+    )
+      return { ready: false, error: 'Firestore installation is not ready for maintenance' };
     // With Cloud Tasks there is no local poller, so this scheduled sweep is
     // the only dispatcher. Every Firestore transition that makes a task
     // runnable commits a durable wake intent in the same transaction. Here the
@@ -233,6 +275,41 @@ export async function runFirestoreSweep(
     report.wakeIntentsDispatched = dispatched?.delivered ?? 0;
     report.wakeIntentsRetrying = dispatched?.retried ?? 0;
     report.wakeIntentErrors = dispatched ? dispatched.errors + dispatched.leaseLost : 1;
+    if (report.wakeIntentErrors > 0 || report.wakeIntentsRetrying > 0)
+      failedSteps.push('dispatchWakeIntents');
+  }
+  const recovery = await attempt(
+    'recordSweepHeartbeat',
+    () =>
+      recordFirestoreSweepHeartbeat(
+        store,
+        deps.config.FIRESTORE_AGENT_ID,
+        startedAt,
+        clock(),
+        failedSteps,
+        skippedSteps,
+      ),
+    undefined,
+  );
+  if (recovery && !failedSteps.length && !skippedSteps.length) {
+    await step('publishSweepRecovery', async () => {
+      const notice = await publishFirestoreSweepRecovery(
+        store,
+        deps.config.FIRESTORE_AGENT_ID,
+        recovery,
+        clock(),
+      );
+      if (notice.status === 'persisted') {
+        await deps.outOfBandNotifier.notifyOwner({
+          text: 'Scheduled checks resumed. Your catch-up is ready in chat.',
+          conversationId: notice.conversationId,
+          urgency: 'ambient',
+          deliveryKey: `sweep-recovery:${recovery.fromMs}`,
+        });
+      }
+      await acknowledgeFirestoreSweepRecovery(store, recovery);
+      return Number(notice.status === 'persisted');
+    });
   }
   return { ready: true, report };
 }
