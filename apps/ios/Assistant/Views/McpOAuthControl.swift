@@ -2,8 +2,8 @@ import AuthenticationServices
 import SwiftUI
 import UIKit
 
-struct McpOAuthStatus: Decodable {
-    enum Grant: String, Decodable {
+struct McpOAuthStatus: Decodable, Sendable {
+    enum Grant: String, Decodable, Sendable {
         case none, authorized
         case reauthorizationRequired = "reauthorization_required"
     }
@@ -39,8 +39,8 @@ struct McpOAuthStart: Decodable {
     }
 }
 
-struct McpOAuthFlow: Decodable {
-    enum Outcome: String, Decodable {
+struct McpOAuthFlow: Decodable, Sendable {
+    enum Outcome: String, Decodable, Sendable {
         case pending, processing, authorized, denied, cancelled, expired, failed, superseded
 
         var isPending: Bool { self == .pending || self == .processing }
@@ -49,6 +49,56 @@ struct McpOAuthFlow: Decodable {
     let connectionId: String
     let flowId: String
     let outcome: Outcome
+}
+
+protocol McpOAuthRecoveryService: Sendable {
+    func mcpOAuthStatus(id: String, verifyProvider: Bool) async throws -> McpOAuthStatus
+    func mcpOAuthFlow(id: String, flowId: String, cancel: Bool) async throws -> McpOAuthFlow
+}
+extension APIClient: McpOAuthRecoveryService {}
+
+struct McpOAuthRecovery {
+    struct Snapshot {
+        let status: McpOAuthStatus; let outcome: McpOAuthFlow.Outcome?; let flowUnavailable: Bool
+    }
+    enum InvalidResponse: Error { case identity }
+    static func read(
+        _ service: any McpOAuthRecoveryService, connectionID: String, flowID: String?, cancel: Bool = false
+    ) async throws -> Snapshot {
+        var outcome: McpOAuthFlow.Outcome?
+        var unavailable = false
+        if let flowID {
+            do {
+                let flow = try await service.mcpOAuthFlow(id: connectionID, flowId: flowID, cancel: cancel)
+                guard flow.connectionId == connectionID, flow.flowId == flowID else {
+                    throw InvalidResponse.identity
+                }
+                outcome = flow.outcome
+            } catch APIError.server(status: 404, message: _) {
+                unavailable = true
+            }
+        }
+        let status = try await service.mcpOAuthStatus(id: connectionID, verifyProvider: false)
+        guard status.connectionId == connectionID else { throw InvalidResponse.identity }
+        return .init(status: status, outcome: outcome, flowUnavailable: unavailable)
+    }
+}
+
+struct McpOAuthDisconnectIntent {
+    let ownerID: String
+    let version: Int
+    let identity: McpSignInOptionsIdentity
+    let viewGeneration: UUID
+    let grantGeneration: String?
+
+    func matches(
+        _ context: McpSignInOptionsRequestContext, viewGeneration: UUID,
+        grantGeneration: String?, starting: Bool, pendingFlow: String?
+    ) -> Bool {
+        !starting && pendingFlow == nil && self.viewGeneration == viewGeneration
+            && ownerID == context.ownerID && version == context.version
+            && identity == context.identity && self.grantGeneration == grantGeneration
+    }
 }
 
 @MainActor
@@ -60,11 +110,13 @@ struct McpOAuthControl: View {
     @State private var window: UIWindow?
     @State private var status: McpOAuthStatus?
     @State private var pending: String?
+    @State private var starting = false
     @State private var providerAvailable = false
     @State private var notice: String?
     @State private var busy = false
     @State private var unconfirmed = false
     @State private var confirmingDisconnect = false
+    @State private var disconnectIntent: McpOAuthDisconnectIntent?
     @State private var isVisible = false
     @State private var generation = UUID()
 
@@ -80,7 +132,7 @@ struct McpOAuthControl: View {
             } else if status?.grant == .reauthorizationRequired {
                 Text("Tool sign-in needs attention").font(.subheadline.weight(.semibold))
             }
-            if status?.signInAvailable == true, pending == nil, !unconfirmed,
+            if status?.signInAvailable == true, pending == nil, !starting, !unconfirmed,
                 !providerAvailable
             {
                 action("Check browser sign-in") {
@@ -100,7 +152,7 @@ struct McpOAuthControl: View {
                     }
                 }
             }
-            if let status, status.signInAvailable, pending == nil, !unconfirmed,
+            if let status, status.signInAvailable, pending == nil, !starting, !unconfirmed,
                 providerAvailable
             {
                 action(
@@ -113,7 +165,10 @@ struct McpOAuthControl: View {
                     }
                 }
             }
-            if pending != nil || unconfirmed {
+            if starting {
+                Text("Sign-in is starting. Its status will be available here.").font(.caption)
+            }
+            if pending != nil || unconfirmed || starting {
                 action("Check sign-in status") {
                     run(failureNotice: statusUnavailable) { context, current in
                         try await reconcile(context, flowId: pending, current: current)
@@ -130,13 +185,21 @@ struct McpOAuthControl: View {
             }
             if let status, status.grant != .none {
                 Button("Disconnect sign-in", role: .destructive) {
+                    guard let context = model.mcpSignInOptionsRequestContext(for: connection),
+                        accepts(context, generation), !model.mcpSignInAttemptIsStarting(context),
+                        model.pendingMcpSignInFlow(for: context) == nil
+                    else { return }
+                    disconnectIntent = .init(
+                        ownerID: context.ownerID, version: context.version,
+                        identity: context.identity, viewGeneration: generation,
+                        grantGeneration: status.grantGeneration)
                     confirmingDisconnect = true
                 }
                 .buttonStyle(
                     AssistantActionButtonStyle(
                         kind: .destructive, fillsWidth: true, minimumHeight: 44)
                 )
-                .disabled(disabled || busy || unconfirmed || pending != nil)
+                .disabled(disabled || busy || starting || unconfirmed || pending != nil)
             }
             if busy {
                 ProgressView("Checking tool sign-in…").font(.caption)
@@ -154,7 +217,7 @@ struct McpOAuthControl: View {
             let current = generation
             busy = true
             do {
-                try await reconcile(context, flowId: nil, current: current)
+                try await restoreAttempt(context, current: current)
             } catch {
                 if accepts(context, current), !Task.isCancelled {
                     unconfirmed = true
@@ -163,12 +226,31 @@ struct McpOAuthControl: View {
             }
             if accepts(context, current) { busy = false }
         }
+        .onChange(of: model.mcpSignInAttemptRevision) { _, _ in
+            guard isVisible, let context = model.mcpSignInOptionsRequestContext(for: connection) else {
+                return
+            }
+            let restored = model.pendingMcpSignInFlow(for: context)
+            let isStarting = model.mcpSignInAttemptIsStarting(context)
+            guard pending != restored || starting != isStarting else { return }
+            let arrived = restored != nil && pending != restored
+            pending = restored
+            starting = isStarting
+            if arrived && !busy {
+                run(failureNotice: statusUnavailable) { context, current in
+                    try await restoreAttempt(context, current: current)
+                }
+            }
+        }
         .onDisappear {
             isVisible = false
             generation = UUID()
             browser.cancel()
+            confirmingDisconnect = false
+            disconnectIntent = nil
             status = nil
             pending = nil
+            starting = false
             providerAvailable = false
             notice = nil
             busy = false
@@ -176,7 +258,16 @@ struct McpOAuthControl: View {
         }
         .confirmationDialog("Disconnect tool sign-in?", isPresented: $confirmingDisconnect) {
             Button("Disconnect sign-in", role: .destructive) {
+                guard let intent = disconnectIntent else { return }
+                disconnectIntent = nil
                 run { context, current in
+                    guard
+                        intent.matches(
+                            context, viewGeneration: current,
+                            grantGeneration: status?.grantGeneration,
+                            starting: model.mcpSignInAttemptIsStarting(context),
+                            pendingFlow: model.pendingMcpSignInFlow(for: context))
+                    else { return }
                     try await context.client.disconnectMcpOAuth(id: connection.id)
                     try await reconcile(context, flowId: nil, current: current)
                     guard accepts(context, current) else { return }
@@ -234,15 +325,17 @@ struct McpOAuthControl: View {
     private func connect(_ context: McpSignInOptionsRequestContext, window: UIWindow, current: UUID)
         async throws
     {
-        let start = try await context.client.startMcpOAuth(id: connection.id)
+        guard let ticket = model.beginMcpSignInAttempt(context) else { return }
+        let start: McpOAuthStart
+        do { start = try await context.client.startMcpOAuth(id: connection.id) } catch {
+            model.abandonMcpSignInAttempt(ticket, context: context); throw error
+        }
         guard start.connectionId == connection.id, UUID(uuidString: start.flowId) != nil,
             let expiry = start.expiry
-        else { throw Unverified.response }
-        guard accepts(context, current) else {
-            _ = try? await context.client.mcpOAuthFlow(
-                id: connection.id, flowId: start.flowId, cancel: true)
-            return
-        }
+        else { model.abandonMcpSignInAttempt(ticket, context: context); throw Unverified.response }
+        // Retain a valid late start response across navigation, but never replace a newer start.
+        guard model.retainMcpSignInFlow(start.flowId, ticket: ticket, context: context) else { return }
+        guard accepts(context, current) else { return }
         pending = start.flowId
         do {
             _ = try await browser.authenticate(
@@ -253,6 +346,9 @@ struct McpOAuthControl: View {
                 error is CancellationError
                 || (error as? ASWebAuthenticationSessionError)?.code == .canceledLogin
             guard cancelled else { throw error }
+            guard accepts(context, current), model.pendingMcpSignInFlow(for: context) == start.flowId else {
+                return
+            }
             try await reconcile(context, flowId: start.flowId, cancel: true, current: current)
             return
         }
@@ -260,26 +356,48 @@ struct McpOAuthControl: View {
         try await reconcile(context, flowId: start.flowId, current: current)
     }
 
+    private func restoreAttempt(_ context: McpSignInOptionsRequestContext, current: UUID) async throws {
+        let restored = model.pendingMcpSignInFlow(for: context)
+        pending = restored
+        starting = model.mcpSignInAttemptIsStarting(context)
+        try await reconcile(context, flowId: restored, current: current)
+        // A start response may arrive during the initial read in a newly appeared view.
+        guard accepts(context, current) else { return }
+        let latest = model.pendingMcpSignInFlow(for: context)
+        starting = model.mcpSignInAttemptIsStarting(context)
+        if let latest, latest != restored {
+            pending = latest
+            try await reconcile(context, flowId: latest, current: current)
+        }
+    }
+
     private func reconcile(
         _ context: McpSignInOptionsRequestContext, flowId: String?, cancel: Bool = false,
         current: UUID
     ) async throws {
-        var outcome: McpOAuthFlow.Outcome?
-        if let flowId {
-            let flow = try await context.client.mcpOAuthFlow(
-                id: connection.id, flowId: flowId, cancel: cancel)
-            guard flow.connectionId == connection.id, flow.flowId == flowId else {
-                throw Unverified.response
-            }
-            outcome = flow.outcome
-        }
-        let value = try await context.client.mcpOAuthStatus(id: connection.id)
-        guard value.connectionId == connection.id else { throw Unverified.response }
-        guard accepts(context, current), !Task.isCancelled else { return }
+        // A stale view (including its browser cancellation callback) cannot mutate any flow.
+        guard accepts(context, current), model.pendingMcpSignInFlow(for: context) == flowId else { return }
+        let snapshot = try await McpOAuthRecovery.read(
+            context.client, connectionID: connection.id, flowID: flowId, cancel: cancel)
+        guard accepts(context, current), !Task.isCancelled,
+            model.pendingMcpSignInFlow(for: context) == flowId
+        else { return }
+        let value = snapshot.status
         status = value
         unconfirmed = false
-        guard let outcome else { return }
-        if !outcome.isPending { pending = nil }
+        if snapshot.flowUnavailable {
+            if let flowId { model.clearMcpSignInFlow(flowId, context: context) }
+            pending = nil
+            notice =
+                flowId.map(value.confirms(flowId:)) == true
+                ? "Sign-in confirmed." : "Saved sign-in status loaded. This attempt is no longer available."
+            return
+        }
+        guard let outcome = snapshot.outcome else { return }
+        if !outcome.isPending {
+            if let flowId { model.clearMcpSignInFlow(flowId, context: context) }
+            pending = nil
+        }
         switch outcome {
         case .authorized:
             notice = flowId.map(value.confirms(flowId:)) == true ? "Sign-in confirmed." : unknown

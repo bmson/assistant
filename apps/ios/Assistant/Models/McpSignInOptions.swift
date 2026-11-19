@@ -105,3 +105,61 @@ struct McpSignInOptionsRequestContext {
   let identity: McpSignInOptionsIdentity
   let client: APIClient
 }
+
+
+/// App-session memory only: no access tokens, authorization URLs, or browser sessions.
+struct McpPendingSignInStore {
+  struct Scope: Equatable { let ownerID: String; let version: Int }
+  struct Connection: Hashable { let id: String; let endpoint: String; let hasBearerToken: Bool }
+  private struct Attempt { let ticket: UUID; var flowID: String? }
+  private var scope: Scope?
+  private var attempts: [Connection: Attempt] = [:]
+
+  mutating func bind(_ value: Scope) {
+    guard scope != value else { return }
+    scope = value
+    attempts.removeAll()
+  }
+  mutating func reset() { scope = nil; attempts.removeAll() }
+  mutating func retain(_ connections: [McpConnection]) {
+    let current = Set(
+      connections.filter(\.enabled).map {
+        Connection(id: $0.id, endpoint: $0.endpoint, hasBearerToken: $0.hasBearerToken)
+      })
+    attempts = attempts.filter { current.contains($0.key) }
+  }
+  mutating func begin(_ connection: Connection, scope: Scope) -> UUID? {
+    bind(scope)
+    guard attempts[connection] == nil else { return nil }
+    let ticket = UUID()
+    attempts[connection] = Attempt(ticket: ticket, flowID: nil)
+    return ticket
+  }
+  func isStarting(connection: Connection, scope: Scope) -> Bool {
+    self.scope == scope && attempts[connection] != nil && attempts[connection]?.flowID == nil
+  }
+  mutating func abandon(_ ticket: UUID, connection: Connection, scope: Scope) -> Bool {
+    guard self.scope == scope, attempts[connection]?.ticket == ticket,
+      attempts[connection]?.flowID == nil
+    else { return false }
+    attempts.removeValue(forKey: connection)
+    return true
+  }
+  mutating func record(_ flowID: String, ticket: UUID, connection: Connection, scope: Scope) -> Bool {
+    guard self.scope == scope, attempts[connection]?.ticket == ticket,
+      UUID(uuidString: flowID) != nil
+    else { return false }
+    attempts[connection]?.flowID = flowID
+    return true
+  }
+  func flow(connection: Connection, scope: Scope) -> String? {
+    guard self.scope == scope else { return nil }
+    return attempts[connection]?.flowID
+  }
+  @discardableResult
+  mutating func clear(_ flowID: String, connection: Connection, scope: Scope) -> Bool {
+    guard self.scope == scope, attempts[connection]?.flowID == flowID else { return false }
+    attempts.removeValue(forKey: connection)
+    return true
+  }
+}

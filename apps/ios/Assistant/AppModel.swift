@@ -284,7 +284,11 @@ final class AppModel {
             navigationPath = newValue.map { $0 == .chat ? [] : [.route($0)] } ?? []
         }
     }
-    private(set) var bootstrap: BootstrapResponse?
+    private(set) var bootstrap: BootstrapResponse? {
+        didSet {
+            if oldValue?.identity.id != bootstrap?.identity.id { pendingMcpSignIns.reset() }
+        }
+    }
     let phoneCalendarSharing: PhoneCalendarSharingCoordinator
     let edits = OptimisticEditStore()
     let nativeMemoryCorrectionEnabled: Bool
@@ -313,7 +317,11 @@ final class AppModel {
     private(set) var peoplePageLoading = false
     private(set) var peoplePageError: String?
     private(set) var memoryReviewCount = 0
-    private(set) var mcpConnections: [McpConnection] = []
+    private(set) var mcpSignInAttemptRevision = 0
+    @ObservationIgnored private var pendingMcpSignIns = McpPendingSignInStore()
+    private(set) var mcpConnections: [McpConnection] = [] {
+        didSet { pendingMcpSignIns.retain(mcpConnections) }
+    }
     private(set) var mcpConnectionsLoaded = false
     private(set) var mcpOAuthConfigured = false
     private(set) var modelProviders: ModelProviderSettings? {
@@ -875,6 +883,67 @@ final class AppModel {
             && client?.configuration == context.client.configuration
             && context.identity.enabled
             && mcpConnections.contains(where: { McpSignInOptionsIdentity($0) == context.identity })
+    }
+
+    private func mcpAttemptScope(_ context: McpSignInOptionsRequestContext) -> (
+        McpPendingSignInStore.Connection, McpPendingSignInStore.Scope
+    )? {
+        guard activityConnectionRevision == context.version, bootstrap?.identity.id == context.ownerID,
+            client?.configuration == context.client.configuration,
+            mcpConnections.contains(where: {
+                $0.id == context.identity.id && $0.endpoint == context.identity.endpoint && $0.enabled
+                    && $0.hasBearerToken == context.identity.hasBearerToken
+            })
+        else { return nil }
+        return (
+            .init(
+                id: context.identity.id, endpoint: context.identity.endpoint,
+                hasBearerToken: context.identity.hasBearerToken),
+            .init(ownerID: context.ownerID, version: context.version)
+        )
+    }
+
+    func pendingMcpSignInFlow(for context: McpSignInOptionsRequestContext) -> String? {
+        guard let (connection, scope) = mcpAttemptScope(context) else { return nil }
+        return pendingMcpSignIns.flow(connection: connection, scope: scope)
+    }
+
+    func mcpSignInAttemptIsStarting(_ context: McpSignInOptionsRequestContext) -> Bool {
+        guard let (connection, scope) = mcpAttemptScope(context) else { return false }
+        return pendingMcpSignIns.isStarting(connection: connection, scope: scope)
+    }
+
+    func beginMcpSignInAttempt(_ context: McpSignInOptionsRequestContext) -> UUID? {
+        guard let (connection, scope) = mcpAttemptScope(context),
+            let ticket = pendingMcpSignIns.begin(connection, scope: scope)
+        else { return nil }
+        mcpSignInAttemptRevision += 1
+        return ticket
+    }
+
+    func abandonMcpSignInAttempt(_ ticket: UUID, context: McpSignInOptionsRequestContext) {
+        guard let (connection, scope) = mcpAttemptScope(context),
+            pendingMcpSignIns.abandon(ticket, connection: connection, scope: scope)
+        else { return }
+        mcpSignInAttemptRevision += 1
+    }
+
+    func retainMcpSignInFlow(_ flowID: String, ticket: UUID, context: McpSignInOptionsRequestContext) -> Bool
+    {
+        guard let (connection, scope) = mcpAttemptScope(context),
+            pendingMcpSignIns.record(flowID, ticket: ticket, connection: connection, scope: scope)
+        else { return false }
+        mcpSignInAttemptRevision += 1
+        return true
+    }
+
+    @discardableResult
+    func clearMcpSignInFlow(_ flowID: String, context: McpSignInOptionsRequestContext) -> Bool {
+        guard let (connection, scope) = mcpAttemptScope(context),
+            pendingMcpSignIns.clear(flowID, connection: connection, scope: scope)
+        else { return false }
+        mcpSignInAttemptRevision += 1
+        return true
     }
 
     func googleCalendarRequestContext() -> GoogleCalendarRequestContext? {
@@ -1959,6 +2028,7 @@ final class AppModel {
         archivedGoals = nil
         workspace = nil
         modelProviders = nil
+        pendingMcpSignIns.reset()
         mcpConnections = []
         mcpOAuthConfigured = false
         mcpConnectionsLoaded = false
