@@ -1,4 +1,5 @@
 import XCTest
+import UserNotifications
 import SwiftUI
 import Observation
 import CoreLocation
@@ -5714,6 +5715,41 @@ extension APIClientRetryTests {
     }
 
     @MainActor
+    func testAppModelNotificationHandlerRegistrarInjectsOwnerGuardedHandlersOnce() async throws {
+        let suite = "assistant.notification-handler-registrar.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        var registrationCount = 0
+        var capturedHandlers: AppNotificationHandlers?
+        let model = AppModel(
+            apiClient: makeClient(),
+            defaults: defaults,
+            storeConnectionToken: { _ in },
+            registerNotificationHandlers: { handlers in
+                registrationCount += 1
+                capturedHandlers = handlers
+            }
+        )
+
+        XCTAssertEqual(registrationCount, 1)
+        XCTAssertNil(model.bootstrap, "The isolated model starts without a resolved owner")
+        let handlers = try XCTUnwrap(capturedHandlers)
+        let accepted = await handlers.approvalDecision(
+            "synthetic-approval", "approve", "synthetic-owner"
+        )
+        XCTAssertFalse(accepted, "A notification for an unresolved owner must not reach approval mutation")
+
+        do {
+            try await handlers.deviceToken("synthetic-token", "synthetic-scope")
+            XCTFail("An unresolved registration scope must reject the device token")
+        } catch APIError.invalidResponse {
+            // The injected production closure retains its scope guard.
+        }
+        XCTAssertTrue(StubURLProtocol.attempts.isEmpty, "Neither rejected handler may issue a request")
+    }
+
+    @MainActor
     func testDefaultSavedNoteEditorUsesTheExistingUpdateRoute() async throws {
         let id = "123e4567-e89b-42d3-a456-426614174101"
         let recoveryRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -5857,6 +5893,14 @@ extension APIClientRetryTests {
             "revision": revision, "sourceLabel": "Saved note", "eligible": true,
             "readOnlyReason": NSNull(), "ownerCorrected": true,
         ])
+    }
+
+    func testAnswerReadyPushIsQuietInTheForeground() {
+        XCTAssertTrue(NotificationManager.foregroundPresentationOptions(for: "ASSISTANT_UPDATE").isEmpty)
+        XCTAssertEqual(
+            NotificationManager.foregroundPresentationOptions(for: "ASSISTANT_ATTENTION"),
+            [.banner, .sound]
+        )
     }
 
     func testNotificationDestinationRejectsMalformedOwnerAndNeverTreatsPathsAsConversationIDs() throws {
@@ -7000,7 +7044,7 @@ extension APIClientRetryTests {
         XCTAssertEqual(changed, true)
         XCTAssertNil(model.errorMessage, "Only the exact task's newly visible durable reply clears the notice")
         XCTAssertTrue(model.messages.contains(where: { $0.id == reply.id }))
-        XCTAssertEqual(recorder.entries.map(\.body), ["A new response is ready."])
+        XCTAssertTrue(recorder.entries.isEmpty)
         XCTAssertNotEqual(model.activityThought, .finished, "Idle reconciliation does not fabricate task completion speech or activity")
     }
 
@@ -7077,17 +7121,17 @@ extension APIClientRetryTests {
             parts: [.init(type: "text", text: "The existing visible result is refreshed with task identity.")],
             metadata: ["taskId": .string(taskId)]
         )
-        let cases: [(String, [ChatMessage], [ChatMessage], [String]?, String?, Bool, Bool)] = [
+        let cases: [(String, [ChatMessage], [ChatMessage], [String]?, String?, Bool)] = [
             // The bootstrap includes an older visible assistant message. A
             // new tool-only row must not pair with it to announce a reply.
-            ("historical-text-plus-tool-only", [toolOnly], [], nil, nil, false, false),
-            ("retracted", [exactReply], [], [exactReply.id], nil, false, false),
-            ("foreign-task", [foreignReply], [], nil, nil, false, true),
-            ("newer-error", [exactReply], [], nil, "A newer connection issue.", false, true),
-            ("refreshed-existing-exact-reply", [], [alreadyVisibleReply], nil, nil, true, false),
+            ("historical-text-plus-tool-only", [toolOnly], [], nil, nil, false),
+            ("retracted", [exactReply], [], [exactReply.id], nil, false),
+            ("foreign-task", [foreignReply], [], nil, nil, false),
+            ("newer-error", [exactReply], [], nil, "A newer connection issue.", false),
+            ("refreshed-existing-exact-reply", [], [alreadyVisibleReply], nil, nil, true),
         ]
 
-        for (name, rows, refreshed, superseded, newerError, clearsNotice, expectNotification) in cases {
+        for (name, rows, refreshed, superseded, newerError, clearsNotice) in cases {
             let recorder = LocalNotificationRecorder()
             let model = try await notificationModel(scheduleLocalNotification: { title, body, route, approvalId, agentID, conversationID in
                 await recorder.schedule(
@@ -7118,7 +7162,7 @@ extension APIClientRetryTests {
             } else {
                 XCTAssertEqual(model.errorMessage, "This task is marked complete, but its reply has not appeared yet.", name)
             }
-            XCTAssertEqual(!recorder.entries.isEmpty, expectNotification, name)
+            XCTAssertTrue(recorder.entries.isEmpty, "Idle polling must leave reply notifications to the server: \(name)")
             if name == "retracted" {
                 XCTAssertFalse(model.messages.contains(where: { $0.id == exactReply.id }))
             }
@@ -7236,13 +7280,11 @@ extension APIClientRetryTests {
 
         model.send("Check the completed task")
         let deadline = ContinuousClock.now.advanced(by: .seconds(5))
-        while (recorder.entries.isEmpty || spokenReplies.isEmpty), ContinuousClock.now < deadline {
+        while (model.activityThought != .finished || spokenReplies.isEmpty), ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(10))
         }
 
-        let notification = try XCTUnwrap(recorder.entries.first)
-        XCTAssertEqual(notification.title, "Ada finished")
-        XCTAssertEqual(notification.body, "Your result is ready.")
+        XCTAssertTrue(recorder.entries.isEmpty)
         XCTAssertEqual(model.activityDetail, "Your result is ready")
         XCTAssertEqual(model.activityThought, .finished)
         XCTAssertEqual(spokenReplies.map(\.id), [reply.id])
@@ -7287,13 +7329,11 @@ extension APIClientRetryTests {
 
         model.send("Check the completed task")
         let deadline = ContinuousClock.now.advanced(by: .seconds(5))
-        while recorder.entries.isEmpty, ContinuousClock.now < deadline {
+        while model.activityThought != .finished, ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(10))
         }
 
-        let notification = try XCTUnwrap(recorder.entries.first)
-        XCTAssertEqual(notification.title, "Ada finished")
-        XCTAssertEqual(notification.body, "Your result is ready.")
+        XCTAssertTrue(recorder.entries.isEmpty)
         XCTAssertEqual(model.activityThought, .finished)
         XCTAssertNotEqual(model.errorMessage, "This task is marked complete, but its reply has not appeared yet.")
     }

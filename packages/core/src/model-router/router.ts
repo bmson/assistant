@@ -1092,6 +1092,8 @@ export class ModelRouter {
       monthlyLimitUsd: totals.monthlyLimitUsd,
       monthlySpentUsd: totals.monthlySpentUsd,
       heldUsd: totals.heldUsd,
+      dailyHeldUsd: totals.dailyHeldUsd,
+      monthlyHeldUsd: totals.monthlyHeldUsd,
       softPct: totals.softPct,
     };
   }
@@ -1795,6 +1797,7 @@ export class ModelRouter {
         input.reservationId,
         'provider returned without complete usage or authoritative cost',
         {
+          ...(input.event.finishReason === 'error' ? {} : { outcome: 'unpriced_result' as const }),
           ...(usage.generationId ? { requestId: usage.generationId } : {}),
           ...(usage.endpointName ? { endpoint: usage.endpointName } : {}),
         },

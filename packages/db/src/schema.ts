@@ -2128,6 +2128,8 @@ export const costEvents = pgTable(
     /** Set when this event reconciles a pre-flight reservation. */
     reservationId: uuid('reservation_id').references((): AnyPgColumn => costReservations.id),
     idempotencyKey: text('idempotency_key'),
+    /** Budget period of a delayed charge. Null keeps the original creation-time accounting. */
+    accountedAt: timestamp('accounted_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [

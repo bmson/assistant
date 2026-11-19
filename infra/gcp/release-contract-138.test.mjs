@@ -14,7 +14,7 @@ const oldContract = JSON.parse(
 const roles = ['agent', 'web', 'browser', 'code', 'processor'];
 function manifest(driver, version, selected = roles) {
   return createManifest({
-    release: 'schema-139-mcp-oauth-fixture',
+    release: 'schema-140-cost-accounting-fixture',
     imageRoot: 'registry/test',
     selected,
     digests: Object.fromEntries(roles.map((role) => [role, `sha256:${'a'.repeat(64)}`])),
@@ -24,16 +24,16 @@ function manifest(driver, version, selected = roles) {
   });
 }
 
-test('current images declare the additive research assignment storage migration on PostgreSQL', () => {
-  assert.equal(deriveSchemaVersion('postgres', journal, contract), 139);
+test('current images declare the additive cost accounting migration on PostgreSQL', () => {
+  assert.equal(deriveSchemaVersion('postgres', journal, contract), 140);
   assert.equal(deriveSchemaVersion('firestore', journal, contract), 1);
-  assert.equal(journal.entries.at(-1).tag, '0139_research_assignment_state');
-  assert.equal(validateManifest(manifest('postgres', 139)), true);
+  assert.equal(journal.entries.at(-1).tag, '0140_cost_event_accounted_at');
+  assert.equal(validateManifest(manifest('postgres', 140)), true);
   assert.equal(validateManifest(manifest('firestore', 1)), true);
   for (const role of roles) {
-    assert.deepEqual(contract.components[role].schema.postgres, { min: 139, max: 139 });
+    assert.deepEqual(contract.components[role].schema.postgres, { min: 140, max: 140 });
     assert.deepEqual(contract.components[role].schema.firestore, { min: 1, max: 1 });
-    assert.throws(() => validateManifest(manifest('postgres', 137, [role])), /incompatible/);
+    assert.throws(() => validateManifest(manifest('postgres', 139, [role])), /incompatible/);
   }
 });
 

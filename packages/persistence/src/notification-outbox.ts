@@ -199,6 +199,7 @@ export async function drainNotificationOutbox(
     now: Date;
     limit?: number;
     send: (leg: NotificationOutboxLeg) => Promise<NotificationOutboxSendResult>;
+    loadTask?: (agentId: string, taskId: string) => Promise<Records['tasks'] | null>;
   },
 ): Promise<number> {
   await repository.recoverExpired(input.agentId, input.now);
@@ -216,7 +217,10 @@ export async function drainNotificationOutbox(
     attempted += 1;
     let outcome: NotificationOutboxSendResult;
     try {
-      outcome = await input.send(claimed);
+      outcome =
+        input.loadTask && (await isLegacyChatAnswer(claimed, input.loadTask))
+          ? { status: 'skipped', reason: 'legacy-chat-answer-notification' }
+          : await input.send(claimed);
     } catch {
       outcome = { status: 'unknown', reason: 'sender-threw-after-claim' };
     }
@@ -237,4 +241,41 @@ export async function drainNotificationOutbox(
     });
   }
   return attempted;
+}
+
+// Before answer-ready had a purpose, the executor adapter also dropped the
+// producer's delivery key. Match that older key against the saved final and
+// its source chat, so old queued copies cannot bypass the new routing.
+async function isLegacyChatAnswer(
+  row: NotificationOutboxLeg,
+  loadTask: (agentId: string, taskId: string) => Promise<Records['tasks'] | null>,
+): Promise<boolean> {
+  const payload = row.payload as {
+    purpose?: unknown;
+    taskId?: unknown;
+    data?: { taskId?: unknown };
+  } | null;
+  if (!payload || payload.purpose === 'answer-ready') return false;
+  const taskId = row.adapter === 'push' ? payload.data?.taskId : payload.taskId;
+  if (typeof taskId !== 'string') return false;
+  const task = await loadTask(row.agentId, taskId);
+  if (
+    !task ||
+    task.agentId !== row.agentId ||
+    task.trust !== 'owner' ||
+    task.type !== 'chat_turn' ||
+    !task.conversationId
+  )
+    return false;
+  const state = task.state as { pendingFinal?: { text?: unknown } } | null;
+  const text = state?.pendingFinal?.text;
+  if (typeof text !== 'string' || !text.trim()) return false;
+  return (
+    row.deliveryKey ===
+    notificationDeliveryKey(
+      'outbox',
+      row.agentId,
+      notificationDeliveryKey('owner-notice', task.id, task.conversationId, text.trim()),
+    )
+  );
 }

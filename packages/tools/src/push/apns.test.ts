@@ -92,6 +92,19 @@ describe('ApnsClient', () => {
     expect(fake.requests).toHaveLength(1);
   });
 
+  it('bounds APNs storage to the answer-ready deadline', async () => {
+    const { client, fake } = makeClient({ status: 200 });
+    const expiresAt = Date.parse('2026-11-18T18:15:00Z');
+    await client.send({
+      token: 'a'.repeat(64),
+      environment: 'production',
+      title: 'Assistant',
+      body: 'Your reply is ready.',
+      expiresAt,
+    });
+    expect(fake.requests[0]?.headers['apns-expiration']).toBe(String(Math.floor(expiresAt / 1000)));
+  });
+
   it('stands down until every setting is present', () => {
     expect(new ApnsClient('', '', '', '').configured()).toBe(false);
     expect(new ApnsClient('k', 't', 'p', '').configured()).toBe(false);

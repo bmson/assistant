@@ -884,6 +884,183 @@ describe('PostgreSQL idempotent cost events', () => {
     );
   });
 
+  it('expires open holds and keeps unknown model holds in their original budget periods', async () => {
+    const repository = createPostgresCostRepository(db);
+    const orphan = await repository.reserve({ source: 'model', estimatedUsd: 0.01, taskId });
+    const late = await repository.reserve({ source: 'model', estimatedUsd: 0.21, taskId });
+    if (!orphan.ok || !late.ok) throw new Error('Fixture failed to reserve');
+    const next = { source: 'model' as const, estimatedUsd: 3.8 };
+    expect(await repository.reserve(next)).toMatchObject({
+      ok: false,
+      budget: { scope: 'daily' },
+    });
+    const dayStart = new Date();
+    dayStart.setUTCHours(0, 0, 0, 0);
+    const priorMonth = new Date(
+      Date.UTC(dayStart.getUTCFullYear(), dayStart.getUTCMonth() - 1, 15),
+    );
+    await db
+      .update(costReservations)
+      .set({ createdAt: priorMonth })
+      .where(eq(costReservations.id, orphan.reservationId));
+    await db
+      .update(costReservations)
+      .set({ status: 'dispatching', createdAt: priorMonth, attemptStartedAt: priorMonth })
+      .where(eq(costReservations.id, late.reservationId));
+    const before = await repository.totals();
+    expect(before).toMatchObject({ heldUsd: 0.22, dailyHeldUsd: 0.22, monthlyHeldUsd: 0.22 });
+    expect(await repository.releaseStale()).toEqual({ released: 1, markedUnknown: 1 });
+    expect(await repository.releaseStale()).toEqual({ released: 0, markedUnknown: 0 });
+    expect(await repository.totals()).toMatchObject({
+      heldUsd: 0.21,
+      dailyHeldUsd: 0,
+      monthlyHeldUsd: 0,
+      dailySpentUsd: before.dailySpentUsd,
+      monthlySpentUsd: before.monthlySpentUsd,
+    });
+    const accepted = await repository.reserve(next);
+    expect(accepted).toMatchObject({ ok: true });
+    if (accepted.ok) reservationIds.push(accepted.reservationId);
+    await db.update(tasks).set({ budgetUsdLimit: '0.25' }).where(eq(tasks.id, taskId));
+    expect(await repository.reserve({ ...next, estimatedUsd: 0.1, taskId })).toMatchObject({
+      ok: false,
+      budget: { scope: 'task' },
+    });
+    const actual = {
+      usd: 0.15,
+      evidence: { basis: 'provider_reported' as const, requestId: 'late-fixture' },
+    };
+    await Promise.all([
+      repository.reconcile(late.reservationId, actual),
+      repository.reconcile(late.reservationId, actual),
+    ]);
+    const events = await db
+      .select()
+      .from(costEvents)
+      .where(eq(costEvents.reservationId, late.reservationId));
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      usd: '0.150000',
+      accountedAt: priorMonth,
+      evidence: actual.evidence,
+    });
+    expect(events[0]?.createdAt.getTime()).toBeGreaterThanOrEqual(dayStart.getTime());
+    const [task] = await db.select().from(tasks).where(eq(tasks.id, taskId));
+    expect(task?.spentUsd).toBe('0.150000');
+    expect(await repository.totals()).toMatchObject({
+      heldUsd: 3.8,
+      dailyHeldUsd: 3.8,
+      monthlyHeldUsd: 3.8,
+      dailySpentUsd: before.dailySpentUsd,
+      monthlySpentUsd: before.monthlySpentUsd,
+    });
+  });
+
+  it('does not count yesterday’s 400 ordinary unknown holds against today’s cap', async () => {
+    const startedAt = new Date();
+    startedAt.setUTCHours(0, 0, 0, 0);
+    startedAt.setUTCDate(startedAt.getUTCDate() - 1);
+    await db.insert(costReservations).values(
+      Array.from({ length: 400 }, () => ({
+        taskId,
+        source: 'model',
+        status: 'unknown',
+        estimatedUsd: '0.011000',
+        createdAt: startedAt,
+        attemptStartedAt: startedAt,
+      })),
+    );
+    const costs = createPostgresCostRepository(db);
+    expect(await costs.totals()).toMatchObject({ heldUsd: 4.4, dailyHeldUsd: 0 });
+    const reserved = await costs.reserve({ source: 'model', estimatedUsd: 4 });
+    expect(reserved).toMatchObject({ ok: true });
+    if (reserved.ok) reservationIds.push(reserved.reservationId);
+  });
+
+  it('settles one eligible estimate at its configured deadline and corrects it exactly once', async () => {
+    const costs = createPostgresCostRepository(db);
+    const ordinary = await costs.reserve({ source: 'model', estimatedUsd: 0.2, taskId });
+    const outward = await costs.reserve({ source: 'external_api', estimatedUsd: 0.05, taskId });
+    const grant = await costs.reserve({ source: 'model', estimatedUsd: 0.05, taskId });
+    if (!ordinary.ok || !outward.ok || !grant.ok) throw new Error('Fixture failed to reserve');
+    const started = new Date(Date.now() - 15 * 60_000);
+    const metadata = { provider: 'fixture', model: 'fixture/model' };
+    await db
+      .update(costReservations)
+      .set({
+        createdAt: started,
+        attemptStartedAt: started,
+        attemptMetadata: metadata,
+        status: 'unknown',
+      })
+      .where(
+        inArray(costReservations.id, [
+          ordinary.reservationId,
+          outward.reservationId,
+          grant.reservationId,
+        ]),
+      );
+    await db
+      .update(costReservations)
+      .set({ costGrantId: randomUUID() })
+      .where(eq(costReservations.id, grant.reservationId));
+    expect(await costs.releaseStale(120, 1, 20)).toEqual({ released: 0, markedUnknown: 0 });
+    const results = await Promise.all([
+      costs.releaseStale(120, 1, 10),
+      costs.releaseStale(120, 1, 10),
+    ]);
+    expect(results.reduce((sum, result) => sum + (result.settledAtEstimate ?? 0), 0)).toBe(1);
+    const eventsForAttempt = () =>
+      db.select().from(costEvents).where(eq(costEvents.reservationId, ordinary.reservationId));
+    const [estimate] = await eventsForAttempt();
+    expect(estimate).toMatchObject({
+      usd: '0.200000',
+      evidence: { basis: 'preflight_estimate', modelAttemptEstimate: 'usage_missing_after_ttl' },
+    });
+    expect(estimate?.accountedAt).toBeInstanceOf(Date);
+    expect(await costs.totals()).toMatchObject({
+      heldUsd: 0.1,
+      dailySpentUsd: 0.2,
+      monthlySpentUsd: 0.2,
+    });
+    const [atEstimate] = await db
+      .select()
+      .from(costReservations)
+      .where(eq(costReservations.id, ordinary.reservationId));
+    expect(atEstimate).toMatchObject({ status: 'reconciled', actualUsd: null });
+
+    await costs.reconcile(ordinary.reservationId, {
+      usd: 0.02,
+      evidence: { basis: 'preflight_estimate' },
+    });
+    expect(await eventsForAttempt()).toEqual([estimate]);
+    const actual = { usd: 0.3, evidence: { basis: 'token_rate' as const, provider: 'fixture' } };
+    await Promise.all([
+      costs.reconcile(ordinary.reservationId, actual),
+      costs.reconcile(ordinary.reservationId, actual),
+    ]);
+    const settled = await eventsForAttempt();
+    expect(settled).toHaveLength(1);
+    expect(settled[0]).toMatchObject({
+      id: estimate?.id,
+      accountedAt: estimate?.accountedAt,
+      usd: '0.300000',
+      evidence: actual.evidence,
+    });
+    const [task] = await db.select().from(tasks).where(eq(tasks.id, taskId));
+    expect(task?.spentUsd).toBe('0.300000');
+    expect(await costs.totals()).toMatchObject({
+      heldUsd: 0.1,
+      dailySpentUsd: 0.3,
+      monthlySpentUsd: 0.3,
+    });
+    const preserved = await db
+      .select()
+      .from(costReservations)
+      .where(inArray(costReservations.id, [outward.reservationId, grant.reservationId]));
+    expect(preserved.map((row) => row.status)).toEqual(['unknown', 'unknown']);
+  });
+
   it('keeps a dispatched unknown attempt held and reconciles a late actual exactly once', async () => {
     const repository = createPostgresCostRepository(db);
     const reservation = await repository.reserve({ source: 'model', estimatedUsd: 0.2, taskId });

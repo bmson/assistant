@@ -1,5 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { Records, SmsChannelRepository } from '@assistant/persistence';
+import {
+  decideProactiveSmsAttempt,
+  type ProactiveSmsAttemptDecision,
+  proactiveSmsQuotaName,
+  type Records,
+  type SmsChannelRepository,
+} from '@assistant/persistence';
 import { conversationDocument } from './conversation-document.js';
 import { assertPrivacyErasureInactiveInTransaction } from './privacy-erasure.js';
 import { claimFirestoreSmsUsage, settleFirestoreSmsUsage } from './sms-usage-reconciliation.js';
@@ -45,6 +51,44 @@ export class FirestoreSmsChannelRepository implements SmsChannelRepository {
     if (typeof limit.maxPerDay === 'number' && (await countSince(24 * HOUR_MS)) >= limit.maxPerDay)
       return false;
     return true;
+  }
+
+  async reserveProactiveAttempt(
+    agentId: string,
+    attemptKey: string,
+    now: Date,
+  ): Promise<ProactiveSmsAttemptDecision> {
+    if (agentId !== this.agentId) throw new Error('Proactive SMS quota is outside the owner');
+    const name = proactiveSmsQuotaName(agentId);
+    const quota = this.store.doc('maintenanceCursors', name);
+    return this.store.db.runTransaction(async (tx) => {
+      await assertPrivacyErasureInactiveInTransaction(tx, this.store, agentId);
+      const [owner, prefs, row] = await tx.getAll(
+        this.store.doc('agents', agentId),
+        this.store.doc('notificationPrefs', agentId),
+        quota,
+      );
+      const timeZone = owner?.get('timezone');
+      if (!owner?.exists || owner.get('id') !== agentId || typeof timeZone !== 'string')
+        throw new Error('Proactive SMS quota owner is unavailable');
+      if (prefs?.exists && prefs.get('agentId') !== agentId)
+        throw new Error('Notification preferences belong to another agent');
+      const result = decideProactiveSmsAttempt({
+        prior: row?.get('cursor') ?? null,
+        timeZone,
+        prefs: prefs?.exists
+          ? {
+              quietStartMin: prefs.get('quietStartMin') ?? null,
+              quietEndMin: prefs.get('quietEndMin') ?? null,
+            }
+          : null,
+        attemptKey,
+        now,
+      });
+      if (result.next !== undefined)
+        tx.set(quota, encodeRecord({ name, cursor: result.next, updatedAt: now }));
+      return result.decision;
+    });
   }
 
   async conversationForPeer(
