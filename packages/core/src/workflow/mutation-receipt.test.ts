@@ -31,6 +31,7 @@ describe('terminal mutation receipts', () => {
     ["I've forgotten that now.", 'Forget the saved preference.'],
     ['Done.', 'Edit the contact record.'],
     ['Removed.', ownerRequest],
+    ['I successfully cancelled the sunglasses reminder.', ownerRequest],
   ])('holds unsupported %s at the completion seam', (text, request) => {
     const final = check(text, request);
     expect(final).toMatchObject({ blocked: true, unsupported: ['mutation'] });
@@ -79,6 +80,32 @@ describe('terminal mutation receipts', () => {
     expect(result.text).toContain('I confirmed the requested reminder removal');
     expect(result.text).toContain('couldn’t confirm the requested file removal');
     expect(result.blocked).toBe(true);
+  });
+
+  it('binds each explicit completion to a matching request and receipt', () => {
+    const passport = {
+      ...cancellation,
+      args: { query: 'passport' },
+      result: { cancelled: true, reminderId: 'reminder-b', text: 'Passport' },
+    };
+    const request = 'Cancel the sunglasses reminder and cancel the passport reminder.';
+    const draft = 'I removed the sunglasses reminder and deleted the passport reminder.';
+    expect(check(draft, request, [cancellation, passport])).toMatchObject({
+      blocked: false,
+      text: draft,
+    });
+    expect(check(draft, request, [cancellation]).blocked).toBe(true);
+  });
+
+  it('does not say the entire request awaits approval when only one change does', () => {
+    const waiting = { ...cancellation, status: 'awaiting_approval', result: null };
+    const result = check(
+      "I'll cancel it after you approve.",
+      'Cancel the sunglasses reminder and delete the obsolete file.',
+      [waiting],
+      ['call-reminder'],
+    );
+    expect(result.text).toContain('couldn’t confirm the requested file removal');
   });
 
   it('joins a named calendar removal to the event ID in the execution receipt', () => {

@@ -40,7 +40,7 @@ const DIRECT = new RegExp(
   'i',
 );
 const ASSERTION = new RegExp(
-  String.raw`^(?:(?:yes|sure|okay|ok|done|all set)[,.!:\s—-]+)*(?:(?:i|we)(?:(?:['’](ll|ve)|\s+(will|have|just|already|am|are))?\s+)(?:already\s+|just\s+|going to\s+|went ahead and\s+)?(${COMMAND}|${COMPLETED})|(\b(?:${COMPLETED})))(?:\b|:)[\s:—-]*(.*)`,
+  String.raw`^(?:(?:yes|sure|okay|ok|done|all set)[,.!:\s—-]+)*(?:(?:i|we)(?:(?:['’](ll|ve)|\s+(will|have|just|already|am|are))?\s+)(?:(?:already|just|successfully|now)\s+|going to\s+|went ahead and\s+)*(${COMMAND}|${COMPLETED})|(\b(?:${COMPLETED})))(?:\b|:)[\s:—-]*(.*)`,
   'i',
 );
 const TERSE = /^(?:done|all set|handled|taken care of|successfully completed)[.! ]*$/i;
@@ -356,57 +356,68 @@ export function guardMutationReply(
   if (!intended.length && describesDraft(admittedText)) return;
   const rows = currentRows(evidence);
   const receipts = mutationReceipts(rows);
-  const awaitingApproval = intended.some((item) =>
-    rows.some((row) => {
-      if (!row.id || !pendingApprovalToolCallIds.has(row.id) || row.status !== 'awaiting_approval')
+  const awaitingApproval =
+    intended.length > 0 &&
+    intended.every((item) =>
+      rows.some((row) => {
+        if (
+          !row.id ||
+          !pendingApprovalToolCallIds.has(row.id) ||
+          row.status !== 'awaiting_approval'
+        )
+          return false;
+        const args = record(row.args);
+        if (
+          item.operation === 'remove' &&
+          item.target === 'reminder' &&
+          row.toolName === 'reminder.cancel'
+        )
+          return item.terms === targetTerms(string(args.query ?? args.reminderId), item.target);
+        if (
+          item.operation === 'remove' &&
+          item.target === 'calendar' &&
+          /^calendar.cancel_/.test(row.toolName)
+        ) {
+          const identity = string(args.eventId);
+          return (
+            identity &&
+            matches(item, {
+              operation: 'remove',
+              target: 'calendar',
+              identity,
+              name: namesForCalendar(rows, identity, {}),
+            })
+          );
+        }
+        if (
+          item.operation === 'edit' &&
+          item.target === 'document' &&
+          row.toolName === 'docs.replace_text'
+        ) {
+          const replacement =
+            Array.isArray(args.replacements) && args.replacements.length === 1
+              ? record(args.replacements[0])
+              : {};
+          return matches(item, {
+            operation: 'edit',
+            target: 'document',
+            identity: string(args.documentId),
+            name: '',
+            change: string(replacement.newText),
+            replaceFrom: string(replacement.oldText),
+          });
+        }
         return false;
-      const args = record(row.args);
-      if (
-        item.operation === 'remove' &&
-        item.target === 'reminder' &&
-        row.toolName === 'reminder.cancel'
-      )
-        return item.terms === targetTerms(string(args.query ?? args.reminderId), item.target);
-      if (
-        item.operation === 'remove' &&
-        item.target === 'calendar' &&
-        /^calendar.cancel_/.test(row.toolName)
-      ) {
-        const identity = string(args.eventId);
-        return (
-          identity &&
-          matches(item, {
-            operation: 'remove',
-            target: 'calendar',
-            identity,
-            name: namesForCalendar(rows, identity, {}),
-          })
-        );
-      }
-      if (
-        item.operation === 'edit' &&
-        item.target === 'document' &&
-        row.toolName === 'docs.replace_text'
-      ) {
-        const replacement =
-          Array.isArray(args.replacements) && args.replacements.length === 1
-            ? record(args.replacements[0])
-            : {};
-        return matches(item, {
-          operation: 'edit',
-          target: 'document',
-          identity: string(args.documentId),
-          name: '',
-          change: string(replacement.newText),
-          replaceFrom: string(replacement.oldText),
-        });
-      }
-      return false;
-    }),
-  );
+      }),
+    );
   const unverified = intended.filter((item) => !receipts.some((receipt) => matches(item, receipt)));
   const stripped = text.replace(/^```[^\n]*\n[\s\S]*?^```/gm, '');
-  const clauses = stripped.split(/\n+|(?<=[.!?;])\s+/);
+  const clauses = stripped.split(
+    new RegExp(
+      String.raw`\n+|(?<=[.!?;])\s+|(?:,?\s+and\s+|,\s+)(?=(?:i|we)\b|(?:${COMPLETED})\b)`,
+      'i',
+    ),
+  );
   const claims = clauses.flatMap<{ future: boolean; mutation?: Mutation }>((line) => {
     const compact = line
       .trim()
@@ -466,13 +477,11 @@ export function guardMutationReply(
           (mutation.target === 'unknown' || item.target === mutation.target),
       );
       return (
-        matching.length !== 1 ||
-        !receipts.some(
-          (receipt) =>
-            matching[0] !== undefined &&
-            matches(matching[0], receipt) &&
-            (!mutation.terms || matches(mutation, receipt)),
-        )
+        matching.filter((item) =>
+          receipts.some(
+            (receipt) => matches(item, receipt) && (!mutation.terms || matches(mutation, receipt)),
+          ),
+        ).length !== 1
       );
     });
   if (!unsafe && !claims.some(({ future, mutation }) => future || mutation?.operation === 'edit'))
