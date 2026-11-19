@@ -1,18 +1,23 @@
 import { randomUUID } from 'node:crypto';
 import {
   assertPostgresInstallationOwner,
+  calendarEventSnapshots,
   createPostgresNotificationOutboxRepository,
   createPostgresPulseAdmissionRepository,
   emailBookingOccurrences,
   emailIngest,
   messages,
   proactiveMoments,
+  recordPostgresCalendarRecovery,
 } from '@assistant/db';
 import {
   FirestoreNotificationOutboxRepository,
   FirestorePulseRepository,
 } from '@assistant/firestore';
 import {
+  type CalendarRecoveryObservation,
+  calendarRecoveryFact,
+  calendarRecoveryHash,
   type NotificationOutboxRepository,
   sendNotificationOutboxLeg,
 } from '@assistant/persistence';
@@ -57,6 +62,7 @@ interface Fixture {
   publish(recovery: SweepRecovery): Promise<{ status: string }>;
   acknowledge(recovery: SweepRecovery): Promise<void>;
   seed(): Promise<void>;
+  seedCalendar(complete: boolean): Promise<void>;
   saved(): Promise<{ messages: Array<string | null>; keys: string[] }>;
   close(): Promise<void>;
 }
@@ -148,6 +154,76 @@ function records(agentId: string) {
   return { mail, bookings };
 }
 
+function calendarRecords(agentId: string) {
+  const eventStart = '2026-11-21T15:00:00Z';
+  const examples = [
+    { eventId: 'moved', summary: 'Training session', kind: 'moved' as const, at: between },
+    { eventId: 'cancelled', summary: 'Workshop', kind: 'cancelled' as const, at: between },
+    { eventId: 'already-told', summary: 'Already reported', kind: 'moved' as const, at: between },
+    { eventId: 'old', summary: 'Before the gap', kind: 'cancelled' as const, at: start },
+    {
+      eventId: 'unverified',
+      summary: 'Missing without confirmation',
+      kind: 'cancelled' as const,
+      at: between,
+    },
+  ];
+  const key = (row: (typeof examples)[number]) =>
+    `calendar-${row.kind}:fixture-calendar:${row.eventId}${row.kind === 'moved' ? ':' + eventStart : ''}`;
+  const snapshots = examples.map(({ eventId, summary }) => ({
+    id: randomUUID(),
+    agentId,
+    calendarId: 'fixture-calendar',
+    eventId,
+    summary,
+    start: eventStart,
+    end: '2026-11-21T16:00:00Z',
+    updatedAt: start,
+  }));
+  const observations: CalendarRecoveryObservation[] = examples
+    .filter((row) => row.eventId !== 'unverified')
+    .map((row) => ({
+      event: calendarRecoveryHash('fixture-calendar', row.eventId),
+      moment: calendarRecoveryHash(key(row)),
+      matchingFact: calendarRecoveryFact(row.kind, row.summary, eventStart),
+      kind: row.kind,
+      observedAt: row.at.getTime(),
+    }));
+  const told = examples[2];
+  if (!told) throw new Error('Missing stored observation fixture');
+  const delivered = {
+    id: randomUUID(),
+    agentId,
+    kind: 'calendar-moved',
+    momentKey: key(told),
+    summary: told.summary,
+    deliveredAt: between,
+  };
+  const source = {
+    id: randomUUID(),
+    agentId,
+    fromEmail: 'example@example.invalid',
+    authenticated: true,
+    subject: 'Provider notice for training session',
+    channelMessageId: 'gmail:calendar-move',
+    importance: 5,
+    createdAt: end,
+    providerReceivedAt: between,
+  };
+  const booking = {
+    id: randomUUID(),
+    agentId,
+    bookingKey: 'calendar-move',
+    lifecycle: 'rescheduled',
+    dates: [{ what: 'Training session', iso: eventStart, dateRole: 'event_start' }],
+    sourceChannelMessageId: source.channelMessageId,
+    sourceReceivedAt: between,
+    sourceAuthenticated: true,
+    version: 1,
+  };
+  return { snapshots, observations, delivered, source, booking };
+}
+
 async function postgres(): Promise<Fixture> {
   const { db, close } = await createIsolatedTestDatabase();
   const agentId = await assertPostgresInstallationOwner(db);
@@ -171,6 +247,14 @@ async function postgres(): Promise<Fixture> {
       const { mail, bookings } = records(agentId);
       await db.insert(emailIngest).values(mail);
       await db.insert(emailBookingOccurrences).values(bookings);
+    },
+    async seedCalendar(complete) {
+      const { snapshots, observations, delivered, source, booking } = calendarRecords(agentId);
+      await db.insert(calendarEventSnapshots).values(snapshots);
+      await db.insert(proactiveMoments).values(delivered);
+      await db.insert(emailIngest).values(source);
+      await db.insert(emailBookingOccurrences).values(booking);
+      await recordPostgresCalendarRecovery(db, agentId, null, between, complete, observations);
     },
     async saved() {
       return {
@@ -205,6 +289,22 @@ async function firestore(): Promise<Fixture> {
       for (const row of bookings) batch.create(store.doc('emailBookingOccurrences', row.id), row);
       await batch.commit();
     },
+    async seedCalendar(complete) {
+      const { snapshots, observations, delivered, source, booking } = calendarRecords(agentId);
+      const batch = store.db.batch();
+      for (const row of snapshots) batch.create(store.doc('calendarEventSnapshots', row.id), row);
+      batch.create(store.doc('proactiveMoments', delivered.id), delivered);
+      batch.create(store.doc('emailIngest', source.id), source);
+      batch.create(store.doc('emailBookingOccurrences', booking.id), booking);
+      await batch.commit();
+      await new FirestorePulseRepository(store).recordCalendarRecovery(
+        agentId,
+        null,
+        between,
+        complete,
+        observations,
+      );
+    },
     async saved() {
       return {
         messages: (await store.collection('messages').get()).docs.map((d) => d.get('text')),
@@ -222,6 +322,34 @@ for (const [driver, fixture] of [
   ['Firestore', firestore],
 ] as const) {
   describe(driver, () => {
+    it.skipIf(driver === 'Firestore' && !process.env.FIRESTORE_EMULATOR_HOST)(
+      'recovers only confirmed withheld calendar changes and deduplicates matching mail',
+      async () => {
+        for (const complete of [true, false]) {
+          const f = await fixture();
+          try {
+            await f.seedCalendar(complete);
+            expect(await f.publish(elapsed)).toMatchObject({ status: 'persisted' });
+            const digest = (await f.saved()).messages.find((text) =>
+              text?.startsWith('While I was away'),
+            );
+            expect(digest).toContain('Calendar move · Training session');
+            expect(digest).toContain('Calendar cancellation · Workshop');
+            for (const excluded of [
+              'Provider notice for training session',
+              'Already reported',
+              'Before the gap',
+              'Missing without confirmation',
+            ])
+              expect(digest).not.toContain(excluded);
+            expect(digest?.includes('No complete Calendar read was recorded')).toBe(!complete);
+          } finally {
+            await f.close();
+          }
+        }
+      },
+      90_000,
+    );
     it.skipIf(driver === 'Firestore' && !process.env.FIRESTORE_EMULATOR_HOST)(
       'records one alert and one grounded recovery digest over a three-hour gap',
       async () => {
@@ -266,6 +394,7 @@ for (const [driver, fixture] of [
             [
               'While I was away',
               'Scheduled checks resumed after a gap of 180 minutes.',
+              'No complete Calendar read was recorded during this gap.',
               'From the authenticated mail available for that period:',
               '- Booking cancellation · Saturday booking',
               '- Booking rescheduled · Tuesday booking',

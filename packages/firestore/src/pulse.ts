@@ -1,8 +1,11 @@
 import { createHash } from 'node:crypto';
 import {
+  type CalendarRecoveryObservation,
+  calendarRecoveryCursor,
   commitmentDueMomentKey,
   commitmentIsActive,
   emailIngestReadable,
+  mergeCalendarRecovery,
   type PulseCalendarSnapshot,
   type PulseCommitment,
   type PulseMail,
@@ -141,6 +144,28 @@ export class FirestorePulseRepository implements PulseRepository {
       .get();
     if (snapshot.size > SNAPSHOT_LIMIT) throw new Error('Calendar snapshot scan exceeded bound');
     return snapshot.docs;
+  }
+
+  async recordCalendarRecovery(
+    agentId: string,
+    fence: string | null,
+    at: Date,
+    complete: boolean,
+    observations: readonly CalendarRecoveryObservation[],
+  ): Promise<void> {
+    const name = calendarRecoveryCursor(agentId);
+    const ref = this.store.doc('maintenanceCursors', name);
+    await this.store.db.runTransaction(async (tx) => {
+      const [owner, erasure, prior] = await tx.getAll(
+        this.store.doc('agents', agentId),
+        this.store.doc('privacyErasureJobs', agentId),
+        ref,
+      );
+      if (owner?.get('id') !== agentId || !erasure || erasureGeneration(erasure, agentId) !== fence)
+        return;
+      const cursor = mergeCalendarRecovery(prior?.get('cursor'), fence, at, complete, observations);
+      tx.set(ref, { name, cursor, updatedAt: at });
+    });
   }
 
   async calendarSnapshot(agentId: string): Promise<PulseCalendarSnapshot[]> {

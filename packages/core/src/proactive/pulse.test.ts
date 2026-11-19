@@ -4,12 +4,18 @@ import {
   createDb,
   type Db,
   emailIngest,
+  maintenanceCursors,
   messages,
   notificationPrefs,
   proactiveMoments,
   suggestions,
 } from '@assistant/db';
-import { type EmailThreadHeadReader, notificationLeg } from '@assistant/persistence';
+import {
+  calendarRecoveryCursor,
+  type EmailThreadHeadReader,
+  notificationLeg,
+  parseCalendarRecovery,
+} from '@assistant/persistence';
 import { desc, eq, like } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { getAgent } from '../chat.js';
@@ -264,6 +270,9 @@ describe('runPulse', () => {
   afterEach(async () => {
     if (!dbUp) return;
     await db.delete(proactiveMoments).where(like(proactiveMoments.momentKey, `%${MARKER}%`));
+    await db
+      .delete(maintenanceCursors)
+      .where(eq(maintenanceCursors.name, calendarRecoveryCursor(agentId)));
     await db.delete(suggestions).where(like(suggestions.sourceRef, `%${MARKER}%`));
     await db.delete(emailIngest).where(like(emailIngest.channelMessageId, `%${MARKER}%`));
     await db.delete(messages).where(like(messages.text, `%${MARKER}%`));
@@ -599,6 +608,15 @@ describe('runPulse', () => {
         { now: NOW },
       );
       expect(result.delivered).toBe('calendar-moved');
+      const [recovery] = await db
+        .select()
+        .from(maintenanceCursors)
+        .where(eq(maintenanceCursors.name, calendarRecoveryCursor(agentId)));
+      expect(parseCalendarRecovery(recovery?.cursor, null)).toMatchObject({
+        reads: [NOW.getTime()],
+        observations: [{ kind: 'moved', observedAt: NOW.getTime() }],
+      });
+      expect(recovery?.cursor).not.toContain(MARKER);
 
       const [row] = await db
         .select({ start: calendarEventSnapshots.start })

@@ -1,3 +1,4 @@
+import type { CalendarRecoveryObservation } from './calendar-recovery.js';
 import type { SituationPackView } from './situations-schema.js';
 
 /** A rescheduled deadline is a new observation, unlike a retry of the same deadline. */
@@ -174,6 +175,13 @@ export interface PulseRepository {
   ambientDailyCap(agentId: string): Promise<number | null>;
   /** Keys of every moment of this kind already delivered. */
   momentKeys(agentId: string, kind: string): Promise<string[]>;
+  recordCalendarRecovery?(
+    agentId: string,
+    fence: string | null,
+    at: Date,
+    complete: boolean,
+    observations: readonly CalendarRecoveryObservation[],
+  ): Promise<void>;
   calendarSnapshot(agentId: string): Promise<PulseCalendarSnapshot[]>;
   /**
    * Bring the stored snapshot up to date with one successful read: drop the
