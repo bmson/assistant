@@ -23,6 +23,7 @@
     "./watches": "./src/watches.ts",
     "./workspace": "./src/workspace-store.ts",
     "./question-regression": "./src/question-regression/index.ts",
+    "./mcp-discovery-qualification": "./src/mcp-discovery-qualification.ts",
     "./mcp-authorization": "./src/mcp-authorization.ts",
     "./mcp-oauth": "./src/mcp-oauth.ts",
     "./mcp-oauth-registration": "./src/mcp-oauth-registration.ts",

@@ -42,15 +42,22 @@ Qualify two independently implemented OAuth MCP servers through connect, an appr
 
 ## Local qualification for the July 2026 transport
 
-Run the discovery qualification and legacy transport tests from the repository root:
+Use a running local MCP server or fixture to inspect its advertised tools. Substitute its actual port and endpoint path in the example. The command prints the negotiated revision and the discovered tool names.
 
 ```sh
-pnpm exec vitest run packages/tools/src/mcp-discovery-qualification.test.ts packages/tools/src/mcp-transport.test.ts packages/tools/src/mcp.test.ts
+pnpm mcp:discover http://127.0.0.1:3000/mcp
+pnpm mcp:discover http://127.0.0.1:3000/mcp --allow-legacy
 ```
 
-The qualification client sends `server/discover` to a loopback HTTP fixture and follows successive pages of `tools/list` when the server advertises the requested revision and tool support. Each request carries its protocol version and client metadata. The fixture exercises JSON replies and request-scoped Server-Sent Events. Discovery follows each opaque cursor on the same endpoint, with a shared 20-second deadline, up to eight list pages and 80 tools in total. A repeated cursor, duplicate tool name, failed page, or exceeded limit ends the operation with an error. A successful result contains the entire list in server order. Tool schemas that request custom HTTP headers are outside this qualification. This exercise uses synthetic tools and requires no provider account or credentials.
+Both commands begin with July 2026 discovery. The optional flag permits a November 2025 initialization handshake when the initial response indicates a legacy server. Authorization errors, timeouts, and failures on later pages end discovery. The local command requires no provider credentials and executes only discovery operations.
 
-Saved connections still use the November 2025 transport. Modern tool execution, protocol selection between revisions, and interoperability with a hosted provider remain open before enabling this revision for saved connections. See the [Streamable HTTP binding](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http), [pagination rules](https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/pagination), and [versioning rules](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning).
+The client follows each opaque cursor on the same endpoint, with one 20-second deadline, at most eight list pages and 80 tool definitions in total. A repeated cursor, duplicate tool name, failed page, or exceeded limit ends the operation with an error. A terminal response returns eligible tools in server order. For modern HTTP discovery, `excludedTools` counts definitions omitted because their custom header annotations could not be validated. The tests exercise JSON responses and request-scoped Server-Sent Events.
+
+```sh
+pnpm exec vitest run packages/tools/src/mcp scripts/mcp-discover.test.ts
+```
+
+Saved connections use the November 2025 transport. Modern tool execution and hosted-provider interoperability remain open before activating this revision for saved connections. See the [Streamable HTTP binding](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http), [pagination rules](https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/pagination), and [versioning rules](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning).
 
 ## Remaining Phase 3 work
 

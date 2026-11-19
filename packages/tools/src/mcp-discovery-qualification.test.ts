@@ -360,27 +360,43 @@ describe('explicit local MCP 2026-07-28 discovery qualification', () => {
       'overlong description',
       { resultType: 'complete', tools: [{ ...tool, description: 'x'.repeat(1201) }] },
     ],
-    [
-      'unsupported header annotation',
-      {
-        resultType: 'complete',
-        tools: [
-          {
-            ...tool,
-            inputSchema: {
-              type: 'object',
-              properties: { credential: { type: 'string', 'x-mcp-header': 'X-Private' } },
-            },
-          },
-        ],
-      },
-    ],
     ['overlong cursor', { resultType: 'complete', tools: [tool], nextCursor: 'x'.repeat(4097) }],
   ])('rejects %s without acting or retrying', async (_label, listing) => {
     const f = fixture(discovery(), listing);
     await expect(f.run()).rejects.toThrow();
     expect(f.fetchImpl).toHaveBeenCalledTimes(2);
     expect(bodies(f.fetchImpl).map((b) => b.method)).toEqual(['server/discover', 'tools/list']);
+  });
+
+  it('keeps valid annotated tools and excludes only the invalid annotated definition', async () => {
+    const annotated = {
+      ...tool,
+      name: 'valid.annotated',
+      inputSchema: {
+        type: 'object',
+        properties: { region: { type: 'string', 'x-mcp-header': 'Region' } },
+      },
+    };
+    const invalid = {
+      ...annotated,
+      name: 'invalid.annotated',
+      inputSchema: {
+        type: 'object',
+        properties: { region: { type: 'string', 'x-mcp-header': 'Bad Header' } },
+      },
+    };
+    const f = fixture(discovery(), { resultType: 'complete', tools: [tool, invalid, annotated] });
+    await expect(f.run()).resolves.toMatchObject({
+      tools: [tool, annotated],
+      excludedTools: 1,
+      complete: true,
+    });
+    expect(bodies(f.fetchImpl).map((b) => b.method)).toEqual(['server/discover', 'tools/list']);
+    for (const [, init] of f.fetchImpl.mock.calls) {
+      expect(
+        [...new Headers(init?.headers).keys()].some((name) => name.startsWith('mcp-param-')),
+      ).toBe(false);
+    }
   });
 
   it.each([0, -1, 20_001, 1.5, Number.NaN])(
