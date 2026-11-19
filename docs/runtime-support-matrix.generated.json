@@ -127,7 +127,7 @@
     },
     "apps/web/app/api/health/route.ts": {
       "methods": ["GET"],
-      "sha256": "43c5853b75a50b762bc8986c469524655c9643d3bc9bd4652c895cd944dcab98"
+      "sha256": "095fab5eace88f1ee9fd32ebc512e74dd2a61a06aeab33072c21eac8a8eb4f11"
     },
     "apps/web/app/api/import/upload/route.ts": {
       "methods": ["POST"],
