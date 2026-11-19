@@ -1,6 +1,7 @@
 /**
  * Visual QA: screenshot every primary surface at desktop and phone widths.
- * Run against a dev server with AUTH_DEV_BYPASS=true:
+ * Run against a dedicated QA dev server using the same allocated QA database.
+ * Set AUTH_DEV_BYPASS=true on the dev server and ASSISTANT_QA_WEB_ORIGIN here:
  *   pnpm tsx scripts/visual-qa.ts [baseUrl]
  * Output lands in /tmp/visual-qa/.
  *
@@ -11,8 +12,11 @@
 
 import { mkdirSync } from 'node:fs';
 import { chromium } from 'playwright';
+import { openQaInstallation, requireQaOrigin } from './visual-qa/qa-installation.js';
 
-const base = process.argv[2] ?? 'http://127.0.0.1:3000';
+const base = requireQaOrigin(process.argv[2], process.env.ASSISTANT_QA_WEB_ORIGIN);
+const { db } = await openQaInstallation();
+await db.$client.end({ timeout: 5 });
 const outDir = '/tmp/visual-qa';
 mkdirSync(outDir, { recursive: true });
 
@@ -54,6 +58,7 @@ const browser = await chromium.launch(
 for (const viewport of viewports) {
   const context = await browser.newContext({
     viewport: { width: viewport.width, height: viewport.height },
+    serviceWorkers: 'block',
     // Cards reveal on scroll via `animation-timeline: view()`. A full-page
     // screenshot never scrolls, so without this everything below the first
     // viewport is captured at opacity 0 and the shot looks half-empty.
@@ -62,6 +67,9 @@ for (const viewport of viewports) {
     isMobile: viewport.name === 'phone',
     hasTouch: viewport.name === 'phone',
   });
+  await context.route('**/*', (route) =>
+    new URL(route.request().url()).origin === base ? route.continue() : route.abort(),
+  );
   const page = await context.newPage();
   const errors: string[] = [];
   page.on('pageerror', (err) => errors.push(`${err.message}`));
