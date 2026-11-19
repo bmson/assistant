@@ -5,6 +5,7 @@ import {
   drainPushNotificationOutbox,
   notifyApprovalsByPush,
   notifyOwnerByPush,
+  type PushChannelDeps,
 } from './channel.js';
 
 const conversationId = '00000000-0000-4000-8000-000000000001';
@@ -47,7 +48,11 @@ function channel() {
     },
     async claim(input) {
       const row = [...rows.values()].find((candidate) => candidate.id === input.legId);
-      if (!row || (row.status !== 'pending' && !(row.status === 'failed' && row.retryable)))
+      if (
+        !row ||
+        row.availableAt > input.now ||
+        (row.status !== 'pending' && !(row.status === 'failed' && row.retryable))
+      )
         return null;
       const claimed = {
         ...row,
@@ -94,6 +99,9 @@ function channel() {
         invalidate: async () => {},
       },
       notificationOutbox,
+      admitAnswerReady: vi
+        .fn<NonNullable<PushChannelDeps['admitAnswerReady']>>()
+        .mockResolvedValue({ deliver: true }),
       owner: async () => ({ id: 'owner', name: 'Ada' }),
     },
   };
@@ -211,5 +219,72 @@ describe('push navigation identity', () => {
       ]),
     );
     expect([...rows.values()].map((row) => row.status).sort()).toEqual(['delivered', 'delivered']);
+  });
+});
+
+const answer = {
+  purpose: 'answer-ready' as const,
+  deliveryKey: 'task-answer:synthetic',
+  conversationId,
+  taskId,
+  text: 'Private medical information',
+};
+
+describe('answer-ready push delivery', () => {
+  it('sends generic copy once per device and opens only the source conversation', async () => {
+    const { deps, send, rows } = channel();
+    await notifyOwnerByPush(deps, answer);
+    await notifyOwnerByPush(deps, { ...answer, text: 'Another private answer' });
+    expect(send).toHaveBeenCalledExactlyOnceWith({
+      token: 'synthetic',
+      environment: 'sandbox',
+      title: 'Assistant',
+      body: 'Your reply is ready.',
+      category: 'ASSISTANT_UPDATE',
+      expiresAt: expect.any(Number),
+      data: { route: 'chat', agentId: 'owner', conversationId },
+    });
+    expect(JSON.stringify([...rows.values()])).not.toContain(answer.text);
+  });
+
+  it('holds replay after quiet hours and never sends an expired queued answer', async () => {
+    for (const delayedMinutes of [1, 15]) {
+      const { deps, rows } = channel();
+      const reject = vi.fn(async () => ({ ok: false, status: 503 }));
+      deps.apns = { configured: () => true, send: reject } as unknown as ApnsClient;
+      deps.admitAnswerReady = vi
+        .fn<NonNullable<PushChannelDeps['admitAnswerReady']>>()
+        .mockResolvedValueOnce({ deliver: true })
+        .mockResolvedValue({ deliver: false, reason: 'quiet-hours' });
+      await notifyOwnerByPush(deps, answer);
+      const [first] = rows.values();
+      if (!first) throw new Error('missing outbox leg');
+      await drainPushNotificationOutbox(
+        deps,
+        new Date(first.createdAt.getTime() + delayedMinutes * 60_000),
+      );
+      expect(reject).toHaveBeenCalledOnce();
+      expect([...rows.values()][0]).toMatchObject({
+        status: 'skipped',
+        result: { reason: delayedMinutes === 15 ? 'answer-ready-expired' : 'quiet-hours' },
+      });
+    }
+  });
+
+  it('ends a definitive retry sequence after three provider attempts', async () => {
+    const { deps, rows } = channel();
+    const reject = vi.fn(async () => ({ ok: false, status: 503 }));
+    deps.apns = { configured: () => true, send: reject } as unknown as ApnsClient;
+    await notifyOwnerByPush(deps, answer);
+    const [first] = rows.values();
+    if (!first) throw new Error('missing outbox leg');
+    for (const minutes of [1, 2, 3]) {
+      await drainPushNotificationOutbox(
+        deps,
+        new Date(first.createdAt.getTime() + minutes * 60_000),
+      );
+    }
+    expect(reject).toHaveBeenCalledTimes(3);
+    expect([...rows.values()][0]).toMatchObject({ status: 'failed', retryable: false });
   });
 });

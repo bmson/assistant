@@ -928,9 +928,12 @@ function derivedRecords(bundle: MigrationBundle, target: MigrationTarget) {
   for (const record of bundle.records.filter((candidate) => candidate.table === 'cost_events')) {
     const data = materialize(record, bundle.manifest.source.embeddingSpace);
     if (!(data.createdAt instanceof Date)) throw new Error('Cost event has no timestamp');
+    const accountedAt = data.accountedAt ?? data.createdAt;
+    if (!(accountedAt instanceof Date) || accountedAt > data.createdAt)
+      throw new Error('Cost event has an invalid accounting timestamp');
     for (const id of [
-      `day:${data.createdAt.toISOString().slice(0, 10)}`,
-      `month:${data.createdAt.toISOString().slice(0, 7)}`,
+      `day:${accountedAt.toISOString().slice(0, 10)}`,
+      `month:${accountedAt.toISOString().slice(0, 7)}`,
     ])
       periodTotals.set(id, (periodTotals.get(id) ?? 0) + usdMicros(data.usd));
   }

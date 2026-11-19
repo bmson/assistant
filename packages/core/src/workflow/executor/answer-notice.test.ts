@@ -18,7 +18,7 @@ function deps(notifyOwner?: ExecutorDeps['notifyOwner']): ExecutorDeps {
 }
 
 describe('telling the owner their answer landed', () => {
-  it('sends the reply as an ambient notice, carrying the thread to open', async () => {
+  it('sends only a generic ambient notice with the source thread', async () => {
     const notifyOwner = vi.fn(async () => ({
       legs: [{ channel: 'push', status: 'delivered' as const }],
     }));
@@ -31,9 +31,8 @@ describe('telling the owner their answer landed', () => {
       deliveryKey: 'task-answer:e056239c1a5e1cf6ffda57b9cc656cef068f5a8ca52241488d0723249fc80719',
       taskId: 'task-1',
       conversationId: 'conversation-1',
-      // Trimmed: the body is the whole message on a lock screen.
-      text: 'Booked for Friday at noon.',
-      // Not 'interrupt' — the work is done and nothing waits on a decision.
+      purpose: 'answer-ready',
+      text: 'Your reply is ready.',
       urgency: 'ambient',
     });
   });

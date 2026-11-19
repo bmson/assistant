@@ -8,6 +8,7 @@ import type {
   FinalChannelDeliveryResult,
   ImportJobRepository,
   NotificationDeliveryResult,
+  OwnerNoticePurpose,
   ReminderEventDependency,
 } from '@assistant/persistence';
 import type { ZodType } from 'zod';
@@ -201,6 +202,7 @@ export interface ExecutorDeps {
    */
   notifyOwner?: (input: {
     deliveryKey?: string;
+    purpose?: OwnerNoticePurpose;
     taskId?: string;
     conversationId: string | null;
     text: string;

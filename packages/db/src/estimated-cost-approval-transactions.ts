@@ -27,9 +27,13 @@ import {
   storedUsdToMicros,
   validateEstimatedCostRuntimeProviderSource,
 } from '@assistant/persistence';
-import { and, eq, gte, inArray, sql, sum } from 'drizzle-orm';
+import { and, eq, inArray, sql, sum } from 'drizzle-orm';
 import type { Db } from './client.js';
-import { lockCostLedger, readEstimatedCostView } from './cost-repository.js';
+import {
+  costEventAccountedSince,
+  lockCostLedger,
+  readEstimatedCostView,
+} from './cost-repository.js';
 import { lockPostgresPrivacyObservationFence } from './privacy-erasure-repository.js';
 import {
   budgets,
@@ -411,11 +415,11 @@ async function snapshot(
     tx
       .select({ total: sum(costEvents.usd) })
       .from(costEvents)
-      .where(gte(costEvents.createdAt, day)),
+      .where(costEventAccountedSince(day)),
     tx
       .select({ total: sum(costEvents.usd) })
       .from(costEvents)
-      .where(gte(costEvents.createdAt, month)),
+      .where(costEventAccountedSince(month)),
     tx
       .select({ total: sum(costReservations.estimatedUsd) })
       .from(costReservations)

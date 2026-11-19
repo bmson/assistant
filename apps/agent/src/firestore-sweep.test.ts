@@ -142,6 +142,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore maintenance swe
         purgedExpired: 0,
         agedHistory: 0,
         releasedReservations: 1,
+        reservationsMarkedUnknown: 0,
         expiredInboxWatches: 0,
         webWatchFires: 0,
         watchFireEffectsDrained: 0,

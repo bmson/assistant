@@ -2,8 +2,14 @@ import { createHash } from 'node:crypto';
 import {
   addLedgerMicros,
   addMicros,
+  assertLedgerMicros,
+  assertUnknownModelSettlementTtl,
+  type CostProviderReceipt,
   type CostRepository,
+  type CostReservationSweep,
+  type CostTotals,
   type CurrentBaselineReservation,
+  canCorrectModelAttemptEstimate,
   canonicalEstimatedCostJson,
   currentHistoricalUnknownMicros,
   DEFAULT_RATES,
@@ -25,12 +31,16 @@ import {
   MODEL_ROLE_NAMES,
   matchesEstimatedCostParkedTask,
   microsToUsd,
+  modelAttemptEstimateKey,
+  modelAttemptSampleOutcome,
   nextDailyReset,
   nextMonthlyReset,
   parseEstimatedCostQuote,
   parseEstimatedCostReceipt,
   parseHistoricalUnknownBaseline,
   projectEstimatedCostRequest,
+  type ReservationActual,
+  staleModelAttemptEstimate,
   storedLedgerUsdToMicros,
   storedTaskBudgetToMicros,
   storedUsdToMicros,
@@ -149,11 +159,11 @@ async function readEstimatedCostSnapshot(
         tx
           .select({ total: sum(costEvents.usd) })
           .from(costEvents)
-          .where(gte(costEvents.createdAt, day)),
+          .where(costEventAccountedSince(day)),
         tx
           .select({ total: sum(costEvents.usd) })
           .from(costEvents)
-          .where(gte(costEvents.createdAt, month)),
+          .where(costEventAccountedSince(month)),
         tx
           .select({ total: sum(costReservations.estimatedUsd) })
           .from(costReservations)
@@ -689,7 +699,7 @@ export async function lockCostLedger(db: Db): Promise<void> {
   await db.execute(sql`select pg_advisory_xact_lock(hashtext('assistant:cost-reservations'))`);
 }
 
-async function writeCostEvent(db: Db, input: CostEventInput): Promise<boolean> {
+async function writeCostEvent(db: Db, input: CostEventInput, accountedAt?: Date): Promise<boolean> {
   const amountMicros = ledgerUsdToMicros(input.usd);
   const amountUsd = microsToUsd(amountMicros);
   const amountDecimal = amountUsd.toFixed(6);
@@ -705,6 +715,7 @@ async function writeCostEvent(db: Db, input: CostEventInput): Promise<boolean> {
     description: input.description ?? '',
     reservationId: input.reservationId,
     idempotencyKey: input.idempotencyKey,
+    accountedAt,
   };
   const inserted = input.idempotencyKey
     ? await db
@@ -756,40 +767,66 @@ export async function recordCostEvent(db: Db, input: CostEventInput): Promise<vo
   });
 }
 
-export interface CostTotals {
-  dailySpentUsd: number;
-  monthlySpentUsd: number;
-  /** Estimated USD currently held by unreconciled reservations. */
-  heldUsd: number;
-  dailyLimitUsd: number;
-  monthlyLimitUsd: number;
-  softPct: number;
+export type { CostTotals } from '@assistant/persistence';
+
+/** A late charge may be booked to the period where its provider attempt began. */
+export function costEventAccountedSince(since: Date) {
+  return and(
+    gte(costEvents.createdAt, since),
+    sql`coalesce(${costEvents.accountedAt}, ${costEvents.createdAt}) >= ${since.toISOString()}::timestamptz`,
+  );
 }
 
-/** Spend + holds vs caps — the shared snapshot for the router guard, reservations, and the dashboard. */
+/** A single snapshot keeps the hold and its replacement spend on the same side of settlement. */
 export async function costTotals(db: Db): Promise<CostTotals> {
-  const [limits, [daily], [monthly], [held]] = await Promise.all([
+  const dayStart = sql`date_trunc('day', now(), 'UTC')`;
+  const monthStart = sql`date_trunc('month', now(), 'UTC')`;
+  const attributable = sql`
+    ${costReservations.status} = 'unknown' and ${costReservations.source} = 'model'
+    and ${costReservations.reservationKind} = 'attempt'
+    and ${costReservations.costGrantId} is null
+    and ${costReservations.attemptStartedAt} >= ${costReservations.createdAt}
+  `;
+  const [limits, [accounting]] = await Promise.all([
     db.select().from(budgets),
-    db
-      .select({ total: sum(costEvents.usd) })
-      .from(costEvents)
-      .where(gte(costEvents.createdAt, sql`date_trunc('day', now())`)),
-    db
-      .select({ total: sum(costEvents.usd) })
-      .from(costEvents)
-      .where(gte(costEvents.createdAt, sql`date_trunc('month', now())`)),
-    db
-      .select({ total: sum(costReservations.estimatedUsd) })
-      .from(costReservations)
-      .where(inArray(costReservations.status, ['held', 'dispatching', 'unknown'])),
+    db.execute<{
+      daily_spent: string;
+      monthly_spent: string;
+      held: string;
+      daily_held: string;
+      monthly_held: string;
+    }>(sql`
+      select * from (
+        select
+          coalesce(sum(${costEvents.usd}) filter (where coalesce(${costEvents.accountedAt}, ${costEvents.createdAt}) >= ${dayStart}), 0) as daily_spent,
+          coalesce(sum(${costEvents.usd}), 0) as monthly_spent
+        from ${costEvents}
+        where ${costEvents.createdAt} >= ${monthStart}
+          and coalesce(${costEvents.accountedAt}, ${costEvents.createdAt}) >= ${monthStart}
+      ) spend cross join (
+        select
+          coalesce(sum(${costReservations.estimatedUsd}), 0) as held,
+          coalesce(sum(${costReservations.estimatedUsd}) filter (
+            where (${attributable} and ${costReservations.attemptStartedAt} < ${dayStart}) is not true
+          ), 0) as daily_held,
+          coalesce(sum(${costReservations.estimatedUsd}) filter (
+            where (${attributable} and ${costReservations.attemptStartedAt} < ${monthStart}) is not true
+          ), 0) as monthly_held
+        from ${costReservations}
+        where ${costReservations.status} in ('held', 'dispatching', 'unknown')
+      ) holds
+    `),
   ]);
+  if (!accounting) throw new Error('Incomplete cost snapshot');
   const limitFor = (scope: string) =>
     Number(limits.find((b) => b.scope === scope)?.limitUsd ?? Number.POSITIVE_INFINITY);
 
   return {
-    dailySpentUsd: Number(daily?.total ?? 0),
-    monthlySpentUsd: Number(monthly?.total ?? 0),
-    heldUsd: Number(held?.total ?? 0),
+    dailySpentUsd: Number(accounting.daily_spent),
+    monthlySpentUsd: Number(accounting.monthly_spent),
+    heldUsd: Number(accounting.held),
+    dailyHeldUsd: Number(accounting.daily_held),
+    monthlyHeldUsd: Number(accounting.monthly_held),
     dailyLimitUsd: limitFor('daily'),
     monthlyLimitUsd: limitFor('monthly'),
     softPct: limits.find((b) => b.scope === 'daily')?.softPct ?? 80,
@@ -864,23 +901,24 @@ export async function reserveCost(
       }
     }
     const totals = await costTotals(tx as unknown as Db);
-    const committed = totals.heldUsd + estimateUsd;
+    const monthlyHeld = totals.monthlyHeldUsd ?? totals.heldUsd;
+    const dailyHeld = totals.dailyHeldUsd ?? totals.heldUsd;
     const globalLimitFactor = input.critical ? 1.1 : 1;
     const monthlyCeiling = totals.monthlyLimitUsd * globalLimitFactor;
     const dailyCeiling = totals.dailyLimitUsd * globalLimitFactor;
 
-    if (totals.monthlySpentUsd + committed > monthlyCeiling) {
+    if (totals.monthlySpentUsd + monthlyHeld + estimateUsd > monthlyCeiling) {
       return {
         ok: false,
-        reason: `monthly budget cannot cover this (spent $${totals.monthlySpentUsd.toFixed(2)} + held $${totals.heldUsd.toFixed(2)} + est $${estimateUsd.toFixed(2)} > cap $${monthlyCeiling.toFixed(2)}${input.critical ? ' including owner-reply carve-out' : ''})`,
+        reason: `monthly budget cannot cover this (spent $${totals.monthlySpentUsd.toFixed(2)} + held $${monthlyHeld.toFixed(2)} + est $${estimateUsd.toFixed(2)} > cap $${monthlyCeiling.toFixed(2)}${input.critical ? ' including owner-reply carve-out' : ''})`,
         budget: { scope: 'monthly', nextAttemptMicros: estimateMicros },
         resumeAt: nextMonthlyReset(),
       } as const;
     }
-    if (totals.dailySpentUsd + committed > dailyCeiling) {
+    if (totals.dailySpentUsd + dailyHeld + estimateUsd > dailyCeiling) {
       return {
         ok: false,
-        reason: `daily budget cannot cover this (spent $${totals.dailySpentUsd.toFixed(2)} + held $${totals.heldUsd.toFixed(2)} + est $${estimateUsd.toFixed(2)} > cap $${dailyCeiling.toFixed(2)}${input.critical ? ' including owner-reply carve-out' : ''})`,
+        reason: `daily budget cannot cover this (spent $${totals.dailySpentUsd.toFixed(2)} + held $${dailyHeld.toFixed(2)} + est $${estimateUsd.toFixed(2)} > cap $${dailyCeiling.toFixed(2)}${input.critical ? ' including owner-reply carve-out' : ''})`,
         budget: { scope: 'daily', nextAttemptMicros: estimateMicros },
         resumeAt: nextDailyReset(),
       } as const;
@@ -1358,11 +1396,11 @@ export async function beginPostgresEstimatedCostGrantAttempt(
       tx
         .select({ total: sum(costEvents.usd) })
         .from(costEvents)
-        .where(gte(costEvents.createdAt, day)),
+        .where(costEventAccountedSince(day)),
       tx
         .select({ total: sum(costEvents.usd) })
         .from(costEvents)
-        .where(gte(costEvents.createdAt, month)),
+        .where(costEventAccountedSince(month)),
       tx
         .select({ total: sum(costReservations.estimatedUsd) })
         .from(costReservations)
@@ -1444,7 +1482,7 @@ export async function markCostAttemptUnknown(
   db: Db,
   reservationId: string,
   reason: string,
-  providerReceipt?: { requestId?: string; endpoint?: string },
+  providerReceipt?: CostProviderReceipt,
 ): Promise<void> {
   await db.transaction(async (tx) => {
     await lockCostLedger(tx as unknown as Db);
@@ -1469,19 +1507,73 @@ export async function markCostAttemptUnknown(
   });
 }
 
+/** Replace the one estimate in place, so caps keep the original settlement period. */
+async function correctModelAttemptEstimate(
+  db: Db,
+  reservation: typeof costReservations.$inferSelect,
+  actual: ReservationActual,
+): Promise<void> {
+  if (
+    reservation.source !== 'model' ||
+    reservation.reservationKind !== 'attempt' ||
+    reservation.costGrantId != null ||
+    !canCorrectModelAttemptEstimate(actual.evidence)
+  )
+    return;
+  const [event] = await db
+    .select()
+    .from(costEvents)
+    .where(eq(costEvents.idempotencyKey, modelAttemptEstimateKey(reservation.id)))
+    .for('update');
+  if (
+    !event ||
+    event.reservationId !== reservation.id ||
+    event.evidence.modelAttemptEstimate !== 'usage_missing_after_ttl'
+  )
+    return;
+  const prior = storedLedgerUsdToMicros(event.usd);
+  if (reservation.actualUsd !== null || prior !== storedLedgerUsdToMicros(reservation.estimatedUsd))
+    throw new Error('Model estimate does not match its reservation');
+  const amount = ledgerUsdToMicros(actual.usd);
+  const usd = microsToUsd(amount).toFixed(6);
+  if (reservation.taskId) {
+    const [task] = await db
+      .select({ spentUsd: tasks.spentUsd })
+      .from(tasks)
+      .where(eq(tasks.id, reservation.taskId))
+      .for('update');
+    if (!task) throw new Error('Ledger task does not exist');
+    const priorTaskSpend = storedLedgerUsdToMicros(task.spentUsd);
+    if (priorTaskSpend < prior) throw new Error('Model estimate exceeds task spend');
+    const spent = assertLedgerMicros(priorTaskSpend - prior + amount);
+    await db
+      .update(tasks)
+      .set({ spentUsd: microsToUsd(spent).toFixed(6), updatedAt: sql`now()` })
+      .where(eq(tasks.id, reservation.taskId));
+  }
+  await db
+    .update(costReservations)
+    .set({ actualUsd: usd })
+    .where(eq(costReservations.id, reservation.id));
+  await db
+    .update(costEvents)
+    .set({
+      usd,
+      evidence: actual.evidence,
+      quantity: actual.quantity?.toFixed(4) ?? null,
+      unit: actual.unit ?? null,
+      unitPriceUsd: actual.unitPriceUsd?.toFixed(8) ?? null,
+      toolCallId: actual.toolCallId ?? null,
+      description: actual.description ?? reservation.description,
+    })
+    .where(eq(costEvents.id, event.id));
+}
+
 /** Reconcile a held reservation to actuals: release the hold, write the ledger row. */
 export async function reconcileReservation(
   db: Db,
   reservationId: string,
-  actual: {
-    evidence?: import('@assistant/persistence').CostEvidence;
-    usd: number;
-    quantity?: number;
-    unit?: string;
-    unitPriceUsd?: number;
-    toolCallId?: string;
-    description?: string;
-  },
+  actual: ReservationActual,
 ): Promise<void> {
   const actualMicros = ledgerUsdToMicros(actual.usd);
   const actualUsd = microsToUsd(actualMicros);
@@ -1492,6 +1584,10 @@ export async function reconcileReservation(
       .select()
       .from(costReservations)
       .where(eq(costReservations.id, reservationId));
+    if (current?.status === 'reconciled') {
+      await correctModelAttemptEstimate(tx as unknown as Db, current, actual);
+      return;
+    }
     if (
       current?.costGrantId &&
       current.reservationKind === 'attempt' &&
@@ -1556,19 +1652,33 @@ export async function reconcileReservation(
       .returning();
     if (!reservation) return; // another reconciler/releaser already won
 
-    await writeCostEvent(tx as unknown as Db, {
-      evidence: actual.evidence,
-      source: reservation.source as SpendSource,
-      usd: actualUsd,
-      taskId: reservation.taskId,
-      toolCallId: actual.toolCallId,
-      quantity: actual.quantity,
-      unit: actual.unit,
-      unitPriceUsd: actual.unitPriceUsd,
-      description: actual.description ?? reservation.description,
-      reservationId,
-      addToTaskSpend: true,
-    });
+    const accountedAt =
+      current?.status === 'unknown' &&
+      current.source === 'model' &&
+      current.reservationKind === 'attempt' &&
+      current.costGrantId == null &&
+      current.attemptStartedAt &&
+      current.attemptStartedAt >= current.createdAt &&
+      current.attemptStartedAt <= new Date()
+        ? current.attemptStartedAt
+        : undefined;
+    await writeCostEvent(
+      tx as unknown as Db,
+      {
+        evidence: actual.evidence,
+        source: reservation.source as SpendSource,
+        usd: actualUsd,
+        taskId: reservation.taskId,
+        toolCallId: actual.toolCallId,
+        quantity: actual.quantity,
+        unit: actual.unit,
+        unitPriceUsd: actual.unitPriceUsd,
+        description: actual.description ?? reservation.description,
+        reservationId,
+        addToTaskSpend: true,
+      },
+      accountedAt,
+    );
   });
 }
 
@@ -1599,9 +1709,75 @@ export async function releaseStaleReservations(
   db: Db,
   olderThanMinutes = 120,
   batch = 500,
-): Promise<number> {
-  return db.transaction(async (tx) => {
+  unknownModelTtlMinutes = 30,
+): Promise<CostReservationSweep> {
+  if (
+    !Number.isFinite(olderThanMinutes) ||
+    olderThanMinutes <= 0 ||
+    !Number.isInteger(batch) ||
+    batch < 1 ||
+    batch > 500
+  ) {
+    throw new Error('Invalid reservation cleanup bounds');
+  }
+  assertUnknownModelSettlementTtl(unknownModelTtlMinutes);
+  const report = await db.transaction(async (tx) => {
     await lockCostLedger(tx as unknown as Db);
+    const candidates = await tx
+      .select()
+      .from(costReservations)
+      .where(
+        and(
+          eq(costReservations.status, 'unknown'),
+          eq(costReservations.source, 'model'),
+          eq(costReservations.reservationKind, 'attempt'),
+          sql`${costReservations.costGrantId} IS NULL`,
+          sql`${costReservations.attemptStartedAt} >= ${costReservations.createdAt}`,
+          sql`${costReservations.attemptStartedAt} <= now() - (${unknownModelTtlMinutes} * interval '1 minute')`,
+          sql`jsonb_typeof(${costReservations.attemptMetadata}->'provider') = 'string' and length(btrim(${costReservations.attemptMetadata}->>'provider')) > 0`,
+          sql`jsonb_typeof(${costReservations.attemptMetadata}->'model') = 'string' and length(btrim(${costReservations.attemptMetadata}->>'model')) > 0`,
+        ),
+      )
+      .orderBy(costReservations.attemptStartedAt, costReservations.id)
+      .limit(batch);
+    const samples: { provider?: string; model?: string; outcome: string; ageMinutes: number }[] =
+      [];
+    let settledAtEstimate = 0;
+    for (const candidate of candidates) {
+      const evidence = staleModelAttemptEstimate(candidate.attemptMetadata);
+      if (!evidence || !candidate.attemptStartedAt) continue;
+      const [settled] = await tx
+        .update(costReservations)
+        .set({ status: 'reconciled', actualUsd: null, reconciledAt: sql`now()` })
+        .where(and(eq(costReservations.id, candidate.id), eq(costReservations.status, 'unknown')))
+        .returning({ reconciledAt: costReservations.reconciledAt });
+      if (!settled?.reconciledAt) continue;
+      const inserted = await writeCostEvent(
+        tx as unknown as Db,
+        {
+          evidence,
+          source: 'model',
+          usd: microsToUsd(storedLedgerUsdToMicros(candidate.estimatedUsd)),
+          taskId: candidate.taskId,
+          description: candidate.description,
+          reservationId: candidate.id,
+          idempotencyKey: modelAttemptEstimateKey(candidate.id),
+          addToTaskSpend: true,
+        },
+        settled.reconciledAt,
+      );
+      if (!inserted) throw new Error('Model attempt already has an estimate receipt');
+      settledAtEstimate++;
+      if (samples.length < 5)
+        samples.push({
+          provider: evidence.provider,
+          model: evidence.model,
+          outcome: modelAttemptSampleOutcome(candidate.unknownReason),
+          ageMinutes: Math.floor(
+            (settled.reconciledAt.getTime() - candidate.attemptStartedAt.getTime()) / 60_000,
+          ),
+        });
+    }
     const stale = tx
       .select({ id: costReservations.id })
       .from(costReservations)
@@ -1663,8 +1839,17 @@ export async function releaseStaleReservations(
           )
           .returning({ id: costReservations.id })
       : [];
-    return released.length + unknown.length;
+    return { released: released.length, markedUnknown: unknown.length, settledAtEstimate, samples };
   });
+  const { settledAtEstimate, samples, ...cleanup } = report;
+  if (settledAtEstimate) {
+    console.info('Settled unknown model attempts at their internal estimates', {
+      settledAtEstimate,
+      samples,
+    });
+    return { ...cleanup, settledAtEstimate };
+  }
+  return cleanup;
 }
 
 /** SQL implementation of the atomic cost port; callers never receive a transaction handle. */
@@ -1692,6 +1877,6 @@ export function createPostgresCostRepository(
     record: (input) => recordCostEvent(db, input),
     reconcile: (id, actual) => reconcileReservation(db, id, actual),
     release: (id) => releaseReservation(db, id),
-    releaseStale: (age, batch) => releaseStaleReservations(db, age, batch),
+    releaseStale: (age, batch, ttl) => releaseStaleReservations(db, age, batch, ttl),
   };
 }

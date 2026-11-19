@@ -19,6 +19,8 @@ export interface ApnsAlert {
   body: string;
   /** Matches UNNotificationCategory identifiers registered by the iOS app. */
   category?: string;
+  /** Last useful delivery time in Unix milliseconds. */
+  expiresAt?: number;
   /** Extra payload keys the app reads from userInfo (route, approvalId, …). */
   data?: Record<string, string>;
 }
@@ -103,7 +105,7 @@ export class ApnsClient {
       ...(alert.data ?? {}),
     });
     try {
-      return await this.request(session, alert.token, payload);
+      return await this.request(session, alert.token, payload, alert.expiresAt);
     } catch (err) {
       if (err instanceof AmbiguousApnsDeliveryError) throw err;
       // Only a failure before a stream exists may get a fresh attempt.
@@ -114,8 +116,10 @@ export class ApnsClient {
           this.session(APNS_HOSTS[alert.environment]),
           alert.token,
           payload,
+          alert.expiresAt,
         );
-      } catch {
+      } catch (retryError) {
+        if (retryError instanceof AmbiguousApnsDeliveryError) throw retryError;
         throw err;
       }
     }
@@ -125,6 +129,7 @@ export class ApnsClient {
     session: ClientHttp2Session,
     token: string,
     payload: string,
+    expiresAt?: number,
   ): Promise<ApnsResult> {
     return new Promise((resolve, reject) => {
       const stream = session.request({
@@ -134,6 +139,9 @@ export class ApnsClient {
         'apns-topic': this.bundleId,
         'apns-push-type': 'alert',
         'apns-priority': '10',
+        ...(expiresAt === undefined
+          ? {}
+          : { 'apns-expiration': String(Math.floor(expiresAt / 1000)) }),
         'apns-id': randomUUID(),
         'content-type': 'application/json',
       });
