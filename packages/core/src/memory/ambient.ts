@@ -256,10 +256,13 @@ export async function fetchWeather(
   const day = data.daily;
   if (!cur || typeof cur.temperature_2m !== 'number') return null;
   const hours = parseHourly(data.hourly, data.hourly_units);
-  const dailyCondition = (code: number, date: string | undefined) =>
+  const dailyCondition = (code: number, date: string | undefined, lowC: number | undefined) =>
     condition(
       code,
-      hours.some((hour) => hour.date === date && hour.code === code),
+      typeof lowC === 'number' &&
+        Number.isFinite(lowC) &&
+        lowC <= MAX_SNOW_CORROBORATION_TEMP_C &&
+        hours.some((hour) => hour.date === date && hour.code === code),
     );
   const forecast = (day?.time ?? [])
     .slice(1)
@@ -271,14 +274,18 @@ export async function fetchWeather(
       const code = day?.weather_code?.[index] ?? MISSING_WEATHER_CODE;
       return {
         date,
-        ...dailyCondition(code, date),
+        ...dailyCondition(code, date, low),
         lowC: Math.round(low),
         highC: Math.round(high),
         precipProbabilityMax: day?.precipitation_probability_max?.[index] ?? 0,
       };
     })
     .filter((entry): entry is WeatherDay => entry !== null);
-  const today = dailyCondition(day?.weather_code?.[0] ?? MISSING_WEATHER_CODE, day?.time?.[0]);
+  const today = dailyCondition(
+    day?.weather_code?.[0] ?? MISSING_WEATHER_CODE,
+    day?.time?.[0],
+    day?.temperature_2m_min?.[0],
+  );
   const currentCondition =
     cur.weather_code == null
       ? today

@@ -1208,6 +1208,31 @@ describe('ResponseCards', () => {
     expect(html).toContain('18 km/h');
   });
 
+  it('preserves daily precipitation uncertainty when the current sky is clear', () => {
+    const html = render({
+      kind: 'weather',
+      id: 'mixed-current-day',
+      location: 'Synthetic town',
+      condition: 'clear',
+      temperature: '12°C',
+      current: { tempC: 12, precipPct: 90 },
+      days: [
+        {
+          weekday: 'Today',
+          lowC: 10,
+          highC: 15,
+          precipPct: 90,
+          description: 'clear',
+          symbol: 'clear',
+          precipitationType: 'unspecified',
+        },
+      ],
+      details: [{ label: 'Precipitation chance', value: '90%' }],
+    });
+    expect(html).toContain('Today, clear, low 10°, high 15°, 90% chance of precipitation');
+    expect(html).not.toContain('chance of rain');
+  });
+
   it('renders a conflicting weather reading with precipitation wording', () => {
     const html = render({
       kind: 'weather',

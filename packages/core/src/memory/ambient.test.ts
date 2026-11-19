@@ -304,6 +304,18 @@ describe('ambient — hourly forecast evidence', () => {
     ]);
   });
 
+  it('does not corroborate snow with hourly evidence that contradicts the daily minimum', async () => {
+    const { impl } = urlSpy({
+      ...DAILY_BODY,
+      daily: { ...DAILY_BODY.daily, weather_code: [3, 75], temperature_2m_min: [10, 10] },
+      hourly_units: { temperature_2m: '°C' },
+      hourly: { time: ['2026-08-29T02:00'], temperature_2m: [-2], weather_code: [75] },
+    });
+    expect((await fetchWeather(37, -122, impl))?.forecast[0]?.description).toBe(
+      'precipitation type uncertain',
+    );
+  });
+
   it('keeps an unverified snow signal uncertain when no hourly block or units are returned', async () => {
     const daily = { ...DAILY_BODY.daily, weather_code: [3, 75] };
     for (const hourly of [
