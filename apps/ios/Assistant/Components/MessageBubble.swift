@@ -2587,17 +2587,19 @@ enum WeatherPresentation {
         fallback: [MessageResponseCard.WeatherDetail]
     ) -> [Metric] {
         if let current {
+            let precipitationLabel = fallback.contains { $0.label == "Precipitation chance" }
+                ? "Precipitation chance" : "Rain chance"
             return [
                 current.windKmh.map { Metric(label: "Wind", value: "\(Int($0.rounded())) km/h", symbol: "wind") },
                 current.humidity.map { Metric(label: "Humidity", value: "\(Int($0.rounded()))%", symbol: "humidity") },
-                current.precipPct.map { Metric(label: "Rain chance", value: "\(Int($0.rounded()))%", symbol: "umbrella") },
+                current.precipPct.map { Metric(label: precipitationLabel, value: "\(Int($0.rounded()))%", symbol: "umbrella") },
             ].compactMap { $0 }
         }
         return fallback
             .filter { $0.label.caseInsensitiveCompare("Today") != .orderedSame }
             .map { detail in
                 let lower = detail.label.lowercased()
-                let symbol = lower.contains("rain") ? "umbrella" : lower.contains("wind") ? "wind"
+                let symbol = lower.contains("rain") || lower.contains("precipitation") ? "umbrella" : lower.contains("wind") ? "wind"
                     : lower.contains("humid") ? "humidity" : "thermometer.medium"
                 return Metric(label: detail.label, value: detail.value, symbol: symbol)
             }
@@ -3400,6 +3402,9 @@ struct RichResponseCards: View {
                 let low = convert(day.lowC)
                 let high = convert(day.highC)
                 let rain = day.precipPct.flatMap { $0 >= 30 ? "\(Int($0.rounded()))%" : nil }
+                let description = day.description.lowercased()
+                let precipitation = description.contains("snow") || description.contains("precipitation type uncertain") || description == "unsettled"
+                    ? "precipitation" : "rain"
                 if usesAccessibilityLayout {
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 8) {
@@ -3408,7 +3413,7 @@ struct RichResponseCards: View {
                                 .symbolRenderingMode(.hierarchical)
                                 .foregroundStyle(AssistantTheme.accent(for: colorScheme))
                         }
-                        Text([ "\(low)°–\(high)°", rain.map { "\($0) rain" } ].compactMap { $0 }.joined(separator: " · "))
+                        Text([ "\(low)°–\(high)°", rain.map { "\($0) \(precipitation)" } ].compactMap { $0 }.joined(separator: " · "))
                             .font(.subheadline)
                             .monospacedDigit()
                             .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
@@ -3446,7 +3451,7 @@ struct RichResponseCards: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
                     .accessibilityElement(children: .combine)
-                    .accessibilityLabel("\(day.weekday), \(day.description), low \(low), high \(high)\(rain.map { ", \($0) chance of rain" } ?? "")")
+                    .accessibilityLabel("\(day.weekday), \(day.description), low \(low), high \(high)\(rain.map { ", \($0) chance of \(precipitation)" } ?? "")")
                 }
             }
         }
@@ -4815,6 +4820,7 @@ struct RichResponseCards: View {
     /// same names to its own icon set — and a name this build does not know
     /// falls through to the prose reading below.
     private static let weatherSymbols: [String: String] = [
+        "uncertain": "questionmark.circle",
         "clear": "sun.max.fill",
         "partly-cloudy": "cloud.sun.fill",
         "cloudy": "cloud.fill",
@@ -4833,6 +4839,7 @@ struct RichResponseCards: View {
     private func weatherSymbol(_ condition: String, symbol: String = "") -> String {
         if let named = Self.weatherSymbols[symbol.lowercased()] { return named }
         let lower = condition.lowercased()
+        if lower.contains("precipitation type uncertain") { return "questionmark.circle" }
         if lower.contains("thunder") || lower.contains("storm") { return "cloud.bolt.rain.fill" }
         if lower.contains("snow") { return "cloud.snow.fill" }
         if lower.contains("freezing rain") || lower.contains("sleet") { return "cloud.sleet.fill" }
