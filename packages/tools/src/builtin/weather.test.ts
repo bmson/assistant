@@ -406,7 +406,7 @@ describe('lookupWeather', () => {
     expect(calls).toHaveLength(1);
   });
 
-  it('asks for no hourly data unless a date or time was requested', async () => {
+  it('requests verification columns only when no hour was requested', async () => {
     const { impl, calls } = fakeFetch();
     await lookupWeather({
       db: UNUSED_DB,
@@ -415,7 +415,9 @@ describe('lookupWeather', () => {
       days: 6,
       fetchImpl: impl,
     });
-    expect(calls[calls.length - 1]).not.toContain('hourly=');
+    expect(new URL(calls.at(-1) ?? '').searchParams.get('hourly')).toBe(
+      'temperature_2m,weather_code',
+    );
   });
 
   it('answers for a named part of the day', async () => {
@@ -443,6 +445,45 @@ describe('lookupWeather', () => {
       label: 'midday',
       precipProbabilityMax: 70,
     });
+  });
+
+  it('keeps contradicted snow uncertain in the selected day and event time', async () => {
+    const reading = hourlyBody('2026-08-29', [12, 13], { 12: 75, 13: 75 });
+    const { impl } = fakeFetch({
+      weather: {
+        ...reading,
+        daily: {
+          ...reading.daily,
+          weather_code: [3, 75, 61],
+          precipitation_probability_max: [10, 95, 80],
+        },
+        hourly_units: { temperature_2m: '°C' },
+        hourly: { ...reading.hourly, precipitation_probability: [90, 95] },
+      },
+    });
+    const result = await lookupWeather({
+      db: UNUSED_DB,
+      agentId: 'agent-1',
+      place: 'San Francisco',
+      days: 6,
+      date: '2026-08-29',
+      startHour: 12,
+      endHour: 13,
+      fetchImpl: impl,
+    });
+    const target = targetOf(result);
+    expect(target.day).toMatchObject({
+      description: 'precipitation type uncertain',
+      precipProbabilityMax: 95,
+    });
+    expect(target.windows[0]).toMatchObject({
+      description: 'precipitation type uncertain',
+      precipProbabilityMax: 95,
+    });
+    expect(target.hours.map((hour) => hour.description)).toEqual([
+      'precipitation type uncertain',
+      'precipitation type uncertain',
+    ]);
   });
 
   it('matches the requested hour on a short DST day', async () => {

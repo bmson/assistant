@@ -573,6 +573,7 @@ function speed(value: unknown): string | undefined {
  * is its own sky rather than the overcast one.
  */
 const WEATHER_SYMBOLS: ReadonlyArray<readonly [RegExp, string]> = [
+  [/precipitation type uncertain/, 'uncertain'],
   [/thunder/, 'thunderstorm'],
   [/snow/, 'snow'],
   [/freezing rain/, 'sleet'],
@@ -617,13 +618,21 @@ function weatherDetail(
   return { label, value, ...(symbol ? { symbol } : {}) };
 }
 
+function weatherProbabilityName(description: string): string {
+  return /snow|precipitation type uncertain|^unsettled$/i.test(description)
+    ? 'precipitation'
+    : 'rain';
+}
+
 /** "16–23°C, light rain, 80% chance of rain" — one day on one line. */
 function weatherDayValue(day: RecordValue): string {
   const rain = numeric(day.precipProbabilityMax);
   return [
     range(day.lowC, day.highC) ?? '',
     string(day.description),
-    rain !== undefined && rain >= NOTABLE_RAIN_PROBABILITY ? `${rain}% chance of rain` : '',
+    rain !== undefined && rain >= NOTABLE_RAIN_PROBABILITY
+      ? `${rain}% chance of ${weatherProbabilityName(string(day.description))}`
+      : '',
   ]
     .filter(Boolean)
     .join(', ');
@@ -670,12 +679,21 @@ function weatherCardDay(
 export function weatherResponseCards(ambient?: string): ResponseCard[] {
   if (!ambient) return [];
   const weather =
-    /Weather there:\s*([^,]+),\s*(-?\d+)°C\s*\(today\s*(-?\d+)–(-?\d+)°C,\s*(\d+)% chance of rain, wind\s*(\d+) km\/h(?:, humidity\s*(\d+)%)?\)/i.exec(
+    /Weather there:\s*([^,]+),\s*(-?\d+)°C\s*\(today\s*(-?\d+)–(-?\d+)°C,\s*(\d+)% chance of (rain|precipitation), wind\s*(\d+) km\/h(?:, humidity\s*(\d+)%)?\)/i.exec(
       ambient,
     );
   if (!weather) return [];
-  const [, condition = '', temperature = '', low = '', high = '', rain = '', wind = '', humidity] =
-    weather;
+  const [
+    ,
+    condition = '',
+    temperature = '',
+    low = '',
+    high = '',
+    rain = '',
+    precipName = '',
+    wind = '',
+    humidity,
+  ] = weather;
   const location =
     /Owner's current location:\s*(?:near\s+)?([^,(\n.]+)/i.exec(ambient)?.[1]?.trim() ||
     'Right now';
@@ -693,9 +711,10 @@ export function weatherResponseCards(ambient?: string): ResponseCard[] {
   const days = [
     weatherCardDay('Today', { lowC: low, highC: high, precipProbabilityMax: rain }, condition),
     ...coming.split(';').map((entry) => {
-      const day = /^(\w+)\s+(-?\d+)–(-?\d+)°C,\s*([^,]+?)(?:,\s*(\d+)% chance of rain)?\.?$/.exec(
-        entry.trim(),
-      );
+      const day =
+        /^(\w+)\s+(-?\d+)–(-?\d+)°C,\s*([^,]+?)(?:,\s*(\d+)% chance of (?:rain|precipitation))?\.?$/.exec(
+          entry.trim(),
+        );
       if (!day) return undefined;
       const [, weekday = '', dayLow, dayHigh, description = '', dayRain] = day;
       // The ambient line omits a rain chance under 30%; absent is not zero.
@@ -727,7 +746,10 @@ export function weatherResponseCards(ambient?: string): ResponseCard[] {
         { label: 'Today', value: `${low}–${high}°C` },
         { label: 'Wind', value: `${wind} km/h` },
         ...(humidity ? [{ label: 'Humidity', value: `${humidity}%` }] : []),
-        { label: 'Rain chance', value: `${rain}%` },
+        {
+          label: precipName === 'rain' ? 'Rain chance' : 'Precipitation chance',
+          value: `${rain}%`,
+        },
         ...forecast,
       ],
     },
@@ -797,13 +819,22 @@ export function weatherLookupResponseCards(evidence: ActionEvidence[]): Response
       ? details([
           // iOS stamps the card with this day; both clients read it as a label.
           ['Day', string(target?.weekday)],
-          ['Rain chance', percent(targetDay.precipProbabilityMax)],
+          [
+            weatherProbabilityName(condition) === 'rain' ? 'Rain chance' : 'Precipitation chance',
+            percent(targetDay.precipProbabilityMax),
+          ],
         ])
       : details([
           ['Today', range(current?.lowC, current?.highC)],
           ['Wind', speed(current?.windKmh)],
           ['Humidity', percent(current?.humidity)],
-          ['Rain chance', percent(current?.precipProbabilityMax)],
+          [
+            current?.dailyPrecipitationType === 'unspecified' ||
+            weatherProbabilityName(condition) === 'precipitation'
+              ? 'Precipitation chance'
+              : 'Rain chance',
+            percent(current?.precipProbabilityMax),
+          ],
         ]);
 
     // The headlined day is already the card's temperature and condition, so it
