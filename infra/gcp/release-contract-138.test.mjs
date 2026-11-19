@@ -33,7 +33,7 @@ test('current images declare the additive cost accounting migration on PostgreSQ
   for (const role of roles) {
     assert.deepEqual(contract.components[role].schema.postgres, { min: 140, max: 140 });
     assert.deepEqual(contract.components[role].schema.firestore, { min: 1, max: 1 });
-    assert.throws(() => validateManifest(manifest('postgres', 140, [role])), /incompatible/);
+    assert.throws(() => validateManifest(manifest('postgres', 139, [role])), /incompatible/);
   }
 });
 
