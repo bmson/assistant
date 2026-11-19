@@ -6,6 +6,7 @@ import { readMcpRpcResponse } from './mcp-transport.js';
 const VERSION = '2026-07-28';
 const MAX_BYTES = 300_000;
 const MAX_TOOLS = 80;
+const MAX_LIST_PAGES = 8;
 
 export interface McpDiscoveryQualificationOptions {
   /** Explicit local qualification only. Never used by connection discovery or execution. */
@@ -19,8 +20,7 @@ export interface McpDiscoveryQualification {
   /** Self-reported, unverified display metadata; never authorization authority. */
   serverInfo?: { name: string; version: string };
   tools: Array<{ name: string; description?: string; inputSchema: Record<string, unknown> }>;
-  nextCursor?: string;
-  complete: boolean;
+  complete: true;
 }
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -43,7 +43,7 @@ function hasHeaderAnnotation(value: unknown): boolean {
  * Opt-in, credential-free, loopback-only discovery qualification. This is not a
  * production MCP client or a protocol activation flag. It deliberately exposes
  * no arbitrary RPC method, handshake fallback, session, authentication, or tool
- * execution. JSON or request-scoped SSE, one tools page, no retries; metadata remains untrusted.
+ * execution. JSON or request-scoped SSE, bounded tools pagination, no retries; metadata remains untrusted.
  *
  * Binding: https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http
  * Discovery: https://modelcontextprotocol.io/specification/2026-07-28/server/discover
@@ -90,7 +90,7 @@ export async function qualifyMcpDiscovery(
       const agent = pinnedAgent(target);
       const session = { endpoint: target.endpoint, agent };
       const fetcher = options.fetchImpl;
-      async function rpc(method: 'server/discover' | 'tools/list', id: number) {
+      async function rpc(method: 'server/discover' | 'tools/list', id: number, cursor?: string) {
         signal.throwIfAborted();
         const init: RequestInit = {
           method: 'POST',
@@ -105,6 +105,7 @@ export async function qualifyMcpDiscovery(
             id,
             method,
             params: {
+              ...(cursor === undefined ? {} : { cursor }),
               _meta: {
                 'io.modelcontextprotocol/protocolVersion': VERSION,
                 'io.modelcontextprotocol/clientInfo': {
@@ -176,48 +177,60 @@ export async function qualifyMcpDiscovery(
           );
           serverInfo = { name: info.name, version: info.version };
         }
-        const listing = await rpc('tools/list', 2);
-        requireValue(
-          Array.isArray(listing.tools) && listing.tools.length <= MAX_TOOLS,
-          'MCP qualification tool page is invalid or exceeds its bound.',
-        );
         const names = new Set<string>();
-        const tools = listing.tools.map((tool) => {
+        const cursors = new Set<string>();
+        const tools: McpDiscoveryQualification['tools'] = [];
+        let cursor: string | undefined;
+        for (let page = 1; ; page++) {
+          const listing = await rpc('tools/list', page + 1, cursor);
           requireValue(
-            record(tool) &&
-              text(tool.name, 128) &&
-              tool.name.trim() === tool.name &&
-              !names.has(tool.name),
-            'MCP qualification tool identity is invalid or repeated.',
+            Array.isArray(listing.tools) && tools.length + listing.tools.length <= MAX_TOOLS,
+            'MCP qualification tool page is invalid or exceeds its bound.',
           );
-          requireValue(record(tool.inputSchema), 'MCP qualification tool input schema is invalid.');
-          // Header schema validation and execution are outside this JSON discovery slice.
+          for (const tool of listing.tools) {
+            requireValue(
+              record(tool) &&
+                text(tool.name, 128) &&
+                tool.name.trim() === tool.name &&
+                !names.has(tool.name),
+              'MCP qualification tool identity is invalid or repeated.',
+            );
+            requireValue(
+              record(tool.inputSchema),
+              'MCP qualification tool input schema is invalid.',
+            );
+            // Header schema validation and execution are outside this JSON discovery slice.
+            requireValue(
+              !hasHeaderAnnotation(tool.inputSchema),
+              'MCP qualification does not support annotated tool headers.',
+            );
+            requireValue(
+              tool.description === undefined ||
+                (typeof tool.description === 'string' && tool.description.length <= 1_200),
+              'MCP qualification tool description exceeds its bound.',
+            );
+            names.add(tool.name);
+            tools.push({
+              name: tool.name,
+              ...(tool.description === undefined ? {} : { description: tool.description }),
+              inputSchema: tool.inputSchema,
+            });
+          }
           requireValue(
-            !hasHeaderAnnotation(tool.inputSchema),
-            'MCP qualification does not support annotated tool headers.',
+            listing.nextCursor === undefined || text(listing.nextCursor, 4_096),
+            'MCP qualification pagination cursor is invalid.',
           );
-          requireValue(
-            tool.description === undefined ||
-              (typeof tool.description === 'string' && tool.description.length <= 1_200),
-            'MCP qualification tool description exceeds its bound.',
-          );
-          names.add(tool.name);
-          return {
-            name: tool.name,
-            ...(tool.description === undefined ? {} : { description: tool.description }),
-            inputSchema: tool.inputSchema,
-          };
-        });
-        requireValue(
-          listing.nextCursor === undefined || text(listing.nextCursor, 4_096),
-          'MCP qualification pagination cursor is invalid.',
-        );
+          cursor = listing.nextCursor;
+          if (cursor === undefined) break;
+          requireValue(!cursors.has(cursor), 'MCP qualification pagination cursor repeated.');
+          requireValue(page < MAX_LIST_PAGES, 'MCP qualification exceeded the tool page limit.');
+          cursors.add(cursor);
+        }
         return {
           protocolVersion: VERSION,
           ...(serverInfo === undefined ? {} : { serverInfo }),
           tools,
-          ...(listing.nextCursor === undefined ? {} : { nextCursor: listing.nextCursor }),
-          complete: listing.nextCursor === undefined,
+          complete: true,
         };
       } finally {
         agent.destroy();

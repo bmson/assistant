@@ -68,19 +68,113 @@ describe('explicit local MCP 2026-07-28 discovery qualification', () => {
     }
   });
 
-  it('does not follow a session ID or pagination cursor into additional requests', async () => {
+  it('follows opaque cursors with unique IDs and no session or action requests', async () => {
+    const cursor = 'opaque /+=? cursor';
+    const secondTool = { ...tool, name: 'projects.list' };
+    const f = fixture(discovery(), { resultType: 'complete', tools: [tool], nextCursor: cursor });
+    f.fetchImpl.mockResolvedValueOnce(rpc(3, { resultType: 'complete', tools: [secondTool] }));
+    await expect(f.run()).resolves.toMatchObject({ tools: [tool, secondTool], complete: true });
+    const requests = bodies(f.fetchImpl);
+    expect(requests.map((b) => b.id)).toEqual([1, 2, 3]);
+    expect(requests.map((b) => b.method)).toEqual(['server/discover', 'tools/list', 'tools/list']);
+    expect(requests[1].params.cursor).toBeUndefined();
+    expect(requests[2].params).toEqual({ ...requests[1].params, cursor });
+    expect(f.fetchImpl).toHaveBeenCalledTimes(3);
+    for (const [, init] of f.fetchImpl.mock.calls) {
+      expect(new Headers(init?.headers).has('mcp-session-id')).toBe(false);
+      expect(new Headers(init?.headers).has('authorization')).toBe(false);
+    }
+  });
+
+  it.each([
+    { label: 'repeated', cursors: ['A', 'A'] },
+    { label: 'cyclic', cursors: ['A', 'B', 'A'] },
+  ])('rejects $label cursors before another request', async ({ cursors }) => {
+    const f = fixture();
+    f.fetchImpl.mockReset().mockResolvedValueOnce(rpc(1, discovery()));
+    cursors.forEach((nextCursor, i) => {
+      f.fetchImpl.mockResolvedValueOnce(
+        rpc(2 + i, { resultType: 'complete', tools: [], nextCursor }),
+      );
+    });
+    await expect(f.run()).rejects.toThrow();
+    expect(f.fetchImpl).toHaveBeenCalledTimes(1 + cursors.length);
+    expect(bodies(f.fetchImpl).map((b) => b.id)).toEqual(
+      Array.from({ length: 1 + cursors.length }, (_, i) => 1 + i),
+    );
+  });
+
+  it('rejects a duplicate tool on a later page rather than silently replacing it', async () => {
+    const f = fixture(discovery(), { resultType: 'complete', tools: [tool], nextCursor: 'page2' });
+    f.fetchImpl.mockResolvedValueOnce(rpc(3, { resultType: 'complete', tools: [tool] }));
+    await expect(f.run()).rejects.toThrow();
+    expect(f.fetchImpl).toHaveBeenCalledTimes(3);
+  });
+
+  it('rejects cumulative tool overflow even when each page is within the limit', async () => {
+    const tools = (start: number, count: number) =>
+      Array.from({ length: count }, (_, i) => ({ ...tool, name: `get_${start + i}` }));
     const f = fixture(discovery(), {
       resultType: 'complete',
-      tools: [tool],
-      nextCursor: 'next-synthetic-page',
+      tools: tools(0, 40),
+      nextCursor: 'page2',
     });
+    f.fetchImpl.mockResolvedValueOnce(rpc(3, { resultType: 'complete', tools: tools(40, 41) }));
+    await expect(f.run()).rejects.toThrow();
+    expect(f.fetchImpl).toHaveBeenCalledTimes(3);
+  });
+
+  it('accepts a terminal eighth page at the cumulative eighty-tool limit', async () => {
+    const f = fixture();
+    f.fetchImpl.mockReset().mockResolvedValueOnce(rpc(1, discovery()));
+    for (let page = 0; page < 8; page++)
+      f.fetchImpl.mockResolvedValueOnce(
+        rpc(2 + page, {
+          resultType: 'complete',
+          tools: Array.from({ length: 10 }, (_, i) => ({ ...tool, name: `get_${page * 10 + i}` })),
+          ...(page === 7 ? {} : { nextCursor: `page${page + 1}` }),
+        }),
+      );
+    const result = await f.run();
+    expect(result.tools).toHaveLength(80);
+    expect(result.complete).toBe(true);
+    expect(result).not.toHaveProperty('nextCursor');
+    expect(f.fetchImpl).toHaveBeenCalledTimes(9);
+    expect(bodies(f.fetchImpl).map((b) => b.id)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+  });
+
+  it('can finish at eighty tools when a bounded continuation is empty', async () => {
+    const f = fixture(discovery(), {
+      resultType: 'complete',
+      tools: Array.from({ length: 80 }, (_, i) => ({ ...tool, name: `get_${i}` })),
+      nextCursor: 'empty-final',
+    });
+    f.fetchImpl.mockResolvedValueOnce(rpc(3, { resultType: 'complete', tools: [] }));
     await expect(f.run()).resolves.toMatchObject({
-      tools: [tool],
-      nextCursor: 'next-synthetic-page',
-      complete: false,
+      complete: true,
+      tools: expect.arrayContaining([{ ...tool, name: 'get_79' }]),
     });
-    expect(f.fetchImpl).toHaveBeenCalledTimes(2);
-    expect(bodies(f.fetchImpl).map((b) => b.method)).toEqual(['server/discover', 'tools/list']);
+    expect(f.fetchImpl).toHaveBeenCalledTimes(3);
+  });
+
+  it('rejects a continuation after eight pages without requesting a ninth page', async () => {
+    const f = fixture();
+    f.fetchImpl.mockReset().mockResolvedValueOnce(rpc(1, discovery()));
+    for (let page = 0; page < 8; page++)
+      f.fetchImpl.mockResolvedValueOnce(
+        rpc(2 + page, { resultType: 'complete', tools: [], nextCursor: `page${page + 1}` }),
+      );
+    await expect(f.run()).rejects.toThrow();
+    expect(f.fetchImpl).toHaveBeenCalledTimes(9);
+  });
+
+  it('bounds a hanging continuation by the same transaction deadline without retries', async () => {
+    const f = fixture(discovery(), { resultType: 'complete', tools: [tool], nextCursor: 'page2' });
+    f.fetchImpl.mockImplementationOnce(() => new Promise(() => {}));
+    await expect(f.run({ timeoutMs: 30 })).rejects.toThrow();
+    expect(f.fetchImpl).toHaveBeenCalledTimes(3);
+    expect(bodies(f.fetchImpl).map((b) => b.id)).toEqual([1, 2, 3]);
+    expect(new Set(f.fetchImpl.mock.calls.map(([, init]) => init?.signal)).size).toBe(1);
   });
 
   it.each([false, undefined])(
@@ -405,4 +499,70 @@ describe('loopback wire qualification with the default pinned transport', () => 
       }
     },
   );
+  it('follows a real opaque cursor through mixed JSON and SSE pages without sessions', async () => {
+    const cursor = 'opaque +/== ? value';
+    const requests: Array<{
+      method: string;
+      id: number;
+      params: Record<string, unknown>;
+      session: string | undefined;
+    }> = [];
+    let closed = false;
+    const server = createServer((req, res) => {
+      let raw = '';
+      req.setEncoding('utf8');
+      req.on('data', (chunk) => {
+        raw += chunk;
+      });
+      req.on('end', () => {
+        const body = JSON.parse(raw);
+        requests.push({ ...body, session: req.headers['mcp-session-id'] });
+        const continuation = body.id === 3;
+        const result =
+          body.method === 'server/discover'
+            ? discovery()
+            : continuation
+              ? { resultType: 'complete', tools: [{ ...tool, name: 'projects.list' }] }
+              : { resultType: 'complete', tools: [tool], nextCursor: cursor };
+        res.writeHead(200, {
+          'content-type': continuation ? 'text/event-stream' : 'application/json',
+          'mcp-session-id': 'not-authority',
+        });
+        if (!continuation) res.end(JSON.stringify({ jsonrpc: '2.0', id: body.id, result }));
+        else {
+          res.on('close', () => {
+            closed = true;
+          });
+          res.write('data: {"jsonrpc":"2.0","method":"notifications/progress","params":{}}\n\n');
+          res.write(`data: ${JSON.stringify({ jsonrpc: '2.0', id: body.id, result })}\n\n`);
+        }
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const address = server.address();
+      if (!address || typeof address === 'string') throw new Error('Fixture did not bind');
+      const result = await qualifyMcpDiscovery(`http://127.0.0.1:${address.port}/mcp`, {
+        enabled: true,
+        timeoutMs: 1000,
+      });
+      expect(result.tools.map((t) => t.name)).toEqual(['projects.get', 'projects.list']);
+      expect(result.complete).toBe(true);
+      expect(result).not.toHaveProperty('nextCursor');
+      expect(requests.map((r) => r.id)).toEqual([1, 2, 3]);
+      expect(requests.map((r) => r.method)).toEqual([
+        'server/discover',
+        'tools/list',
+        'tools/list',
+      ]);
+      expect(requests[2]?.params).toEqual({ ...requests[1]?.params, cursor });
+      expect(requests.every((r) => r.session === undefined)).toBe(true);
+      await vi.waitFor(() => expect(closed).toBe(true));
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) =>
+        server.close((e) => (e ? reject(e) : resolve())),
+      );
+    }
+  });
 });
