@@ -45,6 +45,16 @@ Never test against the production installation. Use the Firestore emulator, the 
 
 Critical paths: A1 → A11 → C2 → D7 (money) and B2 → C6 → D3 (conflict proposals).
 
+## Engineering handoff · 2026-11-19
+
+- Budget visibility, parked-work recovery, and briefing continuity. [A1 settlement](https://github.com/bmson/assistant/pull/949), [A2 wake](https://github.com/bmson/assistant/pull/954), [A3 watchdog](https://github.com/bmson/assistant/pull/960), [A3 recovery window](https://github.com/bmson/assistant/pull/970), [A10 legacy brief retirement](https://github.com/bmson/assistant/pull/956).
+- Chat isolation, checklist deduplication, and self-repair pacing. [A4 private replies](https://github.com/bmson/assistant/pull/948), [A5 checklist](https://github.com/bmson/assistant/pull/944), [A7 pacing](https://github.com/bmson/assistant/pull/947), [A15 originating turn](https://github.com/bmson/assistant/pull/965), [A15 read isolation](https://github.com/bmson/assistant/pull/969).
+- Intake health, local time, weather evidence, and urgent delivery. [A11 mail pipeline](https://github.com/bmson/assistant/pull/957), [A13 owner time](https://github.com/bmson/assistant/pull/952), [A13 Pulse time](https://github.com/bmson/assistant/pull/968), [A16 weather](https://github.com/bmson/assistant/pull/945), [A17 urgent SMS](https://github.com/bmson/assistant/pull/950), [H4 canaries](https://github.com/bmson/assistant/pull/966).
+
+The Phase 0 gate requires seven actual days of evidence covering daily briefing delivery, chat isolation, cost holds under 25% of the daily cap, extraction on days with eligible mail, and zero texts for routine replies. Record owner and household opt-ins before using their optional sources or delivery channels.
+
+H1 covers five of 28 synthetic scenarios on PostgreSQL and Firestore. The seven on-time replay deliveries per driver include both D7 bill reminders. Production recall remains unmeasured. [H1 replay](https://github.com/bmson/assistant/pull/972), [D7 bill timing](https://github.com/bmson/assistant/pull/974), [scorecard and coverage](golden-signals.md#running-the-replay).
+
 ## Status board
 
 Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 2–4 days, L 1–2 weeks.
@@ -91,7 +101,7 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | D4  | Leave-by with live traffic                                             | 3     | M    | B5, D1     | open                                                          |
 | D5  | Weather impact on outdoor events                                       | 3     | M    | B6, D1     | open                                                          |
 | D6  | Occasions and gifts                                                    | 3     | M    | C5, D1     | open                                                          |
-| D7  | Money: bills, renewals, unusual charges                                | 3     | M    | C2, C3     | in progress (owner-local bill timing and payment evidence)   |
+| D7  | Money: bills, renewals, unusual charges                                | 3     | M    | C2, C3     | in progress (owner-local bill timing and payment evidence)    |
 | D8  | School: early dismissal, closures, breaks, forms                       | 3     | M    | C6, C7     | open                                                          |
 | D9  | Home and car: deliveries, maintenance                                  | 3     | S    | C2         | open                                                          |
 | D10 | Weekly reconnect suggestions                                           | 4     | S    | C8         | open                                                          |
@@ -119,7 +129,7 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | G2  | Health data minimization                                               | 4     | M    | —          | open                                                          |
 | G3  | Permissions live in policy, not memory                                 | 5     | S    | —          | open                                                          |
 | G4  | Household consent and visibility                                       | 5     | S    | B2         | open                                                          |
-| H1  | Golden-signal benchmark harness                                        | 3     | L    | —          | in progress (S13, S14, S16, S17, S24 on both drivers)          |
+| H1  | Golden-signal benchmark harness                                        | 3     | L    | —          | in progress (S13, S14, S16, S17, S24 on both drivers)         |
 | H2  | Weekly missed-signal audit                                             | 5     | M    | H1         | open                                                          |
 | H3  | Proactive telemetry                                                    | 5     | M    | —          | open                                                          |
 | H4  | Daily canary                                                           | 0     | S    | —          | in review (source checks and one daily health alert)          |
