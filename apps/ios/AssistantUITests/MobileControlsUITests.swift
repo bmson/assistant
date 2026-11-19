@@ -152,7 +152,7 @@ final class MobileControlsUITests: XCTestCase {
                             try revealTogether([facts.firstMatch], surface: surface, app: app, fullyVisible: false)
                         }
                         try capture(app, key + "-expanded-source")
-                        try revealTogether([details], surface: surface, app: app, upwards: false)
+                        try revealTogether([details], surface: surface, app: app)
                         details.tap()
                         let collapsed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
                             facts.count == 0 && summaries.count == 0
@@ -187,16 +187,53 @@ final class MobileControlsUITests: XCTestCase {
     }
 
     private func revealTogether(_ elements: [XCUIElement], surface: XCUIElement,
-                                app: XCUIApplication, upwards: Bool = true, fullyVisible: Bool = true) throws {
+                                app: XCUIApplication, fullyVisible: Bool = true) throws {
         let key = surface.identifier
+        let nestedScroll = surface.descendants(matching: .scrollView).firstMatch
+        let scrolling = surface.elementType == .scrollView ? surface : (nestedScroll.exists ? nestedScroll : surface)
         while true {
             try checkBudget()
-            if elements.allSatisfy({ $0.exists && $0.isHittable && (fullyVisible ? app.frame.contains($0.frame) : app.frame.intersects($0.frame)) }) { return }
-            guard surfaceSwipes[key, default: 0] < 12 else { break }
+            let viewport = scrolling.frame.intersection(app.frame)
+            guard !viewport.isNull, viewport.width > 0, viewport.height > 24 else { break }
+            func visible(_ element: XCUIElement) -> Bool {
+                guard element.exists else { return false }
+                let frame = element.frame
+                return element.isHittable && (fullyVisible ? viewport.contains(frame) : viewport.intersects(frame))
+            }
+            guard let target = elements.first(where: { !visible($0) }) else { return }
+            guard target.exists, surfaceSwipes[key, default: 0] < 12 else { break }
+            let frame = target.frame
+            guard frame.minY.isFinite, frame.maxY.isFinite else { break }
+            let displacement = scrollDisplacement(target: frame, viewport: viewport, fullyVisible: fullyVisible)
+            let upward = displacement > 0
+            let startY = upward ? viewport.maxY - 12 : viewport.minY + 12
+            let distance = min(abs(displacement), viewport.height - 24)
+            let endY = startY + (upward ? -distance : distance)
+            let origin = app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
+            let start = origin.withOffset(CGVector(dx: viewport.midX - app.frame.minX, dy: startY - app.frame.minY))
+            let end = origin.withOffset(CGVector(dx: viewport.midX - app.frame.minX, dy: endY - app.frame.minY))
             surfaceSwipes[key, default: 0] += 1
-            if upwards { surface.swipeUp() } else { surface.swipeDown() }
+            print("NATIVE_SCROLL surface=\(key) gesture=\(surfaceSwipes[key, default: 0]) target=\(frame) viewport=\(viewport) displacement=\(displacement)")
+            // A bounded controlled drag avoids fling overshoot. Re-evaluate the
+            // target after every gesture, including when a return overshoots it.
+            start.press(forDuration: 0.05, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.15)
         }
-        try require(false, "Could not expose required native elements within 12 total swipes for this surface", app)
+        try require(false, "Could not expose required native elements within 12 total controlled drags for this surface", app)
+    }
+
+    private func scrollDisplacement(target: CGRect, viewport: CGRect, fullyVisible: Bool) -> CGFloat {
+        let desired: CGFloat
+        if !fullyVisible || target.height > viewport.height {
+            desired = target.midY - viewport.midY
+        } else if target.minY < viewport.minY + 8 {
+            desired = target.minY - (viewport.minY + 8)
+        } else if target.maxY > viewport.maxY - 8 {
+            desired = target.maxY - (viewport.maxY - 8)
+        } else {
+            desired = target.midY - viewport.midY
+        }
+        let distance = max(20, min(abs(desired), viewport.height * 0.65))
+        return desired < 0 ? -distance : distance
     }
 
     /// Coordinate conversion can subtract fractional screen origins from each
