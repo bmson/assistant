@@ -403,6 +403,32 @@ grep -Eiq 'requires .*GitHub .*identity|requires .*workflow identity' <<<"$out" 
   fail "direct unbound BASIC5 release needs a clear pre-staging error: $out"
 [[ ! -s "$STUB_CALLS" ]] || fail "direct unbound BASIC5 release must stop before any provider reads or mutations"
 
+# The API jump needs the protected disabled-pair verifier before delivery is held.
+reset
+run_transition_precheck() (
+  set_valid_basic5_context
+  export GCP_PROJECT=bmson-assistant GCP_REGION=us-west1
+  export IMAGE_TAG="$GITHUB_SHA" RELEASE_COMPONENTS=agent,web
+  if [[ "$1" == disabled ]]; then
+    export OWNER_RELEASE_BOOTSTRAP_RECEIPT='{"format":1,"kind":"disabled-bootstrap","source":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}'
+    export OWNER_RELEASE_BOOTSTRAP_SHA256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  fi
+  bash "$ROOT/release-firestore.sh" --compatibility-check-only
+)
+if out="$(run_transition_precheck open 2>&1)"; then fail "ordinary API 1-to-3 release must refuse"; fi
+if grep -q 'owner-release-api-transition' "$STUB_CALLS"; then fail "open pair entered disabled transition"; fi
+: >"$STUB_CALLS"
+if out="$(STUB_INDEX_STATUS=1 run_transition_precheck disabled 2>&1)"; then
+  fail "disabled transition cannot proceed when protected verification fails"
+fi
+grep -Fxq 'pnpm exec tsx scripts/owner-release-api-transition.ts' "$STUB_CALLS" ||
+  fail "disabled transition verifier was not invoked"
+: >"$STUB_CALLS"
+run_transition_precheck disabled || fail "verified transition should complete the read-only precheck"
+if grep -Ev '^gcloud run (services|revisions) describe |^pnpm exec tsx scripts/owner-release-api-transition.ts$' "$STUB_CALLS"; then
+  fail "transition precheck issued an unexpected provider command"
+fi
+
 # Valid protected metadata cannot authorize BASIC5 with the wrong driver or
 # component scope. Both refusals must happen before any provider call.
 reset

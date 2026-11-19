@@ -2,6 +2,7 @@
 import { type RetirementPlan, WEB_SERVICE } from './owner-web-tag-retirement.js';
 
 const ROOT = 'https://run.googleapis.com/v2/';
+const AGENT_SERVICE = WEB_SERVICE.replace(/web$/, 'agent');
 const OPERATION =
   /^projects\/bmson-assistant\/locations\/us-west1\/operations\/[A-Za-z0-9_-]{1,128}$/;
 const LIMIT = 2 * 1024 * 1024;
@@ -83,6 +84,12 @@ export function nativeRetirementClient(
   }
   return {
     readService: () => json(WEB_SERVICE),
+    readAgentService: () => json(AGENT_SERVICE),
+    readAgentRevision: (name: string) => {
+      if (!/^assistant-agent-[a-z0-9-]{1,49}$/.test(name))
+        throw new Error('Untrusted native agent revision');
+      return json(`${AGENT_SERVICE}/revisions/${name}`);
+    },
     readRevision: (name: string) => {
       if (!/^assistant-web-[a-z0-9-]{1,63}$/.test(name))
         throw new Error('Untrusted native revision');

@@ -102,6 +102,19 @@ function project(service: Obj, revision: Obj, context: Context) {
 }
 
 describe('sanitized native current web profile compatibility', () => {
+  it.each(['P', 'R'] as const)('pins MCP sign-in off for disabled API 3 web %s', (role) => {
+    const service = clone(fixture.service);
+    const context = contextFor(service);
+    context.releaseEnv.ASSISTANT_RELEASE_API_CONTRACT = '3';
+    context.releaseEnv.MCP_OAUTH_ENABLED = 'false';
+    service.template.containers[0].env.push({ name: 'MCP_OAUTH_ENABLED', value: 'true' });
+    const planned = creationTemplate(service.template, context, role) as Obj;
+    expect(
+      planned.containers[0].env.filter((value: Obj) => value.name === 'MCP_OAUTH_ENABLED'),
+    ).toEqual([{ name: 'MCP_OAUTH_ENABLED', value: 'false' }]);
+    context.releaseEnv.MCP_OAUTH_ENABLED = 'true';
+    expect(() => creationTemplate(service.template, context, role)).toThrow();
+  });
   it.each(['P', 'R'] as const)(
     'binds the cost manifest to the actual provider version for %s',
     (role) => {

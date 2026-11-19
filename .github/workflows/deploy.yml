@@ -582,6 +582,14 @@ jobs:
         env:
           OWNER_TAG_RELEASE_SOURCE: ${{ needs.plan.outputs.sha }}
         run: pnpm exec tsx scripts/owner-web-release-operator-hold.ts --wait
+      - name: Check live Firestore pair compatibility before delivery guard mutations
+        if: steps.release_path.outputs.firestore_pair == 'true'
+        env:
+          IMAGE_TAG: ${{ needs.plan.outputs.sha }}
+          RELEASE_COMPONENTS: ${{ needs.plan.outputs.components }}
+          GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          GCP_DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+        run: bash infra/gcp/release-firestore.sh --compatibility-check-only
       - name: Release Firestore pair with delivery guard
         if: steps.release_path.outputs.firestore_pair == 'true'
         env:
@@ -669,6 +677,18 @@ jobs:
           path: ${{ runner.temp }}/owner-web-tag-barrier.json
           if-no-files-found: ignore
           retention-days: 90
+      - name: Archive bounded disabled-bootstrap agent successor evidence
+        if: always() && steps.release_path.outputs.firestore_pair == 'true'
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
+        with:
+          name: owner-bootstrap-agent-successor-${{ needs.plan.outputs.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/owner-bootstrap-agent-paused-peer.json
+            ${{ runner.temp }}/owner-bootstrap-agent-successor-attempted.json
+            ${{ runner.temp }}/owner-bootstrap-agent-successor-unknown.json
+            ${{ runner.temp }}/owner-bootstrap-agent-successor-observed_exact_successor.json
+          if-no-files-found: ignore
+          retention-days: 14
       - name: Keep only the current deployment
         if: vars.CURRENT_ONLY_CLEANUP == 'true'
         run: >-

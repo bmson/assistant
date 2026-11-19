@@ -731,6 +731,10 @@ describe('protected read-only release inventory', () => {
   });
   it.each([
     'bound',
+    'bound-api3',
+    'mixed-api',
+    'mixed-api3-manifests',
+    'mixed-api3-sources',
     'bound-local586',
     'bound-disabled-wif',
     'bound-disabled-local',
@@ -828,6 +832,31 @@ describe('protected read-only release inventory', () => {
           .replaceAll('assistant-agent', `assistant-${component}`)
           .replaceAll('/agent@', `/${component}@`),
       ) as ReturnType<typeof service>;
+      if (
+        mode === 'bound-api3' ||
+        mode === 'mixed-api3-manifests' ||
+        mode === 'mixed-api3-sources' ||
+        (mode === 'mixed-api' && component === 'agent')
+      ) {
+        const env = svc.template.containers[0]?.env;
+        const api = env?.find((entry) => entry.name === 'ASSISTANT_RELEASE_API_CONTRACT');
+        if (!api || !env) throw new Error('missing API fixture');
+        api.value = '3';
+        const peer = component === 'agent' ? 'WEB' : 'AGENT';
+        env.push(
+          { name: `ASSISTANT_RELEASE_${peer}_API_MIN`, value: '3' },
+          { name: `ASSISTANT_RELEASE_${peer}_API_MAX`, value: '3' },
+          { name: 'ASSISTANT_RELEASE_SCHEMA_VERSION', value: '1' },
+          {
+            name: 'ASSISTANT_RELEASE_SOURCE_SHA',
+            value: (mode === 'mixed-api3-sources' && component === 'web' ? 'b' : 'a').repeat(40),
+          },
+          {
+            name: 'ASSISTANT_RELEASE_MANIFEST',
+            value: (mode === 'mixed-api3-manifests' && component === 'web' ? 'b' : 'a').repeat(64),
+          },
+        );
+      }
       const traffic = svc.trafficStatuses[0];
       if (!traffic) throw new Error('missing fake traffic fixture');
       if (mode === 'bound-index') {
@@ -971,6 +1000,17 @@ describe('protected read-only release inventory', () => {
       };
       current = reviewedBootstrap(raw, bootstrapDigest(raw), raw.source);
       calls.length = 0;
+    }
+    if (mode === 'mixed-api' || mode === 'mixed-api3-manifests' || mode === 'mixed-api3-sources') {
+      await expect(collectInventory(read, manifest, now, lists, observe)).rejects.toThrow(
+        mode === 'mixed-api'
+          ? 'mixed Firestore API contracts'
+          : mode === 'mixed-api3-manifests'
+            ? 'mixed Firestore release manifests'
+            : 'mixed Firestore release sources',
+      );
+      expect(observations).toBe(0);
+      return;
     }
     const result = await collectInventory(
       read,

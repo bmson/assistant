@@ -85,6 +85,7 @@ function environment(
   r: Obj,
   expectedCallback?: string,
   estimatedCost?: EstimatedCostReleaseProfile,
+  requireMcpOff = false,
 ): Record<string, string> {
   const containers = r.containers;
   requireNative(Array.isArray(containers) && containers.length === 1);
@@ -111,11 +112,18 @@ function environment(
       requireNative(callback !== undefined);
       result[name] = callback;
     }
+    if (name === 'MCP_OAUTH_ENABLED' && requireMcpOff) {
+      requireNative(
+        Object.keys(entry).sort().join(',') === 'name,value' && entry.value === 'false',
+      );
+      result[name] = 'false';
+    }
     if (name.startsWith('ASSISTANT_RELEASE_')) {
       requireNative(Object.keys(entry).sort().join(',') === 'name,value');
       result[name] = text(entry.value, /^[A-Za-z0-9_.:-]{1,128}$/);
     }
   }
+  requireNative(!requireMcpOff || result.MCP_OAUTH_ENABLED === 'false');
   return result;
 }
 function revisionProof(raw: unknown, name: string, c: Context): NativeProof {
@@ -152,6 +160,7 @@ function revisionProof(raw: unknown, name: string, c: Context): NativeProof {
       r,
       name === c.canonical ? undefined : c.releaseEnv.GOOGLE_CALENDAR_OAUTH_CALLBACK_URL,
       name === c.canonical ? undefined : c.estimatedCost,
+      name !== c.canonical && c.releaseEnv.MCP_OAUTH_ENABLED === 'false',
     ),
     pin = HISTORICAL_WEB_TAGS.find((p) => p.revision === name && p.revision === c.canonical);
   let image: string,
