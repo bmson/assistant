@@ -1,4 +1,5 @@
 import XCTest
+import UserNotifications
 import SwiftUI
 import Observation
 import CoreLocation
@@ -5857,6 +5858,14 @@ extension APIClientRetryTests {
             "revision": revision, "sourceLabel": "Saved note", "eligible": true,
             "readOnlyReason": NSNull(), "ownerCorrected": true,
         ])
+    }
+
+    func testAnswerReadyPushIsQuietInTheForeground() {
+        XCTAssertTrue(NotificationManager.foregroundPresentationOptions(for: "ASSISTANT_UPDATE").isEmpty)
+        XCTAssertEqual(
+            NotificationManager.foregroundPresentationOptions(for: "ASSISTANT_ATTENTION"),
+            [.banner, .sound]
+        )
     }
 
     func testNotificationDestinationRejectsMalformedOwnerAndNeverTreatsPathsAsConversationIDs() throws {

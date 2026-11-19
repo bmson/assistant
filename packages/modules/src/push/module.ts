@@ -1,4 +1,6 @@
 import { getAgent } from '@assistant/core/chat';
+import { createPostgresNudgePolicyRepository } from '@assistant/db';
+import { notificationDeliveryKey } from '@assistant/persistence';
 import { ApnsClient } from '@assistant/tools/modules/push';
 import { defineModule, type ModuleHooks } from '../platform.js';
 import {
@@ -37,17 +39,26 @@ export const pushModule = defineModule<ApnsClient>({
     const devices = persistence.deviceTokens;
     if (!devices) throw new Error('push: persistence has no device-token repository');
     const firestore = config.PERSISTENCE_DRIVER === 'firestore';
+    const owner = firestore
+      ? async () => {
+          const owner = await persistence.executionContext.getAgent(config.FIRESTORE_AGENT_ID);
+          if (!owner) throw new Error('push: the configured owner is missing');
+          return owner;
+        }
+      : () => getAgent(db);
+    const policy = persistence.nudgePolicy ?? createPostgresNudgePolicyRepository(db);
     const channelDeps: PushChannelDeps = {
       apns: client,
       devices,
       notificationOutbox: persistence.notificationOutbox,
-      owner: firestore
-        ? async () => {
-            const owner = await persistence.executionContext.getAgent(config.FIRESTORE_AGENT_ID);
-            if (!owner) throw new Error('push: the configured owner is missing');
-            return owner;
-          }
-        : () => getAgent(db),
+      owner,
+      loadTask: (agentId, taskId) => persistence.executionContext.getTask(agentId, taskId),
+      admitAnswerReady: async (deliveryKey, now) =>
+        policy.evaluate(await owner(), {
+          urgency: 'ambient',
+          channel: notificationDeliveryKey('answer-ready', deliveryKey),
+          now,
+        }),
     };
 
     const hooks: ModuleHooks = {
