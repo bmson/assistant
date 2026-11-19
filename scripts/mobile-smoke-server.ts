@@ -40,6 +40,19 @@ async function databaseCommand(command: string, env: NodeJS.ProcessEnv) {
   if (code !== 0) throw new Error(`Mobile smoke ${command} failed.`);
 }
 
+export async function stopMobileSmokeServer(child: ChildProcess, exited: Promise<void>) {
+  if (child.exitCode !== null || child.signalCode !== null || !child.pid) return;
+  const waitForExit = () =>
+    Promise.race([exited.then(() => true), setTimeout(5_000, false, { ref: false })]);
+  child.kill('SIGTERM');
+  if (await waitForExit()) return;
+  child.kill('SIGKILL');
+  if (await waitForExit()) return;
+  child.stdout?.destroy();
+  child.unref();
+  throw new Error('The owned mobile smoke server did not stop.');
+}
+
 export async function withMobileSmokeServer(
   run: (origin: string, serverRunning: () => boolean) => Promise<void>,
 ) {
@@ -135,8 +148,7 @@ export async function withMobileSmokeServer(
     }
     throw new Error('The owned standalone mobile smoke server did not become healthy.');
   } finally {
-    child?.kill('SIGTERM');
-    await exited;
+    if (child && exited) await stopMobileSmokeServer(child, exited);
     try {
       await databaseCommand('test:cleanup', { ...env, ASSISTANT_TEST_CLEANUP: '1' });
     } finally {
