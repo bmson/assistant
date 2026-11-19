@@ -210,6 +210,7 @@ export interface CodeJobOutcome {
   done: boolean;
   runAfter?: Date;
   summary: string;
+  briefingOutcome?: import('@assistant/persistence').BriefingRunOutcome;
 }
 
 export function codeJobName(task: TaskRow): CodeJobName | null {
@@ -280,7 +281,14 @@ export async function runCodeJob(
   task: TaskRow,
 ): Promise<CodeJobOutcome> {
   const unavailable = deps.jobUnavailable?.(job);
-  if (unavailable) return { done: true, summary: unavailable };
+  if (unavailable)
+    return {
+      done: true,
+      summary: unavailable,
+      ...(job === 'briefing.compose'
+        ? { briefingOutcome: { kind: 'unavailable', reason: 'job_unavailable' } as const }
+        : {}),
+    };
   switch (job) {
     case 'reminder.notify': {
       const payload = (
@@ -582,12 +590,8 @@ export async function runCodeJob(
     }
     case 'briefing.compose': {
       await deps.heartbeat?.();
-      return {
-        done: true,
-        summary: briefingSummary(
-          await runBriefing(deps, { taskId: task.id, agentId: task.agentId }),
-        ),
-      };
+      const result = await runBriefing(deps, { taskId: task.id, agentId: task.agentId });
+      return { done: true, summary: briefingSummary(result), briefingOutcome: result.outcome };
     }
     case 'memory.consolidate': {
       await deps.heartbeat?.();

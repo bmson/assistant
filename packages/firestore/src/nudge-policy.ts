@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
 import {
-  answerReadyPingId,
   curiosityNudgePingId,
   insideQuietHours,
   type NudgePolicyRepository,
@@ -9,6 +8,7 @@ import {
   ownerLocalMinutes,
   type PingDecision,
   type Records,
+  stableNudgePingId,
 } from '@assistant/persistence';
 import { isEmulatorClosedTransaction } from './emulator-transaction.js';
 import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from './store.js';
@@ -43,9 +43,11 @@ export class FirestoreNudgePolicyRepository implements NudgePolicyRepository {
     if (!Number.isFinite(now.getTime())) throw new Error('Invalid nudge policy time');
     const channel = opts.channel ?? 'out-of-band';
     const answerReady = channel.startsWith('answer-ready:');
-    const stable = answerReady || channel.startsWith('curiosity-nudge:');
-    const id = answerReady
-      ? answerReadyPingId(agent.id, channel)
+    const watchdog = channel.startsWith('watchdog-outage:');
+    const recheck = answerReady || watchdog;
+    const stable = recheck || channel.startsWith('curiosity-nudge:');
+    const id = recheck
+      ? stableNudgePingId(agent.id, channel)
       : stable
         ? curiosityNudgePingId(agent.id, channel)
         : randomUUID();
@@ -62,14 +64,14 @@ export class FirestoreNudgePolicyRepository implements NudgePolicyRepository {
             // Read before any ledger count so a concurrent ambient evaluation
             // for this owner contends here and reruns against the committed slot.
             await tx.get(this.store.doc('coordination', `ambient-pings:${agent.id}`));
-            let reservedAnswer = false;
+            let reserved = false;
             if (stable) {
               const prior = await tx.get(this.store.doc('proactivePings', id));
               if (prior.exists) {
                 const row = decodeRecord<Records['proactivePings']>(prior.data());
                 if (row.agentId !== agent.id || row.channel !== channel)
                   throw new Error('Nudge reservation ownership mismatch');
-                if (answerReady && row.delivered) reservedAnswer = true;
+                if (recheck && row.delivered) reserved = true;
                 else
                   return {
                     deliver: row.delivered,
@@ -96,7 +98,7 @@ export class FirestoreNudgePolicyRepository implements NudgePolicyRepository {
             if (prefs && insideQuietHours(prefs, ownerLocalMinutes(agent.timezone, now))) {
               decision = { deliver: false, reason: 'quiet-hours' };
             }
-            if (reservedAnswer) {
+            if (reserved && answerReady) {
               return decision.deliver && prefs?.ambientDailyCap === 0
                 ? { deliver: false, reason: 'daily-cap' }
                 : decision;
@@ -104,8 +106,9 @@ export class FirestoreNudgePolicyRepository implements NudgePolicyRepository {
             if (decision.deliver && prefs?.ambientDailyCap != null) {
               const cap = prefs.ambientDailyCap;
               // Counting stops at the cap: only "reached or not" matters here.
+              const limit = cap + Number(reserved);
               const used =
-                cap <= 0
+                limit <= 0
                   ? 0
                   : (
                       await tx.get(
@@ -115,12 +118,14 @@ export class FirestoreNudgePolicyRepository implements NudgePolicyRepository {
                           .where('urgency', '==', 'ambient')
                           .where('delivered', '==', true)
                           .where('createdAt', '>=', midnight)
-                          .limit(cap)
+                          .limit(limit)
                           .count(),
                       )
                     ).data().count;
-              if (used >= cap) decision = { deliver: false, reason: 'daily-cap' };
+              if (used + Number(!reserved) > cap)
+                decision = { deliver: false, reason: 'daily-cap' };
             }
+            if (reserved) return decision;
           }
 
           // All reads precede writes; the callback has no external side effects.

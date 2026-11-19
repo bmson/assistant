@@ -9,13 +9,17 @@ import {
   emailIngestReadableSql,
   notificationPrefs,
   proactiveMoments,
+  recordPostgresCalendarRecovery,
   securityIncidentAttention,
   securityIncidents,
 } from '@assistant/db';
 import {
+  calendarRecoveryFact,
+  calendarRecoveryHash,
   commitmentDueMomentKey,
   type EmailThreadHeadReader,
   type ExecutionPersistence,
+  isCalendarObservationDate,
   notificationDeliveryKey,
   type PulseCalendarSnapshot,
   type PulseEmailSourceFence,
@@ -976,6 +980,8 @@ export function postgresPulseRepository(db: Db): PulseRepository {
         .where(and(eq(proactiveMoments.agentId, agentId), eq(proactiveMoments.kind, kind)));
       return rows.map((row) => row.key);
     },
+    recordCalendarRecovery: (agentId, fence, at, complete, observations) =>
+      recordPostgresCalendarRecovery(db, agentId, fence, at, complete, observations),
     calendarSnapshot: (agentId): Promise<PulseCalendarSnapshot[]> =>
       db
         .select({
@@ -1287,6 +1293,36 @@ export async function runPulse(
       agent.timezone,
       rankingDedupeV2 ? now : undefined,
     );
+    if (calendar && store.recordCalendarRecovery) {
+      const observed = calendarChanges.flatMap((change, index) => {
+        // A shared phone snapshot is a cache. Reading it during the gap
+        // does not establish when its provider observed the event change.
+        if (change.calendarId.startsWith('iphone:')) return [];
+        if (change.kind !== 'cancelled' && change.kind !== 'moved') return [];
+        if (
+          !isCalendarObservationDate(change.start) ||
+          (change.kind === 'moved' && !isCalendarObservationDate(change.previousStart ?? ''))
+        )
+          return [];
+        const moment = changedCalendarMoments[index];
+        return moment
+          ? [
+              {
+                event: calendarRecoveryHash(change.calendarId, change.eventId),
+                moment: calendarRecoveryHash(moment.key),
+                matchingFact: calendarRecoveryFact(change.kind, change.summary, change.start),
+                kind: change.kind,
+                observedAt: now.getTime(),
+              },
+            ]
+          : [];
+      });
+      await store
+        .recordCalendarRecovery(agent.id, observationFence, now, calendar.complete, observed)
+        .catch(() => {
+          console.error('pulse: calendar recovery history unavailable');
+        });
+    }
     const acknowledgedCalendarKeys = new Set<string>();
     const saveCalendarSnapshot = async () => {
       if (!calendar) return;

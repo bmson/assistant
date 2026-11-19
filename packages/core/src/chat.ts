@@ -13,6 +13,7 @@ import {
   lockPostgresPrivacyObservationFence,
   messages,
   postgresPrivacyObservationFence,
+  readPostgresSavedBriefing,
   securityIncidentAttention,
   securityIncidents,
   suggestions,
@@ -27,6 +28,7 @@ import type {
   OwnerNoticeDecisionFenceResult,
   OwnerNoticeRepository,
 } from '@assistant/persistence';
+import { briefingMessageKey } from '@assistant/persistence';
 import {
   and,
   asc,
@@ -720,6 +722,10 @@ export async function postOwnerNoticeWithDecisionFence(
         throw new Error('Owner notice task is outside the configured installation');
     }
 
+    if (input.deduplicateBriefing && input.taskId) {
+      const saved = await readPostgresSavedBriefing(tx, input.agentId, input.taskId);
+      if (saved) return { status: 'posted', ...saved, replayed: true };
+    }
     const inactiveSuggestionSourceRefs: string[] = [];
     const pendingSuggestionWindows: Array<{
       sourceRef: string;
@@ -810,9 +816,12 @@ export async function postOwnerNoticeWithDecisionFence(
     const conversationId =
       (await findPrimaryConversation(txDb, input.agentId))?.id ??
       (await getOrCreateNotificationsConversation(txDb, input.agentId));
-    await persistMessage(txDb, {
+    const message = await persistMessage(txDb, {
       conversationId,
       ...(input.taskId ? { taskId: input.taskId } : {}),
+      ...(input.deduplicateBriefing && input.taskId
+        ? { channelMessageId: briefingMessageKey(input.taskId) }
+        : {}),
       role: 'assistant',
       origin: 'assistant',
       parts: [{ type: 'text', text: input.text }, ...(input.extraParts ?? [])],
@@ -834,7 +843,8 @@ export async function postOwnerNoticeWithDecisionFence(
         .returning({ id: securityIncidentAttention.id });
       if (!accepted.length) throw new Error('Claimed briefing attention receipt changed');
     }
-    return { status: 'posted', conversationId } as const;
+    if (!message) throw new Error('Briefing publication could not be verified');
+    return { status: 'posted', conversationId, messageId: message.id } as const;
   });
 }
 

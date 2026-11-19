@@ -11,12 +11,14 @@ import {
   emailIngestReadableSql,
   goals as goalsTable,
   proactiveMoments,
+  readPostgresSavedBriefing,
   tasks as taskTable,
   watches,
   watchFires,
 } from '@assistant/db';
 import {
   type BriefingInputs,
+  type BriefingRunOutcome,
   type CalendarOccurrenceIdentity,
   type CalendarOwnerParticipation,
   type CalendarPurpose,
@@ -393,6 +395,7 @@ export function briefingTaskSummary(progress: string | null): string {
 }
 
 export interface BriefingResult {
+  outcome?: BriefingRunOutcome;
   delivered: boolean;
   /** Whether the phone leg was attempted and accepted (not held by the policy). */
   pinged: boolean;
@@ -1039,6 +1042,7 @@ export async function runBriefing(
     } else agent = await getAgent(db);
     const result: BriefingResult = {
       delivered: false,
+      outcome: { kind: 'unavailable', reason: 'publication_unverified' },
       pinged: false,
       composedFallback: false,
       mailScanned: 0,
@@ -1056,6 +1060,17 @@ export async function runBriefing(
     };
     const noticeStore = portable?.notices ?? db;
     const observationFence = await ownerNoticeObservationFence(noticeStore, agent.id);
+
+    if (opts.taskId) {
+      const saved = portable
+        ? await portable.notices.readBriefingPublication?.(agent.id, opts.taskId)
+        : await readPostgresSavedBriefing(db, agent.id, opts.taskId);
+      if (saved) {
+        result.delivered = true;
+        result.outcome = { kind: 'delivered', messageId: saved.messageId };
+        return result;
+      }
+    }
 
     // The calendar read is the one input that can fail noisily (an expired
     // grant, a provider outage): it degrades to no section rather than
@@ -1232,6 +1247,11 @@ export async function runBriefing(
     result.goalDeltas = goalDeltas.length;
     result.watchHits = watchHits.length;
 
+    const quietOutcome: BriefingRunOutcome =
+      deps.calendarReader && calendar?.complete !== true
+        ? { kind: 'unavailable', reason: 'calendar_unavailable' }
+        : { kind: 'quiet' };
+
     // Nothing happened. Say nothing (the predicate above is the rule, kept
     // pure so the "routine calendar alone is silence" contract is testable
     // without a quiet database).
@@ -1251,6 +1271,7 @@ export async function runBriefing(
         openCommitments: life.commitments.length,
       })
     ) {
+      result.outcome = quietOutcome;
       return result;
     }
 
@@ -1630,14 +1651,14 @@ export async function runBriefing(
     }
 
     let conversationId: string | null = null;
-    let published = false;
+    let publicationReceipt: { messageId?: string; replayed?: boolean } | null = null;
     for (let publishAttempt = 0; publishAttempt < 3; publishAttempt += 1) {
       let publication: OwnerNoticeDecisionFenceResult;
       try {
         publication = await postOwnerNoticeWithDecisionFence(noticeStore, {
           agentId: agent.id,
           text: body,
-          ...(opts.taskId ? { taskId: opts.taskId } : {}),
+          ...(opts.taskId ? { taskId: opts.taskId, deduplicateBriefing: true } : {}),
           extraParts: parts,
           now,
           observationFence,
@@ -1665,7 +1686,7 @@ export async function runBriefing(
       }
       if (publication.status === 'posted') {
         conversationId = publication.conversationId;
-        published = true;
+        publicationReceipt = publication;
         break;
       }
 
@@ -1752,8 +1773,11 @@ export async function runBriefing(
         return result;
       }
     }
-    if (!published || !conversationId) return result;
+    if (!publicationReceipt || !conversationId) return result;
     result.delivered = true;
+    if (publicationReceipt.messageId)
+      result.outcome = { kind: 'delivered', messageId: publicationReceipt.messageId };
+    if (publicationReceipt.replayed) return result;
 
     // The dashboard copy is posted; this is the buzz that makes it findable
     // without opening the app. Deliberately a deterministic headline rather
@@ -1825,6 +1849,8 @@ export function briefingHeadline(result: BriefingResult): string {
 
 /** The job registry's summary line. */
 export function briefingSummary(result: BriefingResult): string {
+  if (result.outcome?.kind === 'unavailable')
+    return `briefing: unavailable (${result.outcome.reason})`;
   if (!result.delivered) return 'briefing: nothing to report';
   return (
     `briefing: delivered${result.pinged ? ' + pinged' : ''} — ${result.highlights} mail highlight(s) of ${result.mailScanned}, ` +

@@ -7,12 +7,19 @@ import {
 import { resumePostgresBudgetWakes } from '@assistant/db';
 import { type AgentDeps, agentServices } from './deps.js';
 import { executorDeps } from './executor-deps.js';
+import {
+  acknowledgePostgresSweepRecovery,
+  recordPostgresSweepHeartbeat,
+} from './sweep-heartbeat.js';
+import { publishPostgresSweepRecovery } from './sweep-recovery.js';
 
 /** Shared by the local poller and HTTP scheduler; owner reads cannot abort independent maintenance. */
 export async function runPostgresSweep(
   deps: AgentDeps,
-  options: { notifyDueTasks?: boolean } = {},
+  options: { notifyDueTasks?: boolean; clock?: () => Date } = {},
 ) {
+  const clock = options.clock ?? (() => new Date());
+  const startedAt = clock();
   const {
     backfillMessageEmbeddings,
     emitBudgetNotices,
@@ -136,6 +143,30 @@ export async function runPostgresSweep(
     moduleSteps[sweepStep.reportKey ?? sweepStep.name] = await step(
       sweepStep.name,
       () => sweepStep.run(agentServices(deps)),
+      0,
+    );
+  }
+  const recovery = await step(
+    'recordSweepHeartbeat',
+    () => recordPostgresSweepHeartbeat(deps.db, startedAt, clock(), failedSteps, skippedSteps),
+    undefined,
+  );
+  if (recovery && !failedSteps.length && !skippedSteps.length) {
+    await step(
+      'publishSweepRecovery',
+      async () => {
+        const notice = await publishPostgresSweepRecovery(deps.db, recovery, clock());
+        if (notice.status === 'persisted') {
+          await agentServices(deps).ownerNotifier.notifyOwner({
+            text: 'Scheduled checks resumed. Your catch-up is ready in chat.',
+            conversationId: notice.conversationId,
+            urgency: 'ambient',
+            deliveryKey: `sweep-recovery:${recovery.fromMs}`,
+          });
+        }
+        await acknowledgePostgresSweepRecovery(deps.db, recovery);
+        return Number(notice.status === 'persisted');
+      },
       0,
     );
   }

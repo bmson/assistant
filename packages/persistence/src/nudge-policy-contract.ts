@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { NudgePolicyRepository } from './nudge-policy.js';
+import { type NudgePolicyRepository, watchdogOutageNudgeChannel } from './nudge-policy.js';
 
 export interface NudgePolicyFixture {
   agentId: string;
@@ -192,6 +192,60 @@ export function nudgePolicyContract(
         reason: 'quiet-hours',
       });
       expect(await f.pings()).toHaveLength(2);
+    });
+
+    it('applies the owner window to watchdog admission and retries', async () => {
+      const evaluate = (episode: string, now: Date) =>
+        f.repository.evaluate(utcOwner(), {
+          urgency: 'ambient',
+          channel: watchdogOutageNudgeChannel(episode, utcOwner().timezone, now),
+          now,
+        });
+      await f.setPrefs({ quietStartMin: 22 * 60, quietEndMin: 7 * 60, ambientDailyCap: 1 });
+      expect(await evaluate('watchdog-outage:1', MIDDAY)).toEqual({ deliver: true });
+      expect(await evaluate('watchdog-outage:1', minutesAfter(MIDDAY, 1))).toEqual({
+        deliver: true,
+      });
+      expect(await evaluate('watchdog-outage:2', MIDDAY)).toEqual({
+        deliver: false,
+        reason: 'daily-cap',
+      });
+      expect(await evaluate('watchdog-outage:1', LATE_NIGHT)).toEqual({
+        deliver: false,
+        reason: 'quiet-hours',
+      });
+      expect(await evaluate('watchdog-outage:3', LATE_NIGHT)).toEqual({
+        deliver: false,
+        reason: 'quiet-hours',
+      });
+      expect((await f.pings()).filter((row) => row.delivered)).toHaveLength(1);
+      expect(
+        await f.repository.evaluate(utcOwner(), { urgency: 'interrupt', now: LATE_NIGHT }),
+      ).toEqual({ deliver: true });
+    });
+
+    it('checks a delayed watchdog against the current daily cap', async () => {
+      const evaluate = (now: Date) =>
+        f.repository.evaluate(utcOwner(), {
+          urgency: 'ambient',
+          channel: watchdogOutageNudgeChannel('watchdog-outage:4', utcOwner().timezone, now),
+          now,
+        });
+      await f.setPrefs({ ambientDailyCap: 2 });
+      expect(await evaluate(MIDDAY)).toEqual({ deliver: true });
+      expect(await f.repository.evaluate(utcOwner(), { urgency: 'ambient', now: MIDDAY })).toEqual({
+        deliver: true,
+      });
+      await f.setPrefs({ ambientDailyCap: 1 });
+      expect(await evaluate(minutesAfter(MIDDAY, 1))).toEqual({
+        deliver: false,
+        reason: 'daily-cap',
+      });
+      const tomorrow = minutesAfter(MIDDAY, 24 * 60);
+      expect(
+        await f.repository.evaluate(utcOwner(), { urgency: 'ambient', now: tomorrow }),
+      ).toEqual({ deliver: true });
+      expect(await evaluate(tomorrow)).toEqual({ deliver: false, reason: 'daily-cap' });
     });
 
     it('reserves an ambient-cap slot atomically across concurrent producers', async () => {

@@ -9,6 +9,7 @@ import {
   newTaskRecord,
   occurrenceIsCurrent,
   type Records,
+  reactivatedBriefingTemplate,
   type ScheduleCommitResult,
   type ScheduleCreateInput,
   type ScheduleOccurrence,
@@ -301,13 +302,16 @@ export class FirestoreScheduleRepository implements ScheduleRepository {
       const row = decodeSchedule(snapshot.data());
       if (row.id !== scheduleId || row.agentId !== agentId || row.name.startsWith('reminder:'))
         return false;
+      const now = this.store.now();
+      const taskTemplate = reactivatedBriefingTemplate(row, enabled, now);
       tx.update(ref, {
         enabled,
+        ...(taskTemplate ? { taskTemplate } : {}),
         ...(row.name === 'morning-brief' && isHistoricalMorningBriefDefault(row)
           ? { seedReviewRequired: true }
           : {}),
         ...(enabled ? { nextRunAt: null } : {}),
-        updatedAt: this.store.now(),
+        updatedAt: now,
       });
       return true;
     });
