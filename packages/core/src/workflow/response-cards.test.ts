@@ -1143,6 +1143,66 @@ describe('response cards', () => {
     ]);
   });
 
+  it('keeps today precipitation uncertainty separate from a clear current sky', () => {
+    const [ambient] = weatherResponseCards(
+      'Weather there: clear, 12°C (today 10–15°C, 90% chance of precipitation, wind 11 km/h).',
+    );
+    expect(ambient).toMatchObject({
+      condition: 'clear',
+      days: [
+        { weekday: 'Today', description: 'clear', precipitationType: 'unspecified', precipPct: 90 },
+      ],
+    });
+    for (const target of [
+      undefined,
+      {
+        date: '2026-08-29',
+        weekday: 'Sat',
+        day: {
+          date: '2026-08-29',
+          description: 'light rain',
+          lowC: 9,
+          highC: 13,
+        },
+      },
+    ]) {
+      const [lookup] = weatherLookupResponseCards([
+        {
+          toolName: 'weather.lookup',
+          status: 'succeeded',
+          result: {
+            place: 'Synthetic town',
+            current: {
+              tempC: 12,
+              description: 'clear',
+              lowC: 10,
+              highC: 15,
+              precipProbabilityMax: 90,
+              dailyPrecipitationType: 'unspecified',
+            },
+            forecast: [
+              { date: '2026-08-29', weekday: 'Sat', description: 'light rain', lowC: 9, highC: 13 },
+            ],
+            ...(target ? { target } : {}),
+          },
+        },
+      ]);
+      expect(lookup).toMatchObject({
+        days: expect.arrayContaining([
+          {
+            weekday: 'Today',
+            lowC: 10,
+            highC: 15,
+            description: 'clear',
+            symbol: 'clear',
+            precipPct: 90,
+            precipitationType: 'unspecified',
+          },
+        ]),
+      });
+    }
+  });
+
   it('shows the probability without inventing a rain or snow label for a conflicting reading', () => {
     const day = {
       date: '2026-08-29',
