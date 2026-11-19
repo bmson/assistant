@@ -110,10 +110,20 @@ export class TwilioClient implements SmsSender {
     return Boolean(this.accountSid && this.authToken && this.fromNumber);
   }
 
-  async send(to: string, body: string, callerSignal?: AbortSignal): Promise<{ sid: string }> {
+  async send(
+    to: string,
+    body: string,
+    callerSignal?: AbortSignal,
+    options: { retryRejected?: boolean } = {},
+  ): Promise<{ sid: string }> {
     try {
       return await providerTransaction(callerSignal, this.timeoutMs, 'Twilio', (signal) =>
-        this.sendWithinDeadline(to, body, signal),
+        this.sendWithinDeadline(
+          to,
+          body,
+          signal,
+          options.retryRejected === false ? 0 : this.maxRetries,
+        ),
       );
     } catch (error) {
       if (error instanceof ProviderDeadlineError || callerSignal?.aborted)
@@ -129,6 +139,7 @@ export class TwilioClient implements SmsSender {
     to: string,
     body: string,
     signal: AbortSignal,
+    maxRetries: number,
   ): Promise<{ sid: string }> {
     let retries = 0;
     while (true) {
@@ -171,7 +182,7 @@ export class TwilioClient implements SmsSender {
         // The stable error below includes the HTTP status even for malformed bodies.
       }
 
-      if (res.status === 429 && retries < this.maxRetries) {
+      if (res.status === 429 && retries < maxRetries) {
         const retryAfter = retryAfterMs(res.headers.get('retry-after'));
         const exponential = this.retryBaseDelayMs * 2 ** retries;
         retries += 1;

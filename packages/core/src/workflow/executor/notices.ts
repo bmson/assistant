@@ -218,6 +218,7 @@ export async function notifyOwnerAndConversation(
     const result = await deps
       .notifyOwner({
         deliveryKey: notificationDeliveryKey('task-attention', task.id, kind),
+        ...(task.trust === 'owner' ? { purpose: 'task-attention' as const } : {}),
         taskId: task.id,
         conversationId: task.conversationId,
         text,

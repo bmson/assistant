@@ -129,6 +129,7 @@ function fakeDeps(): SmsChannelDeps {
     persistence: {
       smsChannel: {
         underChannelLimit: async () => true,
+        reserveProactiveAttempt: async () => 'reserved',
       } as unknown as SmsChannelDeps['persistence']['smsChannel'],
       notificationOutbox,
       costs: {} as SmsChannelDeps['persistence']['costs'],
@@ -165,7 +166,10 @@ describe('owner-facing SMS pings are budget-critical', () => {
 
   it('owner async updates reserve with the critical carve-out', async () => {
     reserved.length = 0;
-    const delivery = await notifyOwnerBySms(fakeDeps(), { text: 'A task permanently failed.' });
+    const delivery = await notifyOwnerBySms(fakeDeps(), {
+      purpose: 'task-attention',
+      text: 'A task permanently failed.',
+    });
     expect(delivery.legs).toMatchObject([
       {
         channel: 'sms',
@@ -179,11 +183,37 @@ describe('owner-facing SMS pings are budget-critical', () => {
     expect(reserved[0]?.description).toContain('1 estimated segment(s)');
   });
 
+  it('never relays generic owner notice text or starts an SMS attempt', async () => {
+    const deps = fakeDeps();
+    const send = vi.spyOn(deps.twilio, 'send');
+    await expect(notifyOwnerBySms(deps, { text: 'Private unsolicited message' })).resolves.toEqual({
+      legs: [{ channel: 'sms', status: 'skipped', reason: 'unsolicited-sms-category-not-allowed' }],
+    });
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('stops an allowed category at the quota without calling the SMS provider', async () => {
+    const deps = fakeDeps();
+    vi.spyOn(deps.persistence.smsChannel, 'reserveProactiveAttempt').mockResolvedValue(
+      'proactive-sms-daily-cap',
+    );
+    const send = vi.spyOn(deps.twilio, 'send');
+    await expect(
+      notifyOwnerBySms(deps, { purpose: 'leave-now', text: 'Original details' }),
+    ).resolves.toEqual({
+      legs: [{ channel: 'sms', status: 'skipped', reason: 'proactive-sms-daily-cap' }],
+    });
+    expect(send).not.toHaveBeenCalled();
+  });
+
   it('reports unconfigured SMS as skipped without attempting a send', async () => {
     reserved.length = 0;
     const deps = fakeDeps();
     deps.twilio = { configured: () => false } as unknown as SmsChannelDeps['twilio'];
-    const delivery = await notifyOwnerBySms(deps, { text: 'A task permanently failed.' });
+    const delivery = await notifyOwnerBySms(deps, {
+      purpose: 'task-attention',
+      text: 'A task permanently failed.',
+    });
     expect(delivery.legs).toEqual([
       { channel: 'sms', status: 'skipped', reason: 'not-configured' },
     ]);

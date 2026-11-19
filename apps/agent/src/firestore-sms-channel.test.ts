@@ -5,12 +5,16 @@ import { deliverSmsFinal, handleInboundSms, type SmsChannelDeps } from '@assista
 import type { ExecutionPersistence } from '@assistant/persistence';
 import { AmbiguousTwilioDeliveryError, ToolRegistry } from '@assistant/tools';
 import { FieldValue } from '@google-cloud/firestore';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { embeddingSpaceKey } from '../../../packages/firestore/src/memory.js';
 import type { InstallationStore } from '../../../packages/firestore/src/store.js';
 import { disposeStore, emulatorStore } from '../../../packages/firestore/src/test-store.js';
-import { notifyOwnerBySms } from '../../../packages/modules/src/sms/channel.js';
+import {
+  drainSmsNotificationOutbox,
+  notifyApprovalsBySms,
+  notifyOwnerBySms,
+} from '../../../packages/modules/src/sms/channel.js';
 
 const OWNER_PHONE = '+14155550100';
 const SPACE = { provider: 'synthetic', model: 'sms-fixture', dimensions: 1536, revision: '1' };
@@ -47,9 +51,11 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
     let persistence: ExecutionPersistence;
     let deps: SmsChannelDeps;
     let sent: Array<{ to: string; body: string }>;
+    let clockAdjustment: number;
 
     beforeEach(async () => {
-      store = emulatorStore();
+      clockAdjustment = 0;
+      store = emulatorStore(() => new Date(Date.now() + clockAdjustment));
       sent = [];
       persistence = createFirestoreExecutionPersistence(store, agentId, SPACE);
       const smsChannel = persistence.smsChannel;
@@ -245,10 +251,81 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         maxPerDay: null,
         updatedAt: new Date(),
       });
-      await expect(notifyOwnerBySms(deps, { text: 'One more' })).resolves.toEqual({
+      await expect(
+        notifyOwnerBySms(deps, { purpose: 'task-attention', text: 'One more' }),
+      ).resolves.toEqual({
         legs: [{ channel: 'sms', status: 'failed', reason: 'channel-rate-limit' }],
       });
       expect(sent).toHaveLength(1);
+    });
+
+    it('shares the three proactive attempt slots across concurrent senders', async () => {
+      const approval = {
+        taskId: randomUUID(),
+        shortCode: 'A9',
+        summary: 'Review this action',
+      };
+      await store.doc('tasks', approval.taskId).set({
+        id: approval.taskId,
+        agentId,
+        spentUsd: '0',
+        budgetUsdLimit: '1.00',
+      });
+      const notify = (id: string) =>
+        notifyOwnerBySms(deps, {
+          purpose: 'task-attention',
+          deliveryKey: id,
+          text: 'Private details',
+        });
+      const outcomes = await Promise.all([
+        notifyApprovalsBySms(deps, [approval]),
+        notify('retry-worker-one'),
+        notify('worker-two'),
+        notify('worker-three'),
+      ]);
+      expect(
+        outcomes
+          .flatMap((outcome) => outcome.legs)
+          .map((leg) => leg.status)
+          .sort(),
+      ).toEqual(['delivered', 'delivered', 'delivered', 'skipped']);
+      expect(sent).toHaveLength(3);
+      expect(sent.map((sms) => sms.body).join(' ')).not.toContain('Private details');
+      await notify('retry-worker-one');
+      expect(sent).toHaveLength(3);
+    });
+
+    it('counts definitive provider rejections and holds later sweeps at the same cap', async () => {
+      const provider = vi
+        .spyOn(deps.twilio, 'send')
+        .mockRejectedValueOnce(new Error('Synthetic rejection'));
+      const notify = (deliveryKey: string) =>
+        notifyOwnerBySms(deps, { purpose: 'task-attention', text: 'Private details', deliveryKey });
+      await expect(notify('first-attempt-rejected')).resolves.toMatchObject({
+        legs: [{ status: 'failed' }],
+      });
+      await notify('second-attempt');
+      await notify('third-attempt');
+      clockAdjustment = 60_000;
+      await drainSmsNotificationOutbox(deps, store.now());
+      expect(provider).toHaveBeenCalledTimes(3);
+      const outbox = await store
+        .collection('notificationOutbox')
+        .where('adapter', '==', 'sms')
+        .get();
+      expect(outbox.docs.map((row) => row.get('result.reason'))).toContain(
+        'proactive-sms-daily-cap',
+      );
+
+      // A deliberate reply to a new inbound SMS remains available at the cap.
+      const incoming = await inbound('SM-after-proactive-cap', 'A deliberate question');
+      if (incoming.kind !== 'task') throw new Error('Expected deliberate SMS turn');
+      const row = await persistence.tasks.getTask(incoming.taskId);
+      if (!row) throw new Error('Deliberate SMS task missing');
+      await expect(
+        deliverSmsFinal(deps, row, 'A deliberate response', 'sms-attempt-deliberate'),
+      ).resolves.toMatchObject({ status: 'accepted' });
+      expect(provider).toHaveBeenCalledTimes(4);
     });
 
     it('reads the voice profile and the nearest samples of the register in the configured space', async () => {

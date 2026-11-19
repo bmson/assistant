@@ -3,6 +3,7 @@ import {
   hasEffectiveNotificationDelivery,
   type MaintenanceRepository,
   type NotificationDeliveryResult,
+  notificationDeliveryKey,
   type TaskRepository,
 } from '@assistant/persistence';
 import { and, inArray, isNull, lte, sql } from 'drizzle-orm';
@@ -13,6 +14,8 @@ import { markAttentionNotified } from './machine.js';
 /** Best-effort out-of-band push (SMS today; a no-op when unconfigured). */
 export type OwnerPush = (input: {
   taskId: string;
+  purpose?: 'task-attention';
+  deliveryKey?: string;
   conversationId: string | null;
   text: string;
 }) => Promise<NotificationDeliveryResult | void>;
@@ -98,6 +101,8 @@ export async function renotifyStalledAttention(
       // Background work reports to the log, not to the owner's chat or phone.
       if (notifyOwner && !(task.trust === 'assistant' && !task.conversationId)) {
         const result = await notifyOwner({
+          deliveryKey: notificationDeliveryKey('task-attention', task.id, 'needs-attention'),
+          ...(task.trust === 'owner' ? { purpose: 'task-attention' as const } : {}),
           taskId: task.id,
           conversationId: task.conversationId,
           text,
@@ -146,6 +151,8 @@ async function renotifyPortable(
       // Background work reports to the log, not to the owner's chat or phone.
       if (notifyOwner && !(task.trust === 'assistant' && !task.conversationId)) {
         const result = await notifyOwner({
+          deliveryKey: notificationDeliveryKey('task-attention', task.id, 'needs-attention'),
+          ...(task.trust === 'owner' ? { purpose: 'task-attention' as const } : {}),
           taskId: task.id,
           conversationId: task.conversationId,
           text,
