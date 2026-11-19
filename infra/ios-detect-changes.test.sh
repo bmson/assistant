@@ -17,6 +17,8 @@ for index in $(seq 1 3000); do
     printf '%s\n' 'apps/ios/Assistant/ChatView.swift'
   elif [ "$index" -eq 94 ] && [ "${MOCK_IOS_CHANGE:-true}" = helper ]; then
     printf '%s\n' 'infra/ios-detect-changes.sh'
+  elif [ "$index" -eq 95 ] && [ "${MOCK_IOS_CHANGE:-true}" = native-helper ]; then
+    printf '%s\n' 'infra/ios-native-controls.py'
   else
     printf 'docs/review/path-%04d.md\n' "$index"
   fi
@@ -45,6 +47,7 @@ run_filter() {
 run_filter pull_request true
 run_filter pull_request false false
 run_filter pull_request true helper
+run_filter pull_request true native-helper
 run_filter push true
 
 : >"$TEMP_DIR/output"

@@ -32,6 +32,7 @@ on:
       - ".github/workflows/ios.yml"
       - "infra/ios-detect-changes.sh"
       - "infra/ios-detect-changes.test.sh"
+      - "infra/ios-native-controls.py"
   workflow_dispatch:
 
 jobs:
@@ -60,7 +61,8 @@ jobs:
     needs: changes
     if: needs.changes.outputs.ios == 'true'
     runs-on: macos-latest
-    timeout-minutes: 40
+    # Fixed aggregate of the existing ordinary/native phases, sharing one warm destination.
+    timeout-minutes: 80
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -112,6 +114,7 @@ jobs:
       # the tests pass, not to produce a shippable artifact. Releases are signed
       # and uploaded from Xcode; see apps/ios/docs/shipping.md.
       - name: Build and test
+        timeout-minutes: 40
         env:
           DESTINATION_UDID: ${{ steps.simulator.outputs.udid }}
         run: |
@@ -147,6 +150,36 @@ jobs:
             echo "::error::The real EventKit read test skipped despite pre-granted calendar access."
             exit 1
           fi
+
+      # Run only after the ordinary suite has proved the same destination works.
+      # PR-only matches the former standalone native workflow trigger.
+      - name: Qualify native approval and disclosure controls
+        id: native_controls
+        if: github.event_name == 'pull_request'
+        timeout-minutes: 35
+        env:
+          DESTINATION_UDID: ${{ steps.simulator.outputs.udid }}
+          EXPECTED_HEAD: ${{ github.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 -c 'import os,time,pathlib; pathlib.Path(os.environ["RUNNER_TEMP"],"native-controls-start").write_text(str(time.time()))'
+          python3 infra/ios-native-controls.py run
+
+      - name: Close native fixture resources
+        id: native_cleanup
+        if: always() && steps.native_controls.outcome != 'skipped' && github.event_name == 'pull_request'
+        timeout-minutes: 3
+        run: python3 infra/ios-native-controls.py cleanup
+
+      - name: Preserve native control qualification evidence
+        if: always() && steps.native_controls.outcome != 'skipped' && github.event_name == 'pull_request'
+        timeout-minutes: 1
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
+        with:
+          name: native-controls-capability-${{ github.sha }}
+          path: ${{ steps.native_cleanup.outputs.upload }}
+          retention-days: 14
+          if-no-files-found: error
 
       # Normally unarmed. Later allocation permits ONE ordinary push of the
       # final local commit after Manager arms that exact SHA, then clears the

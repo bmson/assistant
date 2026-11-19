@@ -12,7 +12,7 @@ fi
 # with pipefail that turns a successful match into git's SIGPIPE status on large
 # diffs and makes this required check appear skipped.
 changed_paths="$(git diff --name-only "${BASE_SHA:?BASE_SHA is required}" HEAD)"
-if grep -Eq '^(apps/ios/|\.github/workflows/ios\.yml$|infra/ios-detect-changes\.sh$|infra/ios-detect-changes\.test\.sh$)' <<<"$changed_paths"; then
+if grep -Eq '^(apps/ios/|\.github/workflows/ios\.yml$|infra/ios-detect-changes\.sh$|infra/ios-detect-changes\.test\.sh$|infra/ios-native-controls\.py$)' <<<"$changed_paths"; then
   echo "ios=true" >> "$GITHUB_OUTPUT"
 else
   echo "ios=false" >> "$GITHUB_OUTPUT"
