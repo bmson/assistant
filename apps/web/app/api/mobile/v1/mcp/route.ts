@@ -102,7 +102,7 @@ export async function POST(request: Request): Promise<Response> {
     endpoint: body.endpoint,
     bearerToken: typeof body.bearerToken === 'string' ? body.bearerToken : undefined,
   });
-  return 'error' in result
+  return !('status' in result)
     ? mobileJson(
         { error: result.error },
         { status: result.error === 'MCP connection not found.' ? 404 : 400 },
