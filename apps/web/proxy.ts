@@ -1,5 +1,6 @@
 import { isSecurityIncidentId } from '@assistant/application/security-incidents';
 import { loadConfig } from '@assistant/config';
+import { ESTIMATED_COST_ROUTES } from '@assistant/persistence/estimated-cost-approval';
 import { type NextRequest, NextResponse } from 'next/server';
 
 function isLoopbackHostname(hostname: string): boolean {
@@ -74,11 +75,18 @@ export function proxy(request: NextRequest) {
       { status: 503 },
     );
   }
+  if (path === '/api/oauth/mcp/client-metadata' && ['GET', 'HEAD'].includes(request.method))
+    return NextResponse.next();
   // Browser chat and administration pages are owner surfaces. Native APIs
   // retain their existing persistence and authentication boundaries below.
   const adminPage = ['/settings', '/security', '/signin', '/setup'].includes(path);
   // Reach only the existing owner-checked Costs page and cap Server Action.
   const costsPage = path === '/costs' && ['GET', 'POST'].includes(request.method);
+  // The review page authenticates the owner before rendering. Its separate
+  // API handlers enforce authorization for reads and decisions.
+  const spendingRequestPage =
+    /^\/costs\/requests\/[A-Za-z0-9_-]{1,128}$/.test(path) &&
+    ['GET', 'HEAD'].includes(request.method);
   const memoryBrowsePage =
     ['/profile', '/profile/memories', '/people', '/profile/knowledge'].includes(path) ||
     /^\/profile\/knowledge\/notes\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
@@ -129,6 +137,7 @@ export function proxy(request: NextRequest) {
       path === '/' ||
       (!adminPage &&
         !costsPage &&
+        !spendingRequestPage &&
         !auditPage &&
         !localChatPage &&
         !ownerChatPage &&
@@ -146,6 +155,11 @@ export function proxy(request: NextRequest) {
     }
   }
   if (loadConfig().PERSISTENCE_DRIVER !== 'firestore') return NextResponse.next();
+  const estimatedCostApi = Object.values(ESTIMATED_COST_ROUTES).some(
+    ({ overview, quote, decision }) =>
+      (path === overview && request.method === 'GET') ||
+      ((path === quote || path === decision) && ['GET', 'POST'].includes(request.method)),
+  );
   const chatIdPath =
     /^\/api\/mobile\/v1\/chats\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   const activityIdPath =
@@ -178,6 +192,15 @@ export function proxy(request: NextRequest) {
   if (
     path.startsWith('/api/auth/') ||
     (path === '/api/oauth/google-calendar/callback' && request.method === 'GET') ||
+    (path === '/api/oauth/mcp/callback' && request.method === 'GET') ||
+    (/^\/api\/mobile\/v1\/mcp\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/oauth$/i.test(
+      path,
+    ) &&
+      ['GET', 'POST', 'DELETE'].includes(request.method)) ||
+    (/^\/api\/mobile\/v1\/mcp\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/oauth\/flow$/i.test(
+      path,
+    ) &&
+      ['GET', 'DELETE'].includes(request.method)) ||
     (path === '/api/mobile/v1/connections/google-calendar' &&
       ['GET', 'DELETE'].includes(request.method)) ||
     (path === '/api/mobile/v1/connections/google-calendar/connect' && request.method === 'POST') ||
@@ -218,7 +241,9 @@ export function proxy(request: NextRequest) {
       ['GET', 'POST'].includes(request.method)) ||
     // The POST is the costs page's Server Action; it performs its own owner
     // authentication and Firestore persistence checks before changing caps.
-    (path === '/costs' && ['GET', 'POST'].includes(request.method)) ||
+    costsPage ||
+    spendingRequestPage ||
+    estimatedCostApi ||
     // Owner document catalog: page, delete action, and the upload form.
     (path === '/documents' && ['GET', 'POST'].includes(request.method)) ||
     (path === '/api/documents/upload' && request.method === 'POST') ||
@@ -270,6 +295,10 @@ export function proxy(request: NextRequest) {
       ['GET', 'POST', 'PUT', 'DELETE'].includes(request.method)) ||
     (path === '/api/mobile/v1/goals' && ['GET', 'POST'].includes(request.method)) ||
     (path === '/api/mobile/v1/mcp' && ['GET', 'POST'].includes(request.method)) ||
+    (/^\/api\/mobile\/v1\/mcp\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/authorization$/i.test(
+      path,
+    ) &&
+      request.method === 'GET') ||
     (path === '/api/mobile/v1/providers' && ['GET', 'POST'].includes(request.method)) ||
     (path === '/api/mobile/v1/providers/choice' && request.method === 'PUT') ||
     (/^\/api\/mobile\/v1\/providers\/[a-z0-9][a-z0-9_-]{0,39}$/.test(path) &&

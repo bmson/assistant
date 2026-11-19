@@ -9,6 +9,7 @@ import {
   SERVICE_ROOT,
   scalingConfigurationDigest,
 } from './owner-release-current-snapshot.js';
+import { revisionWithRequestedImage } from './owner-release-image-resolution.js';
 import {
   matchesNativeServiceDigest,
   nativeServiceDefaults,
@@ -60,8 +61,13 @@ export function verifyBootstrapRevisionTemplate(
     r.name === `${service}/revisions/${expectedRevision}` &&
       (r.service === service || r.service === `assistant-${role}`),
   );
+  const requestedContainers = t.containers;
+  requireProof(Array.isArray(requestedContainers) && requestedContainers.length === 1);
+  const expectedImage = object(requestedContainers[0]).image;
+  requireProof(typeof expectedImage === 'string');
+  const semantic = revisionWithRequestedImage(r, expectedImage);
   const projected: Obj = {};
-  for (const key of Object.keys(t)) if (r[key] !== undefined) projected[key] = r[key];
+  for (const key of Object.keys(t)) if (semantic[key] !== undefined) projected[key] = semantic[key];
   projected.revision = expectedRevision;
   const requested = t.containers,
     actual = projected.containers;
@@ -124,6 +130,73 @@ function validateCandidate(
   );
   requireProof(literal(t, 'ASSISTANT_RELEASE_WRITES_PAUSED') === String(paused));
 }
+export function verifyCanonicalBootstrapAgent(
+  receipt: BootstrapReceipt,
+  service: unknown,
+  revision: unknown,
+  expected: CandidateIdentity,
+  accepted: unknown,
+) {
+  const s = object(service),
+    r = object(revision),
+    proof = object(accepted);
+  const binding = receipt.services.agent;
+  requireProof(receipt.kind === 'disabled-bootstrap' && receipt.source === expected.source);
+  requireProof(
+    s.name === binding.service &&
+      s.uid === binding.uid &&
+      s.reconciling !== true &&
+      same(s.scaling, binding.automaticScaling) &&
+      object(s.terminalCondition).state === 'CONDITION_SUCCEEDED',
+  );
+  requireProof(
+    proof.kind === 'bootstrap-agent-successor' &&
+      proof.outcome === 'observed_exact_successor' &&
+      proof.source === expected.source &&
+      proof.runId === expected.runId &&
+      proof.attempt === expected.attempt &&
+      proof.manifest === expected.manifest &&
+      proof.revision === expected.revision &&
+      proof.image === expected.image &&
+      typeof r.uid === 'string' &&
+      proof.uidSha256 === bootstrapDigest(r.uid),
+  );
+  validateCandidate(binding.service, s, r, expected, false, true);
+  const template = { ...object(s.template) };
+  delete template.revision;
+  requireProof(bootstrapDigest(template) === proof.templateSha256);
+  requireProof(
+    [
+      s,
+      { ...s, scaling: { scalingMode: 'MANUAL' } },
+      { ...s, scaling: { scalingMode: 'MANUAL', manualInstanceCount: 0 } },
+    ].some(
+      (profile) => nativeStableConfigurationDigest(profile) === proof.serviceStableConfigSha256,
+    ),
+  );
+  requireProof(
+    r.serviceAccount === 'assistant-agent@bmson-assistant.iam.gserviceaccount.com' &&
+      literal(r, 'ASSISTANT_RELEASE_API_CONTRACT') === '3' &&
+      literal(r, 'ASSISTANT_RELEASE_WEB_API_MIN') === '3' &&
+      literal(r, 'ASSISTANT_RELEASE_WEB_API_MAX') === '3' &&
+      literal(r, 'MCP_OAUTH_ENABLED') === 'false',
+  );
+  for (const value of [s.traffic, s.trafficStatuses]) {
+    const rows = normalizedAgentRows(value);
+    const tag = `candidate-${expected.runId}-${expected.attempt}`;
+    requireProof(
+      rows.length >= 1 &&
+        rows.length <= 2 &&
+        rows.every(
+          (row) => row.revision === expected.revision && (row.tag === tag || row.tag === ''),
+        ) &&
+        rows.filter((row) => row.tag === tag).length === 1 &&
+        rows.filter((row) => row.percent === 100).length === 1 &&
+        rows.every((row) => row.percent === 100 || (row.percent === 0 && row.tag === tag)),
+    );
+  }
+}
+
 export function planScalingRestore(
   receipt: BootstrapReceipt,
   role: 'agent' | 'web',

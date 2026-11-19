@@ -991,6 +991,11 @@ private struct AgentSettingsEditor: View {
     }
 }
 
+private struct McpOAuthViewIdentity: Hashable {
+    let connection: McpSignInOptionsIdentity
+    let ownerVersion: Int
+}
+
 /// Owner-managed remote tool servers. Connection discovery is intentionally
 /// separate from tool use: a server can describe its tools here, but every
 /// later invocation follows the owner's normal approval and autonomy policy.
@@ -1009,6 +1014,7 @@ private struct MCPConnectionsView: View {
     @State private var loadFailed = false
     @State private var hasLoaded = false
     @State private var actionFailed = false
+    @State private var actionNotice: String?
     @FocusState private var focusedField: MCPField?
 
     private var usesAccessibilityLayout: Bool { dynamicTypeSize.isAccessibilitySize }
@@ -1028,6 +1034,10 @@ private struct MCPConnectionsView: View {
                             message: hasLoaded || !model.mcpConnections.isEmpty ? "Previous connections are shown. Refresh before changing them." : "Try again to check your connections.",
                             retry: { Task { await load() } }
                         )
+                    }
+                    if let actionNotice {
+                        Text(actionNotice).font(.footnote).foregroundStyle(.secondary)
+                            .assistantPanel(in: colorScheme)
                     }
                     if actionFailed {
                         AssistantInlineFailure(message: "Couldn’t confirm that change. Your entries are kept. Try again or pull to refresh.")
@@ -1201,6 +1211,15 @@ private struct MCPConnectionsView: View {
             }
 
             connectionActions(connection, viewportWidth: viewportWidth)
+            Divider()
+            McpSignInOptionsControl(connection: connection,
+                disabled: workingConnectionID != nil || isAdding || isLoading || loadFailed)
+            if model.mcpOAuthConfigured && connection.enabled {
+                McpOAuthControl(connection: connection,
+                                disabled: workingConnectionID != nil || isAdding || isLoading || loadFailed)
+                    .id(McpOAuthViewIdentity(connection: McpSignInOptionsIdentity(connection),
+                                             ownerVersion: model.activityConnectionVersion))
+            }
         }
         .assistantCard(in: colorScheme)
     }
@@ -1226,6 +1245,7 @@ private struct MCPConnectionsView: View {
                 guard workingConnectionID == nil, !isAdding,
                       !(isLoading && !hasLoaded), !(loadFailed && !hasLoaded) else { return }
                 workingConnectionID = connection.id
+                actionNotice = nil
                 actionFailed = !(await model.deleteMcpConnection(id: connection.id))
                 workingConnectionID = nil
             }
@@ -1258,6 +1278,7 @@ private struct MCPConnectionsView: View {
         focusedField = nil
         isAdding = true
         actionFailed = false
+        actionNotice = nil
         Task {
             let added = await model.createMcpConnection(name: candidateName, endpoint: candidateEndpoint, bearerToken: bearerToken.isEmpty ? nil : bearerToken)
             if added {
@@ -1274,9 +1295,14 @@ private struct MCPConnectionsView: View {
     private func perform(_ connection: McpConnection, action: String) {
         guard workingConnectionID == nil, !isAdding, !(isLoading && !hasLoaded), !(loadFailed && !hasLoaded) else { return }
         actionFailed = false
+        actionNotice = nil
         workingConnectionID = connection.id
         Task {
-            actionFailed = !(await model.updateMcpConnection(id: connection.id, action: action))
+            let result = await model.updateMcpConnection(id: connection.id, action: action)
+            actionFailed = !result.updated
+            if result.requiresReconnect {
+                actionNotice = "To refresh this service’s tools, reconnect its browser sign-in. Saved authorization is kept."
+            }
             workingConnectionID = nil
         }
     }

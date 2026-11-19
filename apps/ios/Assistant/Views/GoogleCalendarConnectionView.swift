@@ -95,7 +95,7 @@ struct GoogleCalendarConnectionView: View {
         }
         .navigationTitle("Google Calendar")
         .assistantSubmenuChrome()
-        .background(GoogleCalendarWindowReader(window: $window).frame(width: 0, height: 0))
+        .background(AssistantWindowReader(window: $window).frame(width: 0, height: 0))
         .task(id: model.activityConnectionVersion) {
             isVisible = true
             let context = model.googleCalendarRequestContext()
@@ -141,7 +141,7 @@ struct GoogleCalendarConnectionView: View {
     }
 }
 
-private struct GoogleCalendarWindowReader: UIViewRepresentable {
+struct AssistantWindowReader: UIViewRepresentable {
     @Binding var window: UIWindow?
 
     final class Probe: UIView {

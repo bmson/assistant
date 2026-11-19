@@ -4,6 +4,7 @@ import { requestChatOperationCancellation } from '../chat-operation-cancellation
 import {
   CANCELLED_REQUEST_NOTE,
   cancelledRequestNote,
+  ownsEstimatedCostAdmission,
   readUnconfirmedStop,
   recoveryTaskFromUrl,
   requestRecoveryHref,
@@ -18,6 +19,23 @@ const taskId = '22222222-2222-4222-8222-222222222222';
 const operationId = '33333333-3333-4333-8333-333333333333';
 
 describe('request recovery identity and honest presentation', () => {
+  it('releases only the matching parked admission while preserving later sends and unresolved stops', () => {
+    const current = { taskId, conversationId, scopeGeneration: 3, clientOperationId: operationId };
+    const input = {
+      taskId,
+      conversationId,
+      scopeGeneration: 3,
+      current,
+      pendingOperationId: operationId,
+    };
+    expect(ownsEstimatedCostAdmission(input)).toBe(true);
+    expect(ownsEstimatedCostAdmission({ ...input, taskId: 'older-a' })).toBe(false);
+    expect(ownsEstimatedCostAdmission({ ...input, pendingOperationId: 'newer-b' })).toBe(false);
+    expect(ownsEstimatedCostAdmission({ ...input, scopeGeneration: 4 })).toBe(false);
+    expect(ownsEstimatedCostAdmission({ ...input, cancellingOperationId: operationId })).toBe(
+      false,
+    );
+  });
   it('links to exactly this owner chat request and offers a path back without task selection', () => {
     const href = requestRecoveryHref(conversationId, taskId) ?? '';
     const html = renderToStaticMarkup(

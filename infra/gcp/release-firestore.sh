@@ -15,6 +15,11 @@
 # the same way; release-postgres.sh is deleted when PostgreSQL is retired.
 set -euo pipefail
 
+if [[ "$#" != 0 && ( "$#" != 1 || "$1" != --compatibility-check-only ) ]]; then
+  echo 'Unexpected release-firestore.sh arguments.' >&2
+  exit 2
+fi
+
 # shellcheck source=infra/gcp/release-staged-services.sh
 source "$(dirname "${BASH_SOURCE[0]}")/release-staged-services.sh"
 release_validate_worker_override || exit $?
@@ -42,14 +47,24 @@ if [[ "$RELEASE_COMPONENTS" == agent,web ]]; then ASSISTANT_RELEASE_WRITES_PAUSE
 export ASSISTANT_RELEASE_WRITES_PAUSED
 # Fail closed before any backup/index/build/revision mutation unless the live
 # pair and selected candidate declare compatible API and Firestore schema ranges.
+RELEASE_DRAINED_API_TRANSITION=false
 echo "Checking live/new schema and API compatibility before Firestore release mutations"
 if ! release_preflight_compatibility "$RELEASE_COMPONENTS"; then
-  # This exception admits only the exact pinned 68e Firestore pair and only
-  # for a full release whose first new web revision is maintenance-paused.
-  # The helper never relabels historical API/schema metadata.
-  # shellcheck source=infra/gcp/release-legacy-bootstrap.sh
-  source "$(dirname "${BASH_SOURCE[0]}")/release-legacy-bootstrap.sh"
-  release_preflight_legacy_firestore_bootstrap agent,web "$RELEASE_AGENT_API" "$RELEASE_WEB_API" "$RELEASE_SCHEMA_VERSION" || exit 1
+  if [[ "$RELEASE_COMPONENTS" == agent,web && -n "${OWNER_RELEASE_BOOTSTRAP_RECEIPT:-}" &&
+        "$(release_reviewed_snapshot_kind "$TAG")" == disabled-bootstrap ]]; then
+    RELEASE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+    (cd "$RELEASE_ROOT" && IMAGE_TAG="$TAG" pnpm exec tsx scripts/owner-release-api-transition.ts) || exit 1
+    RELEASE_DRAINED_API_TRANSITION=true
+  else
+    # The older exception still admits only its pinned historical Firestore pair.
+    # shellcheck source=infra/gcp/release-legacy-bootstrap.sh
+    source "$(dirname "${BASH_SOURCE[0]}")/release-legacy-bootstrap.sh"
+    release_preflight_legacy_firestore_bootstrap agent,web "$RELEASE_AGENT_API" "$RELEASE_WEB_API" "$RELEASE_SCHEMA_VERSION" || exit 1
+  fi
+fi
+# The protected workflow runs the same precheck before acquiring delivery holds.
+if [[ "$#" == 1 ]]; then
+  exit 0
 fi
 # A daily backup schedule leaves at most ~24h between recovery points.
 BACKUP_MAX_AGE_HOURS="${FIRESTORE_BACKUP_MAX_AGE_HOURS:-26}"

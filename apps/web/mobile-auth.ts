@@ -117,6 +117,11 @@ export async function authenticateMobileOwner(
 export async function resolveMobileOwner(
   _principal: MobileBearerPrincipal,
 ): Promise<MobileOwnerResolution> {
+  return resolveAuthenticatedInstallationOwner();
+}
+
+/** Ownership lookup only, never authentication. Call after checking the request's credential/session. */
+export async function resolveAuthenticatedInstallationOwner(): Promise<MobileOwnerResolution> {
   try {
     const config = loadConfig();
     if (config.PERSISTENCE_DRIVER !== 'firestore') {

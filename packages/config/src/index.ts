@@ -6,6 +6,7 @@ import dotenv from 'dotenv';
 import { z } from 'zod';
 import { type AssistantModule, assistantModuleNames, parseAssistantModules } from './modules.js';
 
+export { mcpOAuthReleaseReady } from './mcp-oauth-release.js';
 export {
   type AssistantModule,
   assistantModuleNames,
@@ -214,6 +215,9 @@ const ConfigSchema = z.object({
   PROFILE_ENC_KEY: z.string().default(''),
   /** Encryption key for owner-managed MCP bearer credentials. */
   MCP_ENC_KEY: z.string().default(''),
+  /** Opt in to owner-managed MCP OAuth once web, worker, and storage support it. */
+  MCP_OAUTH_ENABLED: booleanString,
+  MCP_OAUTH_REGISTRATIONS: z.string().default(''),
   /** local = detached child process; cloudrun = Cloud Run Job execution. */
   BROWSER_DRIVER: z.enum(['local', 'cloudrun']).default('local'),
   BROWSER_JOB_NAME: z.string().default('assistant-browser'),
@@ -361,6 +365,10 @@ const ConfigSchema = z.object({
   TRACES_BUCKET: z.string().default(''),
   /** Explicit opt-in: canaries perform real provider side effects. */
   CANARY_ENABLED: booleanString,
+  /** Enable only after all budget writers support request-scoped allowance escrow. */
+  ESTIMATED_COST_APPROVAL_ENABLED: booleanString,
+  /** Deployment-qualified nonsecret provider provenance; never put credentials here. */
+  ESTIMATED_COST_PROVIDER_SOURCE_JSON: z.string().max(4096).default(''),
   /** Explicit rehearsal-only opt-in: permits the authenticated, task-free Vertex probe. */
   VERTEX_MODEL_PROBE_ENABLED: booleanString,
   CANARY_MAX_COST_USD: z.coerce.number().min(0.01).max(0.1).default(0.03),
@@ -385,6 +393,23 @@ const ConfigSchema = z.object({
 
 export type Config = z.infer<typeof ConfigSchema>;
 
+/** One capability shared by web, agent and workers; it never authorizes a cost decision. */
+export function estimatedCostApprovalEnabled(
+  config: Pick<
+    Config,
+    | 'ESTIMATED_COST_APPROVAL_ENABLED'
+    | 'RESTORE_REHEARSAL'
+    | 'PERSISTENCE_DRIVER'
+    | 'POSTGRES_SOURCE_WRITES_FENCED'
+  >,
+): boolean {
+  return (
+    config.ESTIMATED_COST_APPROVAL_ENABLED &&
+    !config.RESTORE_REHEARSAL &&
+    (config.PERSISTENCE_DRIVER !== 'postgres' || !config.POSTGRES_SOURCE_WRITES_FENCED)
+  );
+}
+
 /** Fail-closed profile check used before any restore-rehearsal process starts. */
 export function validateRestoreRehearsalConfig(
   config: Config,
@@ -392,6 +417,8 @@ export function validateRestoreRehearsalConfig(
 ): string[] {
   if (!config.RESTORE_REHEARSAL) return [];
   const problems: string[] = [];
+  if (config.ESTIMATED_COST_APPROVAL_ENABLED)
+    problems.push('ESTIMATED_COST_APPROVAL_ENABLED must be false in RESTORE_REHEARSAL');
   if (env.NODE_ENV === 'production') problems.push('RESTORE_REHEARSAL cannot run in production');
   if (config.PERSISTENCE_DRIVER !== 'postgres')
     problems.push('RESTORE_REHEARSAL requires PERSISTENCE_DRIVER=postgres');

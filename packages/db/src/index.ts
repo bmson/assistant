@@ -14,14 +14,24 @@ export { createPostgresCardRefreshRepository } from './card-refresh-repository.j
 export { notChatAdmissionCancellationSql } from './chat-admission-projection.js';
 export * from './client.js';
 export { createPostgresConversationSearchRepository } from './conversation-search-repository.js';
-export { createPostgresCostRepository } from './cost-repository.js';
+export {
+  createPostgresCostRepository,
+  createPostgresEstimatedCostApprovalRepository,
+} from './cost-repository.js';
 export { admitPostgresCuriosityQuestion } from './curiosity-admission-repository.js';
 export { createPostgresDeviceTokenRepository } from './device-token-repository.js';
 export { createPostgresDocumentProcessorRepository } from './document-processor-repository.js';
 export { createPostgresDocumentSearchRepository } from './document-search-repository.js';
 export { createPostgresEmailAttachmentCustodyRepository } from './email-attachment-custody-repository.js';
+export * from './email-ingest-readiness.js';
 export { createPostgresEmailSyncRepository } from './email-sync-repository.js';
 export * from './entities.js';
+export { capturePostgresEstimatedCostSourceBinding } from './estimated-cost-approval-transactions.js';
+export * from './estimated-cost-baseline-provision.js';
+export {
+  createPostgresEstimatedCostQuotePreparer,
+  createPostgresEstimatedCostTurnParking,
+} from './estimated-cost-preparer.js';
 export { createPostgresExecutionContextRepository } from './execution-context-repository.js';
 export { createPostgresExecutionEvidenceRepository } from './execution-evidence-repository.js';
 export { createPostgresExecutionJobRepository } from './execution-jobs-repository.js';
@@ -37,6 +47,7 @@ export { createPostgresHistoryRecallRepository } from './history-recall-reposito
 export { assertPostgresInstallationOwner } from './installation-owner.js';
 export { createPostgresKnowledgeGraphSyncRepository } from './knowledge-graph-sync-repository.js';
 export { createPostgresLocationPingRepository } from './location-ping-repository.js';
+export * from './mcp-oauth-repository.js';
 export { createPostgresMemoryEmbeddingRefreshRepository } from './memory-embedding-refresh-repository.js';
 export { createPostgresMemorySupersedeRepository } from './memory-supersede-repository.js';
 export { createPostgresMemoryToolRepository } from './memory-tool-repository.js';

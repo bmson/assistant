@@ -42,6 +42,31 @@ describe('private Cloud Run agent readiness source', () => {
     });
   });
 
+  it('keeps the canonical token audience for the exact paused agent tag', async () => {
+    const agent = { ...config, AGENT_URL: 'https://assistant-agent-abc-uw.a.run.app' };
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      return new URL(String(input)).hostname === 'metadata.google.internal'
+        ? new Response('header.payload.signature')
+        : Response.json({ ready: true });
+    }) as unknown as typeof fetch;
+    await expect(
+      createCloudRunAgentReadinessSource(agent, fetcher, 'candidate-123-1').read('owner-agent'),
+    ).resolves.toEqual({ ready: true });
+    expect(
+      new URL(String(vi.mocked(fetcher).mock.calls[0]?.[0])).searchParams.get('audience'),
+    ).toBe(agent.AGENT_URL);
+    expect(String(vi.mocked(fetcher).mock.calls[1]?.[0])).toBe(
+      'https://candidate-123-1---assistant-agent-abc-uw.a.run.app/ready',
+    );
+    vi.mocked(fetcher).mockClear();
+    await expect(
+      createCloudRunAgentReadinessSource(agent, fetcher, 'https://foreign.example').read(
+        'owner-agent',
+      ),
+    ).rejects.toThrow('target is unavailable');
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
   it('rejects a foreign owner or non-Cloud Run destination before fetching a token', async () => {
     const fetcher = vi.fn() as unknown as typeof fetch;
     await expect(

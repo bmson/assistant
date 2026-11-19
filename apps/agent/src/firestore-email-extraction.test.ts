@@ -176,6 +176,45 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       return id;
     }
 
+    it('extracts an admitted automated source with no visible message and unfinished observers', async () => {
+      const id = randomUUID();
+      const sourceId = randomUUID();
+      const channelMessageId = `gmail:automated-${id}`;
+      await store.doc('emailIngest', id).set(
+        encodeRecord({
+          id,
+          agentId,
+          channelMessageId,
+          fromEmail: 'airline@example.test',
+          subject: 'Your booking',
+          category: 'travel',
+          importance: 2,
+          authenticated: true,
+          extractedAt: null,
+          pipelineStage: 'message_persisted',
+          ingestMode: 'direct',
+          scoreStatus: 'prepared',
+          admittedSourceKind: 'automated_source',
+          admittedSourceId: sourceId,
+          messagePersisted: false,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        }),
+      );
+      await store.doc('emailObserverSources', sourceId).set({
+        id: sourceId,
+        agentId,
+        channelMessageId,
+        sourceKey: channelMessageId,
+        body: 'Your flight to Oslo on 1 October 2026 at 08:00 is confirmed. Reference SK4321.',
+      });
+      expect(await persistence.emailExtraction?.pendingCount()).toBe(1);
+      await runJob();
+      expect(prompts[0]).toContain('Your flight to Oslo');
+      expect((await store.doc('emailIngest', id).get()).get('extractedAt')).toBeTruthy();
+      expect(await persistence.emailExtraction?.pendingCount()).toBe(0);
+    });
+
     async function runJob() {
       const { task } = await persistence.tasks.createTask({
         agentId,
@@ -201,6 +240,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         'Weekly newsletter with nothing in it at all really.',
         10,
       );
+      await store.doc('emailIngest', routine).update({ category: 'bulk' });
 
       expect(await runJob()).toBe(
         'email extraction: 2 saved (1 recallable, 1 awaiting review), 0 duplicate, 1 occasion(s), ' +

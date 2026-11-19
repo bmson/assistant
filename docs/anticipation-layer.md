@@ -18,6 +18,20 @@ email watch hands a bounded trigger excerpt (`watch_fires.excerpt`) to the `watc
 holding no tools at all. Phases 3–4 are otherwise unchanged.
 This document is the source of truth for the design.
 
+**November 2026 expansion:** the daily briefing now includes established personal
+occasions and open commitments, including older undated obligations. A separate
+`life-awareness` model-driven review runs at 11:00 and 17:00 using the existing tool
+executor to connect work, family, relationships, calendars, mail, plans and relevant
+public news. Forwarded Gmail observation includes archived received mail, and personal
+and logistics emails qualify for memory extraction even with a low importance score.
+See the [audit, rollout details and remaining coverage gaps](audits/proactive-awareness-2026-11-07.md).
+The [live follow-up audit](audits/proactive-live-audit-2026-11-07.md) found that admitted
+direct-mode email was excluded by readers waiting for a forwarded-only completion state.
+Shared readiness checks now expose those canonical sources to briefing, pulse, extraction
+and health, and automated bodies are read from their canonical source store. Promises
+without deadlines receive a briefing follow-up after two days; identical displayed
+commitments are collapsed. Upcoming dates require owner provenance or confirmation.
+
 **Shipped since:** the proactive surfaces grew past the briefing. The `push`
 module (`packages/modules/src/push`) delivers owner notices and approval pings
 over APNs to the iOS app (`POST /api/mobile/v1/devices` registers tokens; the

@@ -7,6 +7,7 @@ import {
   checksumV3,
   compositeMigrationId,
   deserializeMigrationValue,
+  INSTALLATION_RUNTIME_EXCLUSIONS_V2,
   isOwnerEditorRuntimeCursorName,
   MIGRATION_TABLES,
   type MigrationBundle,
@@ -627,6 +628,14 @@ describe('migration format integrity', () => {
       version: 2,
     } as unknown as typeof OWNER_EDITOR_RUNTIME_EXCLUSIONS_V1;
     expect(() => validate(input)).toThrow('runtime exclusions');
+
+    input.manifest.coverage.runtimeExclusions = INSTALLATION_RUNTIME_EXCLUSIONS_V2;
+    input.manifest.bundleChecksum = migrationBundleChecksum(
+      input.records,
+      input.manifest.formatVersion,
+      INSTALLATION_RUNTIME_EXCLUSIONS_V2,
+    );
+    expect(() => validate(input)).not.toThrow();
 
     const wrongTable = bundle();
     wrongTable.manifest.coverage.runtimeExclusions = {

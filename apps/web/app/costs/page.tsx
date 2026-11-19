@@ -4,10 +4,13 @@ import { loadConfig, validateAgentPersistenceConfig } from '@assistant/config';
 import { createInstallationStore, getFirestoreMobileCosts } from '@assistant/firestore';
 import { COST_BASIS_LABELS, costBasis } from '@assistant/persistence';
 import Link from 'next/link';
+import { AutoRefresh } from '@/app/auto-refresh';
 import { BudgetCapsForm } from '@/app/costs/budget-caps-form';
+import { PendingSpendingOverview } from '@/app/costs/pending-spending-overview';
 import { BillingCoverageSummary, ProviderBillingCards } from '@/app/costs/provider-billing-cards';
 import { DispatchingCostAttempts, UnknownCostAttempts } from '@/app/costs/unknown-cost-attempts';
 import { requireOwner } from '@/auth';
+import { getOwnerEstimatedCostOverview } from '@/lib/estimated-cost-overview';
 import { formatDateTime, formatUsd, truncate } from '@/lib/format';
 import { getBillingOverview, getDb } from '@/lib/server';
 import { cardShellClass, InfoGrid, InfoItem, PageHeader, PageShell } from '@/lib/ui';
@@ -62,11 +65,15 @@ export default async function CostsPage() {
     parkedTasks: parked,
     taskDefaultLimit,
   } = dashboard;
-  const billing = await getBillingOverview();
+  const [billing, estimatedCostOverview] = await Promise.all([
+    getBillingOverview(),
+    getOwnerEstimatedCostOverview(),
+  ]);
   const billingCoverage = billingCoverageProjection(billing, dashboard.byEvidence);
 
   return (
     <PageShell size="reading">
+      <AutoRefresh />
       <PageHeader
         back={{ href: '/chat', label: 'Chat' }}
         title="Costs"
@@ -119,6 +126,8 @@ export default async function CostsPage() {
           </div>
         ))}
       </section>
+
+      <PendingSpendingOverview overview={estimatedCostOverview} />
 
       {/* Cap editing */}
       <section className="mt-6">

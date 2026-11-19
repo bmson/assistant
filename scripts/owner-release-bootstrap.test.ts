@@ -1,6 +1,7 @@
 // biome-ignore-all lint/style/noNonNullAssertion: Synthetic wire fixtures explicitly populate referenced fields.
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { syntheticImage } from './fixtures/owner-image-resolution.synthetic.js';
 import {
   type BootstrapReceipt,
   bootstrapDigest,
@@ -13,6 +14,7 @@ import {
   verifyBootstrapRevisionTemplate,
   verifyCurrentSnapshot,
 } from './owner-release-bootstrap.js';
+import { registerImageResolution } from './owner-release-image-resolution.js';
 
 const source = 'a'.repeat(40),
   manifest = 'b'.repeat(64),
@@ -114,6 +116,63 @@ function fixture(role: 'agent' | 'web' = 'web') {
   };
 }
 describe('reviewed current snapshot and bootstrap restoration', () => {
+  it.each(['agent', 'web'] as const)(
+    'binds %s index resolution without weakening raw hashes or template drift checks',
+    (role) => {
+      const f = fixture(role),
+        image = syntheticImage(role, 'bootstrap');
+      f.service.template.containers[0]!.image = image.image;
+      const native = {
+        ...f.native,
+        containers: [{ ...f.native.containers[0], name: `${role}-1`, image: image.childImage }],
+        containerStatuses: image.revision.containerStatuses,
+      };
+      const before = JSON.stringify(native);
+      expect(() =>
+        verifyBootstrapRevisionTemplate(
+          f.service.name,
+          f.service.template,
+          native,
+          f.expected.revision,
+        ),
+      ).toThrow();
+      registerImageResolution(image.image, image.parentBytes, image.childBytes);
+      expect(() =>
+        verifyBootstrapRevisionTemplate(
+          f.service.name,
+          f.service.template,
+          native,
+          f.expected.revision,
+        ),
+      ).not.toThrow();
+      const b = {
+        ...f.receipt.services[role],
+        service: f.service.name,
+        uid: f.service.uid,
+        revision: f.expected.revision,
+        image: image.image,
+        serviceSha256: bootstrapDigest(f.service),
+        revisionSha256: bootstrapDigest(native),
+      };
+      expect(() => verifyCurrentSnapshot(b, f.service, native, false)).not.toThrow();
+      expect(() =>
+        verifyCurrentSnapshot(b, f.service, { ...native, uid: 'changed' }, false),
+      ).toThrow();
+      for (const changed of [
+        { ...native, timeout: '60s' },
+        { ...native, maxInstanceRequestConcurrency: 99 },
+      ])
+        expect(() =>
+          verifyBootstrapRevisionTemplate(
+            f.service.name,
+            f.service.template,
+            changed,
+            f.expected.revision,
+          ),
+        ).toThrow();
+      expect(JSON.stringify(native)).toBe(before);
+    },
+  );
   it.each(['agent', 'web'] as const)(
     'accepts exact %s full and provider-shaped revision identities without mutating raw evidence',
     (role) => {
@@ -337,6 +396,62 @@ describe('reviewed current snapshot and bootstrap restoration', () => {
     ];
     for (const changed of changes)
       expect(() => verifyCurrentSnapshot(b, changed, f.native)).toThrow();
+  });
+  it('accepts the retained retired resource condition only for a closed stable current revision', () => {
+    const f = fixture(),
+      s = clone(f.service);
+    delete (s.traffic[0] as { tag?: string }).tag;
+    delete (s.trafficStatuses[0] as { tag?: string }).tag;
+    // Condition fields from the retained Cloud Run v2 retired profile; no provider identifiers.
+    const conditions = [
+      { type: 'Ready', state: 'CONDITION_SUCCEEDED', revisionReason: 'RETIRED' },
+      { type: 'Active', state: 'CONDITION_FAILED', revisionReason: 'RETIRED' },
+      { type: 'ResourcesAvailable', state: 'CONDITION_RECONCILING', revisionReason: 'RETIRED' },
+      { type: 'TrafficShutDown', state: 'CONDITION_SUCCEEDED' },
+      { type: 'ContainerReady', state: 'CONDITION_SUCCEEDED' },
+      { type: 'ContainerHealthy', state: 'CONDITION_SUCCEEDED' },
+    ];
+    const revision = { ...f.native, conditions, reconciling: false };
+    const binding = (service: typeof s, native: typeof revision) => ({
+      ...f.receipt.services.web,
+      revision: f.expected.revision,
+      image: f.expected.image,
+      serviceSha256: bootstrapDigest(service),
+      revisionSha256: bootstrapDigest(native),
+    });
+    expect(() => verifyCurrentSnapshot(binding(s, revision), s, revision)).not.toThrow();
+    expect(() => verifyCurrentSnapshot(binding(s, revision), s, revision, false)).toThrow();
+    const activeService = { ...s, scaling: { scalingMode: 'AUTOMATIC', manualInstanceCount: 0 } };
+    expect(() =>
+      verifyCurrentSnapshot(binding(activeService, revision), activeService, revision),
+    ).toThrow();
+    const changingService = { ...s, reconciling: true };
+    expect(() =>
+      verifyCurrentSnapshot(binding(changingService, revision), changingService, revision),
+    ).toThrow();
+    const changingRevision = { ...revision, reconciling: true };
+    expect(() =>
+      verifyCurrentSnapshot(binding(s, changingRevision), s, changingRevision),
+    ).toThrow();
+    for (const invalid of [
+      { type: 'Ready', state: 'CONDITION_RECONCILING', revisionReason: 'RETIRED' },
+      { type: 'Active', state: 'CONDITION_RECONCILING', revisionReason: 'RETIRED' },
+      { type: 'ContainerHealthy', state: 'CONDITION_RECONCILING', revisionReason: 'RETIRED' },
+      { type: 'ResourcesAvailable', state: 'CONDITION_RECONCILING', revisionReason: 'OTHER' },
+      { type: 'ResourcesAvailable', state: 'CONDITION_UNKNOWN', revisionReason: 'RETIRED' },
+    ]) {
+      const changed = { ...revision, conditions: [...conditions, invalid] };
+      expect(() => verifyCurrentSnapshot(binding(s, changed), s, changed)).toThrow();
+    }
+    const terminal = {
+      ...s,
+      terminalCondition: {
+        type: 'ResourcesAvailable',
+        state: 'CONDITION_RECONCILING',
+        revisionReason: 'RETIRED',
+      },
+    };
+    expect(() => verifyCurrentSnapshot(binding(terminal, revision), terminal, revision)).toThrow();
   });
   it.each(['agent', 'web'] as const)(
     'restores only positively promoted new %s revision with strict real readiness',

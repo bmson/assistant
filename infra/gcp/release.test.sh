@@ -6,7 +6,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Every selected image must truthfully cover the bounded calendar schema bridge.
-node --test "$ROOT/calendar-bridge-contract.test.mjs" "$ROOT/release-contract-133.test.mjs" "$ROOT/release-contract-134.test.mjs"
+node --test "$ROOT/calendar-bridge-contract.test.mjs" "$ROOT/release-contract-133.test.mjs" "$ROOT/release-contract-134.test.mjs" "$ROOT/release-contract-137.test.mjs" "$ROOT/release-contract-138.test.mjs" "$ROOT/release-role-qualification-138.test.mjs"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/assistant-release-test.XXXXXX")"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 mkdir -p "$TEST_ROOT/bin" "$TEST_ROOT/dispatch"
@@ -18,11 +18,11 @@ LEGACY_RELEASE_ROOT="$TEST_ROOT/legacy-release-source"
 mkdir -p "$LEGACY_RELEASE_ROOT/infra/gcp" "$LEGACY_RELEASE_ROOT/packages/db/drizzle/meta"
 LEGACY_RELEASE_ROOT="$(cd "$LEGACY_RELEASE_ROOT" && pwd -P)"
 for file in release-firestore.sh release-fast.sh release-persistence.sh release-staged-services.sh release-legacy-bootstrap.sh \
-  release-schema-version.mjs release-manifest.mjs release-contracts.json google-calendar-release-config.mjs; do
+  release-schema-version.mjs release-manifest.mjs release-contracts.json google-calendar-release-config.mjs estimated-cost-release-config.mjs; do
   cp "$ROOT/$file" "$LEGACY_RELEASE_ROOT/infra/gcp/$file"
 done
-cp "${ROOT%/infra/gcp}/packages/db/drizzle/meta/_journal.json" \
-  "$LEGACY_RELEASE_ROOT/packages/db/drizzle/meta/_journal.json"
+cp "$ROOT/fixtures/postgres-journal.schema137.json" "$LEGACY_RELEASE_ROOT/packages/db/drizzle/meta/_journal.json"
+cp "$ROOT/fixtures/release-contracts.schema137.json" "$LEGACY_RELEASE_ROOT/infra/gcp/release-contracts.json"
 node - "$LEGACY_RELEASE_ROOT/infra/gcp/release-contracts.json" <<'NODE'
 const fs = require('node:fs');
 const path = process.argv[2];
@@ -260,7 +260,7 @@ reset() {
 # ── release.sh selects the path from the live services ──────────────────────
 DISPATCH_RELEASE_ROOT="$TEST_ROOT/dispatch/infra/gcp"
 mkdir -p "$DISPATCH_RELEASE_ROOT"
-cp "$ROOT/release.sh" "$ROOT/release-persistence.sh" "$ROOT/release-staged-services.sh" "$DISPATCH_RELEASE_ROOT/"
+cp "$ROOT/release.sh" "$ROOT/release-persistence.sh" "$ROOT/release-staged-services.sh" "$ROOT/estimated-cost-release-config.mjs" "$DISPATCH_RELEASE_ROOT/"
 cp "$LEGACY_RELEASE_ROOT/infra/gcp/release-contracts.json" "$DISPATCH_RELEASE_ROOT/"
 printf '#!/usr/bin/env bash\necho SELECTED:postgres\n' >"$DISPATCH_RELEASE_ROOT/release-postgres.sh"
 printf '#!/usr/bin/env bash\necho SELECTED:firestore\n' >"$DISPATCH_RELEASE_ROOT/release-firestore.sh"
@@ -402,6 +402,32 @@ fi
 grep -Eiq 'requires .*GitHub .*identity|requires .*workflow identity' <<<"$out" ||
   fail "direct unbound BASIC5 release needs a clear pre-staging error: $out"
 [[ ! -s "$STUB_CALLS" ]] || fail "direct unbound BASIC5 release must stop before any provider reads or mutations"
+
+# The API jump needs the protected disabled-pair verifier before delivery is held.
+reset
+run_transition_precheck() (
+  set_valid_basic5_context
+  export GCP_PROJECT=bmson-assistant GCP_REGION=us-west1
+  export IMAGE_TAG="$GITHUB_SHA" RELEASE_COMPONENTS=agent,web
+  if [[ "$1" == disabled ]]; then
+    export OWNER_RELEASE_BOOTSTRAP_RECEIPT='{"format":1,"kind":"disabled-bootstrap","source":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}'
+    export OWNER_RELEASE_BOOTSTRAP_SHA256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  fi
+  bash "$ROOT/release-firestore.sh" --compatibility-check-only
+)
+if out="$(run_transition_precheck open 2>&1)"; then fail "ordinary API 1-to-3 release must refuse"; fi
+if grep -q 'owner-release-api-transition' "$STUB_CALLS"; then fail "open pair entered disabled transition"; fi
+: >"$STUB_CALLS"
+if out="$(STUB_INDEX_STATUS=1 run_transition_precheck disabled 2>&1)"; then
+  fail "disabled transition cannot proceed when protected verification fails"
+fi
+grep -Fxq 'pnpm exec tsx scripts/owner-release-api-transition.ts' "$STUB_CALLS" ||
+  fail "disabled transition verifier was not invoked"
+: >"$STUB_CALLS"
+run_transition_precheck disabled || fail "verified transition should complete the read-only precheck"
+if grep -Ev '^gcloud run (services|revisions) describe |^pnpm exec tsx scripts/owner-release-api-transition.ts$' "$STUB_CALLS"; then
+  fail "transition precheck issued an unexpected provider command"
+fi
 
 # Valid protected metadata cannot authorize BASIC5 with the wrong driver or
 # component scope. Both refusals must happen before any provider call.

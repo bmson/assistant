@@ -45,6 +45,7 @@ import {
   approvalPolicyFingerprint,
   hasAmbiguousOrWithdrawnPhoneCallOwnerAction,
   ownerPhoneProposalNeedsApproval,
+  PROACTIVE_AWARENESS_SCHEDULE,
   parsePhoneCallOwnerActionGrantMatch,
   parsePhoneCallOwnerActionIntent,
   parsePhoneCallToOwnerNumberGrantMatch,
@@ -450,7 +451,34 @@ async function authorizedPublicSourceRead(
   input: DispatchInput,
   args: Record<string, unknown>,
 ): Promise<boolean> {
-  const trigger = input.task.trigger as { source?: string; payload?: { text?: string } } | null;
+  const trigger = input.task.trigger as {
+    source?: string;
+    payload?: { text?: string; schedule?: string; instruction?: string; taintedOrigin?: boolean };
+  } | null;
+  // The shipped awareness review may continue its own public search into exact
+  // returned pages. This cannot authorize another search under taint, a mutated
+  // URL, an external-origin schedule, or an owner-edited instruction.
+  if (
+    input.toolName === 'web.fetch' &&
+    typeof args.url === 'string' &&
+    input.task.type === 'scheduled' &&
+    input.task.trust === 'assistant' &&
+    input.ctx.trust === 'assistant' &&
+    trigger?.source === 'schedule' &&
+    trigger.payload?.schedule === PROACTIVE_AWARENESS_SCHEDULE.name &&
+    trigger.payload.instruction === PROACTIVE_AWARENESS_SCHEDULE.taskTemplate.instruction &&
+    trigger.payload.taintedOrigin !== true
+  ) {
+    const searches = await repository.searchResults(input.task.id);
+    return searches.some((result) => {
+      const value = result as { error?: unknown; results?: Array<{ url?: unknown }> } | null;
+      return (
+        !value?.error &&
+        Array.isArray(value?.results) &&
+        value.results.some((row) => row.url === args.url)
+      );
+    });
+  }
   if (
     (input.toolName !== 'web.fetch' && input.toolName !== 'web.search') ||
     input.task.type !== 'chat_turn' ||

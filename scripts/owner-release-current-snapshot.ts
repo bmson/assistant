@@ -1,3 +1,4 @@
+import { verifyRevisionImage } from './owner-release-image-resolution.js';
 import {
   matchesNativeServiceDigest,
   nativeServiceDefaults,
@@ -222,6 +223,14 @@ export function retiredCurrentCondition(c: Obj) {
     [undefined, 'STATE_UNSPECIFIED', 'CONDITION_FAILED'].includes(c.state as string | undefined)
   );
 }
+export function retiredCurrentRevisionCondition(c: Obj) {
+  return (
+    retiredCurrentCondition(c) ||
+    (c.type === 'ResourcesAvailable' &&
+      c.state === 'CONDITION_RECONCILING' &&
+      c.revisionReason === 'RETIRED')
+  );
+}
 export function verifyCurrentSnapshot(
   binding: CurrentBinding,
   service: unknown,
@@ -234,14 +243,17 @@ export function verifyCurrentSnapshot(
     bootstrapDigest(r) === binding.revisionSha256 &&
       r.name === `${binding.service}/revisions/${binding.revision}`,
   );
-  requireProof(
-    Array.isArray(r.containers) &&
-      r.containers.length === 1 &&
-      object(r.containers[0]).image === binding.image,
-  );
+  verifyRevisionImage(r, binding.image);
   const conditions = r.conditions;
   requireProof(Array.isArray(conditions) && conditions.length > 0 && conditions.length <= 16);
-  const retired = (c: Obj) => mustBeDisabled && retiredCurrentCondition(c);
+  if (
+    conditions.some((value) => {
+      const c = object(value);
+      return c.type === 'ResourcesAvailable' && c.state === 'CONDITION_RECONCILING';
+    })
+  )
+    requireProof(r.reconciling !== true);
+  const retired = (c: Obj) => mustBeDisabled && retiredCurrentRevisionCondition(c);
   requireProof(
     conditions.map(object).every((c) => c.state === 'CONDITION_SUCCEEDED' || retired(c)),
   );

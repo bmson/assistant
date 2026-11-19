@@ -35,6 +35,7 @@ const FIELDS = [
   'archivedAt',
   'autonomyGrant',
   'trigger',
+  'state',
 ] as const;
 
 function taskFromDocument(value: unknown, documentId: string, agentId: string): ActivityTaskRecord {
