@@ -268,7 +268,10 @@ export async function qualifyMcpDiscovery(
         let serverInfo: McpDiscoveryQualification['serverInfo'];
         if (info !== undefined) {
           requireValue(
-            record(info) && text(info.name, 160) && text(info.version, 80),
+            record(info) &&
+              text(info.name, 160) &&
+              typeof info.version === 'string' &&
+              info.version.length <= 80,
             'MCP qualification server identity is malformed.',
           );
           serverInfo = { name: info.name, version: info.version };

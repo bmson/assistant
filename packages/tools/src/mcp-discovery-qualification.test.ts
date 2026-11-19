@@ -36,6 +36,12 @@ const bodies = (fetchImpl: ReturnType<typeof vi.fn<typeof fetch>>) =>
 afterEach(() => vi.unstubAllEnvs());
 
 describe('explicit local MCP 2026-07-28 discovery qualification', () => {
+  it('accepts the Python SDK default empty server version', async () => {
+    const serverInfo = { name: 'fixture', version: '' };
+    const f = fixture(discovery({ _meta: { 'io.modelcontextprotocol/serverInfo': serverInfo } }));
+    await expect(f.run()).resolves.toMatchObject({ tools: [tool], serverInfo, complete: true });
+  });
+
   it('uses only server/discover and tools/list with revision metadata, without acting on a tool', async () => {
     const f = fixture();
     await expect(f.run()).resolves.toMatchObject({
