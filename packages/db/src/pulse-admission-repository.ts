@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import {
   emailIngestReadable,
   type PulseRepository,
+  practiceChangeFromMail,
   pulseDailyCap,
   validatePulseNotice,
 } from '@assistant/persistence';
@@ -83,6 +84,9 @@ export function createPostgresPulseAdmissionRepository(
             current.obligationVersion !== source.obligationVersion ||
             !current.actionable ||
             !emailIngestReadable(current) ||
+            (source.practiceChange !== undefined &&
+              practiceChangeFromMail(current)?.dateEvidence !==
+                source.practiceChange.dateEvidence) ||
             !['unknown', 'open', 'snoozed'].includes(current.obligationStatus) ||
             (current.obligationStatus === 'snoozed' &&
               current.obligationSnoozedUntil &&
