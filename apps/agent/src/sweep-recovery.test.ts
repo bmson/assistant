@@ -285,7 +285,7 @@ for (const [driver, fixture] of [
       async () => {
         const f = await fixture();
         try {
-          for (const state of ['disabled', 'awaiting_first_run']) {
+          for (const state of ['disabled', 'missing', 'awaiting_first_run']) {
             expect(watchdogObservation({ state: 'healthy', briefing: { state } })).toEqual({
               kind: 'recovered',
             });

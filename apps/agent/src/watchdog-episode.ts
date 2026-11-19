@@ -24,11 +24,14 @@ export function watchdogObservation(health: {
     return { kind: 'stale', reason: 'sweep', sweepCompletedAt: health.completedAt };
   if (health.briefing.state === 'stale') return { kind: 'stale', reason: 'briefing' };
   if (
-    health.state === 'healthy' &&
-    ['delivered', 'quiet', 'disabled', 'awaiting_first_run'].includes(health.briefing.state)
+    ['healthy', 'failed'].includes(health.state) &&
+    ['delivered', 'quiet', 'disabled', 'missing', 'awaiting_first_run'].includes(
+      health.briefing.state,
+    )
   )
     return { kind: 'recovered' };
-  // An unverified check cannot close a known incident.
+  // A fresh sweep can end the stale window even if a maintenance step failed.
+  // A missing schedule has no overdue run. Unavailable reads cannot close an incident.
   return null;
 }
 
