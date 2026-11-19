@@ -717,16 +717,18 @@ describe('calendarChangeMoments', () => {
   });
 
   it('shows an unconfirmed calendar change with its last known owner-local time', () => {
-    const [timed, allDay] = calendarChangeMoments(
+    const [timed, allDay, offsetless] = calendarChangeMoments(
       [
         change({ kind: 'unverified', start: '2026-03-05T01:30:00Z' }),
         change({ kind: 'unverified', start: '2026-03-05' }),
+        change({ kind: 'unverified', start: '2026-03-05T01:30:00' }),
       ],
       'America/Los_Angeles',
     );
     expect(timed?.card.details).toEqual([
       { label: 'Last confirmed start', value: 'Mar 4, 2026, 5:30 PM' },
     ]);
+    expect(offsetless?.card.details).toEqual([]);
     expect(allDay?.card.details).toEqual([{ label: 'Last confirmed start', value: 'Mar 5, 2026' }]);
   });
 

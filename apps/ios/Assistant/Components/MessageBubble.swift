@@ -5171,7 +5171,13 @@ struct ProactiveAlertContent: View {
 
     static func temporalLabel(_ value: String, timeZone: TimeZone,
                               locale: Locale = .autoupdatingCurrent) -> String? {
-        CalendarEventPresentation.timestamp(value)?.formatted(
+        guard !value.isEmpty else { return nil }
+        if value.count == 10,
+           let day = CalendarEventPresentation.dateCaption(value, timeZone: timeZone, locale: locale) {
+            return day
+        }
+        guard let instant = CalendarEventPresentation.timestamp(value) else { return value }
+        return instant.formatted(
             Date.FormatStyle(locale: locale, timeZone: timeZone)
                 .month(.abbreviated).day().hour().minute()
         )

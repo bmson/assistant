@@ -60,6 +60,7 @@ import type {
   BriefingCalendarReader,
   CalendarEventReader,
 } from '../workflow/briefing.js';
+import { calendarSourceInstant } from '../workflow/calendar-read-window.js';
 import { canonicalOccurrenceGroups } from '../workflow/calendar-relationship.js';
 import type { ResponseCard } from '../workflow/response-cards.js';
 import {
@@ -682,15 +683,16 @@ export function calendarChangeMoments(
       urgency === undefined ? moment : { ...moment, urgency };
     if (change.kind === 'unverified') {
       const key = `${id}:${change.start}`;
-      const starts = new Date(change.start);
       const allDay = /^\d{4}-\d{2}-\d{2}$/.test(change.start);
-      const lastConfirmedStart = Number.isFinite(starts.getTime())
-        ? new Intl.DateTimeFormat('en-US', {
-            timeZone: allDay ? 'UTC' : timeZone,
-            dateStyle: 'medium',
-            ...(allDay ? {} : { timeStyle: 'short' }),
-          }).format(starts)
-        : undefined;
+      const starts = calendarSourceInstant(allDay ? `${change.start}T00:00:00Z` : change.start);
+      const lastConfirmedStart =
+        starts !== undefined
+          ? new Intl.DateTimeFormat('en-US', {
+              timeZone: allDay ? 'UTC' : timeZone,
+              dateStyle: 'medium',
+              ...(allDay ? {} : { timeStyle: 'short' }),
+            }).format(starts)
+          : undefined;
       return withUrgency({
         kind: 'calendar-unverified',
         key,

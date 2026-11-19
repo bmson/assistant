@@ -2944,6 +2944,12 @@ final class APIModelsTests: XCTestCase {
         ))
         XCTAssertTrue(label.contains("9:00"), label)
         XCTAssertFalse(label.contains("4:00"), label)
+        let day = try XCTUnwrap(ProactiveAlertContent.temporalLabel(
+            "2026-03-05", timeZone: ownerZone, locale: Locale(identifier: "en_US")
+        ))
+        XCTAssertTrue(day.contains("Mar 5"), day)
+        XCTAssertFalse(day.contains(":"), day)
+        XCTAssertNil(ProactiveAlertContent.temporalLabel("", timeZone: ownerZone))
         XCTAssertEqual(details.first?.value, "One Medical")
     }
 
