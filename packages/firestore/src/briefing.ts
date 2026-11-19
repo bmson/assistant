@@ -4,7 +4,7 @@ import type {
   BriefingRepository,
   Records,
 } from '@assistant/persistence';
-import { emailIngestReadable } from '@assistant/persistence';
+import { emailIngestReadable, practiceChangeFromMail } from '@assistant/persistence';
 import type { QueryDocumentSnapshot } from '@google-cloud/firestore';
 import { FirestoreOccasionToolRepository } from './occasion-tools.js';
 import { FirestoreOwnerContextRepository } from './owner-context.js';
@@ -86,6 +86,15 @@ export class FirestoreBriefingRepository implements BriefingRepository {
       for (const doc of page.docs) {
         const row = owned<Records['emailIngest']>(doc, agentId);
         if (!row || !(row.createdAt instanceof Date) || !emailIngestReadable(row)) continue;
+        if (practiceChangeFromMail(row)) {
+          const prior = await this.store
+            .collection('proactiveMoments')
+            .where('agentId', '==', agentId)
+            .where('momentKey', '==', `mail-action:${row.channelMessageId}`)
+            .limit(1)
+            .get();
+          if (prior.docs.some((moment) => moment.get('kind') === 'practice-change')) continue;
+        }
         rows.push({
           fromEmail: row.fromEmail,
           fromName: row.fromName ?? null,
