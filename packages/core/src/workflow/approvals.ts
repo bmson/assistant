@@ -15,9 +15,9 @@ import type {
   ResolveApprovalInput,
   ResolveApprovalResult,
 } from '@assistant/persistence';
-import { persistMessage } from '../chat.js';
 import { approvalHeadline, approvalPrompt } from '../owner-text.js';
 import { getQueueNotifier } from '../queue.js';
+import { postConversationNotice } from './executor/notices.js';
 
 export type {
   ApprovalInbox,
@@ -154,22 +154,18 @@ export async function renotifyStalledApprovals(
         );
       }
       if (task.conversationId) {
-        const text = approvalPrompt(notices.map((approval) => approvalHeadline(approval.summary)));
-        await persistMessage(messages, {
-          conversationId: task.conversationId,
-          taskId: task.id,
-          role: 'assistant',
-          origin: 'assistant',
-          // The approval cards render themselves; the prose lives only in the
-          // `text` column for model history (see carriesOwnCard in notices.ts).
-          parts: notices.map((approval) => ({
+        const delivered = await postConversationNotice(
+          messages,
+          task,
+          approvalPrompt(notices.map((approval) => approvalHeadline(approval.summary))),
+          notices.map((approval) => ({
             type: 'approval',
             approvalId: approval.id,
             shortCode: approval.shortCode,
             summary: approvalHeadline(approval.summary),
           })),
-          text,
-        });
+        );
+        if (!delivered) continue;
       }
       // No conversation means no chat card is owed. Otherwise the append above
       // succeeded. Union this leg with any already-stamped owner delivery.

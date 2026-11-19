@@ -4259,6 +4259,7 @@ final class APIModelsTests: XCTestCase {
                 .skills,
                 .capabilities,
                 .settings,
+                .noticing,
                 .costs,
                 .anomalies,
                 .improvements,
