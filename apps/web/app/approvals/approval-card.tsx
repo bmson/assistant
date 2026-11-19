@@ -78,7 +78,9 @@ export function ApprovalCard({
           </span>
           <div className="min-w-0 flex-1">
             <p className="text-xs font-medium text-accent">{actionLabel} · waiting for you</p>
-            <h3 className={`mt-1 ${cardTitleClass}`}>{approval.summary}</h3>
+            <h3 className={`mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] ${cardTitleClass}`}>
+              {approval.summary}
+            </h3>
             {/* Provenance and timing are context, not content — one quiet line,
                 with exact timestamps on hover, instead of a grid of cells that
                 competed with what is actually being approved below. */}

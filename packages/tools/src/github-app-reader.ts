@@ -72,7 +72,7 @@ export interface GitHubAppReaderConfig {
   selectedRepositoryIds: readonly number[];
 }
 
-function appJwt(key: KeyObject, issuer: string, now: number) {
+export function githubAppJwt(key: KeyObject, issuer: string, now: number) {
   const seconds = Math.floor(now / 1000);
   const encode = (value: object) => Buffer.from(JSON.stringify(value)).toString('base64url');
   const unsigned = `${encode({ alg: 'RS256', typ: 'JWT' })}.${encode({
@@ -89,11 +89,8 @@ function parseResponse<S extends z.ZodType>(schema: S, value: unknown): z.infer<
   return result.data;
 }
 
-/** Server-only reader. One operation uses one fresh, single-repository installation token. */
-export function createGitHubAppReader(
-  config: GitHubAppReaderConfig,
-  options: { fetch?: typeof fetch; now?: () => number } = {},
-) {
+/** Shared server-only key validation; token permissions remain local to each adapter. */
+export function githubAppPrivateKey(config: GitHubAppReaderConfig): KeyObject {
   const { appClientId, installationId } = config;
   const selected = new Set(config.selectedRepositoryIds);
   let key: KeyObject;
@@ -115,6 +112,18 @@ export function createGitHubAppReader(
   } catch {
     throw new GitHubAppReadError('invalid_configuration');
   }
+
+  return key;
+}
+
+/** Server-only reader. One operation uses one fresh, single-repository installation token. */
+export function createGitHubAppReader(
+  config: GitHubAppReaderConfig,
+  options: { fetch?: typeof fetch; now?: () => number } = {},
+) {
+  const { appClientId, installationId } = config;
+  const selected = new Set(config.selectedRepositoryIds);
+  const key = githubAppPrivateKey(config);
 
   const fetcher = options.fetch ?? fetch;
   const now = options.now ?? Date.now;
@@ -193,7 +202,7 @@ export function createGitHubAppReader(
           tokenResponse,
           await request(
             `/app/installations/${installationId}/access_tokens`,
-            appJwt(key, appClientId, now()),
+            githubAppJwt(key, appClientId, now()),
             signal,
             201,
             {

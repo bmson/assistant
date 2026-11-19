@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   estimatedCostApprovalEnabled,
+  githubIssueCreationEnabled,
   isModuleEnabled,
   loadConfig,
   parseAssistantModules,
@@ -50,6 +51,21 @@ describe('config', () => {
     expect(config.GRAPH_RAG_ENABLED).toBe(false);
     expect(config.GRAPH_SYNC_BATCH_LIMIT).toBe(25);
     expect(isModuleEnabled(config, 'google')).toBe(true);
+  });
+
+  it('offers GitHub issue creation only on an opted-in installation accepting writes', () => {
+    const config = loadConfig({});
+    expect(githubIssueCreationEnabled(config)).toBe(false);
+    resetConfigForTest();
+    const enabled = loadConfig({ ASSISTANT_GITHUB_ISSUE_CREATION_ENABLED: 'true' });
+    expect(githubIssueCreationEnabled(enabled)).toBe(true);
+    expect(githubIssueCreationEnabled({ ...enabled, RESTORE_REHEARSAL: true })).toBe(false);
+    expect(githubIssueCreationEnabled({ ...enabled, ASSISTANT_RELEASE_WRITES_PAUSED: true })).toBe(
+      false,
+    );
+    expect(githubIssueCreationEnabled({ ...enabled, POSTGRES_SOURCE_WRITES_FENCED: true })).toBe(
+      false,
+    );
   });
 
   it('parses overrides and coerces numbers', () => {

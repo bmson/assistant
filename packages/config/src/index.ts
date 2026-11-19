@@ -349,6 +349,7 @@ const ConfigSchema = z.object({
   EMAIL_OUTBOUND_DOMAINS: z.string().default(''),
   SEARCH_PROVIDER: z.enum(['none', 'brave', 'tavily', 'serper']).default('none'),
   SEARCH_API_KEY: z.string().default(''),
+  ASSISTANT_GITHUB_ISSUE_CREATION_ENABLED: booleanString,
   GITHUB_TOKEN: z.string().default(''),
   GITHUB_REPO: z.string().default(''),
   SELF_REPAIR_ENABLED: booleanString,
@@ -393,6 +394,24 @@ const ConfigSchema = z.object({
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
+
+export function githubIssueCreationEnabled(
+  config: Pick<
+    Config,
+    | 'ASSISTANT_GITHUB_ISSUE_CREATION_ENABLED'
+    | 'RESTORE_REHEARSAL'
+    | 'ASSISTANT_RELEASE_WRITES_PAUSED'
+    | 'PERSISTENCE_DRIVER'
+    | 'POSTGRES_SOURCE_WRITES_FENCED'
+  >,
+): boolean {
+  return (
+    config.ASSISTANT_GITHUB_ISSUE_CREATION_ENABLED &&
+    !config.RESTORE_REHEARSAL &&
+    !config.ASSISTANT_RELEASE_WRITES_PAUSED &&
+    !(config.PERSISTENCE_DRIVER === 'postgres' && config.POSTGRES_SOURCE_WRITES_FENCED)
+  );
+}
 
 /** One capability shared by web, agent and workers; it never authorizes a cost decision. */
 export function estimatedCostApprovalEnabled(
