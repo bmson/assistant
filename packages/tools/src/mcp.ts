@@ -1,18 +1,21 @@
-import { lookup } from 'node:dns/promises';
-import { Agent as HttpAgent, request as httpRequest } from 'node:http';
-import { Agent as HttpsAgent, request as httpsRequest } from 'node:https';
-import { BlockList, isIP, type LookupFunction } from 'node:net';
-import { Readable } from 'node:stream';
 import { decryptMcpBearerToken } from '@assistant/core/mcp-secrets';
 import { mcpConnections } from '@assistant/db';
-import { mcpApprovalBindingFingerprint } from '@assistant/persistence';
-import { and, asc, eq } from 'drizzle-orm';
+import {
+  type McpOAuthRepository,
+  mcpApprovalBindingFingerprint,
+  projectMcpOAuthApproval,
+} from '@assistant/persistence';
+import { and, asc, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
+import { type McpHttpSession, pinnedAgent, pinnedRequest, resolveMcpEndpoint } from './mcp-http.js';
 import {
   AmbiguousMcpMutationError,
   type McpRpcResponse,
   readMcpRpcResponse,
 } from './mcp-transport.js';
+
+export { checkedMcpEndpoint } from './mcp-http.js';
+
 import { register } from './register.js';
 import type { ToolRegistry } from './registry.js';
 
@@ -51,6 +54,8 @@ export interface McpToolConnectionSummary {
 export interface McpToolConnectionRecord extends McpToolConnectionSummary {
   endpoint: string;
   bearerTokenEncrypted: string | null;
+  oauthGeneration?: string;
+  oauthState?: unknown;
 }
 
 /** Persistence port used by owner-scoped MCP tools in portable runtimes. */
@@ -68,192 +73,17 @@ export type McpToolInvoker = (
 
 type FetchImplementation = typeof fetch;
 
-interface McpSession {
-  endpoint: URL;
-  agent: HttpAgent | HttpsAgent;
+interface McpSession extends McpHttpSession {
   sessionId?: string;
   fetchImpl: FetchImplementation;
   bearerToken?: string;
+  oauth: boolean;
 }
 
 type JsonRpcResponse = McpRpcResponse;
 
 function clip(value: unknown, max: number): string {
   return typeof value === 'string' ? value.replace(/\s+/g, ' ').trim().slice(0, max) : '';
-}
-
-/**
- * Split by family on purpose. A single BlockList holding both families rejects
- * every public IPv4 address on the internet: `::ffff:0:0/96` is the IPv4-mapped
- * range, and Node matches a plain IPv4 address against it, so one IPv6 rule
- * silently blocked all of IPv4. Keeping the lists apart means an IPv4 check
- * never consults an IPv6 rule, while `::ffff:…` stays blocked for addresses
- * that really are IPv6 — which is the bypass that rule exists to close.
- */
-const blockedIpv4Addresses = new BlockList();
-const blockedIpv6Addresses = new BlockList();
-const publicIpv6Addresses = new BlockList();
-publicIpv6Addresses.addSubnet('2000::', 3, 'ipv6');
-for (const [network, prefix] of [
-  ['0.0.0.0', 8],
-  ['10.0.0.0', 8],
-  ['100.64.0.0', 10],
-  ['127.0.0.0', 8],
-  ['169.254.0.0', 16],
-  ['172.16.0.0', 12],
-  ['192.0.0.0', 24],
-  ['192.0.2.0', 24],
-  ['192.168.0.0', 16],
-  ['198.18.0.0', 15],
-  ['198.51.100.0', 24],
-  ['203.0.113.0', 24],
-  ['224.0.0.0', 4],
-  ['240.0.0.0', 4],
-] as const) {
-  blockedIpv4Addresses.addSubnet(network, prefix, 'ipv4');
-}
-for (const [network, prefix] of [
-  ['::', 96],
-  ['::ffff:0:0', 96],
-  ['64:ff9b::', 96],
-  ['64:ff9b:1::', 48],
-  ['100::', 64],
-  ['2001:2::', 48],
-  ['2001:db8::', 32],
-  ['fc00::', 7],
-  ['fe80::', 10],
-  ['fec0::', 10],
-  ['ff00::', 8],
-] as const) {
-  blockedIpv6Addresses.addSubnet(network, prefix, 'ipv6');
-}
-
-function isNonPublicAddress(address: string): boolean {
-  const family = isIP(address);
-  return family === 4
-    ? blockedIpv4Addresses.check(address, 'ipv4')
-    : family === 6
-      ? blockedIpv6Addresses.check(address, 'ipv6') || !publicIpv6Addresses.check(address, 'ipv6')
-      : true;
-}
-
-function isLoopbackAddress(address: string): boolean {
-  const family = isIP(address);
-  return family === 4 ? address.startsWith('127.') : family === 6 && address === '::1';
-}
-
-interface ResolvedMcpEndpoint {
-  endpoint: URL;
-  address: string;
-  family: 4 | 6;
-}
-
-/**
- * Only public HTTPS endpoints are usable in production. This prevents an MCP
- * URL from becoming an SSRF route into the database, metadata service, or a
- * private provider. A session pins one validated address into its keep-alive
- * agent so DNS cannot change between validation and the outbound request.
- */
-async function resolveMcpEndpoint(value: string): Promise<ResolvedMcpEndpoint> {
-  let endpoint: URL;
-  try {
-    endpoint = new URL(value.trim());
-  } catch {
-    throw new Error('Enter a valid MCP endpoint URL.');
-  }
-
-  const host = endpoint.hostname.replace(/^\[|\]$/g, '');
-  const localDevelopment = process.env.NODE_ENV !== 'production';
-  const isHttp = endpoint.protocol === 'http:';
-  const isHttps = endpoint.protocol === 'https:';
-  const localHost = host === 'localhost' || isLoopbackAddress(host);
-  if (
-    (!isHttps && !(localDevelopment && isHttp && localHost)) ||
-    endpoint.username ||
-    endpoint.password
-  ) {
-    throw new Error(
-      'MCP endpoints must use public HTTPS (or localhost HTTP during local development).',
-    );
-  }
-
-  let resolved: Array<{ address: string; family: number }>;
-  try {
-    resolved = isIP(host)
-      ? [{ address: host, family: isIP(host) }]
-      : await lookup(host, { all: true, verbatim: true });
-  } catch {
-    throw new Error('The MCP endpoint hostname could not be resolved.');
-  }
-  if (resolved.length === 0) throw new Error('The MCP endpoint hostname could not be resolved.');
-  if (localDevelopment && localHost) {
-    if (resolved.some((record) => !isLoopbackAddress(record.address))) {
-      throw new Error('Local MCP endpoints must resolve only to the loopback interface.');
-    }
-  } else if (resolved.some((record) => isNonPublicAddress(record.address))) {
-    throw new Error('MCP endpoints cannot resolve to a private network address.');
-  }
-  const selected = resolved[0];
-  if (!selected || (selected.family !== 4 && selected.family !== 6)) {
-    throw new Error('The MCP endpoint hostname resolved to an unsupported address.');
-  }
-  return { endpoint, address: selected.address, family: selected.family };
-}
-
-export async function checkedMcpEndpoint(value: string): Promise<URL> {
-  return (await resolveMcpEndpoint(value)).endpoint;
-}
-
-function pinnedLookup(address: string, family: 4 | 6): LookupFunction {
-  return ((_hostname: string, options: unknown, callback: (...args: unknown[]) => void) => {
-    if (typeof options === 'object' && options && 'all' in options && options.all) {
-      callback(null, [{ address, family }]);
-      return;
-    }
-    callback(null, address, family);
-  }) as LookupFunction;
-}
-
-function pinnedAgent(target: ResolvedMcpEndpoint): HttpAgent | HttpsAgent {
-  const options = {
-    keepAlive: true,
-    maxSockets: 1,
-    lookup: pinnedLookup(target.address, target.family),
-  };
-  return target.endpoint.protocol === 'https:' ? new HttpsAgent(options) : new HttpAgent(options);
-}
-
-function pinnedRequest(session: McpSession, init: RequestInit): Promise<Response> {
-  return new Promise((resolve, reject) => {
-    const request = (session.endpoint.protocol === 'https:' ? httpsRequest : httpRequest)(
-      session.endpoint,
-      {
-        agent: session.agent,
-        headers: init.headers as Record<string, string>,
-        method: init.method,
-        signal: init.signal ?? undefined,
-      },
-      (incoming) => {
-        const headers = new Headers();
-        for (const [name, value] of Object.entries(incoming.headers)) {
-          if (Array.isArray(value)) for (const item of value) headers.append(name, item);
-          else if (value !== undefined) headers.set(name, value);
-        }
-        const status = incoming.statusCode ?? 500;
-        const hasBody = ![101, 204, 205, 304].includes(status);
-        resolve(
-          new Response(hasBody ? (Readable.toWeb(incoming) as ReadableStream<Uint8Array>) : null, {
-            status,
-            statusText: incoming.statusMessage,
-            headers,
-          }),
-        );
-      },
-    );
-    request.on('error', reject);
-    if (typeof init.body === 'string' || init.body instanceof Uint8Array) request.write(init.body);
-    request.end();
-  });
 }
 
 async function rpc(
@@ -279,7 +109,7 @@ async function rpc(
     session.fetchImpl === fetch
       ? await pinnedRequest(session, init)
       : await session.fetchImpl(session.endpoint, init);
-  if (response.status === 401) throw new McpAuthorizationError();
+  if (response.status === 401) throw new McpAuthorizationError(session.oauth);
   if (!response.ok && response.status !== 202) {
     throw new Error(`MCP server responded with HTTP ${response.status}.`);
   }
@@ -291,8 +121,12 @@ async function rpc(
 }
 
 class McpAuthorizationError extends Error {
-  constructor() {
-    super('This MCP server requires authorization. OAuth connection is not yet available.');
+  constructor(oauth: boolean) {
+    super(
+      oauth
+        ? 'The MCP server rejected this account authorization. Reconnect before trying again.'
+        : 'This MCP server requires authorization.',
+    );
     this.name = 'McpAuthorizationError';
   }
 }
@@ -313,16 +147,18 @@ async function openMcpSession(
   endpointValue: string,
   fetchImpl: FetchImplementation = fetch,
   bearerToken?: string,
+  publicHttpsOnly = false,
 ): Promise<{
   session: McpSession;
   initialize: Record<string, unknown>;
 }> {
-  const target = await resolveMcpEndpoint(endpointValue);
+  const target = await resolveMcpEndpoint(endpointValue, { publicHttpsOnly });
   const session: McpSession = {
     endpoint: target.endpoint,
     agent: pinnedAgent(target),
     fetchImpl,
     bearerToken,
+    oauth: publicHttpsOnly,
   };
   try {
     const initialized = await rpc(session, {
@@ -369,14 +205,23 @@ function sanitizedTools(value: unknown): McpListedTool[] {
 /** Check a connection and return a bounded, display-safe discovery snapshot. */
 export async function inspectMcpConnection(
   endpointValue: string,
-  options: { fetchImpl?: FetchImplementation; bearerTokenEncrypted?: string | null } = {},
+  options: {
+    fetchImpl?: FetchImplementation;
+    bearerTokenEncrypted?: string | null;
+    publicHttpsOnly?: boolean;
+  } = {},
 ): Promise<McpInspection> {
   let session: McpSession | undefined;
   try {
     const bearerToken = options.bearerTokenEncrypted
       ? decryptMcpBearerToken(options.bearerTokenEncrypted)
       : undefined;
-    const opened = await openMcpSession(endpointValue, options.fetchImpl, bearerToken);
+    const opened = await openMcpSession(
+      endpointValue,
+      options.fetchImpl,
+      bearerToken,
+      options.publicHttpsOnly,
+    );
     session = opened.session;
     const { initialize } = opened;
     const listed = await rpc(session, { id: 2, method: 'tools/list', params: {} });
@@ -412,16 +257,36 @@ export async function invokeMcpTool(
   input: Record<string, unknown>,
   bearerTokenEncrypted: string | null | undefined,
   fetchImpl: FetchImplementation = fetch,
+  oauthAuthority?: {
+    connection: McpToolConnectionRecord;
+    assertCurrent(): Promise<void>;
+  },
 ): Promise<Record<string, unknown>> {
   const bearerToken = bearerTokenEncrypted
     ? decryptMcpBearerToken(bearerTokenEncrypted)
     : undefined;
-  const { session } = await openMcpSession(endpointValue, fetchImpl, bearerToken);
+  const { session } = await openMcpSession(
+    endpointValue,
+    fetchImpl,
+    bearerToken,
+    Boolean(oauthAuthority),
+  );
   try {
+    if (oauthAuthority) {
+      const listed = await rpc(session, { id: 2, method: 'tools/list', params: {} });
+      const tools = sanitizedTools(resultOf(listed.response, 'tools/list').tools);
+      const current = mcpApprovalBindingFingerprint(
+        { ...oauthAuthority.connection, tools },
+        toolName,
+      );
+      if (current !== mcpApprovalBindingFingerprint(oauthAuthority.connection, toolName))
+        throw new Error('MCP tool changed since approval. Reconnect and request fresh approval.');
+      await oauthAuthority.assertCurrent();
+    }
     let response: Awaited<ReturnType<typeof rpc>>;
     try {
       response = await rpc(session, {
-        id: 2,
+        id: oauthAuthority ? 3 : 2,
         method: 'tools/call',
         params: { name: toolName, arguments: input },
       });
@@ -450,10 +315,16 @@ export async function invokeMcpTool(
 export function registerMcpTools(
   registry: ToolRegistry,
   connectionReadPort?: McpToolConnectionReadPort,
-  options: { invoke?: McpToolInvoker } = {},
+  options: {
+    invoke?: McpToolInvoker;
+    oauth?: {
+      repo: McpOAuthRepository;
+      resolve(ownerId: string, connection: McpToolConnectionRecord): Promise<string>;
+    };
+  } = {},
 ): ToolRegistry {
   const invoke = options.invoke ?? invokeMcpTool;
-  const listConnections = async (ctx: import('./types.js').ToolContext) => {
+  const listSavedConnections = async (ctx: import('./types.js').ToolContext) => {
     if (connectionReadPort) return connectionReadPort.list(ctx.agentId);
     return ctx.db
       .select({
@@ -468,7 +339,7 @@ export function registerMcpTools(
       .where(eq(mcpConnections.agentId, ctx.agentId))
       .orderBy(asc(mcpConnections.name));
   };
-  const getConnection = async (
+  const getSavedConnection = async (
     ctx: import('./types.js').ToolContext,
     connectionId: string,
   ): Promise<McpToolConnectionRecord | null> => {
@@ -483,10 +354,42 @@ export function registerMcpTools(
         tools: mcpConnections.tools,
         endpoint: mcpConnections.endpoint,
         bearerTokenEncrypted: mcpConnections.bearerTokenEncrypted,
+        // Keyed read works before the nullable OAuth column migration as well.
+        oauthState: sql<unknown>`to_jsonb(${mcpConnections}) -> 'oauth_state'`,
       })
       .from(mcpConnections)
       .where(and(eq(mcpConnections.id, connectionId), eq(mcpConnections.agentId, ctx.agentId)));
     return row ?? null;
+  };
+  const getConnection = async (ctx: import('./types.js').ToolContext, connectionId: string) => {
+    const connection = await getSavedConnection(ctx, connectionId);
+    if (!connection?.enabled) return connection;
+    if ('oauthState' in connection) {
+      return projectMcpOAuthApproval(
+        connection,
+        ctx.agentId,
+        connection.oauthState,
+        Boolean(options.oauth),
+      );
+    }
+    if (!options.oauth) return connection;
+    const state = await options.oauth.repo.get(
+      { ownerId: ctx.agentId, connectionId },
+      connection.endpoint,
+    );
+    if (!state) return null;
+    return projectMcpOAuthApproval(connection, ctx.agentId, state, true);
+  };
+  const listConnections = async (ctx: import('./types.js').ToolContext) => {
+    const rows = await listSavedConnections(ctx);
+    if (!options.oauth) return rows;
+    // Reuse one credential-safe projection in listings and approval checks.
+    const result: McpToolConnectionSummary[] = [];
+    for (const row of rows) {
+      const current = await getConnection(ctx, row.id);
+      if (current) result.push(current);
+    }
+    return result;
   };
   register(
     registry,
@@ -603,6 +506,50 @@ export function registerMcpTools(
           scope.fingerprint !== mcpApprovalBindingFingerprint(connection, args.toolName)
         ) {
           throw new Error('MCP connection or tool changed since approval. Request fresh approval.');
+        }
+        if (connection.oauthGeneration) {
+          const oauth = options.oauth;
+          if (!oauth) throw new Error('MCP OAuth is unavailable.');
+          const credential = await oauth.resolve(ctx.agentId, connection);
+          return {
+            connection: connection.name,
+            tool: args.toolName,
+            result: await invokeMcpTool(
+              connection.endpoint,
+              args.toolName,
+              args.arguments,
+              credential,
+              fetch,
+              {
+                connection,
+                assertCurrent: async () => {
+                  const current = await getSavedConnection(ctx, args.connectionId);
+                  const state = current?.enabled
+                    ? await oauth.repo.get(
+                        {
+                          ownerId: ctx.agentId,
+                          connectionId: args.connectionId,
+                        },
+                        current.endpoint,
+                      )
+                    : null;
+                  const grant = state?.grant;
+                  if (
+                    !current ||
+                    !grant ||
+                    grant.tokens.accessTokenEncrypted !== credential ||
+                    Date.parse(grant.tokens.accessTokenExpiresAt) <= Date.now() ||
+                    scope.fingerprint !==
+                      mcpApprovalBindingFingerprint(
+                        projectMcpOAuthApproval(current, ctx.agentId, state, true),
+                        args.toolName,
+                      )
+                  )
+                    throw new Error('MCP account changed since approval. Request fresh approval.');
+                },
+              },
+            ),
+          };
         }
         return {
           connection: connection.name,

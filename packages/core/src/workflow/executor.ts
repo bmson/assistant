@@ -6,6 +6,10 @@ import type { ModelMessage } from 'ai';
 import { BudgetReservationError } from '../cost.js';
 import { isForwardedIngest } from '../email-provenance.js';
 import type { TaskState, Trust } from '../events.js';
+import {
+  EstimatedCostParkedError,
+  estimatedCostGrantContextForTask,
+} from '../model-router/router.js';
 import { withSpan } from '../otel.js';
 import { classifyFailure, failureNotice, ownerTaskLabel } from '../owner-text.js';
 import {
@@ -261,72 +265,83 @@ export async function executeTask(
     return { outcome: 'cancelled', detail: `goal ${abandoned}` };
   }
 
-  return withSpan('task.execute', { taskId, type: task.type, attempt: task.attempt }, async () => {
-    try {
-      return await runSteps(deps, task);
-    } catch (err) {
-      if (err instanceof BudgetReservationError) {
-        if (err.message.startsWith('task budget')) {
-          const marked = await markTaskNeedsAttention(
-            persistence.tasks,
-            task,
-            `budget: ${err.message}`,
-          );
-          if (!marked) return LOST_LEASE;
-          const budgetRequest = taskBudgetPermissionRequest(task, err.message);
-          await notifyAttention(deps, task, budgetRequest.text, [budgetRequest.part]);
-          return { outcome: 'needs_attention', detail: err.message.slice(0, 500) };
+  const grant = estimatedCostGrantContextForTask(task, deps.estimatedCostInstallationId ?? '');
+  const execute = (): Promise<ExecuteResult> =>
+    withSpan(
+      'task.execute',
+      { taskId, type: task.type, attempt: task.attempt },
+      async (): Promise<ExecuteResult> => {
+        try {
+          return await runSteps(deps, task);
+        } catch (err) {
+          if (err instanceof EstimatedCostParkedError)
+            return err.outcome === 'parked'
+              ? { outcome: 'parked', detail: 'estimated cost approval required' }
+              : { outcome: 'failed', detail: 'estimated cost status unconfirmed' };
+          if (err instanceof BudgetReservationError) {
+            if (err.message.startsWith('task budget')) {
+              const marked = await markTaskNeedsAttention(
+                persistence.tasks,
+                task,
+                `budget: ${err.message}`,
+              );
+              if (!marked) return LOST_LEASE;
+              const budgetRequest = taskBudgetPermissionRequest(task, err.message);
+              await notifyAttention(deps, task, budgetRequest.text, [budgetRequest.part]);
+              return { outcome: 'needs_attention', detail: err.message.slice(0, 500) };
+            }
+            const fresh = await persistence.executionContext.getTask(task.agentId, task.id);
+            const parked = await parkForBudget(
+              persistence.tasks,
+              task,
+              taskState(fresh ?? task),
+              err.resumeAt,
+            );
+            if (!parked) return LOST_LEASE;
+            await postConversationNotice(
+              persistence.messages,
+              task,
+              `I'm pausing here — ${err.message}. This resumes automatically when the budget resets.`,
+              noticeParts('parked'),
+            );
+            return { outcome: 'parked', detail: err.message.slice(0, 500) };
+          }
+          const disposition = await recordFailedAttempt(persistence.tasks, task, String(err));
+          if (disposition === 'lost_lease') return LOST_LEASE;
+          if (disposition === 'dead_letter') {
+            // Retry budget exhausted: the task is now needs_attention and will not
+            // self-resume. Every other terminal/park branch notifies the owner, so
+            // this one must too — otherwise the request dies silently in its thread.
+            // notifyAttention stamps the row so the re-notify sweep won't repeat it,
+            // and leaves it unstamped (sweep-eligible) if this notify itself failed.
+            // The raw error is on the task row, where Activity shows it. What goes
+            // to a person is one plain line — never a stack, a provider's JSON or a
+            // billing URL. Background work names itself in the Notifications log.
+            const label = ownerTaskLabel(task.title);
+            await notifyAttention(
+              deps,
+              task,
+              isBackgroundTask(task)
+                ? `${label ? `${label} didn't finish` : "A background task didn't finish"}. ${failureNotice(
+                    err,
+                  )
+                    .replace(/^I couldn't finish that — /u, '')
+                    .replace(/^./u, (c) => c.toUpperCase())}`
+                : failureNotice(err),
+              [],
+              // A provider outage reads as "Response interrupted — try again", not
+              // as a question waiting on the owner.
+              classifyFailure(err) === 'provider' ? 'provider-failed' : 'needs-attention',
+            );
+          }
+          return {
+            outcome: disposition === 'dead_letter' ? 'dead_letter' : 'failed',
+            detail: String(err).slice(0, 500),
+          };
         }
-        const fresh = await persistence.executionContext.getTask(task.agentId, task.id);
-        const parked = await parkForBudget(
-          persistence.tasks,
-          task,
-          taskState(fresh ?? task),
-          err.resumeAt,
-        );
-        if (!parked) return LOST_LEASE;
-        await postConversationNotice(
-          persistence.messages,
-          task,
-          `I'm pausing here — ${err.message}. This resumes automatically when the budget resets.`,
-          noticeParts('parked'),
-        );
-        return { outcome: 'parked', detail: err.message.slice(0, 500) };
-      }
-      const disposition = await recordFailedAttempt(persistence.tasks, task, String(err));
-      if (disposition === 'lost_lease') return LOST_LEASE;
-      if (disposition === 'dead_letter') {
-        // Retry budget exhausted: the task is now needs_attention and will not
-        // self-resume. Every other terminal/park branch notifies the owner, so
-        // this one must too — otherwise the request dies silently in its thread.
-        // notifyAttention stamps the row so the re-notify sweep won't repeat it,
-        // and leaves it unstamped (sweep-eligible) if this notify itself failed.
-        // The raw error is on the task row, where Activity shows it. What goes
-        // to a person is one plain line — never a stack, a provider's JSON or a
-        // billing URL. Background work names itself in the Notifications log.
-        const label = ownerTaskLabel(task.title);
-        await notifyAttention(
-          deps,
-          task,
-          isBackgroundTask(task)
-            ? `${label ? `${label} didn't finish` : "A background task didn't finish"}. ${failureNotice(
-                err,
-              )
-                .replace(/^I couldn't finish that — /u, '')
-                .replace(/^./u, (c) => c.toUpperCase())}`
-            : failureNotice(err),
-          [],
-          // A provider outage reads as "Response interrupted — try again", not
-          // as a question waiting on the owner.
-          classifyFailure(err) === 'provider' ? 'provider-failed' : 'needs-attention',
-        );
-      }
-      return {
-        outcome: disposition === 'dead_letter' ? 'dead_letter' : 'failed',
-        detail: String(err).slice(0, 500),
-      };
-    }
-  });
+      },
+    );
+  return grant ? deps.router.withEstimatedCostGrant(grant, execute) : execute();
 }
 
 /**

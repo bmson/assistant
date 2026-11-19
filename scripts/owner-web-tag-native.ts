@@ -6,6 +6,7 @@ const OPERATION =
   /^projects\/bmson-assistant\/locations\/us-west1\/operations\/[A-Za-z0-9_-]{1,128}$/;
 const LIMIT = 2 * 1024 * 1024;
 type JsonObject = Record<string, unknown>;
+export type RetainedTargetPolicy = 'tagged' | 'canonical-untagged';
 function record(value: unknown): JsonObject {
   if (!value || typeof value !== 'object' || Array.isArray(value))
     throw new Error('Invalid native response');
@@ -23,8 +24,11 @@ export function nativeRetirementClient(
   request: typeof fetch = fetch,
   sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   now: () => number = Date.now,
+  retainedTarget: RetainedTargetPolicy = 'tagged',
 ) {
   if (!/^[A-Za-z0-9._~-]{1,16384}$/.test(token)) throw new Error('Invalid native credential');
+  if (!['tagged', 'canonical-untagged'].includes(retainedTarget))
+    throw new Error('Invalid native retained-target policy');
   let calls = 0;
   async function json(
     path: string,
@@ -102,8 +106,10 @@ export function nativeRetirementClient(
         row.percent !== 100 ||
         typeof row.revision !== 'string' ||
         !/^assistant-web-[a-z0-9-]{1,63}$/.test(row.revision) ||
-        typeof row.tag !== 'string' ||
-        !/^(candidate|resume)-[0-9]{1,20}-[1-9][0-9]{0,5}$/.test(row.tag)
+        (retainedTarget === 'canonical-untagged'
+          ? row.tag !== undefined
+          : typeof row.tag !== 'string' ||
+            !/^(candidate|resume)-[0-9]{1,20}-[1-9][0-9]{0,5}$/.test(row.tag))
       )
         throw new Error('Invalid native retained target');
       return json(`${WEB_SERVICE}?updateMask=traffic`, body);

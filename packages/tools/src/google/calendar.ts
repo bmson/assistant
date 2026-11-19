@@ -89,6 +89,8 @@ export interface CalendarToolDeps {
   client: GoogleClient;
   botEmail: string;
   ownerEmail: string;
+  /** iPhone RSVP identity stays tied to the installation owner across Google account selection. */
+  phoneOwnerEmail?: string;
   googleAvailable?: boolean;
   phoneCalendars?: (agentId: string) => Promise<PhoneCalendarSnapshot | null>;
 }
@@ -747,7 +749,7 @@ async function collectEvents(
         const pageSize = opts.maxResults - buffered.length;
         const query = opts.query(calendar.id, pageSize, token || undefined);
         if (phone && phoneRoster(phone).some((entry) => entry.id === calendar.id)) {
-          const page = phoneEvents(phone, calendar, query, deps.ownerEmail);
+          const page = phoneEvents(phone, calendar, query, deps.phoneOwnerEmail ?? deps.ownerEmail);
           buffered.push(...page.events);
           token = page.nextPageToken ?? null;
         } else {
@@ -1359,7 +1361,7 @@ export function registerCalendarTools(
               phone,
               calendar,
               `${CAL}/events?${new URLSearchParams({ timeMin: args.timeMin, timeMax: args.timeMax, maxResults: '2000' })}`,
-              deps.ownerEmail,
+              deps.phoneOwnerEmail ?? deps.ownerEmail,
             ).events) {
               if (
                 event.blocksTime &&

@@ -1206,6 +1206,17 @@ try {
   for (const status of ['done', 'cancelled', 'failed'] as const) {
     await verifyDelayedTerminalPoll(status);
   }
+  // Prepare the development route before holding a poll. The browser still
+  // clicks the real link, with its own navigation timeout and abort checks.
+  const chatList = await context.request.get(new URL('/chat/all', origin).href, {
+    maxRedirects: 0,
+    timeout: 90_000,
+  });
+  try {
+    assert.equal(chatList.status(), 200, 'The loopback chat list could not be prepared');
+  } finally {
+    await chatList.dispose();
+  }
   await verifyUnmountedPollDoesNotPublishAfterRemount();
   console.log(
     'WEB-17 mounted client acceptance passed for a retained second draft during held admission, delayed A done/cancelled/failed polls and task A abort/remount; admission/status payloads and responses were synthetic, with no model/provider or worker execution.',

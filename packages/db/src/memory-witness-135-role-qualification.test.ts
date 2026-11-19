@@ -54,7 +54,7 @@ async function dropOwnedDatabase(
 }
 
 it.skipIf(!imagesReceipt)(
-  'qualifies the schema 135 migration image, runtime readiness, and generic write compatibility',
+  'qualifies the schema 138 migration image, runtime readiness, and generic write compatibility',
   async () => {
     assertAllocatedTestTarget({
       databaseUrl: process.env.DATABASE_URL,
@@ -82,7 +82,7 @@ it.skipIf(!imagesReceipt)(
       | undefined;
     try {
       await admin`SET statement_timeout = '15s'`;
-      prefixDir = await mkdtemp(join(tmpdir(), 'assistant-memory-witness-role-135-'));
+      prefixDir = await mkdtemp(join(tmpdir(), 'assistant-memory-witness-role-138-'));
       await admin.unsafe(`CREATE DATABASE "${target.databaseName}"`);
       created = true;
       await admin.unsafe(
@@ -95,6 +95,23 @@ it.skipIf(!imagesReceipt)(
       });
       await client`SET statement_timeout = '30s'`;
 
+      // The populated historical 0134 prefix remains unchanged. The current
+      // schema 138 image must apply its witness, Calendar, cost, and MCP OAuth tail.
+      const forwardEntries = journal.entries.slice(135);
+      expect(forwardEntries.map((entry: { tag: string }) => entry.tag)).toEqual([
+        '0135_memory_write_witness',
+        '0136_google_calendar_connections',
+        '0137_estimated_cost_approval',
+        '0138_mcp_oauth_state',
+      ]);
+      const expectedForwardLedger = await Promise.all(
+        forwardEntries.map(async (entry: { tag: string; when: number }) => ({
+          hash: createHash('sha256')
+            .update(await readFile(join(folder, `${entry.tag}.sql`)))
+            .digest('hex'),
+          createdAt: String(entry.when),
+        })),
+      );
       const prefixEntries = journal.entries.slice(0, 135);
       expect(prefixEntries).toHaveLength(135);
       expect(prefixEntries.at(-1)?.tag).toBe('0134_owner_memory_creation');
@@ -116,6 +133,8 @@ it.skipIf(!imagesReceipt)(
 
       const owner = randomUUID();
       const legacyMemoryId = randomUUID();
+      const legacyReservationId = randomUUID();
+      const legacyMcpId = randomUUID();
       const legacyContent = 'Legacy owner corrected note at migration 0134';
       const contentHash = createHash('sha256').update(legacyContent).digest('hex');
       const priorContentHash = 'a'.repeat(64);
@@ -127,16 +146,24 @@ it.skipIf(!imagesReceipt)(
         correctedAt: '2026-11-01T00:00:00.000Z',
       };
       await client`INSERT INTO agents (id,name,email,workspace_prefix,timezone,locale,signature) VALUES (${owner},'Synthetic role qualification owner',${`${owner}@memory-witness.invalid`},${`workspace/${owner}`},'America/Los_Angeles','is','Synthetic owner signature')`;
+      // drizzle(client) installs transparent JSON serializers. Bind serialized
+      // fixtures as text so both this client and the later fresh client agree.
       await client`
       INSERT INTO memories
         (id,agent_id,category,kind,content,content_hash,source,owner_confirmed,pinned,origin_trust,owner_correction)
       VALUES
-        (${legacyMemoryId},${owner},'knowledge','fact',${legacyContent},${contentHash},'manual',true,true,'owner',${JSON.stringify(ownerCorrection)}::jsonb)
+        (${legacyMemoryId},${owner},'knowledge','fact',${legacyContent},${contentHash},'manual',true,true,'owner',${JSON.stringify(ownerCorrection)}::text::jsonb)
     `;
       const [preMigrationColumn] = await client`
       SELECT count(*)::int AS count FROM information_schema.columns
       WHERE table_schema='public' AND table_name='memories' AND column_name='memory_write_witness'`;
       expect(preMigrationColumn?.count).toBe(0);
+      await client`
+        INSERT INTO cost_reservations (id,source,estimated_usd,status,unknown_reason)
+        VALUES (${legacyReservationId},'model',0.125001,'unknown','synthetic pre-migration outcome')`;
+      await client`
+        INSERT INTO mcp_connections (id,agent_id,name,endpoint,status,bearer_token_encrypted)
+        VALUES (${legacyMcpId},${owner},'Fixture MCP','https://mcp.invalid/', 'ready','sealed-fixture')`;
       await client.end({ timeout: 5 });
       client = undefined;
 
@@ -148,6 +175,59 @@ it.skipIf(!imagesReceipt)(
         onnotice: () => {},
       });
       await client`SET statement_timeout = '15s'`;
+      const firstForward = expectedForwardLedger[0];
+      if (!firstForward) throw new Error('Schema 138 forward migration tail is missing.');
+      const forwardLedger = await client`
+        SELECT hash,created_at::text AS "createdAt" FROM drizzle.__drizzle_migrations
+        WHERE created_at >= ${firstForward.createdAt}
+        ORDER BY created_at,id`;
+      expect([...forwardLedger]).toEqual(expectedForwardLedger);
+      const [calendarTable] = await client`
+        SELECT to_regclass('public.google_calendar_connections')::text AS "tableName"`;
+      expect(calendarTable?.tableName).toBe('google_calendar_connections');
+      const calendarState = {
+        version: 1,
+        adopted: true,
+        ownerId: owner,
+        revision: 0,
+        connection: null,
+        flow: null,
+      };
+      await client`INSERT INTO google_calendar_connections (agent_id,state) VALUES (${owner},${JSON.stringify(calendarState)}::text::jsonb)`;
+      const [calendarAfter] =
+        await client`SELECT state FROM google_calendar_connections WHERE agent_id=${owner}`;
+      expect(calendarAfter?.state).toEqual(calendarState);
+      const budgetTables = await client`
+        SELECT table_name AS "tableName" FROM information_schema.tables
+        WHERE table_schema='public' AND table_name LIKE 'estimated_cost_%'
+        ORDER BY table_name`;
+      expect(budgetTables.map((row) => row.tableName)).toEqual([
+        'estimated_cost_baselines',
+        'estimated_cost_decisions',
+        'estimated_cost_grants',
+        'estimated_cost_quote_requests',
+        'estimated_cost_requests',
+      ]);
+      const [legacyReservation] = await client`
+        SELECT status,estimated_usd::text AS "estimatedUsd",reservation_kind AS "kind",
+          cost_grant_id AS "grantId",unknown_reason AS "unknownReason"
+        FROM cost_reservations WHERE id=${legacyReservationId}`;
+      expect(legacyReservation).toEqual({
+        status: 'unknown',
+        estimatedUsd: '0.125001',
+        kind: 'attempt',
+        grantId: null,
+        unknownReason: 'synthetic pre-migration outcome',
+      });
+      const [legacyMcpConnection] = await client`
+        SELECT status, enabled, bearer_token_encrypted AS "bearerTokenEncrypted", oauth_state AS "oauthState"
+        FROM mcp_connections WHERE id=${legacyMcpId} AND agent_id=${owner}`;
+      expect(legacyMcpConnection).toEqual({
+        status: 'ready',
+        enabled: true,
+        bearerTokenEncrypted: 'sealed-fixture',
+        oauthState: null,
+      });
       const [legacyAfter] = await client`
       SELECT content,content_hash AS "contentHash",owner_correction AS "ownerCorrection",
         memory_write_witness IS NULL AS "witnessIsSqlNull"
@@ -168,6 +248,28 @@ it.skipIf(!imagesReceipt)(
         legacyMemoryId,
         legacyContent,
       });
+      const proofDirectory = process.env.ASSISTANT_MEMORY_WITNESS_PROOF_DIR;
+      if (proofDirectory) {
+        await writeFile(
+          join(proofDirectory, 'schema-138-forward-upgrade.json'),
+          `${JSON.stringify(
+            {
+              prefixLastMigration: prefixEntries.at(-1)?.tag,
+              forwardMigrations: forwardEntries.map((entry: { tag: string }) => entry.tag),
+              appliedForwardLedger: [...forwardLedger],
+              calendarTable: calendarTable?.tableName,
+              disconnectedCalendarStateReadback: calendarAfter?.state,
+              estimatedCostTables: budgetTables.map((row) => row.tableName),
+              historicalUnknownReservationReadback: legacyReservation,
+              legacyMcpRecordPreserved: legacyMcpConnection?.oauthState === null,
+              legacyMemoryWitnessRemainsSqlNull: legacyAfter?.witnessIsSqlNull,
+            },
+            null,
+            2,
+          )}\n`,
+          { mode: 0o600 },
+        );
+      }
     } catch (error) {
       primaryError = error;
     }
@@ -237,8 +339,8 @@ it.skipIf(!imagesReceipt)(
   // + 15s post-migration readback + 2 x 95s migration-image passes (10s
   // create, 5s inspect, 45s attach, 5s exit inspect, 30s cleanup) + 40s
   // runtime image starts + 45s readiness + 80s runtime-container cleanup
-  // (10s logs and 30s exact close per role) + 240s for at most 16 host SQL
+  // (10s logs and 30s exact close per role) + 300s for at most 20 host SQL
   // statements at the helper's 15s statement timeout + 50s fixture
-  // drop/client close/temp cleanup = 885s; reserve 15s diagnostics margin.
-  900_000,
+  // drop/client close/temp cleanup = 945s; reserve 15s diagnostics margin.
+  960_000,
 );

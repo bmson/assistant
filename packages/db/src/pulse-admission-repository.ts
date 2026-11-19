@@ -1,5 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import { type PulseRepository, pulseDailyCap, validatePulseNotice } from '@assistant/persistence';
+import {
+  emailIngestReadable,
+  type PulseRepository,
+  pulseDailyCap,
+  validatePulseNotice,
+} from '@assistant/persistence';
 import { and, count, eq, gte, isNull, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
 import { postgresPrivacyObservationFence } from './privacy-erasure-repository.js';
@@ -77,7 +82,7 @@ export function createPostgresPulseAdmissionRepository(
             current.providerMessageId !== source.providerMessageId ||
             current.obligationVersion !== source.obligationVersion ||
             !current.actionable ||
-            current.pipelineStage !== 'complete' ||
+            !emailIngestReadable(current) ||
             !['unknown', 'open', 'snoozed'].includes(current.obligationStatus) ||
             (current.obligationStatus === 'snoozed' &&
               current.obligationSnoozedUntil &&

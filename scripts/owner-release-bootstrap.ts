@@ -2,12 +2,18 @@ import {
   type BootstrapReceipt,
   bootstrapDigest,
   disabled,
+  matchesScalingConfigurationDigest,
   object,
   RUN_ROOT,
   requireProof,
   SERVICE_ROOT,
   scalingConfigurationDigest,
 } from './owner-release-current-snapshot.js';
+import { revisionWithRequestedImage } from './owner-release-image-resolution.js';
+import {
+  matchesNativeServiceDigest,
+  nativeServiceDefaults,
+} from './owner-release-native-service-defaults.js';
 /** Reviewed bootstrap scaling transport and existing-phase checkpoints. */
 import {
   type Snapshot,
@@ -55,8 +61,13 @@ export function verifyBootstrapRevisionTemplate(
     r.name === `${service}/revisions/${expectedRevision}` &&
       (r.service === service || r.service === `assistant-${role}`),
   );
+  const requestedContainers = t.containers;
+  requireProof(Array.isArray(requestedContainers) && requestedContainers.length === 1);
+  const expectedImage = object(requestedContainers[0]).image;
+  requireProof(typeof expectedImage === 'string');
+  const semantic = revisionWithRequestedImage(r, expectedImage);
   const projected: Obj = {};
-  for (const key of Object.keys(t)) if (r[key] !== undefined) projected[key] = r[key];
+  for (const key of Object.keys(t)) if (semantic[key] !== undefined) projected[key] = semantic[key];
   projected.revision = expectedRevision;
   const requested = t.containers,
     actual = projected.containers;
@@ -80,6 +91,7 @@ function validateCandidate(
   paused: boolean,
   healthy: boolean,
 ) {
+  nativeServiceDefaults(s); // Validate the one supported service boolean before any candidate mutation.
   verifyBootstrapRevisionTemplate(service, s.template, r, expected.revision);
   if (healthy) {
     requireProof(s.observedGeneration === s.generation);
@@ -235,7 +247,7 @@ export async function restoreScaling(
     before = await request(name),
     revision = await request(`${name}/revisions/${expected.revision}`);
   if (expectedBeforeServiceSha256)
-    requireProof(bootstrapDigest(before) === expectedBeforeServiceSha256);
+    requireProof(matchesNativeServiceDigest(before, expectedBeforeServiceSha256, bootstrapDigest));
   const probe = hold
     ? { ...before, scaling: { scalingMode: 'MANUAL', manualInstanceCount: 0 } }
     : before;
@@ -243,7 +255,7 @@ export async function restoreScaling(
   if (hold)
     requireProof(
       expectedAfterConfiguration &&
-        scalingConfigurationDigest(before) === expectedAfterConfiguration,
+        matchesScalingConfigurationDigest(before, expectedAfterConfiguration),
     );
   const body = planScalingRestore(receipt, role, probe, revision, expected, hold);
   if (hold) body.scaling = { scalingMode: 'MANUAL', manualInstanceCount: 0 };

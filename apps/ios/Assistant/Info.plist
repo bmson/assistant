@@ -26,6 +26,7 @@
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>assistant</string>
+				<string>assistant-oauth</string>
 			</array>
 		</dict>
 	</array>

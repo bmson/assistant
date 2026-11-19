@@ -6,7 +6,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Every selected image must truthfully cover the bounded calendar schema bridge.
-node --test "$ROOT/calendar-bridge-contract.test.mjs" "$ROOT/release-contract-133.test.mjs" "$ROOT/release-contract-134.test.mjs"
+node --test "$ROOT/calendar-bridge-contract.test.mjs" "$ROOT/release-contract-133.test.mjs" "$ROOT/release-contract-134.test.mjs" "$ROOT/release-contract-137.test.mjs" "$ROOT/release-contract-138.test.mjs" "$ROOT/release-role-qualification-138.test.mjs"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/assistant-release-test.XXXXXX")"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 mkdir -p "$TEST_ROOT/bin" "$TEST_ROOT/dispatch"
@@ -18,11 +18,11 @@ LEGACY_RELEASE_ROOT="$TEST_ROOT/legacy-release-source"
 mkdir -p "$LEGACY_RELEASE_ROOT/infra/gcp" "$LEGACY_RELEASE_ROOT/packages/db/drizzle/meta"
 LEGACY_RELEASE_ROOT="$(cd "$LEGACY_RELEASE_ROOT" && pwd -P)"
 for file in release-firestore.sh release-fast.sh release-persistence.sh release-staged-services.sh release-legacy-bootstrap.sh \
-  release-schema-version.mjs release-manifest.mjs release-contracts.json; do
+  release-schema-version.mjs release-manifest.mjs release-contracts.json google-calendar-release-config.mjs estimated-cost-release-config.mjs; do
   cp "$ROOT/$file" "$LEGACY_RELEASE_ROOT/infra/gcp/$file"
 done
-cp "${ROOT%/infra/gcp}/packages/db/drizzle/meta/_journal.json" \
-  "$LEGACY_RELEASE_ROOT/packages/db/drizzle/meta/_journal.json"
+cp "$ROOT/fixtures/postgres-journal.schema137.json" "$LEGACY_RELEASE_ROOT/packages/db/drizzle/meta/_journal.json"
+cp "$ROOT/fixtures/release-contracts.schema137.json" "$LEGACY_RELEASE_ROOT/infra/gcp/release-contracts.json"
 node - "$LEGACY_RELEASE_ROOT/infra/gcp/release-contracts.json" <<'NODE'
 const fs = require('node:fs');
 const path = process.argv[2];
@@ -260,7 +260,7 @@ reset() {
 # ── release.sh selects the path from the live services ──────────────────────
 DISPATCH_RELEASE_ROOT="$TEST_ROOT/dispatch/infra/gcp"
 mkdir -p "$DISPATCH_RELEASE_ROOT"
-cp "$ROOT/release.sh" "$ROOT/release-persistence.sh" "$ROOT/release-staged-services.sh" "$DISPATCH_RELEASE_ROOT/"
+cp "$ROOT/release.sh" "$ROOT/release-persistence.sh" "$ROOT/release-staged-services.sh" "$ROOT/estimated-cost-release-config.mjs" "$DISPATCH_RELEASE_ROOT/"
 cp "$LEGACY_RELEASE_ROOT/infra/gcp/release-contracts.json" "$DISPATCH_RELEASE_ROOT/"
 printf '#!/usr/bin/env bash\necho SELECTED:postgres\n' >"$DISPATCH_RELEASE_ROOT/release-postgres.sh"
 printf '#!/usr/bin/env bash\necho SELECTED:firestore\n' >"$DISPATCH_RELEASE_ROOT/release-firestore.sh"

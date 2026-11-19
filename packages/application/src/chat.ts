@@ -28,6 +28,7 @@ export const SETTLED_TASK_STATUSES = new Set([
   ...TERMINAL_TASK_STATUSES,
   'needs_attention',
   'waiting_approval',
+  'waiting_estimated_cost',
 ]);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 

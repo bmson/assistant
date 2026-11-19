@@ -1,0 +1,169 @@
+
+> assistant@ test /Users/baldvinsmarason/.codex/worktrees/ai-calendar-server-release/assistant
+> tsx scripts/test.ts packages/db/src/estimated-cost-preparer.test.ts
+
+
+> @assistant/db@0.0.1 test:prepare /Users/baldvinsmarason/.codex/worktrees/ai-calendar-server-release/assistant/packages/db
+> tsx src/test-db.ts && pnpm migrate && pnpm seed
+
+
+> @assistant/db@0.0.1 migrate /Users/baldvinsmarason/.codex/worktrees/ai-calendar-server-release/assistant/packages/db
+> tsx src/migrate.ts
+
+No config path provided, using default 'drizzle.config.ts'
+Reading config file '/Users/baldvinsmarason/.codex/worktrees/ai-calendar-server-release/assistant/packages/db/drizzle.config.ts'
+Using 'postgres' driver for database querying
+[⣷] applying migrations...[2K[1G[⣯] applying migrations...{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '42622',
+  message: 'identifier "knowledge_graph_relations_subject_entity_id_knowledge_graph_entities_id_fk" will be truncated to "knowledge_graph_relations_subject_entity_id_knowledge_graph_ent"',
+  file: 'scansup.c',
+  line: '102',
+  routine: 'truncate_identifier'
+}
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '42622',
+  message: 'identifier "knowledge_graph_relations_object_entity_id_knowledge_graph_entities_id_fk" will be truncated to "knowledge_graph_relations_object_entity_id_knowledge_graph_enti"',
+  file: 'scansup.c',
+  line: '102',
+  routine: 'truncate_identifier'
+}
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '42622',
+  message: 'identifier "knowledge_graph_entity_aliases_entity_id_knowledge_graph_entities_id_fk" will be truncated to "knowledge_graph_entity_aliases_entity_id_knowledge_graph_entiti"',
+  file: 'scansup.c',
+  line: '102',
+  routine: 'truncate_identifier'
+}
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '42622',
+  message: 'identifier "security_incident_attention_incident_id_security_incidents_id_fk" will be truncated to "security_incident_attention_incident_id_security_incidents_id_f"',
+  file: 'scansup.c',
+  line: '102',
+  routine: 'truncate_identifier'
+}
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '42622',
+  message: 'identifier "knowledge_graph_assertion_evidence_assertion_id_knowledge_graph_assertions_id_fk" will be truncated to "knowledge_graph_assertion_evidence_assertion_id_knowledge_graph"',
+  file: 'scansup.c',
+  line: '102',
+  routine: 'truncate_identifier'
+}
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '42622',
+  message: 'identifier "knowledge_graph_assertion_evidence_source_memory_id_memories_id_fk" will be truncated to "knowledge_graph_assertion_evidence_source_memory_id_memories_id"',
+  file: 'scansup.c',
+  line: '102',
+  routine: 'truncate_identifier'
+}
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '42622',
+  message: 'identifier "knowledge_graph_assertions_subject_entity_id_knowledge_graph_entities_id_fk" will be truncated to "knowledge_graph_assertions_subject_entity_id_knowledge_graph_en"',
+  file: 'scansup.c',
+  line: '102',
+  routine: 'truncate_identifier'
+}
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '42622',
+  message: 'identifier "knowledge_graph_assertions_object_entity_id_knowledge_graph_entities_id_fk" will be truncated to "knowledge_graph_assertions_object_entity_id_knowledge_graph_ent"',
+  file: 'scansup.c',
+  line: '102',
+  routine: 'truncate_identifier'
+}
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '42622',
+  message: 'identifier "knowledge_graph_relations_assertion_id_knowledge_graph_assertions_id_fk" will be truncated to "knowledge_graph_relations_assertion_id_knowledge_graph_assertio"',
+  file: 'scansup.c',
+  line: '102',
+  routine: 'truncate_identifier'
+}
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '42622',
+  message: 'identifier "memory_embedding_refreshes_agent_id_memory_id_memories_agent_id_id_fk" will be truncated to "memory_embedding_refreshes_agent_id_memory_id_memories_agent_id"',
+  file: 'scansup.c',
+  line: '102',
+  routine: 'truncate_identifier'
+}
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '42622',
+  message: 'identifier "files_email_attachment_custody_id_email_attachment_custodies_id_fk" will be truncated to "files_email_attachment_custody_id_email_attachment_custodies_id"',
+  file: 'scansup.c',
+  line: '102',
+  routine: 'truncate_identifier'
+}
+[2K[1G[⣟] applying migrations...{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '42622',
+  message: 'identifier "estimated_cost_quote_requests_operation_id_estimated_cost_requests_operation_id_fk" will be truncated to "estimated_cost_quote_requests_operation_id_estimated_cost_reque"',
+  file: 'scansup.c',
+  line: '102',
+  routine: 'truncate_identifier'
+}
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '42622',
+  message: 'identifier "estimated_cost_decisions_operation_id_estimated_cost_requests_operation_id_fk" will be truncated to "estimated_cost_decisions_operation_id_estimated_cost_requests_o"',
+  file: 'scansup.c',
+  line: '102',
+  routine: 'truncate_identifier'
+}
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '42622',
+  message: 'identifier "estimated_cost_grants_operation_id_estimated_cost_requests_operation_id_fk" will be truncated to "estimated_cost_grants_operation_id_estimated_cost_requests_oper"',
+  file: 'scansup.c',
+  line: '102',
+  routine: 'truncate_identifier'
+}
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '42622',
+  message: 'identifier "estimated_cost_grants_escrow_reservation_id_cost_reservations_id_fk" will be truncated to "estimated_cost_grants_escrow_reservation_id_cost_reservations_i"',
+  file: 'scansup.c',
+  line: '102',
+  routine: 'truncate_identifier'
+}
+[2K[1G[✓] migrations applied successfully!
+> @assistant/db@0.0.1 seed /Users/baldvinsmarason/.codex/worktrees/ai-calendar-server-release/assistant/packages/db
+> tsx src/seed.ts
+
+seeded: agent Assistant <assistant@example.com> (84313409-82aa-48fe-b576-f3b93b375eb7)
+seeded: 11 models, 8 roles, 3 budgets, 8 rate limits, 3 policies
+
+ RUN  v5.0.5 /Users/baldvinsmarason/.codex/worktrees/ai-calendar-server-release/assistant
+
+
+ Test Files  1 passed (1)
+      Tests  8 passed (8)
+   Start at  12:00:06
+   Duration  965ms (tests 65%, import 26%, transform 9%)
+
+
+> @assistant/db@0.0.1 test:cleanup /Users/baldvinsmarason/.codex/worktrees/ai-calendar-server-release/assistant/packages/db
+> tsx src/cleanup-test-db.ts
+

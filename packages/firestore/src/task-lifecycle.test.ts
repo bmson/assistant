@@ -26,6 +26,14 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       vi.restoreAllMocks();
       await disposeStore(store);
     });
+    it('does not claim, wake, or sweep a task awaiting estimated-cost consent', async () => {
+      await store
+        .doc('tasks', 'task')
+        .update({ status: 'waiting_estimated_cost', runAfter: new Date(0) });
+      expect(await repo.claim('task')).toBeNull();
+      expect(await repo.wakeTask('task')).toBeNull();
+      expect((await repo.findDueTasks()).some((row) => row.id === 'task')).toBe(false);
+    });
     it('commits sleep/wake generations with durable queue intents and excludes future tasks', async () => {
       const lease = await repo.claim('task');
       if (!lease) throw new Error('Missing test lease');

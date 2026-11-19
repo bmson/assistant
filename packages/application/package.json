@@ -18,6 +18,7 @@
     "./documents": "./src/documents.ts",
     "./email-obligations": "./src/email-obligations.ts",
     "./security-incidents": "./src/security-incidents.ts",
+    "./calendar-duplicates": "./src/calendar-duplicates.ts",
     "./goals": "./src/goals.ts",
     "./health": "./src/health.ts",
     "./imports": "./src/imports.ts",
@@ -48,7 +49,8 @@
     "./owner-editor": "./src/owner-editor.ts",
     "./owner-editor-domain": "./src/owner-editor-domain.ts",
     "./phone-call-owner-grants": "./src/phone-call-owner-grants.ts",
-    "./approval-policy-presentation": "./src/approval-policy-presentation.ts"
+    "./approval-policy-presentation": "./src/approval-policy-presentation.ts",
+    "./google-calendar-connection": "./src/google-calendar-connection.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"

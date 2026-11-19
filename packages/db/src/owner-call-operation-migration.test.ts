@@ -288,20 +288,33 @@ beforeAll(async () => {
     const expectedOwnerMemoryHash = createHash('sha256')
       .update(await readFile(join(folder, '0134_owner_memory_creation.sql')))
       .digest('hex');
-    const expectedFinalHash = createHash('sha256')
+    const expectedWitnessHash = createHash('sha256')
       .update(await readFile(join(folder, '0135_memory_write_witness.sql')))
       .digest('hex');
+    const expectedCalendarHash = createHash('sha256')
+      .update(await readFile(join(folder, '0136_google_calendar_connections.sql')))
+      .digest('hex');
+    const expectedCostHash = createHash('sha256')
+      .update(await readFile(join(folder, '0137_estimated_cost_approval.sql')))
+      .digest('hex');
+    const expectedFinalHash = createHash('sha256')
+      .update(await readFile(join(folder, '0138_mcp_oauth_state.sql')))
+      .digest('hex');
+    expect(journal.entries.at(-1)?.tag).toBe('0138_mcp_oauth_state');
     const [endpoint] = await client`
       SELECT hash FROM drizzle.__drizzle_migrations ORDER BY id DESC LIMIT 1`;
     expect(endpoint?.hash).toBe(expectedFinalHash);
     const [ledgerCount] =
       await client`SELECT count(*)::int AS count FROM drizzle.__drizzle_migrations`;
-    expect(ledgerCount?.count).toBe(136);
+    expect(ledgerCount?.count).toBe(139);
     const ledgerBeforeRerun = await client`
       SELECT hash,created_at::text AS "createdAt"
       FROM drizzle.__drizzle_migrations ORDER BY id`;
-    expect(ledgerBeforeRerun).toHaveLength(136);
-    expect(ledgerBeforeRerun.at(-2)?.hash).toBe(expectedOwnerMemoryHash);
+    expect(ledgerBeforeRerun).toHaveLength(139);
+    expect(ledgerBeforeRerun.at(-5)?.hash).toBe(expectedOwnerMemoryHash);
+    expect(ledgerBeforeRerun.at(-4)?.hash).toBe(expectedWitnessHash);
+    expect(ledgerBeforeRerun.at(-3)?.hash).toBe(expectedCalendarHash);
+    expect(ledgerBeforeRerun.at(-2)?.hash).toBe(expectedCostHash);
     expect(ledgerBeforeRerun.at(-1)?.hash).toBe(expectedFinalHash);
     await client.end();
     client = undefined;

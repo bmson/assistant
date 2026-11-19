@@ -45,3 +45,49 @@ grep -Fq 'ref: ${{ steps.release.outputs.sha }}' <<<"$target_block" || {
   exit 1
 }
 echo 'manual verifier checkout order tests passed'
+
+# Evaluate the actual automatic-deploy admission expression against first and
+# later attempts, including a rerun of another job that leaves BASIC5 skipped.
+python3 - "$workflow" "$ROOT/../../.github/workflows/ci.yml" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+deploy = Path(sys.argv[1]).read_text()
+ci = Path(sys.argv[2]).read_text()
+plan = deploy.split('  plan:\n', 1)[1].split('    runs-on:', 1)[0]
+match = re.search(r'    if: >-\n((?:      .*\n)+)', plan)
+assert match, 'automatic deployment admission expression missing'
+expression = ' '.join(line.strip() for line in match.group(1).splitlines())
+
+def admitted(attempt, *, event='workflow_run', conclusion='success', source_event='push', branch='main', same_repo=True):
+    values = {
+        'github.event_name': event,
+        'github.ref': 'refs/heads/main',
+        'inputs.native_web_qualification': '',
+        'github.event.workflow_run.conclusion': conclusion,
+        'github.event.workflow_run.run_attempt': attempt,
+        'github.event.workflow_run.event': source_event,
+        'github.event.workflow_run.head_repository.full_name': 'owner/repo' if same_repo else 'fork/repo',
+        'github.repository': 'owner/repo',
+        'github.event.workflow_run.head_branch': branch,
+    }
+    parsed = re.sub(r'\b(?:github|inputs)\.[a-zA-Z0-9_.]+', lambda m: repr(values[m.group()]), expression)
+    parsed = parsed.replace('&&', ' and ').replace('||', ' or ')
+    assert re.fullmatch(r"[a-zA-Z0-9_ ./=()'\-]+", parsed), 'unexpected admission syntax'
+    return bool(eval(parsed, {'__builtins__': {}}, {}))
+
+assert admitted(1), 'successful first main push must be admitted'
+assert not admitted(2), 'selective rerun with skipped BASIC5 must not deploy'
+assert not admitted(2, conclusion='failure'), 'failed rerun must not deploy'
+assert not admitted(1, branch='feature')
+assert not admitted(1, same_repo=False)
+assert not admitted(1, source_event='pull_request')
+
+job = re.split(r'\n  [a-zA-Z][a-zA-Z0-9_-]*:', ci.split('  build-smoke:\n', 1)[1], maxsplit=1)[0]
+assert "if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.run_attempt != 1" in job
+assert job.index('Reject main push reruns without BASIC5 acceptance') < job.index('actions/checkout@')
+assert re.search(r'Reject main push reruns without BASIC5 acceptance.*?exit 1', job, re.S)
+assert re.search(r"Verify four BASIC5 saves.*?if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.run_attempt == 1.*?run: pnpm exec tsx scripts/basic5-ci-acceptance.ts", job, re.S)
+print('automatic release and BASIC5 rerun admission checks passed')
+PY

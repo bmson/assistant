@@ -10,7 +10,7 @@ POSTGRES_SCHEMA_VERSION="$(node "$ROOT/release-schema-version.mjs" postgres)"
 POSTGRES_PREVIOUS_SCHEMA_VERSION=$((POSTGRES_SCHEMA_VERSION - 1))
 export POSTGRES_SCHEMA_VERSION POSTGRES_PREVIOUS_SCHEMA_VERSION
 cat >"$TEST_ROOT/state.json" <<JSON
-{"assistant-agent":{"revision":"agent-old","traffic":{"agent-old":100},"env":{"QUEUE_DRIVER":"cloudtasks","ASSISTANT_RELEASE_API_CONTRACT":"1","ASSISTANT_RELEASE_SCHEMA_DRIVER":"postgres","ASSISTANT_RELEASE_SCHEMA_VERSION":"${POSTGRES_SCHEMA_VERSION}","ASSISTANT_RELEASE_WEB_API_MIN":"1","ASSISTANT_RELEASE_WEB_API_MAX":"1","ASSISTANT_RELEASE_SCHEMA_DRIVER":"postgres","ASSISTANT_RELEASE_SCHEMA_MIN":"${POSTGRES_SCHEMA_VERSION}","ASSISTANT_RELEASE_SCHEMA_MAX":"${POSTGRES_SCHEMA_VERSION}"},"next":0},"assistant-web":{"revision":"web-old","traffic":{"web-old":100},"env":{"ASSISTANT_RELEASE_API_CONTRACT":"1","ASSISTANT_RELEASE_AGENT_API_MIN":"1","ASSISTANT_RELEASE_AGENT_API_MAX":"1","ASSISTANT_RELEASE_SCHEMA_DRIVER":"postgres","ASSISTANT_RELEASE_SCHEMA_MIN":"${POSTGRES_SCHEMA_VERSION}","ASSISTANT_RELEASE_SCHEMA_MAX":"${POSTGRES_SCHEMA_VERSION}"},"next":0},"assistant-browser":{"image":"registry/old-browser","next":0},"assistant-processor":{"image":"registry/old-processor","next":0}}
+{"assistant-agent":{"revision":"agent-old","traffic":{"agent-old":100},"env":{"QUEUE_DRIVER":"cloudtasks","ASSISTANT_RELEASE_API_CONTRACT":"3","ASSISTANT_RELEASE_SCHEMA_DRIVER":"postgres","ASSISTANT_RELEASE_SCHEMA_VERSION":"${POSTGRES_SCHEMA_VERSION}","ASSISTANT_RELEASE_WEB_API_MIN":"3","ASSISTANT_RELEASE_WEB_API_MAX":"3","ASSISTANT_RELEASE_SCHEMA_DRIVER":"postgres","ASSISTANT_RELEASE_SCHEMA_MIN":"${POSTGRES_SCHEMA_VERSION}","ASSISTANT_RELEASE_SCHEMA_MAX":"${POSTGRES_SCHEMA_VERSION}"},"next":0},"assistant-web":{"revision":"web-old","traffic":{"web-old":100},"env":{"ASSISTANT_RELEASE_API_CONTRACT":"3","ASSISTANT_RELEASE_AGENT_API_MIN":"3","ASSISTANT_RELEASE_AGENT_API_MAX":"3","ASSISTANT_RELEASE_SCHEMA_DRIVER":"postgres","ASSISTANT_RELEASE_SCHEMA_MIN":"${POSTGRES_SCHEMA_VERSION}","ASSISTANT_RELEASE_SCHEMA_MAX":"${POSTGRES_SCHEMA_VERSION}"},"next":0},"assistant-browser":{"image":"registry/old-browser","next":0},"assistant-processor":{"image":"registry/old-processor","next":0}}
 JSON
 cat >"$TEST_ROOT/bin/gcloud" <<'PY'
 #!/usr/bin/env python3
@@ -258,7 +258,7 @@ v2_job='{"template":{"template":{"containers":[{"image":"registry/v2-image"}]}}}
 [[ "$(release_job_image "$v2_job")" == registry/v2-image ]] || { echo 'v2 job image path not parsed' >&2; exit 1; }
 reset_case() {
  cat >"$TEST_ROOT/state.json" <<JSON
-{"assistant-agent":{"revision":"agent-old","traffic":{"agent-old":100},"env":{"QUEUE_DRIVER":"cloudtasks","ASSISTANT_RELEASE_API_CONTRACT":"1","ASSISTANT_RELEASE_SCHEMA_DRIVER":"postgres","ASSISTANT_RELEASE_SCHEMA_VERSION":"${POSTGRES_SCHEMA_VERSION}","ASSISTANT_RELEASE_WEB_API_MIN":"1","ASSISTANT_RELEASE_WEB_API_MAX":"1","ASSISTANT_RELEASE_SCHEMA_DRIVER":"postgres","ASSISTANT_RELEASE_SCHEMA_MIN":"${POSTGRES_SCHEMA_VERSION}","ASSISTANT_RELEASE_SCHEMA_MAX":"${POSTGRES_SCHEMA_VERSION}"},"next":0},"assistant-web":{"revision":"web-old","traffic":{"web-old":100},"env":{"ASSISTANT_RELEASE_API_CONTRACT":"1","ASSISTANT_RELEASE_AGENT_API_MIN":"1","ASSISTANT_RELEASE_AGENT_API_MAX":"1","ASSISTANT_RELEASE_SCHEMA_DRIVER":"postgres","ASSISTANT_RELEASE_SCHEMA_MIN":"${POSTGRES_SCHEMA_VERSION}","ASSISTANT_RELEASE_SCHEMA_MAX":"${POSTGRES_SCHEMA_VERSION}"},"next":0},"assistant-browser":{"image":"registry/old-browser","next":0},"assistant-processor":{"image":"registry/old-processor","next":0}}
+{"assistant-agent":{"revision":"agent-old","traffic":{"agent-old":100},"env":{"QUEUE_DRIVER":"cloudtasks","ASSISTANT_RELEASE_API_CONTRACT":"3","ASSISTANT_RELEASE_SCHEMA_DRIVER":"postgres","ASSISTANT_RELEASE_SCHEMA_VERSION":"${POSTGRES_SCHEMA_VERSION}","ASSISTANT_RELEASE_WEB_API_MIN":"3","ASSISTANT_RELEASE_WEB_API_MAX":"3","ASSISTANT_RELEASE_SCHEMA_DRIVER":"postgres","ASSISTANT_RELEASE_SCHEMA_MIN":"${POSTGRES_SCHEMA_VERSION}","ASSISTANT_RELEASE_SCHEMA_MAX":"${POSTGRES_SCHEMA_VERSION}"},"next":0},"assistant-web":{"revision":"web-old","traffic":{"web-old":100},"env":{"ASSISTANT_RELEASE_API_CONTRACT":"3","ASSISTANT_RELEASE_AGENT_API_MIN":"3","ASSISTANT_RELEASE_AGENT_API_MAX":"3","ASSISTANT_RELEASE_SCHEMA_DRIVER":"postgres","ASSISTANT_RELEASE_SCHEMA_MIN":"${POSTGRES_SCHEMA_VERSION}","ASSISTANT_RELEASE_SCHEMA_MAX":"${POSTGRES_SCHEMA_VERSION}"},"next":0},"assistant-browser":{"image":"registry/old-browser","next":0},"assistant-processor":{"image":"registry/old-processor","next":0}}
 JSON
  unset FAIL_AGENT_BUILD FAIL_AGENT_STAGE UNHEALTHY_AGENT UNHEALTHY_WEB UNHEALTHY_LIVE_WEB \
     CANDIDATE_WEB_PROBE_FAIL FINAL_NEW_PAIR_PROBE_FAIL RESUME_WEB_PROBE_FAIL RESUME_LIVE_PROBE_FAIL \
@@ -273,6 +273,7 @@ JSON
  : >"$STUB_DRAIN_CALLS"
  : >"$STUB_ADMISSION_CALLS"
  TEST_BASIC5_CAPABILITY=false
+ unset GOOGLE_CALENDAR_OAUTH_CALLBACK_URL
  unset RELEASE_EMAIL_OBSERVER_WORKER_ENABLED
  export RELEASE_COMPONENTS=agent,web RELEASE_MODULES=none RELEASE_PERSISTENCE_DRIVER=postgres
  export PROJECT=test-project REGION=us-west1 REPO=assistant IMAGE_ROOT=us-west1-docker.pkg.dev/test-project/assistant
@@ -335,6 +336,25 @@ import json,sys
 import os
 s=json.load(open(sys.argv[1])); env=s['assistant-agent']['env']; live=s['assistant-agent']['revisions']['agent-old']['env']; current=os.environ['POSTGRES_SCHEMA_VERSION']; old=os.environ['POSTGRES_PREVIOUS_SCHEMA_VERSION']; assert env['ASSISTANT_RELEASE_SCHEMA_MIN']==current; assert env['ASSISTANT_RELEASE_SCHEMA_MAX']==current; assert live['ASSISTANT_RELEASE_SCHEMA_MIN']==old; assert live['ASSISTANT_RELEASE_SCHEMA_MAX']==old
 PYCONTROL
+for invalid_callback in 'http://bot.bmson.com/api/oauth/google-calendar/callback' 'https://bot.bmson.com/api/oauth/google-calendar/callback,PRIVATE=replace' 'https://bot.bmson.com/wrong'; do
+ reset_case; export GOOGLE_CALENDAR_OAUTH_CALLBACK_URL="$invalid_callback"
+ if release_staged_services; then fail 'invalid Calendar callback must fail'; fi
+ [[ ! -s "$STUB_SERVICE_UPDATE_CALLS" ]] || fail 'invalid Calendar callback mutated a service'
+done
+reset_case; export GOOGLE_CALENDAR_OAUTH_CALLBACK_URL='https://bot.bmson.com/api/oauth/google-calendar/callback'
+release_staged_services || fail 'optional Calendar callback should stage the pair'
+python3 - "$STUB_SERVICE_UPDATE_CALLS" <<'PYTEST'
+import json,sys
+calls=[json.loads(line) for line in open(sys.argv[1])]
+for service in ['assistant-agent','assistant-web']:
+ call=next(x for x in calls if x[3]==service)
+ assert 'GOOGLE_CALENDAR_OAUTH_CALLBACK_URL=https://bot.bmson.com/api/oauth/google-calendar/callback' in call[call.index('--update-env-vars')+1]
+ assert '--no-traffic' in call
+PYTEST
+reset_case; export GOOGLE_CALENDAR_OAUTH_CALLBACK_URL='https://bot.bmson.com/api/oauth/google-calendar/callback' RELEASE_COMPONENTS=web RELEASE_SCHEMA_UNCHANGED=true
+if release_staged_services; then fail 'Calendar configuration must reject web-only release'; fi
+[[ ! -s "$STUB_SERVICE_UPDATE_CALLS" ]] || fail 'web-only Calendar configuration mutated a service'
+reset_case
 reset_case; export RELEASE_EMAIL_OBSERVER_WORKER_ENABLED=bogus
 if release_staged_services; then fail 'invalid worker flag must fail before staging'; fi
 [[ ! -s "$STUB_SERVICE_UPDATE_CALLS" && ! -s "$STUB_RELEASE_CALLS" ]] || fail 'invalid worker flag reached a staging or traffic mutation'
@@ -519,6 +539,25 @@ p=sys.argv[1]; s=json.load(open(p)); s['assistant-agent']['env']['ASSISTANT_RELE
 PY
 if release_staged_services; then fail 'web-only release must reject incompatible live API metadata'; fi
 assert_old_traffic
+reset_case
+# Same Firestore schema is insufficient on either side of the OAuth authority boundary.
+for old_peer in assistant-agent assistant-web; do
+  reset_case
+  prepare_firestore_state
+  python3 - "$TEST_ROOT/state.json" "$old_peer" <<'PYTHON'
+import json,sys
+p, role = sys.argv[1:]
+with open(p) as f:
+    state = json.load(f)
+state[role]['env']['ASSISTANT_RELEASE_API_CONTRACT'] = '1'
+with open(p, 'w') as f:
+    json.dump(state, f)
+PYTHON
+  if release_preflight_compatibility agent,web; then
+    fail "Firestore preflight accepted pre-OAuth ${old_peer} despite the shared storage version"
+  fi
+  assert_old_traffic
+done
 reset_case
 prepare_firestore_state
 release_preflight_compatibility agent,web || fail 'Firestore contract metadata should pass preflight'
@@ -934,4 +973,5 @@ export FAIL_BOOTSTRAP_UNKNOWN=1
 if release_staged_services >/dev/null 2>&1; then fail 'unknown scaling restoration must fail closed'; fi
 if rg -q '^native-phase:restoreC' "$STUB_ADMISSION_CALLS"; then fail 'unknown scaling outcome resumed legacy traffic'; fi
 unset FAIL_BOOTSTRAP_UNKNOWN OWNER_RELEASE_BOOTSTRAP_RECEIPT OWNER_RELEASE_BOOTSTRAP_SHA256
+bash "$ROOT/google-calendar-release-config.test.sh"
 echo 'staged release protocol tests passed'

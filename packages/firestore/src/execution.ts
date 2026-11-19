@@ -30,6 +30,7 @@ import { FirestoreExecutionEvidenceRepository } from './execution-evidence.js';
 import { FirestoreExecutionJobRepository } from './execution-jobs.js';
 import { FirestoreGeneratedCardRepository } from './generated-cards.js';
 import { FirestoreGoalRuntimeRepository } from './goal-runtime.js';
+import { createFirestoreGoogleCalendarConnectionRepository } from './google-calendar-connections.js';
 import { FirestoreGraphCuriosityRepository } from './graph-curiosity.js';
 import { FirestoreGraphDateBackfillRepository } from './graph-date-backfill.js';
 import { FirestoreGraphRecallRepository } from './graph-recall.js';
@@ -85,6 +86,7 @@ export function createFirestoreExecutionPersistence(
   const situationDecisionContext = new FirestoreSituationToolRepository(store, agentId);
   return {
     driver: 'firestore',
+    googleCalendarConnection: createFirestoreGoogleCalendarConnectionRepository(store),
     conversationSearch: new FirestoreConversationSearchRepository(store, capturedEmbeddingSpace),
     tasks: new FirestoreTaskRepository(store),
     costs: new FirestoreCostRepository(store),

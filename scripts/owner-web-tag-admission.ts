@@ -1,8 +1,11 @@
+import { revisionWithRequestedImage } from './owner-release-image-resolution.js';
+import { nativeServiceDefaults } from './owner-release-native-service-defaults.js';
 /** Fixed-service BASIC5 rollout barrier. Called only by the protected paired release. */
 
 import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import { reviewedEstimatedCostReleaseProfile } from './estimated-cost-release-profile.js';
 import { verifyPreAuthEnvironment } from './owner-editor-release-inventory.js';
 import {
   bootstrapDigest,
@@ -28,6 +31,7 @@ import {
   runPairedWebLifecyclePhase,
 } from './owner-web-release-native-controller.js';
 import {
+  matchesNativeStableConfigurationDigest,
   nativeStableConfigurationDigest,
   projectNativeWebSnapshot,
   TEMPLATE_FIELDS,
@@ -190,6 +194,20 @@ export async function runWebTagAdmission(mode: string | undefined) {
   const bootstrapEvidence = bootstrap ? bootstrapDigest(bootstrap) : undefined;
   const preclosed = bootstrap?.kind === 'disabled-bootstrap';
   const io = await protectedWebTagCloud();
+  // Expected parents come only from the verified release/current evidence. Keep raw
+  // native responses intact; later semantic checks require this content proof.
+  for (const expectedImage of new Set([
+    image,
+    String(rec(rec(manifest.components).agent).image),
+    ...Object.values(bootstrap?.services ?? {}).map((binding) => binding.image),
+  ]))
+    await io.ensureImage?.(expectedImage);
+  async function ensureResolution(native: unknown, expectedImage: string) {
+    const containers = rec(native).containers;
+    if (!Array.isArray(containers) || containers.length !== 1)
+      throw new Error('Ambiguous native containers');
+    if (rec(containers[0]).image !== expectedImage) await io.ensureImage?.(expectedImage);
+  }
   const artifactCache = new Map<string, Awaited<ReturnType<typeof readProtectedWebTagArtifact>>>();
   async function priorProof(
     revision: string,
@@ -203,6 +221,8 @@ export async function runWebTagAdmission(mode: string | undefined) {
       (proof) => proof.revision === revision && proof.tag === tag,
     );
     if (fixed) {
+      // Historical exact-image revisions need no registry access.
+      await ensureResolution(native, fixed.image);
       immutableWebRevision(native, fixed.revision, fixed.image, fixed.writesPaused);
       if (
         live.length &&
@@ -224,6 +244,7 @@ export async function runWebTagAdmission(mode: string | undefined) {
     const { runMetadata: run, artifactMetadata: metadata, archiveBytes } = artifact;
     const workflowRun = rec(metadata.workflow_run);
     const extracted = extractCreationArchive(archiveBytes);
+    await ensureResolution(native, parseWebManifest(extracted.releaseManifestBytes).image);
     const proof = resolveProtectedOwnedWebTag({
       runMetadata: {
         repository: rec(run.repository).full_name,
@@ -285,6 +306,7 @@ export async function runWebTagAdmission(mode: string | undefined) {
   if (mode === '--capture' && bootstrap && preclosed) {
     const service = await io.readService(),
       revision = await io.readRevision(bootstrap.services.web.revision);
+    await ensureResolution(revision, bootstrap.services.web.image);
     verifyCurrentSnapshot(bootstrap.services.web, service, revision);
     const deps = await protectedNativeReleaseDependencies({
       recordIntent: () => {},
@@ -294,14 +316,13 @@ export async function runWebTagAdmission(mode: string | undefined) {
       },
       recordCheckpoint: () => {},
     });
-    verifyCurrentSnapshot(
-      bootstrap.services.agent,
-      await readBootstrapNative(deps, bootstrap.services.agent.service),
-      await readBootstrapNative(
-        deps,
-        `${bootstrap.services.agent.service}/revisions/${bootstrap.services.agent.revision}`,
-      ),
+    const agentService = await readBootstrapNative(deps, bootstrap.services.agent.service);
+    const agentRevision = await readBootstrapNative(
+      deps,
+      `${bootstrap.services.agent.service}/revisions/${bootstrap.services.agent.revision}`,
     );
+    await ensureResolution(agentRevision, bootstrap.services.agent.image);
+    verifyCurrentSnapshot(bootstrap.services.agent, agentService, agentRevision);
     save(capturePath, {
       format: 1,
       source,
@@ -316,13 +337,11 @@ export async function runWebTagAdmission(mode: string | undefined) {
   }
   if (mode === '--capture') {
     const rawCurrent = await io.readService();
-    if (bootstrap)
-      verifyCurrentSnapshot(
-        bootstrap.services.web,
-        rawCurrent,
-        await io.readRevision(bootstrap.services.web.revision),
-        false,
-      );
+    if (bootstrap) {
+      const native = await io.readRevision(bootstrap.services.web.revision);
+      await ensureResolution(native, bootstrap.services.web.image);
+      verifyCurrentSnapshot(bootstrap.services.web, rawCurrent, native, false);
+    }
     const snapshot = webTagTrafficSnapshot(rawCurrent);
     const canonical = snapshot.rows.filter((row) => row.percent === 100);
     if (
@@ -385,6 +404,7 @@ export async function runWebTagAdmission(mode: string | undefined) {
     native[capture.canonical] = await io.readRevision(capture.canonical);
     let current: Parameters<typeof pairedWebContext>[0]['current'];
     if (bootstrap) {
+      await ensureResolution(native[capture.canonical], bootstrap.services.web.image);
       current = {
         revision: bootstrap.services.web.revision,
         binding: {
@@ -405,8 +425,9 @@ export async function runWebTagAdmission(mode: string | undefined) {
         throw new Error('Current canonical proof changed');
       const revision = rec(native[capture.canonical]),
         template: Record<string, unknown> = {};
+      const semantic = revisionWithRequestedImage(revision, owned.image);
       for (const key of TEMPLATE_FIELDS)
-        if (key !== 'revision' && revision[key] !== undefined) template[key] = revision[key];
+        if (key !== 'revision' && semantic[key] !== undefined) template[key] = semantic[key];
       template.revision = capture.canonical;
       const tag = /^(?:candidate|resume)-([1-9][0-9]*)-([1-9][0-9]*)$/.exec(owned.tag);
       if (!tag || typeof revision.uid !== 'string')
@@ -432,12 +453,14 @@ export async function runWebTagAdmission(mode: string | undefined) {
       };
     }
     const context = pairedWebContext({
+      googleCalendarOAuthCallbackUrl: process.env.GOOGLE_CALENDAR_OAUTH_CALLBACK_URL,
       source,
       runId: String(runId),
       attempt: String(runAttempt),
       manifestDigest,
       manifest,
       current,
+      estimatedCostProfile: reviewedEstimatedCostReleaseProfile(),
     });
     initializePairedWebLifecycle(context, raw, native, receipts);
     return;
@@ -446,6 +469,12 @@ export async function runWebTagAdmission(mode: string | undefined) {
     if (!bootstrap || !preclosed) throw new Error('Reviewed disabled bootstrap required');
     const receipts = openPrivateReleasePhaseReceipts(temp, receiptIdentity),
       state = receipts.readCurrent();
+    if (
+      state.context.estimatedCost &&
+      bootstrapDigest(reviewedEstimatedCostReleaseProfile()) !==
+        bootstrapDigest(state.context.estimatedCost)
+    )
+      throw new Error('Reviewed estimated cost profile changed');
     await verifyOperatorOwnedHold(state.context);
     if (
       state.context.currentBinding?.reviewedEvidenceSha256 !== bootstrapEvidence ||
@@ -504,6 +533,13 @@ export async function runWebTagAdmission(mode: string | undefined) {
     const receipts = openPrivateReleasePhaseReceipts(temp, receiptIdentity),
       state = receipts.readCurrent();
     await verifyOperatorOwnedHold(state.context);
+    if (
+      mode === '--bootstrap-restore' &&
+      state.context.estimatedCost &&
+      bootstrapDigest(reviewedEstimatedCostReleaseProfile()) !==
+        bootstrapDigest(state.context.estimatedCost)
+    )
+      throw new Error('Reviewed estimated cost profile changed');
     if (
       state.context.currentBinding?.reviewedEvidenceSha256 !== bootstrapEvidence ||
       !state.context.currentBinding?.preclosed
@@ -583,7 +619,10 @@ export async function runWebTagAdmission(mode: string | undefined) {
         accepted.image !== rec(rec(manifest.components).agent).image ||
         accepted.manifest !== manifestDigest ||
         accepted.uidSha256 !== bootstrapDigest(revision.uid) ||
-        accepted.serviceStableConfigSha256 !== nativeStableConfigurationDigest(beforeScaling)
+        !matchesNativeStableConfigurationDigest(
+          beforeScaling,
+          String(accepted.serviceStableConfigSha256),
+        )
       )
         throw new Error('Agent successor receipt/config changed');
       const template = { ...rec(beforeScaling.template) };
@@ -620,7 +659,11 @@ export async function runWebTagAdmission(mode: string | undefined) {
       restoredConfiguration,
       bootstrapDigest(beforeScaling),
     );
-    if (role === 'web' && bootstrapDigest(result.before) !== bootstrapDigest(result.after)) {
+    if (
+      role === 'web' &&
+      bootstrapDigest(nativeServiceDefaults(result.before)) !==
+        bootstrapDigest(nativeServiceDefaults(result.after))
+    ) {
       const native: Record<string, unknown> = {};
       for (const name of Object.keys(state.snapshot.revisions))
         native[name] = await io.readRevision(name);
@@ -652,6 +695,13 @@ export async function runWebTagAdmission(mode: string | undefined) {
       receipts,
       async (state) => {
         await verifyOperatorOwnedHold(state.context);
+        if (
+          state.context.estimatedCost &&
+          ['createP', 'attachP', 'promoteP', 'createR', 'attachR', 'promoteR'].includes(phase) &&
+          bootstrapDigest(reviewedEstimatedCostReleaseProfile()) !==
+            bootstrapDigest(state.context.estimatedCost)
+        )
+          throw new Error('Reviewed estimated cost profile changed');
       },
     );
     if (completedPhase.context.currentBinding && ['attachP', 'attachR'].includes(phase))

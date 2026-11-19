@@ -318,6 +318,16 @@ const RecallSourceSchema = z.object({
 });
 
 export const TaskStateSchema = z.object({
+  /** Keep the original grant identity across every executor checkpoint. */
+  estimatedCostApproval: z
+    .object({
+      operationId: z.string(),
+      quoteId: z.string(),
+      bindingDigest: z.string(),
+      status: z.enum(['pending', 'approved']),
+      grantId: z.string().optional(),
+    })
+    .optional(),
   phase: z.string().default('start'),
   step: z.number().int().default(0),
   /** Owner timezone captured on the first leased run for relative schedule resolution. */

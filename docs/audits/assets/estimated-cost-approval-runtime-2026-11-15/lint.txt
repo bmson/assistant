@@ -1,0 +1,462 @@
+
+> assistant@ lint /Users/baldvinsmarason/.codex/worktrees/ai-calendar-server-release/assistant
+> biome check . && pnpm check:boundaries && pnpm check:migrations && pnpm support:matrix:check && pnpm ios:generated-card-contract:check
+
+apps/agent/src/canaries.test.ts:3:14 lint/correctness/noUnusedImports  FIXABLE  ━━━━━━━━━━━━━━━━━━━━
+
+  ! Several of these imports are unused.
+  
+    1 │ import { createHash } from 'node:crypto';
+    2 │ import { canaryRuns, createDb, type Db } from '@assistant/db';
+  > 3 │ import { eq, sql } from 'drizzle-orm';
+      │              ^^^
+    4 │ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+    5 │ import {
+  
+  i Unused imports might be the result of an incomplete refactoring.
+  
+  i Unsafe fix: Remove the unused imports.
+  
+    3 │ import·{·eq,·sql·}·from·'drizzle-orm';
+      │              ----                     
+
+apps/agent/src/email-provenance-ingress.e2e.test.ts:340:30 lint/style/noNonNullAssertion ━━━━━━━━━━━
+
+  ! Forbidden non-null assertion.
+  
+    338 │           resetConfigForTest();
+    339 │           if (driver === 'firestore') {
+  > 340 │             await seedBudget(store!);
+        │                              ^^^^^^
+    341 │             await store!.doc('modelRoles', 'embed').set({
+    342 │               id: 'embed',
+  
+  i A non-null assertion tells TypeScript to ignore a possible null or undefined value. If the value is missing at runtime, the code fails with an error that the compiler could not catch.
+  
+  i Check that the value is defined before using it, for example with an if statement or optional chaining, instead of asserting it.
+  
+
+apps/agent/src/email-provenance-ingress.e2e.test.ts:341:19 lint/style/noNonNullAssertion  FIXABLE  ━━━━━━━━━━
+
+  ! Forbidden non-null assertion.
+  
+    339 │           if (driver === 'firestore') {
+    340 │             await seedBudget(store!);
+  > 341 │             await store!.doc('modelRoles', 'embed').set({
+        │                   ^^^^^^
+    342 │               id: 'embed',
+    343 │               role: 'embed',
+  
+  i A non-null assertion tells TypeScript to ignore a possible null or undefined value. If the value is missing at runtime, the code fails with an error that the compiler could not catch.
+  
+  i Check that the value is defined before using it, for example with an if statement or optional chaining, instead of asserting it.
+  
+  i Unsafe fix: Replace with optional chain operator ?. This operator includes runtime checks, so it is safer than the compile-only non-null assertion operator
+  
+    339 339 │             if (driver === 'firestore') {
+    340 340 │               await seedBudget(store!);
+    341     │ - ············await·store!.doc('modelRoles',·'embed').set({
+        341 │ + ············await·store?.doc('modelRoles',·'embed').set({
+    342 342 │                 id: 'embed',
+    343 343 │                 role: 'embed',
+  
+
+apps/agent/src/email-provenance-ingress.e2e.test.ts:397:32 lint/style/noNonNullAssertion  FIXABLE  ━━━━━━━━━━
+
+  ! Forbidden non-null assertion.
+  
+    395 │               .where(eq(emailObserverWork.id, cardWorkId));
+    396 │           } else {
+  > 397 │             const rows = await store!
+        │                                ^^^^^^
+    398 │               .collection('emailObserverWork')
+    399 │               .where('sourceKey', '==', channelMessageId)
+  
+  i A non-null assertion tells TypeScript to ignore a possible null or undefined value. If the value is missing at runtime, the code fails with an error that the compiler could not catch.
+  
+  i Check that the value is defined before using it, for example with an if statement or optional chaining, instead of asserting it.
+  
+  i Unsafe fix: Replace with optional chain operator ?. This operator includes runtime checks, so it is safer than the compile-only non-null assertion operator
+  
+    395 395 │                 .where(eq(emailObserverWork.id, cardWorkId));
+    396 396 │             } else {
+    397     │ - ············const·rows·=·await·store!
+    398     │ - ··············.collection('emailObserverWork')
+        397 │ + ············const·rows·=·await·store?.collection('emailObserverWork')
+    399 398 │                 .where('sourceKey', '==', channelMessageId)
+    400 399 │                 .get();
+  
+
+apps/agent/src/email-provenance-ingress.e2e.test.ts:490:46 lint/style/noNonNullAssertion ━━━━━━━━━━━
+
+  ! Forbidden non-null assertion.
+  
+    488 │                   and(
+    489 │                     eq(emailObserverWork.agentId, agentId),
+  > 490 │                     ne(emailObserverWork.id, cardWorkId!),
+        │                                              ^^^^^^^^^^^
+    491 │                   ),
+    492 │                 );
+  
+  i A non-null assertion tells TypeScript to ignore a possible null or undefined value. If the value is missing at runtime, the code fails with an error that the compiler could not catch.
+  
+  i Check that the value is defined before using it, for example with an if statement or optional chaining, instead of asserting it.
+  
+
+apps/agent/src/email-provenance-ingress.e2e.test.ts:494:34 lint/style/noNonNullAssertion  FIXABLE  ━━━━━━━━━━
+
+  ! Forbidden non-null assertion.
+  
+    492 │                 );
+    493 │             } else {
+  > 494 │               const rows = await store!
+        │                                  ^^^^^^
+    495 │                 .collection('emailObserverWork')
+    496 │                 .where('agentId', '==', agentId)
+  
+  i A non-null assertion tells TypeScript to ignore a possible null or undefined value. If the value is missing at runtime, the code fails with an error that the compiler could not catch.
+  
+  i Check that the value is defined before using it, for example with an if statement or optional chaining, instead of asserting it.
+  
+  i Unsafe fix: Replace with optional chain operator ?. This operator includes runtime checks, so it is safer than the compile-only non-null assertion operator
+  
+    492 492 │                   );
+    493 493 │               } else {
+    494     │ - ··············const·rows·=·await·store!
+    495     │ - ················.collection('emailObserverWork')
+        494 │ + ··············const·rows·=·await·store?.collection('emailObserverWork')
+    496 495 │                   .where('agentId', '==', agentId)
+    497 496 │                   .get();
+  
+
+apps/agent/src/email-provenance-ingress.e2e.test.ts:529:49 lint/style/noNonNullAssertion ━━━━━━━━━━━
+
+  ! Forbidden non-null assertion.
+  
+    527 │                 .update(emailObserverWork)
+    528 │                 .set({ ...common, status: 'pending' })
+  > 529 │                 .where(eq(emailObserverWork.id, cardWorkId!));
+        │                                                 ^^^^^^^^^^^
+    530 │             } else {
+    531 │               try {
+  
+  i A non-null assertion tells TypeScript to ignore a possible null or undefined value. If the value is missing at runtime, the code fails with an error that the compiler could not catch.
+  
+  i Check that the value is defined before using it, for example with an if statement or optional chaining, instead of asserting it.
+  
+
+apps/agent/src/email-provenance-ingress.e2e.test.ts:532:23 lint/style/noNonNullAssertion  FIXABLE  ━━━━━━━━━━
+
+  ! Forbidden non-null assertion.
+  
+    530 │             } else {
+    531 │               try {
+  > 532 │                 await store!.doc('emailObserverWork', cardWorkId!).update({
+        │                       ^^^^^^
+    533 │                   ...common,
+    534 │                   status: 'pending',
+  
+  i A non-null assertion tells TypeScript to ignore a possible null or undefined value. If the value is missing at runtime, the code fails with an error that the compiler could not catch.
+  
+  i Check that the value is defined before using it, for example with an if statement or optional chaining, instead of asserting it.
+  
+  i Unsafe fix: Replace with optional chain operator ?. This operator includes runtime checks, so it is safer than the compile-only non-null assertion operator
+  
+    530 530 │               } else {
+    531 531 │                 try {
+    532     │ - ················await·store!.doc('emailObserverWork',·cardWorkId!).update({
+        532 │ + ················await·store?.doc('emailObserverWork',·cardWorkId!).update({
+    533 533 │                     ...common,
+    534 534 │                     status: 'pending',
+  
+
+apps/agent/src/email-provenance-ingress.e2e.test.ts:532:55 lint/style/noNonNullAssertion ━━━━━━━━━━━
+
+  ! Forbidden non-null assertion.
+  
+    530 │             } else {
+    531 │               try {
+  > 532 │                 await store!.doc('emailObserverWork', cardWorkId!).update({
+        │                                                       ^^^^^^^^^^^
+    533 │                   ...common,
+    534 │                   status: 'pending',
+  
+  i A non-null assertion tells TypeScript to ignore a possible null or undefined value. If the value is missing at runtime, the code fails with an error that the compiler could not catch.
+  
+  i Check that the value is defined before using it, for example with an if statement or optional chaining, instead of asserting it.
+  
+
+apps/agent/src/email-provenance-ingress.e2e.test.ts:548:49 lint/style/noNonNullAssertion ━━━━━━━━━━━
+
+  ! Forbidden non-null assertion.
+  
+    546 │                 .select()
+    547 │                 .from(emailObserverWork)
+  > 548 │                 .where(eq(emailObserverWork.id, cardWorkId!));
+        │                                                 ^^^^^^^^^^^
+    549 │               if (!row) throw new Error('prepared email card row disappeared');
+    550 │               return row as EmailObserverWorkRecord;
+  
+  i A non-null assertion tells TypeScript to ignore a possible null or undefined value. If the value is missing at runtime, the code fails with an error that the compiler could not catch.
+  
+  i Check that the value is defined before using it, for example with an if statement or optional chaining, instead of asserting it.
+  
+
+apps/agent/src/email-provenance-ingress.e2e.test.ts:552:31 lint/style/noNonNullAssertion  FIXABLE  ━━━━━━━━━━
+
+  ! Forbidden non-null assertion.
+  
+    550 │               return row as EmailObserverWorkRecord;
+    551 │             }
+  > 552 │             const row = await store!.doc('emailObserverWork', cardWorkId!).get();
+        │                               ^^^^^^
+    553 │             if (!row.exists) throw new Error('prepared email card row disappeared');
+    554 │             return decodeRecord<EmailObserverWorkRecord>(row.data());
+  
+  i A non-null assertion tells TypeScript to ignore a possible null or undefined value. If the value is missing at runtime, the code fails with an error that the compiler could not catch.
+  
+  i Check that the value is defined before using it, for example with an if statement or optional chaining, instead of asserting it.
+  
+  i Unsafe fix: Replace with optional chain operator ?. This operator includes runtime checks, so it is safer than the compile-only non-null assertion operator
+  
+    550 550 │                 return row as EmailObserverWorkRecord;
+    551 551 │               }
+    552     │ - ············const·row·=·await·store!.doc('emailObserverWork',·cardWorkId!).get();
+        552 │ + ············const·row·=·await·store?.doc('emailObserverWork',·cardWorkId!).get();
+    553 553 │               if (!row.exists) throw new Error('prepared email card row disappeared');
+    554 554 │               return decodeRecord<EmailObserverWorkRecord>(row.data());
+  
+
+apps/agent/src/email-provenance-ingress.e2e.test.ts:552:63 lint/style/noNonNullAssertion ━━━━━━━━━━━
+
+  ! Forbidden non-null assertion.
+  
+    550 │               return row as EmailObserverWorkRecord;
+    551 │             }
+  > 552 │             const row = await store!.doc('emailObserverWork', cardWorkId!).get();
+        │                                                               ^^^^^^^^^^^
+    553 │             if (!row.exists) throw new Error('prepared email card row disappeared');
+    554 │             return decodeRecord<EmailObserverWorkRecord>(row.data());
+  
+  i A non-null assertion tells TypeScript to ignore a possible null or undefined value. If the value is missing at runtime, the code fails with an error that the compiler could not catch.
+  
+  i Check that the value is defined before using it, for example with an if statement or optional chaining, instead of asserting it.
+  
+
+apps/agent/src/email-provenance-ingress.e2e.test.ts:574:31 lint/style/noNonNullAssertion  FIXABLE  ━━━━━━━━━━
+
+  ! Forbidden non-null assertion.
+  
+    572 │               return row?.reservedCount ?? 0;
+    573 │             }
+  > 574 │             const row = await store!.doc('emailObserverBudgets', id).get();
+        │                               ^^^^^^
+    575 │             return row.exists ? Number(row.get('reservedCount') ?? 0) : 0;
+    576 │           };
+  
+  i A non-null assertion tells TypeScript to ignore a possible null or undefined value. If the value is missing at runtime, the code fails with an error that the compiler could not catch.
+  
+  i Check that the value is defined before using it, for example with an if statement or optional chaining, instead of asserting it.
+  
+  i Unsafe fix: Replace with optional chain operator ?. This operator includes runtime checks, so it is safer than the compile-only non-null assertion operator
+  
+    572 572 │                 return row?.reservedCount ?? 0;
+    573 573 │               }
+    574     │ - ············const·row·=·await·store!.doc('emailObserverBudgets',·id).get();
+        574 │ + ············const·row·=·await·store?.doc('emailObserverBudgets',·id).get();
+    575 575 │               return row.exists ? Number(row.get('reservedCount') ?? 0) : 0;
+    576 576 │             };
+  
+
+apps/agent/src/email-provenance-ingress.e2e.test.ts:27:24 lint/correctness/noUnusedImports  FIXABLE  ━━━━━━━━━━
+
+  ! Several of these imports are unused.
+  
+    25 │ import { z } from 'zod';
+    26 │ import type { InstallationStore } from '../../../packages/firestore/src/store.js';
+  > 27 │ import { decodeRecord, encodeRecord } from '../../../packages/firestore/src/store.js';
+       │                        ^^^^^^^^^^^^
+    28 │ import {
+    29 │   disposeStore,
+  
+  i Unused imports might be the result of an incomplete refactoring.
+  
+  i Unsafe fix: Remove the unused imports.
+  
+    27 │ import·{·decodeRecord,·encodeRecord·}·from·'../../../packages/firestore/src/store.js';
+       │                        -------------                                                  
+
+apps/agent/src/estimated-cost-worker.e2e.test.ts:248:25 lint/style/noNonNullAssertion  FIXABLE  ━━━━━━━━━━
+
+  ! Forbidden non-null assertion.
+  
+    246 │         expect(b.status).toBe(200);
+    247 │         const before = await chat.listMessages(agentId, conversationB.id, { limit: 30 });
+  > 248 │         const bTaskId = before!.messages.find(
+        │                         ^^^^^^^
+    249 │           (row) => row.role === 'user' && row.text === 'Hello B',
+    250 │         )?.taskId;
+  
+  i A non-null assertion tells TypeScript to ignore a possible null or undefined value. If the value is missing at runtime, the code fails with an error that the compiler could not catch.
+  
+  i Check that the value is defined before using it, for example with an if statement or optional chaining, instead of asserting it.
+  
+  i Unsafe fix: Replace with optional chain operator ?. This operator includes runtime checks, so it is safer than the compile-only non-null assertion operator
+  
+    246 246 │           expect(b.status).toBe(200);
+    247 247 │           const before = await chat.listMessages(agentId, conversationB.id, { limit: 30 });
+    248     │ - ········const·bTaskId·=·before!.messages.find(
+        248 │ + ········const·bTaskId·=·before?.messages.find(
+    249 249 │             (row) => row.role === 'user' && row.text === 'Hello B',
+    250 250 │           )?.taskId;
+  
+
+apps/agent/src/estimated-cost-worker.e2e.test.ts:253:23 lint/style/noNonNullAssertion  FIXABLE  ━━━━━━━━━━
+
+  ! Forbidden non-null assertion.
+  
+    251 │         if (!bTaskId) throw new Error('Missing task B');
+    252 │         expect((await persistence.tasks.getTask(bTaskId))?.status).toBe('done');
+  > 253 │         const bRows = before!.messages.filter((row) => row.taskId === bTaskId);
+        │                       ^^^^^^^
+    254 │         const prepared = await createFirestoreEstimatedCostQuotePreparer(store, {
+    255 │           mutationsEnabled: () => true,
+  
+  i A non-null assertion tells TypeScript to ignore a possible null or undefined value. If the value is missing at runtime, the code fails with an error that the compiler could not catch.
+  
+  i Check that the value is defined before using it, for example with an if statement or optional chaining, instead of asserting it.
+  
+  i Unsafe fix: Replace with optional chain operator ?. This operator includes runtime checks, so it is safer than the compile-only non-null assertion operator
+  
+    251 251 │           if (!bTaskId) throw new Error('Missing task B');
+    252 252 │           expect((await persistence.tasks.getTask(bTaskId))?.status).toBe('done');
+    253     │ - ········const·bRows·=·before!.messages.filter((row)·=>·row.taskId·===·bTaskId);
+        253 │ + ········const·bRows·=·before?.messages.filter((row)·=>·row.taskId·===·bTaskId);
+    254 254 │           const prepared = await createFirestoreEstimatedCostQuotePreparer(store, {
+    255 255 │             mutationsEnabled: () => true,
+  
+
+apps/agent/src/estimated-cost-worker.e2e.test.ts:288:11 lint/style/noNonNullAssertion  FIXABLE  ━━━━━━━━━━
+
+  ! Forbidden non-null assertion.
+  
+    286 │         const task = await persistence.tasks.getTask(taskId);
+    287 │         const marker = (
+  > 288 │           task!.state as { estimatedCostApproval: { grantId: string; bindingDigest: string } }
+        │           ^^^^^
+    289 │         ).estimatedCostApproval;
+    290 │         if (boundary === 'exhausted') {
+  
+  i A non-null assertion tells TypeScript to ignore a possible null or undefined value. If the value is missing at runtime, the code fails with an error that the compiler could not catch.
+  
+  i Check that the value is defined before using it, for example with an if statement or optional chaining, instead of asserting it.
+  
+  i Unsafe fix: Replace with optional chain operator ?. This operator includes runtime checks, so it is safer than the compile-only non-null assertion operator
+  
+    286 286 │           const task = await persistence.tasks.getTask(taskId);
+    287 287 │           const marker = (
+    288     │ - ··········task!.state·as·{·estimatedCostApproval:·{·grantId:·string;·bindingDigest:·string·}·}
+        288 │ + ··········task?.state·as·{·estimatedCostApproval:·{·grantId:·string;·bindingDigest:·string·}·}
+    289 289 │           ).estimatedCostApproval;
+    290 290 │           if (boundary === 'exhausted') {
+  
+
+apps/agent/src/estimated-cost-worker.e2e.test.ts:378:53 lint/style/noNonNullAssertion  FIXABLE  ━━━━━━━━━━
+
+  ! Forbidden non-null assertion.
+  
+    376 │           modules: { taskHandlerFor: () => undefined, taskKindUnavailable: () => null },
+    377 │         } as unknown as AgentDeps;
+  > 378 │         expect(await executeAgentTask(deps, taskId, task!.queueGeneration)).toMatchObject({
+        │                                                     ^^^^^
+    379 │           outcome: 'admission_recovered',
+    380 │           status: boundary === 'lost_renewal' ? 503 : 200,
+  
+  i A non-null assertion tells TypeScript to ignore a possible null or undefined value. If the value is missing at runtime, the code fails with an error that the compiler could not catch.
+  
+  i Check that the value is defined before using it, for example with an if statement or optional chaining, instead of asserting it.
+  
+  i Unsafe fix: Replace with optional chain operator ?. This operator includes runtime checks, so it is safer than the compile-only non-null assertion operator
+  
+    376 376 │             modules: { taskHandlerFor: () => undefined, taskKindUnavailable: () => null },
+    377 377 │           } as unknown as AgentDeps;
+    378     │ - ········expect(await·executeAgentTask(deps,·taskId,·task!.queueGeneration)).toMatchObject({
+        378 │ + ········expect(await·executeAgentTask(deps,·taskId,·task?.queueGeneration)).toMatchObject({
+    379 379 │             outcome: 'admission_recovered',
+    380 380 │             status: boundary === 'lost_renewal' ? 503 : 200,
+  
+
+apps/agent/src/estimated-cost-worker.e2e.test.ts:383:16 lint/style/noNonNullAssertion  FIXABLE  ━━━━━━━━━━
+
+  ! Forbidden non-null assertion.
+  
+    381 │         });
+    382 │         const after = await chat.listMessages(agentId, conversationB.id, { limit: 30 });
+  > 383 │         expect(after!.messages.filter((row) => row.taskId === bTaskId)).toEqual(bRows);
+        │                ^^^^^^
+    384 │         if (
+    385 │           boundary === 'exhausted' ||
+  
+  i A non-null assertion tells TypeScript to ignore a possible null or undefined value. If the value is missing at runtime, the code fails with an error that the compiler could not catch.
+  
+  i Check that the value is defined before using it, for example with an if statement or optional chaining, instead of asserting it.
+  
+  i Unsafe fix: Replace with optional chain operator ?. This operator includes runtime checks, so it is safer than the compile-only non-null assertion operator
+  
+    381 381 │           });
+    382 382 │           const after = await chat.listMessages(agentId, conversationB.id, { limit: 30 });
+    383     │ - ········expect(after!.messages.filter((row)·=>·row.taskId·===·bTaskId)).toEqual(bRows);
+        383 │ + ········expect(after?.messages.filter((row)·=>·row.taskId·===·bTaskId)).toEqual(bRows);
+    384 384 │           if (
+    385 385 │             boundary === 'exhausted' ||
+  
+
+apps/agent/src/estimated-cost-worker.e2e.test.ts:447:55 lint/style/noNonNullAssertion  FIXABLE  ━━━━━━━━━━
+
+  ! Forbidden non-null assertion.
+  
+    445 │           ).toBe(2);
+    446 │           const renewedTask = await persistence.tasks.getTask(taskId);
+  > 447 │           expect(await executeAgentTask(deps, taskId, renewedTask!.queueGeneration)).toMatchObject({
+        │                                                       ^^^^^^^^^^^^
+    448 │             outcome: 'admission_recovered',
+    449 │             status: 200,
+  
+  i A non-null assertion tells TypeScript to ignore a possible null or undefined value. If the value is missing at runtime, the code fails with an error that the compiler could not catch.
+  
+  i Check that the value is defined before using it, for example with an if statement or optional chaining, instead of asserting it.
+  
+  i Unsafe fix: Replace with optional chain operator ?. This operator includes runtime checks, so it is safer than the compile-only non-null assertion operator
+  
+    445 445 │             ).toBe(2);
+    446 446 │             const renewedTask = await persistence.tasks.getTask(taskId);
+    447     │ - ··········expect(await·executeAgentTask(deps,·taskId,·renewedTask!.queueGeneration)).toMatchObject({
+        447 │ + ··········expect(await·executeAgentTask(deps,·taskId,·renewedTask?.queueGeneration)).toMatchObject({
+    448 448 │               outcome: 'admission_recovered',
+    449 449 │               status: 200,
+  
+
+The number of diagnostics exceeds the limit allowed. Use --max-diagnostics to increase it.
+Diagnostics not shown: 552.
+Checked 3056 files in 1092ms. No fixes applied.
+Found 555 warnings.
+Found 17 infos.
+
+> assistant@ check:boundaries /Users/baldvinsmarason/.codex/worktrees/ai-calendar-server-release/assistant
+> tsx scripts/check-boundaries.ts
+
+Architecture boundaries are clean.
+
+> assistant@ check:migrations /Users/baldvinsmarason/.codex/worktrees/ai-calendar-server-release/assistant
+> tsx scripts/check-migrations.ts
+
+Migration journal validated; historical inversion requires forward correction 0084.
+
+> assistant@ support:matrix:check /Users/baldvinsmarason/.codex/worktrees/ai-calendar-server-release/assistant
+> node scripts/runtime-support-matrix.mjs --check
+
+Runtime composition and 112 API route files match the checked snapshot.
+
+> assistant@ ios:generated-card-contract:check /Users/baldvinsmarason/.codex/worktrees/ai-calendar-server-release/assistant
+> tsx scripts/generate-ios-card-capability-manifest.ts --check
+

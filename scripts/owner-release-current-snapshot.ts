@@ -1,3 +1,8 @@
+import { verifyRevisionImage } from './owner-release-image-resolution.js';
+import {
+  matchesNativeServiceDigest,
+  nativeServiceDefaults,
+} from './owner-release-native-service-defaults.js';
 /** Pure reviewed current binding; no transport, credential lookup or settlement observation. */
 import type { NativeProof } from './owner-web-release-lifecycle-model.js';
 import { reconciliationDigest } from './owner-web-traffic-reconciliation-model.js';
@@ -28,7 +33,17 @@ const SERVICE_OUTPUT = new Set([
   'reconciling',
 ]);
 export const scalingConfigurationDigest = (s: Obj) =>
-  bootstrapDigest(Object.fromEntries(Object.entries(s).filter(([k]) => !SERVICE_OUTPUT.has(k))));
+  bootstrapDigest(
+    nativeServiceDefaults(
+      Object.fromEntries(Object.entries(s).filter(([k]) => !SERVICE_OUTPUT.has(k))),
+    ),
+  );
+export const matchesScalingConfigurationDigest = (s: Obj, expected: string) =>
+  matchesNativeServiceDigest(
+    Object.fromEntries(Object.entries(s).filter(([k]) => !SERVICE_OUTPUT.has(k))),
+    expected,
+    bootstrapDigest,
+  );
 export function verifiedRestoreReceipts(
   attempt: unknown,
   completion: unknown,
@@ -177,7 +192,7 @@ export function verifyCurrentService(
     s.name === binding.service &&
       s.uid === binding.uid &&
       (!mustBeDisabled || disabled(s)) &&
-      bootstrapDigest(s) === binding.serviceSha256,
+      matchesNativeServiceDigest(s, binding.serviceSha256, bootstrapDigest),
   );
   for (const value of [s.traffic, s.trafficStatuses]) {
     requireProof(Array.isArray(value) && value.length === 1);
@@ -208,6 +223,14 @@ export function retiredCurrentCondition(c: Obj) {
     [undefined, 'STATE_UNSPECIFIED', 'CONDITION_FAILED'].includes(c.state as string | undefined)
   );
 }
+export function retiredCurrentRevisionCondition(c: Obj) {
+  return (
+    retiredCurrentCondition(c) ||
+    (c.type === 'ResourcesAvailable' &&
+      c.state === 'CONDITION_RECONCILING' &&
+      c.revisionReason === 'RETIRED')
+  );
+}
 export function verifyCurrentSnapshot(
   binding: CurrentBinding,
   service: unknown,
@@ -220,14 +243,17 @@ export function verifyCurrentSnapshot(
     bootstrapDigest(r) === binding.revisionSha256 &&
       r.name === `${binding.service}/revisions/${binding.revision}`,
   );
-  requireProof(
-    Array.isArray(r.containers) &&
-      r.containers.length === 1 &&
-      object(r.containers[0]).image === binding.image,
-  );
+  verifyRevisionImage(r, binding.image);
   const conditions = r.conditions;
   requireProof(Array.isArray(conditions) && conditions.length > 0 && conditions.length <= 16);
-  const retired = (c: Obj) => mustBeDisabled && retiredCurrentCondition(c);
+  if (
+    conditions.some((value) => {
+      const c = object(value);
+      return c.type === 'ResourcesAvailable' && c.state === 'CONDITION_RECONCILING';
+    })
+  )
+    requireProof(r.reconciling !== true);
+  const retired = (c: Obj) => mustBeDisabled && retiredCurrentRevisionCondition(c);
   requireProof(
     conditions.map(object).every((c) => c.state === 'CONDITION_SUCCEEDED' || retired(c)),
   );

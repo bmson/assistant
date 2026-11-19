@@ -3,3 +3,9 @@ packages:
   - "apps/agent/runtime-dependencies"
   - "packages/*"
   - "workers/*"
+
+# Exact patched-source exception. CI verifies the installed parser and patch
+# bytes before audit; see docs/picomatch-hardening.md.
+auditConfig:
+  ignoreGhsas:
+    - GHSA-fc5q-39xc-vjpf

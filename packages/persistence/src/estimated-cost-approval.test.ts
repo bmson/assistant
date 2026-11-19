@@ -1,0 +1,206 @@
+import { describe, expect, it } from 'vitest';
+import {
+  canonicalEstimatedCostJson,
+  currentHistoricalUnknownMicros,
+  type EstimatedCostHeadroom,
+  estimatedCostAllowance,
+  estimatedCostAllowanceExpiry,
+  estimatedCostConnectionId,
+  estimatedCostQuoteExpiry,
+  estimatedCostQuoteMatches,
+  parseEstimatedCostQuote,
+  parseHistoricalUnknownBaseline,
+  verifiedHistoricalUnknownMicros,
+} from './estimated-cost-approval.js';
+
+const snapshot: EstimatedCostHeadroom = {
+  dailySpentMicros: 200,
+  monthlySpentMicros: 500,
+  heldMicros: 700,
+  historicalUnknownMicros: 600,
+  dailyCeilingMicros: 1000,
+  monthlyCeilingMicros: 2000,
+  taskSpentMicros: 100,
+  taskHeldMicros: 50,
+  taskCeilingMicros: 600,
+  nextAttemptMicros: 300,
+};
+
+describe('estimated cost allowance', () => {
+  it('canonicalizes bound rows without implicit non-JSON coercion', () => {
+    expect(canonicalEstimatedCostJson({ z: [2, { b: true, a: null }], a: 'x' })).toBe(
+      '{"a":"x","z":[2,{"a":null,"b":true}]}',
+    );
+    expect(() => canonicalEstimatedCostJson({ changed: undefined })).toThrow();
+    expect(() => canonicalEstimatedCostJson(new Date())).toThrow();
+    expect(() => canonicalEstimatedCostJson(Number.NaN)).toThrow();
+    expect(
+      ['vertex:model', 'openai:model', 'gw:private:model', 'other/model'].map(
+        estimatedCostConnectionId,
+      ),
+    ).toEqual(['vertex', 'openai', 'private', 'openrouter']);
+  });
+  it('accepts only a bounded, sorted, unambiguous frozen baseline', () => {
+    const row = { reservationId: 'old', estimatedMicros: 10 };
+    expect(parseHistoricalUnknownBaseline([row])).toEqual([row]);
+    expect(parseHistoricalUnknownBaseline([row, row])).toBeNull();
+    expect(parseHistoricalUnknownBaseline([{ ...row, estimatedMicros: 0 }])).toBeNull();
+    expect(parseHistoricalUnknownBaseline([{ ...row, unknown: true }])).toBeNull();
+    expect(
+      parseHistoricalUnknownBaseline(
+        Array.from({ length: 501 }, (_, index) => ({
+          reservationId: String(index),
+          estimatedMicros: 1,
+        })),
+      ),
+    ).toBeNull();
+  });
+  it('requires a quote to match all current exposure components exactly', () => {
+    const current = { ...snapshot, pendingOtherMicros: 100 };
+    const quote = {
+      type: 'estimated-cost-approval' as const,
+      operationId: 'operation',
+      taskId: 'task',
+      requestText: 'request',
+      quoteId: 'quote',
+      quoteVersion: 'v1',
+      expiresAt: '2026-11-15T12:00:00.000Z',
+      nextAttemptMicros: 300,
+      allowanceMicros: 450,
+      recordedDailyMicros: 200,
+      recordedMonthlyMicros: 500,
+      totalHeldMicros: 700,
+      eligibleHistoricalUnknownMicros: 600,
+      pendingApprovalMicros: 550,
+      dailyCeilingMicros: 1000,
+      monthlyCeilingMicros: 2000,
+      dailyProjectedGrossMicros: 1450,
+      monthlyProjectedGrossMicros: 1750,
+      complete: true,
+      canApprove: true,
+    };
+    expect(estimatedCostQuoteMatches(quote, current)).toBe(true);
+    expect(parseEstimatedCostQuote(quote)).toEqual(quote);
+    expect(parseEstimatedCostQuote({ ...quote, dailyProjectedGrossMicros: 1 })).toBeNull();
+    expect(parseEstimatedCostQuote({ ...quote, eligibleHistoricalUnknownMicros: 701 })).toBeNull();
+    expect(estimatedCostQuoteMatches(quote, { ...current, heldMicros: 699 })).toBe(false);
+    expect(estimatedCostQuoteMatches(quote, { ...current, pendingOtherMicros: 101 })).toBe(false);
+    expect(estimatedCostQuoteMatches({ ...quote, complete: false }, current)).toBe(false);
+    expect(estimatedCostQuoteMatches({ ...quote, allowanceMicros: 451 }, current)).toBe(false);
+    const ordinary = { ...current, heldMicros: 100, historicalUnknownMicros: 0 };
+    const refreshed = {
+      ...quote,
+      totalHeldMicros: 100,
+      eligibleHistoricalUnknownMicros: 0,
+      dailyProjectedGrossMicros: 850,
+      monthlyProjectedGrossMicros: 1150,
+    };
+    expect(estimatedCostQuoteMatches(refreshed, ordinary)).toBe(false);
+    expect(estimatedCostQuoteMatches(refreshed, ordinary, { allowOrdinaryCapacity: true })).toBe(
+      true,
+    );
+  });
+  it('accepts only the exact complete, proven historical unknown baseline', () => {
+    const row = { reservationId: 'old', estimatedMicros: 10 };
+    const baseline = [row];
+    const canonical = {
+      ...row,
+      status: 'unknown',
+      provenance: 'proven-historical-unapproved' as const,
+    };
+    const current = [canonical];
+    expect(verifiedHistoricalUnknownMicros(baseline, current, true)).toBe(10);
+    expect(currentHistoricalUnknownMicros(baseline, current)).toBe(10);
+    expect(currentHistoricalUnknownMicros(baseline, [{ ...canonical, status: 'reconciled' }])).toBe(
+      0,
+    );
+    expect(currentHistoricalUnknownMicros(baseline, [])).toBeNull();
+    expect(() => verifiedHistoricalUnknownMicros(baseline, current, false)).toThrow();
+    expect(() => verifiedHistoricalUnknownMicros(baseline, [], true)).toThrow();
+    expect(() =>
+      verifiedHistoricalUnknownMicros(
+        baseline,
+        [{ ...canonical, provenance: 'grant-linked' }],
+        true,
+      ),
+    ).toThrow();
+    expect(() =>
+      verifiedHistoricalUnknownMicros(baseline, [{ ...canonical, estimatedMicros: 11 }], true),
+    ).toThrow();
+    expect(() =>
+      verifiedHistoricalUnknownMicros(baseline, [{ ...canonical, status: 'reconciled' }], true),
+    ).toThrow();
+  });
+  it('limits an approved allowance to 30 minutes and the next UTC day', () => {
+    expect(estimatedCostQuoteExpiry(new Date('2026-11-30T23:55:00Z')).toISOString()).toBe(
+      '2026-12-01T00:00:00.000Z',
+    );
+    expect(estimatedCostAllowanceExpiry(new Date('2026-11-15T12:00:00Z')).toISOString()).toBe(
+      '2026-11-15T12:30:00.000Z',
+    );
+    expect(estimatedCostAllowanceExpiry(new Date('2026-11-30T23:50:00Z')).toISOString()).toBe(
+      '2026-12-01T00:00:00.000Z',
+    );
+    expect(() => estimatedCostAllowanceExpiry(new Date('invalid'))).toThrow();
+  });
+  it('does not reuse baseline credit after settlement or removal', () => {
+    const baseline = [{ reservationId: 'historical', estimatedMicros: 600 }];
+    const original = {
+      ...baseline[0],
+      reservationId: 'historical',
+      estimatedMicros: 600,
+      status: 'unknown',
+      provenance: 'proven-historical-unapproved' as const,
+    };
+    expect(
+      estimatedCostAllowance({
+        ...snapshot,
+        historicalUnknownMicros: verifiedHistoricalUnknownMicros(baseline, [original], true),
+      }).canApprove,
+    ).toBe(true);
+    expect(() =>
+      verifiedHistoricalUnknownMicros(baseline, [{ ...original, status: 'reconciled' }], true),
+    ).toThrow();
+    expect(() => verifiedHistoricalUnknownMicros(baseline, [], true)).toThrow();
+    expect(() =>
+      estimatedCostAllowance({ ...snapshot, heldMicros: 100, historicalUnknownMicros: 600 }),
+    ).toThrow();
+    expect(
+      estimatedCostAllowance({
+        ...snapshot,
+        heldMicros: 100,
+        historicalUnknownMicros: 0,
+        dailySpentMicros: 800,
+      }).canApprove,
+    ).toBe(false);
+  });
+  it('excludes only proven historical pressure from global headroom and protects the task cap', () => {
+    expect(estimatedCostAllowance(snapshot)).toEqual({ allowanceMicros: 450, canApprove: true });
+    expect(estimatedCostAllowance({ ...snapshot, historicalUnknownMicros: 0 })).toEqual({
+      allowanceMicros: 100,
+      canApprove: false,
+    });
+    expect(estimatedCostAllowance({ ...snapshot, taskHeldMicros: 400 })).toEqual({
+      allowanceMicros: 100,
+      canApprove: false,
+    });
+  });
+
+  it('rejects inconsistent or unrepresentable amounts', () => {
+    for (const change of [
+      { historicalUnknownMicros: 701 },
+      { nextAttemptMicros: 0 },
+      { heldMicros: Number.NaN },
+      { taskSpentMicros: -1 },
+      { monthlyCeilingMicros: Number.MAX_SAFE_INTEGER + 1 },
+    ])
+      expect(() => estimatedCostAllowance({ ...snapshot, ...change })).toThrow();
+  });
+
+  it('returns no headroom when recorded spend exceeds a ceiling', () => {
+    expect(estimatedCostAllowance({ ...snapshot, dailySpentMicros: 1001 })).toEqual({
+      allowanceMicros: 0,
+      canApprove: false,
+    });
+  });
+});

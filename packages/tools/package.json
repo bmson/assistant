@@ -22,7 +22,11 @@
     "./search": "./src/search.ts",
     "./watches": "./src/watches.ts",
     "./workspace": "./src/workspace-store.ts",
-    "./question-regression": "./src/question-regression/index.ts"
+    "./question-regression": "./src/question-regression/index.ts",
+    "./mcp-authorization": "./src/mcp-authorization.ts",
+    "./mcp-oauth": "./src/mcp-oauth.ts",
+    "./mcp-oauth-registration": "./src/mcp-oauth-registration.ts",
+    "./mcp-oauth-service": "./src/mcp-oauth-service.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"

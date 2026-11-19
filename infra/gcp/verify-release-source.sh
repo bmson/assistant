@@ -25,12 +25,13 @@ if jq -e --arg sha "$RELEASE_SHA" '
     .head_sha == $sha and
     .head_branch == "main" and
     .event == "push" and
+    .run_attempt == 1 and
     .conclusion == "success"
   )] | length > 0
 ' <<<"$runs" >/dev/null; then
-  echo "Verified successful main CI for ${RELEASE_SHA}"
+  echo "Verified successful first-attempt main CI for ${RELEASE_SHA}"
   exit 0
 fi
 
-echo "No successful main-branch CI run found for ${RELEASE_SHA}; provide an explicit break-glass reason to proceed" >&2
+echo "No successful first-attempt main-branch CI run found for ${RELEASE_SHA}; provide an explicit break-glass reason to proceed" >&2
 exit 1

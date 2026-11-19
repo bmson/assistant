@@ -70,6 +70,33 @@ describe('module metadata', () => {
     });
   });
 
+  it('recognizes personal Calendar onboarding without claiming Workspace or an account is connected', () => {
+    const config = loadConfig({
+      ASSISTANT_MODULES: 'calendar,google',
+      GOOGLE_OAUTH_CLIENT_ID: 'client',
+      GOOGLE_OAUTH_CLIENT_SECRET: 'secret',
+      GOOGLE_CALENDAR_OAUTH_CALLBACK_URL:
+        'https://example.invalid/api/oauth/google-calendar/callback',
+      MCP_ENC_KEY: 'a'.repeat(64),
+    });
+    expect(moduleDiagnostics(config)).toContainEqual({
+      module: 'calendar',
+      enabled: true,
+      ready: true,
+      detail: 'personal Calendar onboarding configured; account connection checked separately',
+    });
+    expect(moduleDiagnostics(config)).toContainEqual({
+      module: 'google',
+      enabled: true,
+      ready: false,
+      detail: 'missing Google OAuth credentials',
+    });
+    config.GOOGLE_CALENDAR_OAUTH_CALLBACK_URL = 'http://example.invalid/invalid';
+    expect(moduleDiagnostics(config).find((entry) => entry.module === 'calendar')?.ready).toBe(
+      false,
+    );
+  });
+
   it('distinguishes browser research from the optional direct search API', () => {
     const config = loadConfig({ ASSISTANT_MODULES: 'browser,search' });
     expect(moduleDiagnostics(config)).toContainEqual({
