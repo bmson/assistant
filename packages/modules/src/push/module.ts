@@ -1,5 +1,4 @@
 import { getAgent } from '@assistant/core/chat';
-import { createPostgresNudgePolicyRepository } from '@assistant/db';
 import { notificationDeliveryKey } from '@assistant/persistence';
 import { ApnsClient } from '@assistant/tools/modules/push';
 import { defineModule, type ModuleHooks } from '../platform.js';
@@ -46,7 +45,8 @@ export const pushModule = defineModule<ApnsClient>({
           return owner;
         }
       : () => getAgent(db);
-    const policy = persistence.nudgePolicy ?? createPostgresNudgePolicyRepository(db);
+    const policy = persistence.nudgePolicy;
+    if (!policy) throw new Error('push: persistence has no notification policy repository');
     const channelDeps: PushChannelDeps = {
       apns: client,
       devices,
