@@ -1,7 +1,8 @@
 /**
  * Visual QA: screenshot every primary surface at desktop and phone widths.
  * Run against a dedicated QA dev server using the same allocated QA database.
- * Set AUTH_DEV_BYPASS=true on the dev server and ASSISTANT_QA_WEB_ORIGIN here:
+ * Start the server with AUTH_DEV_BYPASS=true and the same QA origin and
+ * allocator environment used for this command:
  *   pnpm tsx scripts/visual-qa.ts [baseUrl]
  * Output lands in /tmp/visual-qa/.
  *
@@ -12,11 +13,19 @@
 
 import { mkdirSync } from 'node:fs';
 import { chromium } from 'playwright';
-import { openQaInstallation, requireQaOrigin } from './visual-qa/qa-installation.js';
+import {
+  assertQaWebInstallation,
+  openQaInstallation,
+  requireQaOrigin,
+} from './visual-qa/qa-installation.js';
 
 const base = requireQaOrigin(process.argv[2], process.env.ASSISTANT_QA_WEB_ORIGIN);
-const { db } = await openQaInstallation();
-await db.$client.end({ timeout: 5 });
+const { db, target } = await openQaInstallation();
+try {
+  await assertQaWebInstallation(base, target);
+} finally {
+  await db.$client.end({ timeout: 5 });
+}
 const outDir = '/tmp/visual-qa';
 mkdirSync(outDir, { recursive: true });
 
@@ -67,9 +76,26 @@ for (const viewport of viewports) {
     isMobile: viewport.name === 'phone',
     hasTouch: viewport.name === 'phone',
   });
-  await context.route('**/*', (route) =>
-    new URL(route.request().url()).origin === base ? route.continue() : route.abort(),
-  );
+  await context.route('**/*', async (route) => {
+    const request = route.request();
+    if (new URL(request.url()).origin !== base || !['GET', 'HEAD'].includes(request.method())) {
+      await route.abort();
+      return;
+    }
+    if (!request.isNavigationRequest()) {
+      await route.continue();
+      return;
+    }
+    const response = await route.fetch({ maxRedirects: 0 });
+    const location = response.headers().location;
+    if (location && new URL(location, request.url()).origin !== base) {
+      await response.dispose();
+      await route.abort();
+      return;
+    }
+    await route.fulfill({ response });
+    await response.dispose();
+  });
   const page = await context.newPage();
   const errors: string[] = [];
   page.on('pageerror', (err) => errors.push(`${err.message}`));

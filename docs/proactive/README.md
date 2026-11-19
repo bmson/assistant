@@ -62,7 +62,7 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | A9  | Firestore parity for every route the phone calls                       | 1     | M    | —          | open (estimated-cost routes admitted in #934)                 |
 | A10 | Retire `morning-brief` in Firestore                                    | 0     | S    | —          | open                                                          |
 | A11 | Email pipeline: verify #910, census, stall alert                       | 0     | M    | —          | in progress (cause fixed in #910)                             |
-| A12 | Isolate QA from production; purge QA data                              | 1     | M    | —          | open                                                          |
+| A12 | Isolate QA from production; purge QA data                              | 1     | M    | —          | in review (local QA web binding and dry-run inventory)        |
 | A13 | Owner time zone in every card                                          | 0     | S    | —          | open                                                          |
 | A14 | Brief calendar answers                                                 | 1     | M    | —          | open                                                          |
 | A15 | Each turn answers its own message                                      | 0     | M    | —          | open                                                          |

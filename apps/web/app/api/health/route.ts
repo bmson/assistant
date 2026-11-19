@@ -1,3 +1,7 @@
+import { createHmac } from 'node:crypto';
+import { loadConfig } from '@assistant/config';
+import { assertAllocatedTestTarget } from '@assistant/db/test-target';
+
 export const dynamic = 'force-dynamic';
 
 /**
@@ -13,9 +17,45 @@ export const dynamic = 'force-dynamic';
  * owner session, and a commit SHA is not a secret. It reveals nothing about
  * the owner's data, so it stays outside isAuthed() on purpose.
  */
-export function GET() {
+function localQaProof(request: Request): string | undefined {
+  if (process.env.NODE_ENV !== 'development') return;
+  const nonce = request.headers.get('x-assistant-qa-nonce');
+  const token = process.env.ASSISTANT_TEST_TARGET_TOKEN;
+  if (
+    !nonce ||
+    !/^[0-9a-f]{32}$/.test(nonce) ||
+    !token ||
+    new URL(request.url).origin !== process.env.ASSISTANT_QA_WEB_ORIGIN
+  )
+    return;
+  try {
+    const config = loadConfig();
+    if (
+      !config.AUTH_DEV_BYPASS ||
+      config.RESTORE_REHEARSAL ||
+      config.PERSISTENCE_DRIVER !== 'postgres'
+    )
+      return;
+    assertAllocatedTestTarget({
+      databaseUrl: config.DATABASE_URL,
+      testDatabaseUrl: process.env.TEST_DATABASE_URL,
+      token,
+    });
+    return createHmac('sha256', token).update(config.DATABASE_URL).update(nonce).digest('hex');
+  } catch {
+    return;
+  }
+}
+
+export function GET(request: Request) {
+  const proof = localQaProof(request);
   return Response.json(
     { ok: true, service: 'web', sha: process.env.BUILD_SHA ?? 'unknown' },
-    { headers: { 'cache-control': 'no-store' } },
+    {
+      headers: {
+        'cache-control': 'no-store',
+        ...(proof ? { 'x-assistant-qa-proof': proof } : {}),
+      },
+    },
   );
 }
