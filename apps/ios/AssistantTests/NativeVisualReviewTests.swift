@@ -2322,6 +2322,10 @@ final class NativeVisualReviewTests: XCTestCase {
         }
     }
 
+    // Approval/disclosure geometry and activation are qualified by the isolated
+    // AssistantUIFixtures XCUI suite. UIView traversal does not materialize
+    // SwiftUI's native automation tree and cannot establish those assertions.
+
     @MainActor
     func testBriefingLongSourceQualificationsAndMetadata() async throws {
         enum BudgetError: Error { case exceeded, imageUnavailable }
