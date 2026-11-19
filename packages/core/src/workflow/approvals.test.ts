@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import {
   approvals,
   conversations,
@@ -8,6 +9,7 @@ import {
   tasks,
   toolCalls,
 } from '@assistant/db';
+import { CHAT_ADMISSION_PROTOCOL, chatAdmissionExternalEventId } from '@assistant/persistence';
 import { and, eq, inArray } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { getAgent } from '../chat.js';
@@ -30,7 +32,10 @@ interface Fixture {
 }
 
 /** A waiting_approval task with one pending, never-notified approval — the crash residue. */
-async function insertSilentParkedApproval(minutesOld: number): Promise<Fixture> {
+async function insertSilentParkedApproval(
+  minutesOld: number,
+  origin?: { clientOperationId: string; triggerMessageId: string },
+): Promise<Fixture> {
   const [chat] = await db
     .insert(conversations)
     .values({ agentId, channel: 'chat', trust: 'owner', title: 'renotify-test' })
@@ -45,7 +50,27 @@ async function insertSilentParkedApproval(minutesOld: number): Promise<Fixture> 
       type: 'chat_turn',
       status: 'waiting_approval',
       trust: 'owner',
-      trigger: { source: 'web', payload: {} },
+      ...(origin
+        ? {
+            externalEventId: chatAdmissionExternalEventId({
+              agentId,
+              conversationId,
+              clientOperationId: origin.clientOperationId,
+            }),
+            trigger: {
+              source: 'chat',
+              payload: {
+                triggerMessageId: origin.triggerMessageId,
+                chatAdmission: {
+                  ...origin,
+                  protocol: CHAT_ADMISSION_PROTOCOL,
+                  requestHash: 'synthetic',
+                  phase: 'queued',
+                },
+              },
+            },
+          }
+        : { trigger: { source: 'web', payload: {} } }),
     })
     .returning();
   const taskId = (task as NonNullable<typeof task>).id;
@@ -113,7 +138,8 @@ afterAll(async () => {
 describe('renotifyStalledApprovals (integration)', () => {
   it('re-emits owner + conversation notices for a silently parked approval, exactly once', async (ctx) => {
     if (!dbUp) return ctx.skip();
-    const fixture = await insertSilentParkedApproval(10);
+    const origin = { clientOperationId: randomUUID(), triggerMessageId: randomUUID() };
+    const fixture = await insertSilentParkedApproval(10, origin);
     const notified: Array<{ taskId: string; shortCode: string }> = [];
     const notify = async (
       task: TaskRow,
@@ -136,6 +162,7 @@ describe('renotifyStalledApprovals (integration)', () => {
     expect(rows[0]?.text).toContain('okay to go ahead?');
     expect(JSON.stringify(rows[0]?.parts)).toContain(fixture.shortCode);
     expect(JSON.stringify(rows[0]?.parts)).toContain(fixture.approvalId);
+    expect(rows[0]?.parts).toContainEqual({ type: 'data-turn-origin', data: origin });
 
     // Stamped — the next sweep must not spam the owner again.
     const [row] = await db.select().from(approvals).where(eq(approvals.id, fixture.approvalId));
@@ -143,6 +170,18 @@ describe('renotifyStalledApprovals (integration)', () => {
     notified.length = 0;
     expect(await renotifyStalledApprovals(db, notify)).toBe(0);
     expect(notified).toHaveLength(0);
+  });
+
+  it('does not invent an originating operation for an older parked task', async (ctx) => {
+    if (!dbUp) return ctx.skip();
+    const fixture = await insertSilentParkedApproval(10);
+    expect(await renotifyStalledApprovals(db)).toBe(1);
+    const [row] = await db
+      .select()
+      .from(messages)
+      .where(eq(messages.conversationId, fixture.conversationId));
+    expect(row?.taskId).toBe(fixture.taskId);
+    expect(row?.parts).toEqual([expect.objectContaining({ type: 'approval' })]);
   });
 
   it('leaves fresh approvals alone (the executor is still inside its own notify window)', async (ctx) => {
