@@ -187,8 +187,10 @@ export function buildRequestChecklist(
       .trim(),
   );
   for (const { requestSpan } of proposed) {
-    if (request.includes(requestSpan) && !spans.some((span) => span.includes(requestSpan)))
-      spans.push(requestSpan);
+    if (!request.includes(requestSpan)) continue;
+    // The clause parser already trimmed sentence delimiters from its spans.
+    const label = requestSpan.replace(/[,;.!?\s]+$/, '').trimStart();
+    if (label && !spans.some((span) => span.includes(label))) spans.push(label);
   }
   let priorTerms: string[] = [];
   const items: RequestChecklist['items'] = [];
