@@ -2,6 +2,7 @@ import path from 'node:path';
 import {
   type Config,
   estimatedCostApprovalEnabled,
+  githubIssueCreationEnabled,
   loadConfig,
   mcpOAuthReleaseReady,
   parseFirestoreEmbeddingSpace,
@@ -122,11 +123,15 @@ import {
   registerWeatherTool,
 } from '@assistant/tools/builtin';
 import { ToolDispatcher } from '@assistant/tools/dispatcher';
+import { configuredGitHubAppIssueCreator } from '@assistant/tools/github-app-issue-creator-config';
 import {
   configuredGitHubAppReader,
   configuredGitHubAppSelection,
 } from '@assistant/tools/github-app-reader-config';
-import { registerGitHubAppTools } from '@assistant/tools/github-app-tools';
+import {
+  registerGitHubAppIssueTools,
+  registerGitHubAppTools,
+} from '@assistant/tools/github-app-tools';
 import { type McpToolConnectionRecord, registerMcpTools } from '@assistant/tools/mcp';
 import { parseMcpOAuthRegistrations } from '@assistant/tools/mcp-oauth-registration';
 import { resolveMcpOAuthCredential } from '@assistant/tools/mcp-oauth-service';
@@ -829,7 +834,15 @@ function estimatedCostRuntimeSource(config: Config) {
 /** Add the same optional, owner-scoped tools on either persistence driver. */
 export function registerConfiguredGitHubAppTools(
   registry: ToolRegistry,
-  config: Pick<Config, 'RESTORE_REHEARSAL' | 'ASSISTANT_RELEASE_WRITES_PAUSED'>,
+  config: Pick<Config, 'RESTORE_REHEARSAL' | 'ASSISTANT_RELEASE_WRITES_PAUSED'> &
+    Partial<
+      Pick<
+        Config,
+        | 'ASSISTANT_GITHUB_ISSUE_CREATION_ENABLED'
+        | 'PERSISTENCE_DRIVER'
+        | 'POSTGRES_SOURCE_WRITES_FENCED'
+      >
+    >,
   resolveOwner: () => Promise<string | undefined>,
 ) {
   if (
@@ -838,12 +851,29 @@ export function registerConfiguredGitHubAppTools(
     !configuredGitHubAppSelection()
   )
     return registry;
-  return registerGitHubAppTools(registry, {
+  registerGitHubAppTools(registry, {
     resolveOwner,
     selection: () => configuredGitHubAppSelection(),
     async loadReader() {
       const reader = await configuredGitHubAppReader();
       return reader ? { selection: reader.selection, reader } : null;
+    },
+  });
+  const enabled = () =>
+    githubIssueCreationEnabled({
+      ...config,
+      ASSISTANT_GITHUB_ISSUE_CREATION_ENABLED:
+        config.ASSISTANT_GITHUB_ISSUE_CREATION_ENABLED ?? false,
+      PERSISTENCE_DRIVER: config.PERSISTENCE_DRIVER ?? 'postgres',
+      POSTGRES_SOURCE_WRITES_FENCED: config.POSTGRES_SOURCE_WRITES_FENCED ?? false,
+    });
+  return registerGitHubAppIssueTools(registry, {
+    enabled,
+    resolveOwner,
+    selection: () => configuredGitHubAppSelection(),
+    async loadCreator() {
+      const creator = await configuredGitHubAppIssueCreator();
+      return creator ? { selection: creator.selection, creator } : null;
     },
   });
 }
