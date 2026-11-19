@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { DispatcherPort, InboundEvent, ModelRouter, StepCallOutcome } from '@assistant/core';
 import {
   acceptSuggestion,
@@ -17,6 +17,7 @@ import {
   conversationSegments,
   conversations,
   createDb,
+  createPostgresApplicationChatPersistence,
   type Db,
   messages,
   modelCallAudit,
