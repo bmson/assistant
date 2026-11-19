@@ -105,6 +105,11 @@ struct MoreView: View {
 
             Section("Services") {
                 NavigationLink {
+                    NoticingHealthView().id(model.activityConnectionVersion)
+                } label: {
+                    Label("Noticing", systemImage: "bell.badge")
+                }
+                NavigationLink {
                     GoogleCalendarConnectionView()
                 } label: {
                     Label("Google Calendar", systemImage: "calendar.badge.plus")
@@ -1631,3 +1636,112 @@ extension MoreView {
     }
 }
 #endif
+
+
+private struct NoticingHealthView: View {
+    @Environment(AppModel.self) private var model
+    @State private var health: NoticingHealth?
+    @State private var loadFailed = false
+
+    var body: some View {
+        AssistantSettingsList {
+            if let health {
+                Section("Mail received in the last 7 days") {
+                    LabeledContent("Received", value: String(health.mailReceived7d))
+                    LabeledContent("Available to the assistant", value: String(health.mailScored7d))
+                    LabeledContent("Finished processing", value: String(health.mailProcessed7d))
+                    if let delayed = health.mailAwaitingAdmissionOver6h7d {
+                        LabeledContent("In intake over 6 hours", value: String(delayed))
+                    }
+                    LabeledContent("Awaiting extraction over 6 hours", value: String(health.mailPendingOver6h7d))
+                    if let lastMail = health.lastMailDate {
+                        LabeledContent("Latest available mail") { observationTime(lastMail) }
+                    }
+                }
+                Section("Morning brief") {
+                    evidenceRow("Last run", status: health.briefing?.label ?? "Status unavailable",
+                                date: health.briefing?.observationDate, timestampLabel: "Recorded")
+                }
+                if let checks = health.canaries {
+                    Section("Checks and sources") {
+                        evidenceRow("Pulse check", status: checks.pulse.label,
+                                    date: checks.pulse.observationDate, timestampLabel: "Last completed")
+                        evidenceRow("Google Calendar", status: checks.googleCalendar.label,
+                                    date: checks.googleCalendar.observationDate, timestampLabel: "Recorded")
+                        evidenceRow("Phone calendar", status: checks.phoneCalendar.label,
+                                    date: checks.phoneCalendar.observationDate, timestampLabel: "Captured")
+                        evidenceRow("Cached weather", status: checks.weather.label,
+                                    date: checks.weather.observationDate, timestampLabel: "Fetched")
+                        evidenceRow("Urgent texts", status: checks.urgentSms.label,
+                                    date: checks.urgentSms.observationDate, timestampLabel: "Recorded")
+                    }
+                }
+                Section("Budget") {
+                    LabeledContent("Daily budget holds", value: health.dailyBudgetHoldsLabel)
+                }
+                Section("Last 24 hours") {
+                    LabeledContent("Mail processing", value: health.mailExtraction24hLabel)
+                    if let intake = health.mailEligibleIntake24h {
+                        LabeledContent("Eligible mail received", value: String(intake))
+                    }
+                    if let completed = health.mailExtractionCompleted24h {
+                        LabeledContent("Eligible mail processed", value: String(completed))
+                    }
+                    LabeledContent("Pulse notices saved", value: String(health.momentsDelivered24h))
+                    LabeledContent("Phone alerts held", value: String(health.pingsHeld24h))
+                }
+                if !health.warnings.isEmpty {
+                    Section("Needs attention") {
+                        ForEach(health.warnings, id: \.self) { Text($0) }
+                    }
+                }
+            } else if loadFailed {
+                Section {
+                    Text("Couldn’t load the noticing status.")
+                    Button("Try again") { Task { await load() } }
+                }
+            } else {
+                ProgressView("Checking noticing status")
+            }
+        }
+        .navigationTitle("Noticing")
+        .task { await load() }
+        .refreshable { await load() }
+    }
+
+    private func evidenceRow(_ title: String, status: String, date: Date?, timestampLabel: String) -> some View {
+        LabeledContent(title) {
+            VStack(alignment: .trailing, spacing: 3) {
+                Text(status)
+                if let date { observationTime(date, label: timestampLabel) }
+            }
+            .multilineTextAlignment(.trailing)
+        }
+    }
+
+    private func observationTime(_ date: Date, label: String? = nil) -> some View {
+        let elapsed = AssistantFormatters.relative.localizedString(for: date, relativeTo: .now)
+        let exact = date.formatted(date: .abbreviated, time: .shortened)
+        return VStack(alignment: .trailing, spacing: 2) {
+            Text(label.map { "\($0) \(elapsed)" } ?? elapsed)
+            Text(exact)
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .multilineTextAlignment(.trailing)
+        .accessibilityElement(children: .combine)
+    }
+
+    @MainActor private func load() async {
+        do {
+            let result = try await model.loadNoticingHealth()
+            guard !Task.isCancelled else { return }
+            health = result
+            loadFailed = false
+        } catch {
+            guard !Task.isCancelled else { return }
+            health = nil
+            loadFailed = true
+        }
+    }
+}

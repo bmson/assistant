@@ -13,6 +13,7 @@ import {
   missionTaskTerminalReport,
   newTaskRecord,
   normalizeTaskBudget,
+  pulseCompletionFor,
   redactTerminalArrivalTask,
 } from '@assistant/persistence';
 import { Filter } from '@google-cloud/firestore';
@@ -319,6 +320,16 @@ export class FirestoreTaskRepository
               now,
             )
           : null;
+      const pulse =
+        outcome.status === 'done' && outcome.pulseCompleted
+          ? pulseCompletionFor(row, `firestore:${this.store.installationId}`, now)
+          : null;
+      if (pulse) {
+        const ref = this.store.doc('maintenanceCursors', pulse.name);
+        const existing = await tx.get(ref);
+        const recordedAt = existing.get('updatedAt')?.toMillis?.();
+        if (typeof recordedAt !== 'number' || recordedAt <= now.getTime()) tx.set(ref, pulse);
+      }
       if (watchdog) tx.set(watchdog.ref, watchdog.data);
       tx.update(
         taskRef,

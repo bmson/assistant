@@ -63,6 +63,7 @@ import {
   listGoalsDashboard,
   listImprovementProposals,
   listMcpConnections,
+  proactiveCanaryView,
   purgeImportedSource,
   recordOwnerForeground,
   recordOwnerLocationPing,
@@ -97,6 +98,7 @@ import { createGoogleCalendarConnectionService } from '@assistant/application/go
 import { GRAPH_EXTRACTION_VERSION } from '@assistant/application/knowledge-graph';
 import type { ModelProviderPorts } from '@assistant/application/model-providers';
 import { listPeopleDirectoryPage, personSummaryFromStoredRow } from '@assistant/application/people';
+import { proactiveHealthView } from '@assistant/application/proactive-health';
 import {
   createProfileMemoryCommands,
   organizeMemoryNow,
@@ -145,6 +147,7 @@ import {
   createPostgresCallSessionRepository,
   createPostgresCardFormAdmissionRepository,
   createPostgresCardRefreshRepository,
+  createPostgresCostRepository,
   createPostgresEmailSyncRepository,
   createPostgresEstimatedCostApprovalRepository,
   createPostgresEstimatedCostQuotePreparer,
@@ -155,6 +158,7 @@ import {
   createPostgresModelCatalogRepository,
   createPostgresModelConnectionRepository,
   createPostgresModelRoutingRepository,
+  createPostgresProactiveCanaryRepository,
   createPostgresRecallSurfacingRepository,
   createPostgresResearchAssignmentRepository,
   createPostgresSelfRepairRepository,
@@ -166,10 +170,12 @@ import {
   improvementProposals,
   mcpConnections,
   type PostgresAgentResolutionStageObserver,
+  readPostgresBriefingHealth,
   skills,
   withPostgresPrivacyObservationFence,
 } from '@assistant/db';
 import {
+  assertFirestoreInstallationOwner,
   assertPrivacyErasureFenceUnchanged,
   createFirestoreCardFormAdmissionRepository,
   createFirestoreEstimatedCostApprovalRepository,
@@ -178,6 +184,7 @@ import {
   createFirestoreExecutionPersistence,
   createFirestoreGoogleCalendarConnectionRepository,
   createFirestoreMcpOAuthRepository,
+  createFirestoreProactiveCanaryRepository,
   createFirestoreProfileMemoryCommandPersistence,
   createFirestoreSettingsPersistence,
   createInstallationStore,
@@ -186,6 +193,7 @@ import {
   FirestoreAuditInvestigationRepository,
   FirestoreCallSessionRepository,
   FirestoreCommitmentMutationRepository,
+  FirestoreCostRepository,
   FirestoreDeviceTokenRepository,
   FirestoreDocumentReadRepository,
   FirestoreEmailSyncRepository,
@@ -198,6 +206,7 @@ import {
   FirestoreModelCatalogRepository,
   FirestoreModelConnectionRepository,
   FirestoreOwnerKnowledgeGraphFactRepository,
+  FirestoreProactiveHealthRepository,
   FirestoreRecallFeedbackRepository,
   FirestoreRecallSurfacingRepository,
   FirestoreSelfRepairRepository,
@@ -210,6 +219,7 @@ import {
   FirestoreWorkspaceImprovementRepository,
   getFirestoreClosedCommitmentOverview,
   getFirestoreMobilePeopleDirectoryPage,
+  readFirestoreBriefingHealth,
   readPrivacyErasureFence,
 } from '@assistant/firestore';
 import { FirestoreSkillLibraryRepository } from '@assistant/firestore/skill-library';
@@ -710,6 +720,45 @@ export function getWorkspace(): WorkspaceStore {
           );
   }
   return globalCache.__assistantWorkspace;
+}
+
+export async function getMobileNoticingHealth(ownerId: string) {
+  const now = new Date();
+  if (loadConfig().PERSISTENCE_DRIVER === 'firestore') {
+    const store = getFirestoreInstallationStore();
+    await assertFirestoreInstallationOwner(store, ownerId);
+    const fence = await readPrivacyErasureFence(store, ownerId);
+    const [health, briefing, diagnostics] = await Promise.all([
+      proactiveHealthView(new FirestoreProactiveHealthRepository(store), ownerId, () =>
+        new FirestoreCostRepository(store).totals(),
+      ),
+      readFirestoreBriefingHealth(store, ownerId, now),
+      proactiveCanaryView(createFirestoreProactiveCanaryRepository(store), ownerId, now),
+    ]);
+    await assertFirestoreInstallationOwner(store, ownerId);
+    await assertPrivacyErasureFenceUnchanged(store, ownerId, fence);
+    return {
+      ...health,
+      healthy: health.healthy && briefing.ok && !diagnostics.warnings.length,
+      briefing,
+      canaries: diagnostics.canaries,
+      warnings: [...health.warnings, ...diagnostics.warnings],
+    };
+  }
+  return withPostgresMemoryBrowseRead(async (db) => {
+    const [health, briefing, diagnostics] = await Promise.all([
+      proactiveHealthView(db, ownerId, () => createPostgresCostRepository(db).totals()),
+      readPostgresBriefingHealth(db, now, ownerId),
+      proactiveCanaryView(createPostgresProactiveCanaryRepository(db), ownerId, now),
+    ]);
+    return {
+      ...health,
+      healthy: health.healthy && briefing.ok && !diagnostics.warnings.length,
+      briefing,
+      canaries: diagnostics.canaries,
+      warnings: [...health.warnings, ...diagnostics.warnings],
+    };
+  });
 }
 
 /** Owner-scoped import history read used by initial pages and web continuations. */

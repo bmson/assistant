@@ -6,16 +6,22 @@ import type {
   NotificationOutboxLeg,
   NotificationOutboxRepository,
   NotificationOutboxSendResult,
+  NudgePolicyRepository,
   OwnerNoticePurpose,
   PingDecision,
+  ProactiveCanaryRepository,
 } from '@assistant/persistence';
 import {
   drainNotificationOutbox,
+  HEALTH_CANARY_PUSH_TEXT,
+  healthCanaryDeliveryDay,
   isWatchdogOutageDeliveryKey,
   type NotificationDeliveryResult,
   type NotificationLegResult,
   notificationDeliveryKey,
   notificationLeg,
+  ownerLocalDay,
+  ownerLocalMidnightUtc,
   pushDeviceKey,
   sendNotificationOutboxLeg,
   WATCHDOG_OUTAGE_TEXT,
@@ -31,7 +37,29 @@ export interface PushChannelDeps {
   owner: () => Promise<{ id: string; name: string }>;
   loadTask?: ExecutionContextRepository['getTask'];
   admitAnswerReady?: (deliveryKey: string, now: Date) => Promise<PingDecision>;
+  admitHealthCanary?: (deliveryKey: string, day: string, now: Date) => Promise<PingDecision | null>;
   admitWatchdog?: (deliveryKey: string, now: Date) => Promise<PingDecision>;
+}
+
+export function healthCanaryAdmission(
+  owner: () => Promise<{ id: string; timezone: string }>,
+  policy: NudgePolicyRepository,
+  canaries?: ProactiveCanaryRepository,
+): NonNullable<PushChannelDeps['admitHealthCanary']> {
+  return async (deliveryKey, day, now) => {
+    const agent = await owner();
+    if (
+      ownerLocalDay(agent.timezone, now) !== day ||
+      !canaries ||
+      !(await canaries.hasOpenAlert(agent.id, ownerLocalMidnightUtc(agent.timezone, now)))
+    )
+      return null;
+    return policy.evaluate(agent, {
+      urgency: 'ambient',
+      channel: notificationDeliveryKey('health-canary', deliveryKey),
+      now,
+    });
+  };
 }
 
 /**
@@ -62,7 +90,8 @@ async function deliver(
     body: string;
     category: string;
     data?: Record<string, string>;
-    purpose?: 'answer-ready' | 'watchdog-outage';
+    purpose?: 'answer-ready' | 'watchdog-outage' | 'health-canary';
+    healthCanaryDay?: string;
   },
   applicationConfirmationNoticeFence?: import('@assistant/persistence').ApplicationConfirmationNoticeFence,
 ): Promise<NotificationDeliveryResult> {
@@ -117,6 +146,7 @@ async function sendPushOutboxLeg(
     category?: unknown;
     data?: unknown;
     purpose?: unknown;
+    healthCanaryDay?: unknown;
   } | null;
   if (
     !destination ||
@@ -153,6 +183,25 @@ async function sendPushOutboxLeg(
     const decision = await deps.admitWatchdog(row.deliveryKey, now);
     if (!decision.deliver) return { status: 'skipped', reason: decision.reason ?? 'watchdog-held' };
   }
+  const healthCanary = alert.purpose === 'health-canary';
+  if (healthCanary) {
+    if (!deps.admitHealthCanary || typeof alert.healthCanaryDay !== 'string')
+      return { status: 'skipped', reason: 'health-canary-policy-unavailable' };
+    try {
+      const decision = await deps.admitHealthCanary(row.deliveryKey, alert.healthCanaryDay, now);
+      if (!decision?.deliver)
+        return { status: 'skipped', reason: decision?.reason ?? 'health-canary-closed-or-expired' };
+    } catch {
+      // Policy failed before a provider submission, so the outbox can safely retry.
+      return {
+        status: 'failed',
+        retryable: true,
+        retryAt: retryAt(now, row.attempts),
+        reason: 'health-canary-policy-read-failed',
+      };
+    }
+  }
+  const privateNotice = watchdog || healthCanary;
   const answerReady = alert.purpose === 'answer-ready';
   const expiresAt = answerReady ? row.createdAt.getTime() + ANSWER_READY_TTL_MS : undefined;
   if (expiresAt !== undefined && now.getTime() >= expiresAt)
@@ -169,12 +218,12 @@ async function sendPushOutboxLeg(
     const result = await deps.apns.send({
       token: device.token,
       environment: device.environment,
-      title: watchdog ? 'Assistant' : alert.title,
-      body: watchdog ? WATCHDOG_BODY : alert.body,
-      category: watchdog ? UPDATE_CATEGORY : alert.category,
+      title: privateNotice ? 'Assistant' : alert.title,
+      body: healthCanary ? HEALTH_CANARY_PUSH_TEXT : watchdog ? WATCHDOG_BODY : alert.body,
+      category: privateNotice ? UPDATE_CATEGORY : alert.category,
       // The outbox owns retries so each attempt uses a fresh policy decision.
-      ...(watchdog ? { expiresAt: 0 } : expiresAt !== undefined ? { expiresAt } : {}),
-      ...(watchdog
+      ...(privateNotice ? { expiresAt: 0 } : expiresAt !== undefined ? { expiresAt } : {}),
+      ...(privateNotice
         ? { data: { route: 'chat', agentId: row.agentId } }
         : alert.data && typeof alert.data === 'object'
           ? { data: alert.data as Record<string, string> }
@@ -245,6 +294,11 @@ export async function notifyOwnerByPush(
   const watchdog = input.purpose === 'watchdog-outage';
   if (watchdog && (!input.deliveryKey || !isWatchdogOutageDeliveryKey(input.deliveryKey)))
     return notificationLeg('push', 'skipped', 'watchdog-destination-invalid');
+  const healthCanary = input.purpose === 'health-canary';
+  const healthCanaryDay = healthCanary ? healthCanaryDeliveryDay(input.deliveryKey ?? '') : null;
+  if (healthCanary && !healthCanaryDay)
+    return notificationLeg('push', 'skipped', 'health-canary-day-invalid');
+  const privateNotice = watchdog || healthCanary;
   const answerReady = input.purpose === 'answer-ready';
   if (answerReady && (!uuid(input.conversationId) || !input.deliveryKey))
     return notificationLeg('push', 'skipped', 'answer-ready-destination-invalid');
@@ -260,18 +314,25 @@ export async function notifyOwnerByPush(
         input.text,
       ),
     {
-      title: answerReady || watchdog ? 'Assistant' : agent.name,
-      body: watchdog ? WATCHDOG_BODY : answerReady ? 'Your reply is ready.' : plain(input.text),
+      title: answerReady || privateNotice ? 'Assistant' : agent.name,
+      body: healthCanary
+        ? HEALTH_CANARY_PUSH_TEXT
+        : watchdog
+          ? WATCHDOG_BODY
+          : answerReady
+            ? 'Your reply is ready.'
+            : plain(input.text),
+      ...(healthCanaryDay ? { purpose: 'health-canary' as const, healthCanaryDay } : {}),
       ...(watchdog ? { purpose: 'watchdog-outage' as const } : {}),
       ...(answerReady ? { purpose: 'answer-ready' as const } : {}),
       category: UPDATE_CATEGORY,
       data: {
         route: 'chat',
         agentId: agent.id,
-        ...(!watchdog && uuid(input.conversationId)
+        ...(!privateNotice && uuid(input.conversationId)
           ? { conversationId: input.conversationId as string }
           : {}),
-        ...(!watchdog && !answerReady && uuid(input.taskId)
+        ...(!privateNotice && !answerReady && uuid(input.taskId)
           ? { taskId: input.taskId as string }
           : {}),
       },

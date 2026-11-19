@@ -11,14 +11,25 @@ import type {
   AssistantHealthObservations,
   AssistantHealthRepository,
   AssistantHealthSignal,
+  CostRepository,
   KnowledgeGraphSyncRepository,
+  ProactiveCanaryRepository,
+} from '@assistant/persistence';
+import {
+  HEALTH_CANARY_PUSH_TEXT,
+  ownerLocalDay,
+  PROACTIVE_CANARY_ALERT_KINDS,
 } from '@assistant/persistence';
 import { and, eq, gte, inArray, isNull, lt, ne, notInArray, or, sql } from 'drizzle-orm';
 import { loadConfig } from '../config.js';
 import { pendingKnowledgeGraphSourceCount } from '../memory/knowledge-graph.js';
+import type { ProactiveNotifier } from '../proactive/notify.js';
 import {
+  assessProactiveCanaries,
+  dailyBudgetHoldHealth,
   mailHealthWindow,
   mailIntakeStallDetails,
+  proactiveCanaryProblems,
   sqlMailHealthCounts,
 } from '../proactive/pipeline-health.js';
 import { notifyOwnerInNotifications } from './anomaly.js';
@@ -174,6 +185,10 @@ export async function runAssistantHealthMonitor(
     /** Portable persistence; both are supplied together or not at all. */
     health?: AssistantHealthRepository;
     graphSync?: KnowledgeGraphSyncRepository;
+    canaries?: ProactiveCanaryRepository;
+    readTotals?: CostRepository['totals'];
+    ownerTimeZone?: () => Promise<string>;
+    notifyOwner?: ProactiveNotifier;
   },
   opts: { agentId: string; taskId?: string; now?: Date },
 ): Promise<HealthMonitorResult> {
@@ -186,12 +201,15 @@ export async function runAssistantHealthMonitor(
   const qualitySince = new Date(now.getTime() - QUALITY_WINDOW_MS);
   await deps.heartbeat?.();
 
-  const [observed, graphBacklog, mail] = await Promise.all([
+  const [observed, graphBacklog, mail, canaries, budget, briefing] = await Promise.all([
     health.observe({ agentId: opts.agentId, staleBefore, qualitySince }),
     graphRagEnabled
       ? pendingKnowledgeGraphSourceCount(deps.graphSync ?? deps.db, opts.agentId)
       : Promise.resolve(0),
     health.observeMail?.(opts.agentId, mailHealthWindow(now)),
+    deps.canaries ? assessProactiveCanaries(deps.canaries, opts.agentId, config, now) : undefined,
+    deps.readTotals ? dailyBudgetHoldHealth(deps.readTotals) : undefined,
+    deps.canaries?.briefing(opts.agentId, now).catch(() => ({ state: 'unavailable' })),
   ]);
   const {
     graphQuarantined: quarantined,
@@ -272,6 +290,36 @@ export async function runAssistantHealthMonitor(
         }
       : null,
   ].filter((signal): signal is HealthSignal => signal !== null);
+  if (canaries) {
+    for (const { key, detail } of proactiveCanaryProblems(canaries)) {
+      signals.push({
+        kind: `proactive_canary_${key}`,
+        detail,
+        notificationDueBefore: new Date(now.getTime() - MAIL_ALERT_RENOTIFY_MS),
+      });
+    }
+  }
+
+  const canaryReminderBefore = new Date(now.getTime() - MAIL_ALERT_RENOTIFY_MS);
+  if (budget === 'above_threshold' || budget === 'unavailable') {
+    signals.push({
+      kind: 'proactive_canary_budget',
+      detail:
+        budget === 'above_threshold'
+          ? 'Budget holds exceed 25% of the daily spending cap.'
+          : 'Daily budget holds could not be checked.',
+      notificationDueBefore: canaryReminderBefore,
+    });
+  }
+  // The independent watchdog owns overdue briefings. Report other recorded
+  // briefing failures here without opening a second notification for that outage.
+  if (briefing && ['aborted', 'unavailable'].includes(briefing.state)) {
+    signals.push({
+      kind: 'proactive_canary_briefing',
+      detail: 'The scheduled briefing could not be verified.',
+      notificationDueBefore: canaryReminderBefore,
+    });
+  }
 
   const notify = await health.claim({
     agentId: opts.agentId,
@@ -279,29 +327,50 @@ export async function runAssistantHealthMonitor(
     now,
     renotifyBefore: new Date(now.getTime() - HEALTH_ALERT_RENOTIFY_MS),
   });
-  if (notify.length === 0)
-    return { signals: signals.map((signal) => signal.detail), notified: false };
-  try {
-    await health.notify({
-      agentId: opts.agentId,
-      text: [
-        '⚠️ Assistant health needs attention:',
-        ...notify.map((signal) => `• ${signal.detail}`),
-        'These are deterministic checks; no configuration was changed automatically.',
-      ].join('\n'),
-      ...(opts.taskId ? { taskId: opts.taskId } : {}),
-    });
-  } catch (error) {
-    // The alert is not considered delivered until the durable owner message
-    // exists. Releasing just this claim lets the normal task retry report it.
-    await health.release({
-      agentId: opts.agentId,
-      kinds: notify.map((signal) => signal.kind),
-      claimedAt: now,
-    });
-    throw error;
+  if (notify.length) {
+    try {
+      await health.notify({
+        agentId: opts.agentId,
+        text: [
+          '⚠️ Assistant health needs attention:',
+          ...notify.map((signal) => `• ${signal.detail}`),
+          'These are deterministic checks; no configuration was changed automatically.',
+        ].join('\n'),
+        ...(opts.taskId ? { taskId: opts.taskId } : {}),
+      });
+    } catch (error) {
+      // The alert is not considered delivered until the durable owner message
+      // exists. Releasing just this claim lets the normal task retry report it.
+      await health.release({
+        agentId: opts.agentId,
+        kinds: notify.map((signal) => signal.kind),
+        claimedAt: now,
+      });
+      throw error;
+    }
   }
-  return { signals: signals.map((signal) => signal.detail), notified: true };
+  if (
+    deps.notifyOwner &&
+    deps.ownerTimeZone &&
+    signals.some(({ kind }) => PROACTIVE_CANARY_ALERT_KINDS.some((canary) => canary === kind))
+  ) {
+    try {
+      const day = ownerLocalDay(await deps.ownerTimeZone(), now);
+      await deps.notifyOwner({
+        deliveryKey: `health-canary:${day}`,
+        purpose: 'health-canary',
+        urgency: 'interrupt',
+        text: HEALTH_CANARY_PUSH_TEXT,
+        conversationId: null,
+      });
+    } catch {
+      // Dashboard admission is durable. The next active run replays the same
+      // push key if this attempt did not reach the outbox.
+      console.error('Unable to request scheduled health push');
+    }
+  }
+
+  return { signals: signals.map((signal) => signal.detail), notified: notify.length > 0 };
 }
 
 /** The PostgreSQL implementation of the monitor's persistence. */

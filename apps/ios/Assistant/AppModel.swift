@@ -3335,6 +3335,14 @@ final class AppModel {
         }
     }
 
+    func loadNoticingHealth() async throws -> NoticingHealth {
+        guard let client else { throw APIError.invalidServerURL }
+        let version = connectionVersion
+        let result = try await client.proactiveHealth()
+        guard connectionIsCurrent(client, version: version) else { throw CancellationError() }
+        return result
+    }
+
     func loadSituationPacks() async throws -> SituationOverview {
         guard let client else { throw APIError.invalidServerURL }
         let version = connectionVersion

@@ -868,6 +868,80 @@ final class APIClientRetryTests: XCTestCase {
         StubURLProtocol.beginTestCase(testCaseID)
     }
 
+    func testNoticingCanariesDistinguishSourcesFromSmsReservations() throws {
+        let checks = try JSONDecoder().decode(NoticingHealth.Canaries.self, from: Data(#"""
+        {
+          "pulse": {"state": "fresh", "observedAt": "2026-11-18T09:00:00.000Z"},
+          "googleCalendar": {"state": "configured_unverified"},
+          "phoneCalendar": {"state": "incomplete", "observedAt": "2026-11-18T09:00:00Z"},
+          "weather": {"state": "unavailable", "observedAt": "invalid timestamp"},
+          "urgentSms": {"state": "at_limit", "attempts": 3, "limit": 3}
+        }
+        """#.utf8))
+        XCTAssertEqual(checks.pulse.label, "Up to date")
+        XCTAssertEqual(checks.googleCalendar.label, "Configured, not verified")
+        XCTAssertNil(checks.googleCalendar.observationDate)
+        XCTAssertEqual(checks.phoneCalendar.label, "Capture incomplete, not verified")
+        let capture = try XCTUnwrap(checks.phoneCalendar.observationDate)
+        XCTAssertEqual(checks.pulse.observationDate, capture)
+        XCTAssertEqual(checks.weather.label, "Status unavailable")
+        XCTAssertNil(checks.weather.observationDate)
+        XCTAssertEqual(checks.urgentSms.label, "3 of 3 daily slots reserved")
+        XCTAssertNil(checks.urgentSms.observationDate)
+        let connection = try JSONDecoder().decode(NoticingHealth.Canary.self, from: Data(#"{"state":"connected"}"#.utf8))
+        XCTAssertEqual(connection.label, "Connection recorded")
+        XCTAssertNil(connection.observationDate)
+        let missing = try JSONDecoder().decode(NoticingHealth.Canary.self, from: Data(#"{"state":"missing"}"#.utf8))
+        XCTAssertEqual(missing.label, "Schedule missing")
+        XCTAssertNil(missing.observationDate)
+        let newState = try JSONDecoder().decode(NoticingHealth.Canary.self, from: Data(#"{"state":"future_state"}"#.utf8))
+        XCTAssertEqual(newState.label, "Status unavailable")
+    }
+
+    func testNoticingHealthDecodesBriefingStatus() throws {
+        let quiet = try JSONDecoder().decode(NoticingHealth.Briefing.self, from: Data(#"{"state":"quiet"}"#.utf8))
+        let stale = try JSONDecoder().decode(NoticingHealth.Briefing.self, from: Data(#"{"state":"stale","recordedAt":"2026-11-18T09:00:00.000Z"}"#.utf8))
+        XCTAssertEqual(quiet.label, "Checked, nothing to flag")
+        XCTAssertNil(quiet.observationDate)
+        XCTAssertEqual(stale.label, "Overdue")
+        XCTAssertNotNil(stale.observationDate)
+    }
+
+    func testNoticingHealthReadsStageCounts() async throws {
+        let body = #"{"mailReceived7d":4,"mailScored7d":3,"mailProcessed7d":1,"mailPendingOver6h7d":2,"mailAwaitingAdmissionOver6h7d":1,"momentsDelivered24h":1,"pingsHeld24h":0,"pushDevices":1,"warnings":[]}"#
+        StubURLProtocol.prime([.success(status: 200, body: Data(body.utf8))])
+        let health = try await makeClient().proactiveHealth()
+        XCTAssertEqual(health.mailReceived7d, 4)
+        XCTAssertEqual(health.mailPendingOver6h7d, 2)
+        XCTAssertEqual(health.mailAwaitingAdmissionOver6h7d, 1)
+        XCTAssertEqual(health.dailyBudgetHoldsLabel, "Status unavailable")
+        XCTAssertNil(health.lastMailDate)
+        XCTAssertEqual(StubURLProtocol.urls.first?.path, "/api/mobile/v1/proactive-health")
+        XCTAssertEqual(StubURLProtocol.attempts, ["GET"])
+    }
+
+    func testNoticingHealthDecodesBudgetStatusAndLastMailTime() throws {
+        let states = [
+            "within_limit": "At or below 25% of daily cap",
+            "above_threshold": "Over 25% of daily cap",
+            "paused": "Daily spending cap is zero",
+            "uncapped": "No daily cap",
+            "unavailable": "Status unavailable",
+            "future_state": "Status unavailable",
+        ]
+        for (wire, label) in states {
+            let health = try JSONDecoder().decode(NoticingHealth.self, from: Data(#"""
+            {
+              "dailyBudgetHolds":"\#(wire)", "lastMailAt":"2026-11-18T09:00:00Z",
+              "mailReceived7d":0, "mailScored7d":0, "mailProcessed7d":0, "mailPendingOver6h7d":0,
+              "momentsDelivered24h":0, "pingsHeld24h":0, "pushDevices":0, "warnings":[]
+            }
+            """#.utf8))
+            XCTAssertEqual(health.dailyBudgetHoldsLabel, label)
+            XCTAssertEqual(health.lastMailDate?.timeIntervalSince1970, 1_794_992_400)
+        }
+    }
+
     override func tearDown() {
         StubURLProtocol.endTestCase(testCaseID)
         let sessions = sessionLock.withLock { () -> [URLSession] in

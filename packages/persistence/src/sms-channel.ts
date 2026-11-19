@@ -6,6 +6,8 @@ export type ProactiveSmsAttemptDecision =
   | 'proactive-sms-daily-cap'
   | 'proactive-sms-already-reserved';
 
+export const PROACTIVE_SMS_DAILY_LIMIT = 3;
+
 type ProactiveSmsQuota = { day: string; attemptKeys: string[] };
 
 export function decideProactiveSmsAttempt(input: {
@@ -28,13 +30,27 @@ export function decideProactiveSmsAttempt(input: {
     throw new Error('Invalid quiet hours for proactive SMS');
   if (input.prefs && insideQuietHours(input.prefs, ownerLocalMinutes(input.timeZone, input.now)))
     return { decision: 'quiet-hours' };
+  const { day, previous } = readProactiveSmsQuota(input.prior, input.timeZone, input.now);
+  // Backward clock or timezone changes cannot create another allowance.
+  if (previous && previous.day > day) return { decision: 'proactive-sms-daily-cap' };
+  const attemptKeys = previous?.day === day ? previous.attemptKeys : [];
+  if (attemptKeys.includes(input.attemptKey)) return { decision: 'proactive-sms-already-reserved' };
+  if (attemptKeys.length >= PROACTIVE_SMS_DAILY_LIMIT)
+    return { decision: 'proactive-sms-daily-cap' };
+  return {
+    decision: 'reserved',
+    next: JSON.stringify({ day, attemptKeys: [...attemptKeys, input.attemptKey] }),
+  };
+}
+
+export function readProactiveSmsQuota(prior: string | null, timeZone: string, now: Date) {
   const day = new Intl.DateTimeFormat('en-CA', {
-    timeZone: input.timeZone,
+    timeZone,
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
-  }).format(input.now);
-  const previous = input.prior === null ? null : (JSON.parse(input.prior) as ProactiveSmsQuota);
+  }).format(now);
+  const previous = prior === null ? null : (JSON.parse(prior) as ProactiveSmsQuota);
   if (
     previous !== null &&
     (!/^\d{4}-\d{2}-\d{2}$/.test(previous.day) ||
@@ -42,18 +58,10 @@ export function decideProactiveSmsAttempt(input: {
       previous.attemptKeys.some(
         (key) => typeof key !== 'string' || !/^sms-attempt:[a-f0-9]{64}$/.test(key),
       ) ||
-      previous.attemptKeys.length > 3)
+      previous.attemptKeys.length > PROACTIVE_SMS_DAILY_LIMIT)
   )
     throw new Error('Invalid proactive SMS quota state');
-  // Backward clock or timezone changes cannot create another allowance.
-  if (previous && previous.day > day) return { decision: 'proactive-sms-daily-cap' };
-  const attemptKeys = previous?.day === day ? previous.attemptKeys : [];
-  if (attemptKeys.includes(input.attemptKey)) return { decision: 'proactive-sms-already-reserved' };
-  if (attemptKeys.length >= 3) return { decision: 'proactive-sms-daily-cap' };
-  return {
-    decision: 'reserved',
-    next: JSON.stringify({ day, attemptKeys: [...attemptKeys, input.attemptKey] }),
-  };
+  return { day, previous };
 }
 
 export function proactiveSmsQuotaName(agentId: string): string {

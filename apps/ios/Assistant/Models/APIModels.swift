@@ -4141,3 +4141,104 @@ struct OwnerCallGrantReceipt: Codable, Sendable {
     let grantId: String
     let expiresAt: String
 }
+
+
+struct NoticingHealth: Decodable, Sendable {
+    struct Briefing: Decodable, Sendable {
+        let state: String
+        let recordedAt: String?
+
+        var observationDate: Date? { NoticingHealth.observationDate(recordedAt) }
+
+        var label: String {
+            switch state {
+            case "delivered": return "Brief saved"
+            case "quiet": return "Checked, nothing to flag"
+            case "disabled": return "Turned off"
+            case "awaiting_first_run": return "Waiting for first run"
+            case "stale": return "Overdue"
+            case "aborted": return "Run stopped"
+            case "missing": return "Schedule missing"
+            default: return "Status unavailable"
+            }
+        }
+    }
+    struct Canary: Decodable, Sendable {
+        let state: String
+        let attempts: Int?
+        let limit: Int?
+        let observedAt: String?
+
+        var observationDate: Date? { NoticingHealth.observationDate(observedAt) }
+
+        var label: String {
+            switch state {
+            case "fresh": return "Up to date"
+            case "connected": return "Connection recorded"
+            case "missing": return "Schedule missing"
+            case "configured_unverified": return "Configured, not verified"
+            case "unverified": return "Agent setup unverified"
+            case "incomplete": return "Capture incomplete, not verified"
+            case "within_limit", "at_limit":
+                if let attempts, let limit { return "\(attempts) of \(limit) daily slots reserved" }
+                return "Status unavailable"
+            case "disabled": return "Turned off"
+            case "not_configured": return "Not set up"
+            case "awaiting_first_run": return "Waiting for first update"
+            case "expired": return "Out of date"
+            case "overdue": return "Overdue"
+            default: return "Status unavailable"
+            }
+        }
+    }
+    struct Canaries: Decodable, Sendable {
+        let pulse: Canary
+        let googleCalendar: Canary
+        let phoneCalendar: Canary
+        let weather: Canary
+        let urgentSms: Canary
+    }
+    let canaries: Canaries?
+    let briefing: Briefing?
+    let dailyBudgetHolds: String?
+    let lastMailAt: String?
+    let mailEligibleIntake24h: Int?
+    let mailExtractionCompleted24h: Int?
+    let mailExtraction24hState: String?
+    let mailReceived7d: Int
+    let mailScored7d: Int
+    let mailProcessed7d: Int
+    let mailPendingOver6h7d: Int
+    let mailAwaitingAdmissionOver6h7d: Int?
+    let momentsDelivered24h: Int
+    let pingsHeld24h: Int
+    let pushDevices: Int
+    let warnings: [String]
+
+    var lastMailDate: Date? { Self.observationDate(lastMailAt) }
+
+    var mailExtraction24hLabel: String {
+        switch mailExtraction24hState {
+        case "no_eligible_mail": return "No eligible mail arrived"
+        case "processed": return "Processing recorded"
+        case "within_grace": return "Waiting for processing"
+        case "stalled": return "Overdue"
+        default: return "Status unavailable"
+        }
+    }
+
+    var dailyBudgetHoldsLabel: String {
+        switch dailyBudgetHolds {
+        case "within_limit": return "At or below 25% of daily cap"
+        case "above_threshold": return "Over 25% of daily cap"
+        case "paused": return "Daily spending cap is zero"
+        case "uncapped": return "No daily cap"
+        default: return "Status unavailable"
+        }
+    }
+
+    private static func observationDate(_ value: String?) -> Date? {
+        guard let value else { return nil }
+        return value.assistantDate ?? AssistantFormatters.internetDateTime.date(from: value)
+    }
+}
