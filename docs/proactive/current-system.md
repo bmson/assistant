@@ -101,6 +101,7 @@ There is no news source. `web.search` is registered as `autonomous` (`packages/t
 ### 4.4 `life-awareness` (model-loop review, since #910)
 
 Runs at 11:00 and 17:00 with the general executor and a $0.50 budget. Its instruction (`packages/persistence/src/proactive-awareness.ts`):
+
 - recalls memory, goals and the next 30 days of occasions;
 - runs one public web search before reading private sources;
 - reads every calendar for the next 14 days and two days of mail;

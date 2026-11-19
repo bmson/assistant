@@ -18,11 +18,13 @@ Shared rules for every brief:
 **Evidence.** Production held more than the whole daily cap (about 122% of it, from roughly 400 unknown-cost attempts), so every non-critical task parked at $0.00 spent and morning briefs were missed for days. The held total kept growing through ordinary use.
 
 **Root cause.**
+
 - Firestore: one global `heldMicros` counter (`packages/firestore/src/costs.ts:254-278`) is added to daily spent at admission (`:472-474`). The daily reset clears only spent.
 - PostgreSQL: `packages/db/src/cost-repository.ts:148-160` sums every reservation with status `held`, `dispatching` or `unknown`, regardless of age.
 - `expireEstimatedCostGrant` (`costs.ts:626`) deliberately leaves dispatched and unknown children held.
 
 **Change.**
+
 1. Log a sample of unknown attempts first (provider, model, outcome, age) to confirm why they never settle: aborted streams, timeouts, or missing usage.
 2. Settle unknown attempts. Use provider-reported usage when the provider has it. Otherwise, after a configurable TTL (default 30 minutes), convert the attempt to spent at its estimate, with a distinct evidence basis, or release it when the request provably never reached the provider.
 3. Scope admission. Only active holds (`held` and `dispatching` within the TTL) count against the daily cap; settled amounts count as spent in the period they settle.
@@ -60,6 +62,7 @@ Shared rules for every brief:
 **Evidence.** No activity at all for about 2.6 days (Nov 15–18), and nobody was told.
 
 **Change.**
+
 1. Put the watchdog **outside** the scheduler it watches: a separate Cloud Scheduler job or Cloud Monitoring alert that calls a cheap health route and alerts when the last sweep heartbeat is more than 30 minutes old, or the last briefing more than 26 hours old. Check `infra/gcp` for the existing scheduler wiring first.
 2. Alert through an interrupt-urgency path (push and, by A17's rules, text), deduped per incident.
 3. When the agent recovers, compose one catch-up digest of what changed during the gap (cancellations, moves, important mail) through the `proactiveMoments` ledger, so nothing is repeated.
@@ -129,6 +132,7 @@ Shared rules for every brief:
 **Already fixed in code (#910).** Readers use `emailIngestReadable` (`packages/persistence/src/email-ingest-readiness.ts`), which admits authenticated direct-mode sources at `message_persisted` with a prepared score. Extraction reads automated bodies from `emailObserverSources`, and forwarded observation includes archived mail. See [current-system.md §3.2](current-system.md#32-mail).
 
 **Remaining change.**
+
 1. **Verify after deploy.** Extraction reports more than 0 per run, and the backlog the audit measured drains. The owner runs this check in production; record only counts.
 2. **Census.** A read-only diagnostic (reuse the patterns of the existing census scripts in `scripts/`) that counts `emailIngest` rows by `pipelineStage`, `ingestMode`, `admittedSourceKind`, `scoreStatus`, age, and whether `extractedAt` is `null`, missing or set. Firestore `== null` queries never match a missing field.
 3. **Visible stalls.** The extraction pending counter (`packages/firestore/src/email-extraction.ts`, around `:323`) and its PostgreSQL twin report rows that are _not_ readable, by stage, as `N stuck in <stage>` instead of `0 still pending`.
@@ -157,10 +161,12 @@ Shared rules for every brief:
 **Evidence.** In testing, 3 of 18 questions were answered with the answer to an earlier question: news got a weather answer, deliveries got a sleep question, and bills got a health question.
 
 **Root causes.**
+
 1. **Clarification binding.** `clarificationAnswerStatus` (`packages/core/src/workflow/owner-intent.ts:228-250`) returns `'answer'` for anything that isn't a short refusal or an explicit "unrelated" opener. The new message is then merged as `Owner clarification answer: …` into the old request (`:878-890`).
 2. **Fold after park.** `foldOwnerRepliesSincePark` (`packages/core/src/workflow/executor/seed.ts:324`, called at `executor.ts:1192`) folds every owner message posted while the task waited for approval, including messages that started tasks of their own.
 
 **Change.**
+
 1. Treat a message as the answer only when it plausibly answers: short slot-filling replies, or replies that reference the question. A message that is itself a complete request with a different read intent (`read-intent.ts`, `active-read-intent.ts`) is `'unrelated'` and starts its own task. A pending clarification also expires once the assistant has answered anything else.
 2. Fold only replies that modify the parked request ("also include…", "cancel that"), never a message that already owns a task.
 
@@ -191,6 +197,7 @@ Shared rules for every brief:
 **Root cause.** `notifyOwnerBySms` (`packages/modules/src/sms/channel.ts:377-423`) sends any notice it receives, although its own doc comment limits it to failures, stalls, escalations and confirmations. `composeOwnerNotifiers` (`apps/agent/src/deps.ts:649`) fans out ambient answer-ready notices, email importance alerts and the twice-daily `life-awareness` notice to SMS. The nudge policy is off when no preference row exists (`packages/core/src/proactive/nudge-policy.ts:9-28`).
 
 **Change.**
+
 1. The SMS leg accepts `urgency: 'interrupt'` notices and approvals only. It skips `ambient` notices, recording a `skipped` leg with a reason.
 2. Add a daily SMS cap (default 3, in `packages/config` and `.env.example`) and an explicit opt-in to "text me answers".
 3. Email importance alerts and answer-ready notices use push.
