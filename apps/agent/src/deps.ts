@@ -22,6 +22,7 @@ import { compileOwnerCard } from '@assistant/core/memory/consolidation';
 import { supersedeContradictedFacts } from '@assistant/core/memory/supersede';
 import { evaluateOutOfBandPing } from '@assistant/core/proactive/nudge-policy';
 import {
+  assertPostgresInstallationOwner,
   conversations,
   createDb,
   createPostgresAuditInvestigationRepository,
@@ -36,6 +37,7 @@ import {
   tasks,
 } from '@assistant/db';
 import {
+  assertFirestoreInstallationOwner,
   createFirestoreExecutionPersistence,
   createFirestoreMcpOAuthRepository,
   createInstallationStore,
@@ -120,6 +122,11 @@ import {
   registerWeatherTool,
 } from '@assistant/tools/builtin';
 import { ToolDispatcher } from '@assistant/tools/dispatcher';
+import {
+  configuredGitHubAppReader,
+  configuredGitHubAppSelection,
+} from '@assistant/tools/github-app-reader-config';
+import { registerGitHubAppTools } from '@assistant/tools/github-app-tools';
 import { type McpToolConnectionRecord, registerMcpTools } from '@assistant/tools/mcp';
 import { parseMcpOAuthRegistrations } from '@assistant/tools/mcp-oauth-registration';
 import { resolveMcpOAuthCredential } from '@assistant/tools/mcp-oauth-service';
@@ -804,6 +811,28 @@ function estimatedCostRuntimeSource(config: Config) {
     : undefined;
 }
 
+/** Add the same optional, owner-scoped tools on either persistence driver. */
+export function registerConfiguredGitHubAppTools(
+  registry: ToolRegistry,
+  config: Pick<Config, 'RESTORE_REHEARSAL' | 'ASSISTANT_RELEASE_WRITES_PAUSED'>,
+  resolveOwner: () => Promise<string | undefined>,
+) {
+  if (
+    config.RESTORE_REHEARSAL ||
+    config.ASSISTANT_RELEASE_WRITES_PAUSED ||
+    !configuredGitHubAppSelection()
+  )
+    return registry;
+  return registerGitHubAppTools(registry, {
+    resolveOwner,
+    selection: () => configuredGitHubAppSelection(),
+    async loadReader() {
+      const reader = await configuredGitHubAppReader();
+      return reader ? { selection: reader.selection, reader } : null;
+    },
+  });
+}
+
 export function composeFirestoreAgent(config: Config): AgentDeps {
   const parsedProviderSource = estimatedCostRuntimeSource(config);
   const store = createInstallationStore({
@@ -937,6 +966,9 @@ export function composeFirestoreAgent(config: Config): AgentDeps {
     toolExecution: persistence.toolExecution,
     conversations,
   });
+  registerConfiguredGitHubAppTools(registry, config, () =>
+    assertFirestoreInstallationOwner(store, config.FIRESTORE_AGENT_ID),
+  );
   registerAuditTools(registry, new FirestoreAuditInvestigationRepository(store));
   if (persistence.selfRepair) registerSelfRepairTools(registry, persistence.selfRepair);
   const occasions = new FirestoreOccasionToolRepository(store, config.FIRESTORE_AGENT_ID);
@@ -1120,6 +1152,7 @@ export function buildDeps(): AgentDeps {
     undefined,
     { oauth: agentMcpOAuth(config, () => createPostgresMcpOAuthRepository(db)) },
   );
+  registerConfiguredGitHubAppTools(registry, config, () => assertPostgresInstallationOwner(db));
   registerAuditTools(registry, createPostgresAuditInvestigationRepository(db));
   registerSelfRepairTools(registry, createPostgresSelfRepairRepository(db));
   const installedModules = installModules(composition.modules, {
