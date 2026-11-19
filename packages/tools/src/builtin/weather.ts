@@ -104,6 +104,7 @@ export interface WeatherLookupResult {
     highC: number;
     lowC: number;
     precipProbabilityMax: number;
+    dailyPrecipitationType?: WeatherNow['dailyPrecipitationType'];
     windKmh: number;
     humidity?: number;
   };
@@ -128,6 +129,9 @@ export function toLookupResult(
       highC: weather.highC,
       lowC: weather.lowC,
       precipProbabilityMax: weather.precipProbabilityMax,
+      ...(weather.dailyPrecipitationType
+        ? { dailyPrecipitationType: weather.dailyPrecipitationType }
+        : {}),
       windKmh: weather.windKmh,
       ...(weather.humidity === undefined ? {} : { humidity: weather.humidity }),
     },
@@ -371,7 +375,7 @@ export async function lookupWeather(
     lng = Number(ping.lng);
   }
 
-  // Only pay for hourly rows when the question is actually about a time.
+  // Full hourly rows are returned only for a date or time question.
   const wantsTarget =
     input.date !== undefined || input.timeOfDay !== undefined || input.startHour !== undefined;
   // Explicit local dates can fall beyond the ordinary seven-day response.
@@ -434,7 +438,7 @@ export function registerWeatherTool(
     {
       name: 'weather.lookup',
       description:
-        'Current conditions, the coming days, and — when you ask for a date or a time — the weather at that hour. A specific date or requested multi-day forecast can use up to 16 calendar days including today; farther dates are generally less certain, and missing days are never filled in. A date outside the returned range has no forecast here. Give `place` for anywhere named ("San Francisco", "Tokyo"); omit it only for where the owner is right now. This source knows towns, cities and regions, NOT venues, parks or street addresses: a full location string works because the tool falls back to the town inside it and tells you it did, but a bare venue name ("Crocker Amazon Soccer Fields") does not resolve — pass the town it is in. If this returns a not-found error, call again with the town rather than telling the owner to check a weather service. Use this for any weather question the ambient "right now" block does not already answer — another town, or a day past today.',
+        'Current conditions, the coming days, and — when you ask for a date or a time — the weather at that hour. A specific date or requested multi-day forecast can use up to 16 calendar days including today; farther dates are generally less certain, and missing days are never filled in. A date outside the returned range has no forecast here. Give `place` for anywhere named ("San Francisco", "Tokyo"); omit it only for where the owner is right now. This source knows towns, cities and regions, NOT venues, parks or street addresses: a full location string works because the tool falls back to the town inside it and tells you it did, but a bare venue name ("Crocker Amazon Soccer Fields") does not resolve — pass the town it is in. If this returns a not-found error, call again with the town rather than telling the owner to check a weather service. Use this for any weather question the ambient "right now" block does not already answer — another town, or a day past today. If the forecast reports an uncertain precipitation type, preserve that uncertainty when describing the probability.',
       inputSchema: z.object({
         place: z
           .string()

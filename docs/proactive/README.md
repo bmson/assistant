@@ -66,7 +66,7 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | A13 | Owner time zone in every card                                          | 0     | S    | —          | open                                                          |
 | A14 | Brief calendar answers                                                 | 1     | M    | —          | open                                                          |
 | A15 | Each turn answers its own message                                      | 0     | M    | —          | open                                                          |
-| A16 | Weather plausibility                                                   | 0     | S    | —          | open                                                          |
+| A16 | Weather plausibility                                                   | 0     | S    | —          | in review (hourly snow corroboration)                         |
 | A17 | Texts only for urgent items                                            | 0     | S    | —          | open                                                          |
 | B1  | Calendar connection health and warning                                 | 1     | S    | —          | open                                                          |
 | B2  | Household calendar setup and classification                            | 1     | M    | B1         | open                                                          |
