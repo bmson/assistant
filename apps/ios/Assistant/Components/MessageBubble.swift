@@ -1296,6 +1296,7 @@ enum MessageResponseCard: Identifiable {
             let precipPct: Double?
             let description: String
             let symbol: String
+            var precipitationType: String? = nil
         }
         struct Current: Hashable {
             let windKmh: Double?
@@ -1327,7 +1328,8 @@ enum MessageResponseCard: Identifiable {
                         highC: high,
                         precipPct: number(day["precipPct"], in: 0...100),
                         description: day["description"]?.string ?? "",
-                        symbol: day["symbol"]?.string ?? ""
+                        symbol: day["symbol"]?.string ?? "",
+                        precipitationType: day["precipitationType"]?.string
                     )
                 }
             }
@@ -2569,6 +2571,12 @@ enum WeatherUnits {
 /// labels that start with a day name ("Saturday", "Sat", "Tomorrow") leave
 /// the metric list and group under their day instead.
 enum WeatherPresentation {
+    static func precipitationName(for day: MessageResponseCard.WeatherForecast.Day) -> String {
+        let description = day.description.lowercased()
+        return day.precipitationType == "unspecified" || description.contains("snow") || description.contains("precipitation type uncertain") || description == "unsettled"
+            ? "precipitation" : "rain"
+    }
+
     struct DayFacts {
         let day: String
         let facts: [MessageResponseCard.WeatherDetail]
@@ -3433,9 +3441,7 @@ struct RichResponseCards: View {
                 let low = convert(day.lowC)
                 let high = convert(day.highC)
                 let rain = day.precipPct.flatMap { $0 >= 30 ? "\(Int($0.rounded()))%" : nil }
-                let description = day.description.lowercased()
-                let precipitation = description.contains("snow") || description.contains("precipitation type uncertain") || description == "unsettled"
-                    ? "precipitation" : "rain"
+                let precipitation = WeatherPresentation.precipitationName(for: day)
                 if usesAccessibilityLayout {
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 8) {
@@ -5183,7 +5189,7 @@ struct ProactiveAlertContent: View {
                     .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
             }
             if !details.isEmpty || !summary.isEmpty || actionSummary != nil {
-                DisclosureGroup("Details", isExpanded: $expanded) {
+                DisclosureGroup(isExpanded: $expanded) {
                     VStack(alignment: .leading, spacing: 10) {
                         if let actionSummary, !actionSummary.isEmpty, actionSummary != summary, actionSummary != title {
                             Text(AssistantMarkdown.inlineAttributed(actionSummary))
@@ -5204,6 +5210,10 @@ struct ProactiveAlertContent: View {
                         }
                     }
                     .padding(.top, 6)
+                } label: {
+                    Text("Details")
+                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                        .contentShape(Rectangle())
                 }
                 .font(.caption.weight(.semibold))
                 .tint(AssistantTheme.accent(for: colorScheme))
