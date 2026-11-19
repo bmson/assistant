@@ -335,33 +335,9 @@ jobs:
       # path — and it now also exercises the request-level loopback guard.
       - name: Exercise mobile administration in a real browser
         env:
-          AUTH_LOCALHOST_BYPASS: "true"
-          AUTH_URL: http://127.0.0.1:3000
-          QUEUE_DRIVER: local
-          SMOKE_BASE_URL: http://127.0.0.1:3000
           SMOKE_BROWSER_CHANNEL: chrome
-          PORT: "3000"
-          HOSTNAME: 127.0.0.1
-        run: |
-          # The standalone output carries the server, not the static assets.
-          cp -r apps/web/.next/static apps/web/.next/standalone/apps/web/.next/static
-          cp -r apps/web/public apps/web/.next/standalone/apps/web/public 2>/dev/null || true
-          node apps/web/.next/standalone/apps/web/server.js > "$RUNNER_TEMP/assistant-web.log" 2>&1 &
-          assistant_web_pid=$!
-          trap 'kill "$assistant_web_pid" 2>/dev/null || true' EXIT
-          assistant_web_ready=false
-          for assistant_attempt in {1..60}; do
-            if curl --fail --silent --output /dev/null http://127.0.0.1:3000/; then
-              assistant_web_ready=true
-              break
-            fi
-            sleep 1
-          done
-          if [ "$assistant_web_ready" != true ]; then
-            cat "$RUNNER_TEMP/assistant-web.log"
-            exit 1
-          fi
-          pnpm smoke:mobile
+          TEST_DATABASE_URL: postgres://assistant:assistant@127.0.0.1:5432/assistant
+        run: pnpm smoke:mobile
       - name: Verify four BASIC5 saves with synthetic Auth.js and durable readback
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.run_attempt == 1
         timeout-minutes: 8
