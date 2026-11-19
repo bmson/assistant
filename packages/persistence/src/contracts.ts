@@ -83,6 +83,7 @@ export interface CostAttemptMetadata {
 export interface CostReservationSweep {
   released: number;
   markedUnknown: number;
+  settledAtEstimate?: number;
 }
 
 export interface CostProviderReceipt {
@@ -117,7 +118,11 @@ export interface CostRepository {
   record(input: CostEventInput): Promise<void>;
   reconcile(reservationId: string, actual: ReservationActual): Promise<void>;
   release(reservationId: string): Promise<void>;
-  releaseStale(olderThanMinutes?: number, batch?: number): Promise<CostReservationSweep>;
+  releaseStale(
+    olderThanMinutes?: number,
+    batch?: number,
+    unknownModelTtlMinutes?: number,
+  ): Promise<CostReservationSweep>;
 }
 
 export interface ReminderCancellation {

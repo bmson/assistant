@@ -2,11 +2,13 @@ import { createHash, randomUUID } from 'node:crypto';
 import {
   addLedgerMicros,
   addMicros,
+  assertUnknownModelSettlementTtl,
   type CostEventInput,
   type CostProviderReceipt,
   type CostRepository,
   type CostReservationSweep,
   type CostTotals,
+  canCorrectModelAttemptEstimate,
   type EstimatedCostActor,
   type EstimatedCostApprovalRepository,
   type EstimatedCostBudgetTracking,
@@ -20,6 +22,8 @@ import {
   MAX_LEDGER_USD_MICROS,
   matchesEstimatedCostParkedTask,
   microsToUsd,
+  modelAttemptEstimateKey,
+  modelAttemptSampleOutcome,
   nextUtcDailyReset,
   nextUtcMonthlyReset,
   parseEstimatedCostQuote,
@@ -29,14 +33,15 @@ import {
   type ReservationActual,
   type ReserveCostInput,
   type ReserveOutcome,
+  staleModelAttemptEstimate,
   storedLedgerUsdToMicros,
   storedTaskBudgetToMicros,
   usdToMicros,
 } from '@assistant/persistence';
-import type { DocumentSnapshot, Transaction } from '@google-cloud/firestore';
+import type { DocumentSnapshot, QueryDocumentSnapshot, Transaction } from '@google-cloud/firestore';
 import { withEmulatorTransactionRetry } from './emulator-transaction.js';
 import { firestoreEstimatedCostBaseline } from './estimated-cost-baseline.js';
-import { decodeRecord, encodeRecord, type InstallationStore } from './store.js';
+import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from './store.js';
 
 /** Missing period counters are acceptable only when no cost event supports a charge. */
 export async function hasCostEventAccountedSince(
@@ -96,6 +101,11 @@ function fingerprint(input: ReserveCostInput): string {
       ]),
     )
     .digest('hex');
+}
+
+function costEventId(key: string): ReturnType<typeof randomUUID> {
+  const digest = createHash('sha256').update(key).digest('hex').slice(0, 32);
+  return `${digest.slice(0, 8)}-${digest.slice(8, 12)}-4${digest.slice(13, 16)}-a${digest.slice(17, 20)}-${digest.slice(20)}`;
 }
 
 /** Counters, hold transitions, ledger events, and per-task spend commit together. */
@@ -983,6 +993,75 @@ export class FirestoreCostRepository implements CostRepository {
     );
   }
 
+  /** Update the original period and receipt together, with no second ledger event. */
+  private async correctModelAttemptEstimate(
+    tx: Transaction,
+    reservation: DocumentSnapshot,
+    reservationId: string,
+    actual: ReservationActual,
+  ): Promise<boolean> {
+    if (
+      reservation.get('source') !== 'model' ||
+      reservation.get('costGrantId') != null ||
+      !canCorrectModelAttemptEstimate(actual.evidence)
+    )
+      return false;
+    const key = modelAttemptEstimateKey(reservationId);
+    const eventRef = this.store.doc('costEvents', costEventId(key));
+    const event = await tx.get(eventRef);
+    if (
+      !event.exists ||
+      event.get('reservationId') !== reservationId ||
+      event.get('idempotencyKey') !== key ||
+      event.get('evidence.modelAttemptEstimate') !== 'usage_missing_after_ttl'
+    )
+      return false;
+    const prior = storedLedgerUsdToMicros(event.get('usd'));
+    if (
+      reservation.get('actualUsd') != null ||
+      prior !== storedLedgerUsdToMicros(reservation.get('estimatedUsd'))
+    )
+      throw new Error('Model estimate does not match its reservation');
+    const amount = ledgerUsdToMicros(actual.usd);
+    const usd = microsToUsd(amount).toFixed(6);
+    const accountedAt = decodeRecord<Date>(event.get('accountedAt') ?? event.get('createdAt'));
+    if (!(accountedAt instanceof Date) || !Number.isFinite(accountedAt.getTime()))
+      throw new Error('Invalid model estimate settlement period');
+    const refs = this.refs(accountedAt, reservation.get('taskId'));
+    const [holds, daily, monthly] = await tx.getAll(refs.holds, refs.daily, refs.monthly);
+    if (!holds?.exists || !daily?.exists || !monthly?.exists)
+      throw new Error('Missing model estimate counters');
+    const task = refs.task ? await tx.get(refs.task) : null;
+    if (task && !task.exists) throw new Error('Ledger task does not exist');
+    const dailySpent = addMicros(integer(daily, 'spentMicros') - prior, amount);
+    const monthlySpent = addMicros(integer(monthly, 'spentMicros') - prior, amount);
+    const taskSpend = task
+      ? addLedgerMicros(storedLedgerUsdToMicros(task.get('spentUsd')) - prior, amount)
+      : null;
+    tx.set(refs.holds, { heldMicros: integer(holds, 'heldMicros') });
+    tx.set(refs.daily, { spentMicros: dailySpent });
+    tx.set(refs.monthly, { spentMicros: monthlySpent });
+    if (task && taskSpend !== null)
+      tx.update(task.ref, {
+        spentUsd: microsToUsd(taskSpend).toFixed(6),
+        updatedAt: this.store.now(),
+      });
+    tx.update(reservation.ref, { actualUsd: usd });
+    tx.update(
+      eventRef,
+      encodeRecord({
+        usd,
+        evidence: actual.evidence,
+        quantity: actual.quantity?.toFixed(4) ?? null,
+        unit: actual.unit ?? null,
+        unitPriceUsd: actual.unitPriceUsd?.toFixed(8) ?? null,
+        toolCallId: actual.toolCallId ?? null,
+        description: actual.description ?? reservation.get('description') ?? '',
+      }),
+    );
+    return true;
+  }
+
   private async settle(
     tx: Transaction,
     reservationId: string | null,
@@ -990,12 +1069,33 @@ export class FirestoreCostRepository implements CostRepository {
     direct?: CostEventInput,
     eventId = randomUUID(),
     staleBefore?: Date,
+    estimateBefore?: Date,
   ): Promise<boolean> {
     const now = this.store.now();
     const reservationRef = reservationId ? this.store.doc('costReservations', reservationId) : null;
     const reservation = reservationRef ? await tx.get(reservationRef) : null;
     const reservationStatus = reservation?.get('status');
     const reservationKind = reservation?.get('reservationKind');
+    if (
+      reservation &&
+      reservationId &&
+      reservationStatus === 'reconciled' &&
+      actual &&
+      !estimateBefore
+    )
+      return this.correctModelAttemptEstimate(tx, reservation, reservationId, actual);
+    const estimateKey =
+      reservationId && estimateBefore ? modelAttemptEstimateKey(reservationId) : null;
+    if (estimateBefore && reservation && estimateKey) {
+      const startedAt = this.accountableUnknownAttempt(reservation, now);
+      const evidence = staleModelAttemptEstimate(reservation.get('attemptMetadata'));
+      if (!startedAt || startedAt > estimateBefore || !evidence) return false;
+      actual = {
+        usd: microsToUsd(storedLedgerUsdToMicros(reservation.get('estimatedUsd'))),
+        evidence,
+      };
+      eventId = costEventId(estimateKey);
+    }
     if (
       reservationRef &&
       (!reservation?.exists ||
@@ -1011,7 +1111,9 @@ export class FirestoreCostRepository implements CostRepository {
     }
     const taskId: string | null = reservation?.get('taskId') ?? direct?.taskId ?? null;
     const accountedAt =
-      actual && reservation ? (this.accountableUnknownAttempt(reservation, now) ?? now) : now;
+      actual && reservation && !estimateKey
+        ? (this.accountableUnknownAttempt(reservation, now) ?? now)
+        : now;
     const refs = this.refs(accountedAt, taskId);
     // Reservation status and event creation commit together, so the status guard
     // provides deduplication while the event retains its public UUID as its document ID.
@@ -1103,7 +1205,7 @@ export class FirestoreCostRepository implements CostRepository {
     if (reservationRef) {
       tx.update(reservationRef, {
         status: writesEvent ? 'reconciled' : 'released',
-        actualUsd: writesEvent ? microsToUsd(amount).toFixed(6) : null,
+        actualUsd: writesEvent && !estimateKey ? microsToUsd(amount).toFixed(6) : null,
         reconciledAt: now,
       });
       tx.set(refs.holds, { heldMicros: held - estimated - poolExtra });
@@ -1136,7 +1238,9 @@ export class FirestoreCostRepository implements CostRepository {
           unit: details?.unit ?? null,
           unitPriceUsd: details?.unitPriceUsd?.toFixed(8) ?? null,
           description: details?.description ?? reservation?.get('description') ?? '',
-          ...(direct?.idempotencyKey ? { idempotencyKey: direct.idempotencyKey } : {}),
+          ...((estimateKey ?? direct?.idempotencyKey)
+            ? { idempotencyKey: estimateKey ?? direct?.idempotencyKey }
+            : {}),
           createdAt: now,
           ...(accountedAt !== now ? { accountedAt } : {}),
         }),
@@ -1147,14 +1251,7 @@ export class FirestoreCostRepository implements CostRepository {
 
   async record(input: CostEventInput): Promise<void> {
     if (input.reservationId) throw new Error('Use reconcile to settle a reservation');
-    const digest = input.idempotencyKey
-      ? createHash('sha256').update(input.idempotencyKey).digest('hex').slice(0, 32)
-      : null;
-    const id = (
-      digest
-        ? `${digest.slice(0, 8)}-${digest.slice(8, 12)}-4${digest.slice(13, 16)}-a${digest.slice(17, 20)}-${digest.slice(20)}`
-        : randomUUID()
-    ) as ReturnType<typeof randomUUID>;
+    const id = input.idempotencyKey ? costEventId(input.idempotencyKey) : randomUUID();
     await this.store.db.runTransaction((tx) => this.settle(tx, null, null, input, id));
   }
 
@@ -1173,7 +1270,11 @@ export class FirestoreCostRepository implements CostRepository {
     );
   }
 
-  async releaseStale(olderThanMinutes = 120, batch = 500): Promise<CostReservationSweep> {
+  async releaseStale(
+    olderThanMinutes = 120,
+    batch = 500,
+    unknownModelTtlMinutes = 30,
+  ): Promise<CostReservationSweep> {
     if (
       !Number.isFinite(olderThanMinutes) ||
       olderThanMinutes <= 0 ||
@@ -1183,6 +1284,65 @@ export class FirestoreCostRepository implements CostRepository {
     ) {
       throw new Error('Invalid reservation cleanup bounds');
     }
+    assertUnknownModelSettlementTtl(unknownModelTtlMinutes);
+    const now = this.store.now();
+    const estimateBefore = new Date(now.getTime() - unknownModelTtlMinutes * 60_000);
+    const unknown = this.store
+      .collection('costReservations')
+      .where('status', '==', 'unknown')
+      .where('attemptStartedAt', '<=', estimateBefore)
+      .orderBy('attemptStartedAt')
+      .select(
+        'id',
+        'status',
+        'source',
+        'reservationKind',
+        'costGrantId',
+        'createdAt',
+        'attemptStartedAt',
+        'attemptMetadata',
+        'unknownReason',
+      );
+    const samples: { provider?: string; model?: string; outcome: string; ageMinutes: number }[] =
+      [];
+    let settledAtEstimate = 0;
+    let cursor: QueryDocumentSnapshot | undefined;
+    // A page can be entirely protected approval attempts. Continue past it so
+    // those liabilities cannot prevent a later ordinary attempt from settling.
+    while (settledAtEstimate < batch) {
+      const page = await (cursor ? unknown.startAfter(cursor) : unknown).limit(batch).get();
+      for (const doc of page.docs) {
+        const id: unknown = doc.get('id');
+        if (typeof id !== 'string' || !id || doc.id !== documentKey(id)) continue;
+        const startedAt = this.accountableUnknownAttempt(doc, now);
+        const estimate = staleModelAttemptEstimate(doc.get('attemptMetadata'));
+        if (!startedAt || !estimate) continue;
+        if (
+          await withEmulatorTransactionRetry(() =>
+            this.store.db.runTransaction((tx) =>
+              this.settle(tx, id, null, undefined, undefined, undefined, estimateBefore),
+            ),
+          )
+        ) {
+          settledAtEstimate++;
+          if (samples.length < 5)
+            samples.push({
+              provider: estimate.provider,
+              model: estimate.model,
+              outcome: modelAttemptSampleOutcome(doc.get('unknownReason')),
+              ageMinutes: Math.floor((now.getTime() - startedAt.getTime()) / 60_000),
+            });
+          if (settledAtEstimate >= batch) break;
+        }
+      }
+      cursor = page.docs.at(-1);
+      if (!cursor || page.size < batch) break;
+    }
+    if (settledAtEstimate)
+      console.info('Settled unknown model attempts at their internal estimates', {
+        settledAtEstimate,
+        samples,
+      });
     const cutoff = new Date(this.store.now().getTime() - olderThanMinutes * 60_000);
     const stale = await this.store
       .collection('costReservations')
@@ -1252,7 +1412,7 @@ export class FirestoreCostRepository implements CostRepository {
       );
       if (transitioned) markedUnknown++;
     }
-    return { released, markedUnknown };
+    return { released, markedUnknown, ...(settledAtEstimate ? { settledAtEstimate } : {}) };
   }
 }
 

@@ -84,8 +84,9 @@ export function releaseStaleReservations(
   store: CostStore,
   age = 120,
   batch = 500,
+  unknownModelTtlMinutes?: number,
 ): Promise<CostReservationSweep> {
-  return costs(store).releaseStale(age, batch);
+  return costs(store).releaseStale(age, batch, unknownModelTtlMinutes);
 }
 
 // ── Threshold notifications (sweep hook) ─────────────────────────────────────

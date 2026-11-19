@@ -152,7 +152,12 @@ export async function purgeExpired(
         proactivePingRetentionDays: 90,
         auditRetentionDays: config.LLM_AUDIT_RETENTION_DAYS,
       }),
-      releaseStaleReservations(store.costs, 120, batch),
+      releaseStaleReservations(
+        store.costs,
+        120,
+        batch,
+        config.COST_UNKNOWN_MODEL_SETTLEMENT_TTL_MINUTES,
+      ),
       purgeStaleRecallMetrics(store.recallMetrics, 90, batch),
     ]);
     return {
@@ -195,7 +200,12 @@ export async function purgeExpired(
       .where(inArray(toolCache.cacheKey, expiredCache))
       .returning({ id: toolCache.cacheKey }),
     db.delete(memories).where(inArray(memories.id, expiredMemories)).returning({ id: memories.id }),
-    releaseStaleReservations(db, 120, batch),
+    releaseStaleReservations(
+      db,
+      120,
+      batch,
+      loadConfig().COST_UNKNOWN_MODEL_SETTLEMENT_TTL_MINUTES,
+    ),
     // Phase 15: location pings are transient — purge past the retention window.
     purgeStaleLocations(db, loadConfig().LOCATION_RETENTION_DAYS, batch),
     // Phase 20: dream notes are kept 7 days for inspection, then purged.

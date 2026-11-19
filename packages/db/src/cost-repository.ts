@@ -2,11 +2,14 @@ import { createHash } from 'node:crypto';
 import {
   addLedgerMicros,
   addMicros,
+  assertLedgerMicros,
+  assertUnknownModelSettlementTtl,
   type CostProviderReceipt,
   type CostRepository,
   type CostReservationSweep,
   type CostTotals,
   type CurrentBaselineReservation,
+  canCorrectModelAttemptEstimate,
   canonicalEstimatedCostJson,
   currentHistoricalUnknownMicros,
   DEFAULT_RATES,
@@ -28,12 +31,16 @@ import {
   MODEL_ROLE_NAMES,
   matchesEstimatedCostParkedTask,
   microsToUsd,
+  modelAttemptEstimateKey,
+  modelAttemptSampleOutcome,
   nextDailyReset,
   nextMonthlyReset,
   parseEstimatedCostQuote,
   parseEstimatedCostReceipt,
   parseHistoricalUnknownBaseline,
   projectEstimatedCostRequest,
+  type ReservationActual,
+  staleModelAttemptEstimate,
   storedLedgerUsdToMicros,
   storedTaskBudgetToMicros,
   storedUsdToMicros,
@@ -1500,19 +1507,73 @@ export async function markCostAttemptUnknown(
   });
 }
 
+/** Replace the one estimate in place, so caps keep the original settlement period. */
+async function correctModelAttemptEstimate(
+  db: Db,
+  reservation: typeof costReservations.$inferSelect,
+  actual: ReservationActual,
+): Promise<void> {
+  if (
+    reservation.source !== 'model' ||
+    reservation.reservationKind !== 'attempt' ||
+    reservation.costGrantId != null ||
+    !canCorrectModelAttemptEstimate(actual.evidence)
+  )
+    return;
+  const [event] = await db
+    .select()
+    .from(costEvents)
+    .where(eq(costEvents.idempotencyKey, modelAttemptEstimateKey(reservation.id)))
+    .for('update');
+  if (
+    !event ||
+    event.reservationId !== reservation.id ||
+    event.evidence.modelAttemptEstimate !== 'usage_missing_after_ttl'
+  )
+    return;
+  const prior = storedLedgerUsdToMicros(event.usd);
+  if (reservation.actualUsd !== null || prior !== storedLedgerUsdToMicros(reservation.estimatedUsd))
+    throw new Error('Model estimate does not match its reservation');
+  const amount = ledgerUsdToMicros(actual.usd);
+  const usd = microsToUsd(amount).toFixed(6);
+  if (reservation.taskId) {
+    const [task] = await db
+      .select({ spentUsd: tasks.spentUsd })
+      .from(tasks)
+      .where(eq(tasks.id, reservation.taskId))
+      .for('update');
+    if (!task) throw new Error('Ledger task does not exist');
+    const priorTaskSpend = storedLedgerUsdToMicros(task.spentUsd);
+    if (priorTaskSpend < prior) throw new Error('Model estimate exceeds task spend');
+    const spent = assertLedgerMicros(priorTaskSpend - prior + amount);
+    await db
+      .update(tasks)
+      .set({ spentUsd: microsToUsd(spent).toFixed(6), updatedAt: sql`now()` })
+      .where(eq(tasks.id, reservation.taskId));
+  }
+  await db
+    .update(costReservations)
+    .set({ actualUsd: usd })
+    .where(eq(costReservations.id, reservation.id));
+  await db
+    .update(costEvents)
+    .set({
+      usd,
+      evidence: actual.evidence,
+      quantity: actual.quantity?.toFixed(4) ?? null,
+      unit: actual.unit ?? null,
+      unitPriceUsd: actual.unitPriceUsd?.toFixed(8) ?? null,
+      toolCallId: actual.toolCallId ?? null,
+      description: actual.description ?? reservation.description,
+    })
+    .where(eq(costEvents.id, event.id));
+}
+
 /** Reconcile a held reservation to actuals: release the hold, write the ledger row. */
 export async function reconcileReservation(
   db: Db,
   reservationId: string,
-  actual: {
-    evidence?: import('@assistant/persistence').CostEvidence;
-    usd: number;
-    quantity?: number;
-    unit?: string;
-    unitPriceUsd?: number;
-    toolCallId?: string;
-    description?: string;
-  },
+  actual: ReservationActual,
 ): Promise<void> {
   const actualMicros = ledgerUsdToMicros(actual.usd);
   const actualUsd = microsToUsd(actualMicros);
@@ -1523,6 +1584,10 @@ export async function reconcileReservation(
       .select()
       .from(costReservations)
       .where(eq(costReservations.id, reservationId));
+    if (current?.status === 'reconciled') {
+      await correctModelAttemptEstimate(tx as unknown as Db, current, actual);
+      return;
+    }
     if (
       current?.costGrantId &&
       current.reservationKind === 'attempt' &&
@@ -1644,6 +1709,7 @@ export async function releaseStaleReservations(
   db: Db,
   olderThanMinutes = 120,
   batch = 500,
+  unknownModelTtlMinutes = 30,
 ): Promise<CostReservationSweep> {
   if (
     !Number.isFinite(olderThanMinutes) ||
@@ -1654,8 +1720,64 @@ export async function releaseStaleReservations(
   ) {
     throw new Error('Invalid reservation cleanup bounds');
   }
-  return db.transaction(async (tx) => {
+  assertUnknownModelSettlementTtl(unknownModelTtlMinutes);
+  const report = await db.transaction(async (tx) => {
     await lockCostLedger(tx as unknown as Db);
+    const candidates = await tx
+      .select()
+      .from(costReservations)
+      .where(
+        and(
+          eq(costReservations.status, 'unknown'),
+          eq(costReservations.source, 'model'),
+          eq(costReservations.reservationKind, 'attempt'),
+          sql`${costReservations.costGrantId} IS NULL`,
+          sql`${costReservations.attemptStartedAt} >= ${costReservations.createdAt}`,
+          sql`${costReservations.attemptStartedAt} <= now() - (${unknownModelTtlMinutes} * interval '1 minute')`,
+          sql`jsonb_typeof(${costReservations.attemptMetadata}->'provider') = 'string' and length(btrim(${costReservations.attemptMetadata}->>'provider')) > 0`,
+          sql`jsonb_typeof(${costReservations.attemptMetadata}->'model') = 'string' and length(btrim(${costReservations.attemptMetadata}->>'model')) > 0`,
+        ),
+      )
+      .orderBy(costReservations.attemptStartedAt, costReservations.id)
+      .limit(batch);
+    const samples: { provider?: string; model?: string; outcome: string; ageMinutes: number }[] =
+      [];
+    let settledAtEstimate = 0;
+    for (const candidate of candidates) {
+      const evidence = staleModelAttemptEstimate(candidate.attemptMetadata);
+      if (!evidence || !candidate.attemptStartedAt) continue;
+      const [settled] = await tx
+        .update(costReservations)
+        .set({ status: 'reconciled', actualUsd: null, reconciledAt: sql`now()` })
+        .where(and(eq(costReservations.id, candidate.id), eq(costReservations.status, 'unknown')))
+        .returning({ reconciledAt: costReservations.reconciledAt });
+      if (!settled?.reconciledAt) continue;
+      const inserted = await writeCostEvent(
+        tx as unknown as Db,
+        {
+          evidence,
+          source: 'model',
+          usd: microsToUsd(storedLedgerUsdToMicros(candidate.estimatedUsd)),
+          taskId: candidate.taskId,
+          description: candidate.description,
+          reservationId: candidate.id,
+          idempotencyKey: modelAttemptEstimateKey(candidate.id),
+          addToTaskSpend: true,
+        },
+        settled.reconciledAt,
+      );
+      if (!inserted) throw new Error('Model attempt already has an estimate receipt');
+      settledAtEstimate++;
+      if (samples.length < 5)
+        samples.push({
+          provider: evidence.provider,
+          model: evidence.model,
+          outcome: modelAttemptSampleOutcome(candidate.unknownReason),
+          ageMinutes: Math.floor(
+            (settled.reconciledAt.getTime() - candidate.attemptStartedAt.getTime()) / 60_000,
+          ),
+        });
+    }
     const stale = tx
       .select({ id: costReservations.id })
       .from(costReservations)
@@ -1717,8 +1839,17 @@ export async function releaseStaleReservations(
           )
           .returning({ id: costReservations.id })
       : [];
-    return { released: released.length, markedUnknown: unknown.length };
+    return { released: released.length, markedUnknown: unknown.length, settledAtEstimate, samples };
   });
+  const { settledAtEstimate, samples, ...cleanup } = report;
+  if (settledAtEstimate) {
+    console.info('Settled unknown model attempts at their internal estimates', {
+      settledAtEstimate,
+      samples,
+    });
+    return { ...cleanup, settledAtEstimate };
+  }
+  return cleanup;
 }
 
 /** SQL implementation of the atomic cost port; callers never receive a transaction handle. */
@@ -1746,6 +1877,6 @@ export function createPostgresCostRepository(
     record: (input) => recordCostEvent(db, input),
     reconcile: (id, actual) => reconcileReservation(db, id, actual),
     release: (id) => releaseReservation(db, id),
-    releaseStale: (age, batch) => releaseStaleReservations(db, age, batch),
+    releaseStale: (age, batch, ttl) => releaseStaleReservations(db, age, batch, ttl),
   };
 }
