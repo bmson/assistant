@@ -2411,6 +2411,36 @@ final class APIModelsTests: XCTestCase {
         XCTAssertEqual(items[0].meetingLink?.url, "http://meet.example/meeting")
     }
 
+    func testBriefingAgendaFormatsInstantsInCardTimeZoneAndPreservesLegacyLabels() throws {
+        let json = #"""
+        {
+          "kind":"briefing","id":"zoned-agenda","presentation":"calendar-agenda",
+          "timeZone":"America/Los_Angeles","sections":[{"type":"agenda","title":"Today","items":[
+            {"day":"Timed","title":"Winter event","time":"18:30–19:45 UTC",
+             "start":"2026-11-18T18:30:00.000Z","end":"2026-11-18T19:45:00Z"},
+            {"day":"Timed","title":"Summer event","start":"2026-07-18T18:30:00Z"},
+            {"day":"Timed","title":"Legacy event","time":"9:00 AM"},
+            {"day":"All day","title":"Holiday","time":"All day · through November 19",
+             "start":"2026-11-18T18:30:00Z"}
+          ]}]
+        }
+        """#
+        let part = MessagePart(type: "data-card", data: try JSONDecoder().decode(JSONValue.self, from: Data(json.utf8)))
+        guard case let .briefing(card)? = MessageResponseCard(part: part),
+              case let .agenda(_, _, _, items)? = card.sections.first else {
+            return XCTFail("Expected a briefing with agenda rows")
+        }
+        XCTAssertEqual(card.timeZone?.identifier, "America/Los_Angeles")
+        let locale = Locale(identifier: "en_US_POSIX")
+        let labels = items.map {
+            $0.localTimeLabel(timeZone: card.timeZone, locale: locale)
+                .replacingOccurrences(of: "\u{202F}", with: " ")
+        }
+        XCTAssertEqual(labels, ["10:30 AM – 11:45 AM", "11:30 AM", "9:00 AM", "All day · through November 19"])
+        XCTAssertEqual(items.map(\.timeCategory), [.timed, .timed, .timed, .allDay])
+        XCTAssertEqual(items[0].localTimeLabel(timeZone: nil), "18:30–19:45 UTC")
+    }
+
     func testCalendarAgendaUnknownDayMarkerNeverMasqueradesAsTimed() throws {
         let json = #"{"kind":"briefing","id":"unknown-time","presentation":"calendar-agenda","lead":"Two events","sections":[{"type":"agenda","title":"Today","items":[{"day":"Mystery provider value","time":"9:00 AM","title":"Unknown source event"},{"day":"Timed","time":"","title":"Missing time event"}]}]}"#
         let part = MessagePart(type: "data-card", data: try JSONDecoder().decode(JSONValue.self, from: Data(json.utf8)))

@@ -1480,8 +1480,8 @@ enum MessageResponseCard: Identifiable {
         let error: String
     }
 
-    /// The daily briefing: a lead and labelled sections, all pre-formatted
-    /// in the owner's zone by the server.
+    /// The daily briefing: a lead and labelled sections, with owner-local
+    /// text for historical cards and structured times for current cards.
     struct BriefingCard: Hashable {
         enum Presentation: String, Hashable {
             case calendarAgenda = "calendar-agenda"
@@ -1512,6 +1512,8 @@ enum MessageResponseCard: Identifiable {
             let id: String
             let day: String
             let time: String
+            let start: Date?
+            let end: Date?
             let title: String
             let location: String
             let flag: String
@@ -1522,8 +1524,24 @@ enum MessageResponseCard: Identifiable {
 
             var timeCategory: TimeCategory {
                 if day == "All day" { return .allDay }
-                if day == "Timed", !time.isEmpty { return .timed }
+                if day == "Timed", !time.isEmpty || start != nil { return .timed }
                 return .timeUnavailable
+            }
+
+            func localTimeLabel(timeZone: TimeZone?, locale: Locale = .current) -> String {
+                guard day != "All day", day != "Time unavailable",
+                      time != "All day", let timeZone, let start else { return time }
+                let formatter = DateFormatter()
+                formatter.locale = locale
+                formatter.timeZone = timeZone
+                formatter.timeStyle = .short
+                guard let end, end >= start else { return formatter.string(from: start) }
+                var calendar = Calendar(identifier: .gregorian)
+                calendar.timeZone = timeZone
+                if !calendar.isDate(start, inSameDayAs: end) {
+                    formatter.dateStyle = .medium
+                }
+                return "\(formatter.string(from: start)) – \(formatter.string(from: end))"
             }
         }
         struct ListItem: Hashable {
@@ -1551,6 +1569,7 @@ enum MessageResponseCard: Identifiable {
         }
         let id: String
         let date: String
+        let timeZone: TimeZone?
         let lead: String
         let title: String
         let presentation: Presentation?
@@ -1585,7 +1604,10 @@ enum MessageResponseCard: Identifiable {
                                 return MeetingLink(label: object["label"]?.string.flatMap { $0.isEmpty ? nil : $0 } ?? "Join meeting", url: url)
                             }()
                             return AgendaItem(id: text(row, "id").isEmpty ? "agenda-\(index)-\(text(row, "title"))" : text(row, "id"),
-                                              day: text(row, "day"), time: text(row, "time"), title: text(row, "title"),
+                                              day: text(row, "day"), time: text(row, "time"),
+                                              start: row["start"]?.string.flatMap(ISO8601DateFormatter.flexible),
+                                              end: row["end"]?.string.flatMap(ISO8601DateFormatter.flexible),
+                                              title: text(row, "title"),
                                               location: text(row, "location"), flag: text(row, "flag"), note: text(row, "note"),
                                               calendars: row["calendars"]?.arrayStrings ?? [], calendarLinks: links, meetingLink: meeting)
                         }
@@ -1642,6 +1664,7 @@ enum MessageResponseCard: Identifiable {
             guard !lead.isEmpty || !sections.isEmpty else { return nil }
             self.id = id
             self.date = text(data, "date")
+            self.timeZone = TimeZone(identifier: text(data, "timeZone"))
             self.lead = lead
             self.title = text(data, "title")
             self.presentation = Presentation(rawValue: text(data, "presentation"))
