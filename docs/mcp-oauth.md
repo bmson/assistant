@@ -2,6 +2,10 @@
 
 Phase 3 extends the existing owner-managed MCP connections. Integrations remain optional; chat, memory, reminders, the existing assistant account, and manual bearer-token connections do not depend on OAuth setup. The current MCP transport remains pinned to `2025-11-25`. Authorization discovery uses the published `2026-07-28` requirements; this does not advertise support for that revision's different transport protocol.
 
+### Finding tools on a saved connection
+
+When a server returns its tools in pages, refreshing the saved connection follows the server's cursor. Assistant exposes up to 80 tools in server order. An OAuth tool call checks the current definition against the approved definition before sending the call. If the provider changes or removes the tool, refresh the connection and review a new request.
+
 ## First increment: inspect sign-in requirements
 
 The first increment checks a saved connection's public authorization metadata and returns a transient diagnostic to its owner. It does not register a client, open a consent page, obtain tokens, change saved credentials, enable tools, or change the connection's discovery status. A successful metadata check means that sign-in requirements were found; it does not establish a working sign-in or access to the user's data.
