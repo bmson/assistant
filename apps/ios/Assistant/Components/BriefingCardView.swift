@@ -2,8 +2,7 @@ import SwiftUI
 
 /// The daily briefing: its one-line lead, then short labelled sections — the
 /// schedule by day, the weather in one line, and lists for what needs the
-/// owner. Every value arrives pre-formatted in the owner's zone, so this view
-/// only lays it out. Mirrors `BriefingCard` in the web transcript.
+/// owner. Agenda rows use the briefing's time zone.
 struct BriefingCardView: View {
     let card: MessageResponseCard.BriefingCard
 
@@ -229,7 +228,7 @@ struct BriefingCardView: View {
         } else if item.timeCategory == .timeUnavailable {
             timeLabel = "Time unavailable"
         } else {
-            timeLabel = item.time
+            timeLabel = item.localTimeLabel(timeZone: card.timeZone)
         }
         let time = Text(timeLabel)
             .font(.caption.monospacedDigit().weight(.medium))
@@ -484,13 +483,14 @@ struct BriefingCardView: View {
     private func agendaRow(_ item: MessageResponseCard.BriefingCard.AgendaItem) -> some View {
         // "9:30 AM – 10:30 AM" stacks start over end, so the column stays
         // narrow and neither half is ever cut off.
-        let bounds = item.time.components(separatedBy: " – ")
+        let timeLabel = item.localTimeLabel(timeZone: card.timeZone)
+        let bounds = timeLabel.components(separatedBy: " – ")
         let time = VStack(alignment: .leading, spacing: 1) {
-            Text(bounds.first ?? item.time)
+            Text(bounds.first ?? timeLabel)
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(AssistantTheme.ink(for: colorScheme))
                 .fixedSize(horizontal: false, vertical: true)
-                .eventRhythmClockText("legacy.clock.start:\(item.id)", sourceText: bounds.first ?? item.time)
+                .eventRhythmClockText("legacy.clock.start:\(item.id)", sourceText: bounds.first ?? timeLabel)
                 .eventRhythmFrame("legacy.clock.start:\(item.id)")
             if bounds.count > 1 {
                 Text(bounds.dropFirst().joined(separator: " – "))
