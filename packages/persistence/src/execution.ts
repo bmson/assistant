@@ -55,6 +55,7 @@ import type {
 import type { NudgePolicyRepository } from './nudge-policy.js';
 import type { OwnerCardCompilationRepository } from './owner-card-compilation.js';
 import type { AmbientSnapshotRepository, OwnerContextRepository } from './owner-context.js';
+import type { ProactiveCanaryRepository } from './proactive-canaries.js';
 import type { PulseRepository } from './pulse.js';
 import type { RecallMetricsRepository } from './recall-metrics.js';
 import type { RecallSurfacingRepository } from './recall-surfacing.js';
@@ -116,6 +117,7 @@ export interface ExecutionPersistence {
   readonly missions: MissionRepository;
   /** Present where the health monitor job has a portable adapter. */
   readonly assistantHealth?: AssistantHealthRepository;
+  readonly proactiveCanaries?: ProactiveCanaryRepository;
   /**
    * Present where scheduled reminder delivery has a portable adapter. Without
    * it the `reminder.notify` job keeps its PostgreSQL delivery path.

@@ -2,11 +2,18 @@ import { randomUUID } from 'node:crypto';
 import { resetConfigForTest } from '@assistant/config';
 import { type ExecutorDeps, executeTask } from '@assistant/core';
 import type { Db } from '@assistant/db';
-import { createFirestoreExecutionPersistence } from '@assistant/firestore';
+import {
+  createFirestoreExecutionPersistence,
+  FirestoreScheduleRepository,
+} from '@assistant/firestore';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { runAssistantHealthMonitor } from '../../../packages/core/src/workflow/health-monitor.js';
 import type { InstallationStore } from '../../../packages/firestore/src/store.js';
-import { disposeStore, emulatorStore } from '../../../packages/firestore/src/test-store.js';
+import {
+  disposeStore,
+  emulatorStore,
+  seedBudget,
+} from '../../../packages/firestore/src/test-store.js';
 
 const HOUR = 3600 * 1000;
 
@@ -40,6 +47,15 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore assistant healt
       revision: '1',
     });
     await store.doc('agents', agentId).set({ id: agentId, name: 'Owner', timezone: 'UTC' });
+    await seedBudget(store);
+    await new FirestoreScheduleRepository(store).ensure({
+      name: 'pulse',
+      agentId,
+      enabled: false,
+      cron: '*/20 * * * *',
+      nextRunAt: null,
+      taskTemplate: { type: 'scheduled', job: 'pulse.check' },
+    });
   });
 
   afterEach(async () => {

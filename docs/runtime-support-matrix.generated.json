@@ -3,10 +3,10 @@
   "purpose": "Source composition and route drift evidence only; not a deployment or configured-runtime receipt.",
   "runtimeSources": {
     "packages/config/src/index.ts": "4b5e869fdc45b6630930827b97b8480fa19d6fa567abc18cee7ea5f11fea68b1",
-    "apps/agent/src/deps.ts": "ddd18be2b051841d65fb303cba2b981eadc01a50facca4fbe84584167439bede",
+    "apps/agent/src/deps.ts": "6218d3d687329c914c07683f1c882763e0db5d77d0fd912dc106eca35ac2b5c2",
     "apps/agent/src/index.ts": "bc65b1a16ba83c6351a74e2c071189fb4288d5d3ec2c4425accc185da77fe6ab",
-    "apps/web/lib/server.ts": "d7134834a1d0b86e5cba4c7fa9f00898b7951a2c6741fc6be254e73022159f5c",
-    "apps/web/proxy.ts": "a98bad019e18f95a23024a0b6d25780e1ec74cf7cc4a23c58780a58e1e56c024",
+    "apps/web/lib/server.ts": "bd24d03d7dbe4fef6c74e907a14a4ff7445aac65389614b3c01770693e2b7c5f",
+    "apps/web/proxy.ts": "146fa8521907b79699ead76875ed2a79e1377c50eec22c4db3a4c3c0563402d6",
     "packages/db/drizzle/meta/_journal.json": "01afe22ee85b59f1f6cfdef77c8d7be25a9dbf41d3010b7995f1736d39f1dac9",
     "infra/gcp/release-contracts.json": "e5028ef1d69a1d6eac7818fb309d72f15a40c10bb71bd45121345bc036ba2ccd"
   },
@@ -75,7 +75,7 @@
     }
   },
   "agentWebSchemaCompatible": true,
-  "webApiRouteCount": 119,
+  "webApiRouteCount": 120,
   "routes": {
     "apps/web/app/api/audit/[id]/route.ts": {
       "methods": ["GET"],
@@ -405,6 +405,10 @@
       "methods": ["GET"],
       "sha256": "74714b977b79d77e019d8a38bcc6550f0d96f90b9f9c066e13b99fcb3e3c5560"
     },
+    "apps/web/app/api/mobile/v1/proactive-health/route.ts": {
+      "methods": ["GET"],
+      "sha256": "18cccde2600b547ff3a2528b765d44e69686e310a9611e8666b5124cbe993350"
+    },
     "apps/web/app/api/mobile/v1/providers/[id]/route.ts": {
       "methods": ["POST"],
       "sha256": "eaa643adc694fc8634a71759417dc07fc99fbbcb0d1a430cd0e7db625503137f"
@@ -467,7 +471,7 @@
     },
     "apps/web/app/api/mobile/v1/workspace/route.ts": {
       "methods": ["GET"],
-      "sha256": "2ed36ec32a074598330acb6299b6e91b5242bb6b5d79918a6d1392be917e1a31"
+      "sha256": "a196c70725694e001950fc8709756ad7ffda3000b0b1dbaea1e7a4c8980d92ed"
     },
     "apps/web/app/api/mobile/v1/workspace/sections/[section]/route.ts": {
       "methods": ["GET"],

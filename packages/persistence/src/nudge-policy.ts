@@ -80,17 +80,19 @@ function tzOffsetMs(timeZone: string, at: Date): number {
   return asIfUtc - Math.floor(at.getTime() / 1000) * 1000;
 }
 
-/** The UTC instant of the owner's local midnight at `now` (DST-refined once). */
-export function ownerLocalMidnightUtc(timeZone: string, now: Date): Date {
-  const [year = 1970, month = 1, day = 1] = new Intl.DateTimeFormat('en-CA', {
+/** Civil day for one owner, independent of the worker's zone. */
+export function ownerLocalDay(timeZone: string, now: Date): string {
+  return new Intl.DateTimeFormat('en-CA', {
     timeZone,
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
-  })
-    .format(now)
-    .split('-')
-    .map(Number);
+  }).format(now);
+}
+
+/** The UTC instant of the owner's local midnight at `now` (DST-refined once). */
+export function ownerLocalMidnightUtc(timeZone: string, now: Date): Date {
+  const [year = 1970, month = 1, day = 1] = ownerLocalDay(timeZone, now).split('-').map(Number);
   const midnightAsIfUtc = Date.UTC(year, month - 1, day);
   const guess = midnightAsIfUtc - tzOffsetMs(timeZone, new Date(midnightAsIfUtc));
   return new Date(midnightAsIfUtc - tzOffsetMs(timeZone, new Date(guess)));

@@ -1,4 +1,8 @@
-import { type NotificationDeliveryResult, notificationLeg } from '@assistant/persistence';
+import {
+  type NotificationDeliveryResult,
+  notificationLeg,
+  type OwnerNoticePurpose,
+} from '@assistant/persistence';
 /**
  * The one shape a proactive producer uses to reach the owner.
  *
@@ -15,6 +19,7 @@ import { type NotificationDeliveryResult, notificationLeg } from '@assistant/per
  */
 export type ProactiveNotifier = (input: {
   deliveryKey?: string;
+  purpose?: OwnerNoticePurpose;
   taskId?: string;
   conversationId: string | null;
   text: string;

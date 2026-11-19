@@ -235,6 +235,10 @@ struct APIClient: Sendable, GoogleCalendarConnectionService, McpSignInOptionsSer
         catch { throw APIError.decodeFailure(error, as: PhoneCalendarSharingMutationResult.self) }
     }
 
+    func proactiveHealth() async throws -> NoticingHealth {
+        try await get("api/mobile/v1/proactive-health")
+    }
+
     func overview() async throws -> OverviewResponse {
         try await get("api/mobile/v1/overview")
     }

@@ -21,7 +21,7 @@ import { formatLocationLine, latestLocation } from './location.js';
  */
 
 /** Minutes a compiled snapshot stays authoritative before we fall back to location-only. */
-const AMBIENT_TTL_MINUTES = 90;
+export const AMBIENT_TTL_MINUTES = 90;
 const WEATHER_TIMEOUT_MS = 10_000;
 /**
  * One budget for the whole geocode ladder rather than per leg: three rungs at

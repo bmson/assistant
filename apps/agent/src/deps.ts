@@ -358,7 +358,7 @@ function dashboardOwnerNotifier(deps: AgentDeps): OwnerNotifier {
       emailObserverEffectFence,
       applicationConfirmationNoticeFence,
     }) => {
-      if (purpose === 'answer-ready')
+      if (purpose === 'answer-ready' || purpose === 'health-canary')
         return notificationLeg('dashboard', 'skipped', 'already-in-source-conversation');
       return post(
         text,
@@ -572,7 +572,7 @@ function firestoreDashboardOwnerNotifier(deps: AgentDeps): OwnerNotifier {
       emailObserverEffectFence,
       applicationConfirmationNoticeFence,
     }) => {
-      if (purpose === 'answer-ready')
+      if (purpose === 'answer-ready' || purpose === 'health-canary')
         return notificationLeg('dashboard', 'skipped', 'already-in-source-conversation');
       const agentId = deps.config.FIRESTORE_AGENT_ID;
       const primaryId = await notices.primaryConversationId();
@@ -636,8 +636,12 @@ function policyGatedOutOfBand(
   return {
     notifyOwner: async (input) => {
       // Push enforces these purposes at the sender, including outbox retries.
-      // SMS does not handle either purpose.
-      if (input.purpose === 'answer-ready' || input.purpose === 'watchdog-outage')
+      // SMS does not handle those purposes.
+      if (
+        input.purpose === 'answer-ready' ||
+        input.purpose === 'watchdog-outage' ||
+        input.purpose === 'health-canary'
+      )
         return inner.notifyOwner(input);
       const decision = await evaluateOutOfBandPing(policy, await owner(), {
         urgency: input.urgency ?? 'interrupt',
