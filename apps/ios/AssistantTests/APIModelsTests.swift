@@ -1002,7 +1002,7 @@ final class APIModelsTests: XCTestCase {
         let message = ChatMessage(id: "legacy-alert", role: .assistant, parts: [
             .init(type: "text", text: text), malformed,
         ])
-        guard case let .proactiveAlert(_, category, _, title, _, _, _, details)? =
+        guard case let .proactiveAlert(_, category, _, title, _, _, _, _, details)? =
             message.bubbleResponseCards(formRendererAvailable: false).first else {
             return XCTFail("An unrecognized explicit payload must retain the supported historical alert fallback")
         }
@@ -2911,7 +2911,7 @@ final class APIModelsTests: XCTestCase {
         XCTAssertFalse(normalizedRange.contains("6:00 AM–2:00 AM"), range)
     }
 
-    func testProactiveAlertCardDecodesGroundedDetails() {
+    func testProactiveAlertCardDecodesGroundedDetails() throws {
         let part = MessagePart(
             type: "data-card",
             data: .object([
@@ -2921,12 +2921,13 @@ final class APIModelsTests: XCTestCase {
                 "urgencyLabel": .string("Starts in 30 min"),
                 "title": .string("Annual Physical"),
                 "startsAt": .string("2026-09-02T16:00:00.000Z"),
+                "timeZone": .string("America/Los_Angeles"),
                 "details": .array([
                     .object(["label": .string("Location"), "value": .string("One Medical")]),
                 ]),
             ])
         )
-        guard case let .proactiveAlert(id, category, urgency, title, summary, startsAt, dueAt, details)? = MessageResponseCard(part: part) else {
+        guard case let .proactiveAlert(id, category, urgency, title, summary, startsAt, dueAt, timeZone, details)? = MessageResponseCard(part: part) else {
             return XCTFail("Expected a proactive alert card")
         }
         XCTAssertEqual(id, "event-lead-1")
@@ -2936,6 +2937,13 @@ final class APIModelsTests: XCTestCase {
         XCTAssertEqual(summary, "")
         XCTAssertEqual(startsAt, "2026-09-02T16:00:00.000Z")
         XCTAssertEqual(dueAt, "")
+        let ownerZone = try XCTUnwrap(timeZone)
+        XCTAssertEqual(ownerZone.identifier, "America/Los_Angeles")
+        let label = try XCTUnwrap(ProactiveAlertContent.temporalLabel(
+            startsAt, timeZone: ownerZone, locale: Locale(identifier: "en_US")
+        ))
+        XCTAssertTrue(label.contains("9:00"), label)
+        XCTAssertFalse(label.contains("4:00"), label)
         XCTAssertEqual(details.first?.value, "One Medical")
     }
 
@@ -2952,7 +2960,7 @@ final class APIModelsTests: XCTestCase {
         XCTAssertEqual(items[2].title, "Technical interviews with Clay")
 
         let alertText = "\"Annual Physical\" starts in 30 minutes at One Medical, 559 Clay St. it is at One Medical, 559 Clay St; family@example.com called it."
-        guard case let .proactiveAlert(_, category, urgency, title, summary, _, _, details)? = MessageResponseCard.inferredLegacy(from: alertText).first else {
+        guard case let .proactiveAlert(_, category, urgency, title, summary, _, _, _, details)? = MessageResponseCard.inferredLegacy(from: alertText).first else {
             return XCTFail("Expected the historical event notice to become an alert")
         }
         XCTAssertEqual(category, "event")

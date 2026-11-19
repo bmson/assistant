@@ -284,6 +284,7 @@ export async function persistNextPulseMoment(
   store: Pick<PulseRepository, 'admitNotice'> & Partial<Pick<PulseRepository, 'momentKeys'>>,
   input: {
     agentId: string;
+    timeZone: string;
     taskId?: string;
     now: Date;
     observationFence: string | null;
@@ -340,7 +341,10 @@ export async function persistNextPulseMoment(
       },
       ...(moment.securityIncident ? { securityIncident: moment.securityIncident } : {}),
       ...(moment.emailSource ? { emailSource: moment.emailSource } : {}),
-      notice: { text: moment.text, extraParts: [{ type: 'data-card', data: moment.card }] },
+      notice: {
+        text: moment.text,
+        extraParts: [{ type: 'data-card', data: { ...moment.card, timeZone: input.timeZone } }],
+      },
       ...(moment.suggestion
         ? {
             suggestion: {
@@ -678,6 +682,15 @@ export function calendarChangeMoments(
       urgency === undefined ? moment : { ...moment, urgency };
     if (change.kind === 'unverified') {
       const key = `${id}:${change.start}`;
+      const starts = new Date(change.start);
+      const allDay = /^\d{4}-\d{2}-\d{2}$/.test(change.start);
+      const lastConfirmedStart = Number.isFinite(starts.getTime())
+        ? new Intl.DateTimeFormat('en-US', {
+            timeZone: allDay ? 'UTC' : timeZone,
+            dateStyle: 'medium',
+            ...(allDay ? {} : { timeStyle: 'short' }),
+          }).format(starts)
+        : undefined;
       return withUrgency({
         kind: 'calendar-unverified',
         key,
@@ -690,7 +703,9 @@ export function calendarChangeMoments(
           urgencyLabel: 'Unconfirmed change',
           title: cardTitle,
           summary: 'Missing from the current window; cancellation has not been confirmed.',
-          details: [{ label: 'Last confirmed start', value: change.start }],
+          details: lastConfirmedStart
+            ? [{ label: 'Last confirmed start', value: lastConfirmedStart }]
+            : [],
         },
       });
     }
@@ -1387,6 +1402,7 @@ export async function runPulse(
     // rejected write leaves the candidate eligible for retry.
     const { moment, notice, alreadySaidKeys, heldBy } = await persistNextPulseMoment(store, {
       agentId: agent.id,
+      timeZone: agent.timezone,
       now,
       candidates: rankingDedupeV2
         ? candidates

@@ -716,6 +716,20 @@ describe('calendarChangeMoments', () => {
     expect(reykjavik?.text).toContain('11:30 PM');
   });
 
+  it('shows an unconfirmed calendar change with its last known owner-local time', () => {
+    const [timed, allDay] = calendarChangeMoments(
+      [
+        change({ kind: 'unverified', start: '2026-03-05T01:30:00Z' }),
+        change({ kind: 'unverified', start: '2026-03-05' }),
+      ],
+      'America/Los_Angeles',
+    );
+    expect(timed?.card.details).toEqual([
+      { label: 'Last confirmed start', value: 'Mar 4, 2026, 5:30 PM' },
+    ]);
+    expect(allDay?.card.details).toEqual([{ label: 'Last confirmed start', value: 'Mar 5, 2026' }]);
+  });
+
   it('keeps a summary carrying a newline on one line', () => {
     // Provider text is spliced into markdown downstream, where a stray newline
     // ends the list item and strands the rest as its own paragraph.
