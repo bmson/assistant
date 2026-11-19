@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
   compareIndexInventory,
+  INDEX_MANIFEST_DIGEST,
   OWNER_EDITOR_RELEASE_MANIFEST_SHA256,
 } from './owner-editor-release-index-inventory.js';
 
@@ -20,8 +21,8 @@ const prefix = 'projects/bmson-assistant/databases/assistant-production/collecti
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
 
-function liveComposites() {
-  return spec.indexes.map((index, position) => {
+function liveComposites(manifestSpec = spec) {
+  return manifestSpec.indexes.map((index, position) => {
     const fields = index.fields.map((field) => ({ ...field }));
     if (!fields.some((field) => field.fieldPath === '__name__')) {
       const vectorPosition = fields.findIndex((field) => field.vectorConfig !== undefined);
@@ -42,8 +43,8 @@ function liveComposites() {
   });
 }
 
-function liveOverrides(): unknown[] {
-  const explicit = spec.fieldOverrides.map((field) => ({
+function liveOverrides(manifestSpec = spec): unknown[] {
+  const explicit = manifestSpec.fieldOverrides.map((field) => ({
     name: `${prefix}${field.collectionGroup}/fields/${field.fieldPath}`,
     indexConfig: { usesAncestorConfig: false, reverting: false, indexes: [] },
   }));
@@ -80,6 +81,34 @@ function liveOverrides(): unknown[] {
 const complete = { compositesComplete: true, fieldsComplete: true } as const;
 
 describe('compareIndexInventory', () => {
+  it('requires exact inventory for all current release-candidate indexes', async () => {
+    const candidate = readFileSync(
+      new URL('../infra/gcp/firestore/firestore.indexes.json', import.meta.url),
+    );
+    const candidateSpec: typeof spec = JSON.parse(candidate.toString('utf8'));
+    const composites = liveComposites(candidateSpec);
+    const overrides = liveOverrides(candidateSpec);
+    await expect(
+      compareIndexInventory(candidate, composites, overrides, complete, 'release-candidate'),
+    ).resolves.toMatchObject({
+      status: 'exact_manifest_parity',
+      compositeCount: 200,
+      manifestSha256: INDEX_MANIFEST_DIGEST['release-candidate'],
+    });
+    await expect(
+      compareIndexInventory(
+        candidate,
+        composites.slice(1),
+        overrides,
+        complete,
+        'release-candidate',
+      ),
+    ).resolves.toMatchObject({ status: 'unknown', reason: 'inventory_not_exact' });
+    await expect(
+      compareIndexInventory(candidate, composites, overrides, complete),
+    ).resolves.toMatchObject({ status: 'unknown', reason: 'manifest_not_pinned' });
+  });
+
   it('compares the full target inventory through the canonical readiness verifier', async () => {
     const result = await compareIndexInventory(
       manifest,

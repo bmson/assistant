@@ -272,6 +272,8 @@ async function main(
     JSON.parse(readFileSync('infra/gcp/release-contracts.json', 'utf8')),
     lstatSync('apps/web/lib/owner-editor-runtime.ts').isFile(),
   );
+  const manifest = readFileSync('infra/gcp/firestore/firestore.indexes.json');
+  verifyManifest(manifest, 'release-candidate');
   const current = reviewedCurrentEnvironment(env, head);
   if (!current) throw new Error('Reviewed current service snapshot required');
   const output = privateDirectory(env.ESTIMATED_COST_BASELINE_OUTPUT_DIRECTORY ?? '');
@@ -333,8 +335,6 @@ async function main(
       fields: parseInventoryList(command(localGlobalIndexArgs('fields'))),
       evidence: 'reviewed-local-gcloud-586-complete-lists' as const,
     };
-    const manifest = readFileSync('infra/gcp/firestore/firestore.indexes.json');
-    verifyManifest(manifest);
     const read = createReadOnlyGet(token, started + 60000);
     const inventory = await collectInventory(
       read,
@@ -345,6 +345,7 @@ async function main(
       undefined,
       current,
       createImageResolutionReader(token),
+      head,
     );
     if (
       inventory.indexes.status !== 'exact_manifest_parity' ||

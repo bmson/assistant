@@ -214,7 +214,7 @@ async function main() {
   )
     throw new Error('Private output directory required');
   const manifest = readFileSync('infra/gcp/firestore/firestore.indexes.json');
-  verifyManifest(manifest);
+  verifyManifest(manifest, 'release-candidate');
   const started = Date.now();
   let bytes = 0;
   let inventoryEnv: NodeJS.ProcessEnv | undefined;
@@ -289,6 +289,7 @@ async function main() {
       undefined,
       current,
       createImageResolutionReader(token, fetch, started + 60000),
+      head,
     );
     if (receipt.services.some((s) => s.admissionDisabled) && current?.kind !== 'disabled-bootstrap')
       throw new Error('Disabled current pair requires reviewed bootstrap binding');
@@ -327,7 +328,6 @@ async function main() {
       resolve(output, 'operator-prerequisites.json'),
       `${JSON.stringify({
         ...receipt,
-        candidateSource: head,
         operatorSource: head,
         observationIdentity: {
           principal: account,

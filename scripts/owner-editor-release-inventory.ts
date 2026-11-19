@@ -22,7 +22,11 @@ import {
   encryptInventoryFailure,
   verifyFailureRecipient,
 } from './owner-editor-inventory-failure-envelope.js';
-import { compareIndexInventory } from './owner-editor-release-index-inventory.js';
+import {
+  compareIndexInventory,
+  INDEX_MANIFEST_DIGEST,
+  type IndexManifestScope,
+} from './owner-editor-release-index-inventory.js';
 import {
   createEditorMetadataRead,
   type EditorMetadataTarget,
@@ -42,7 +46,6 @@ export const PROJECT = 'bmson-assistant';
 export const DATABASE = `projects/${PROJECT}/databases/assistant-production`;
 export const REGION = 'us-west1';
 export const SOURCE = '04c17b04ab9d76d005b04121927c189baa6edaf9';
-export const MANIFEST_HASH = '5baaca10aa089b2eac771de7c9086317206bd937d09a89ea6e937ac945e03cd1';
 const RUN_ROOT = `projects/${PROJECT}/locations/${REGION}`;
 const LIMIT = 2 * 1024 * 1024;
 const exec = promisify(execFile);
@@ -67,8 +70,12 @@ function instant(value: unknown, bound: 'floor' | 'ceil' = 'floor'): number {
   const fraction = /\.([0-9]+)Z$/.exec(value)?.[1] ?? '';
   return time + (bound === 'ceil' && /[1-9]/.test(fraction.slice(3)) ? 1 : 0);
 }
-export function verifyManifest(bytes: Buffer): { groups: string[] } {
-  if (hash(bytes) !== MANIFEST_HASH) throw new Error('manifest mismatch');
+export function verifyManifest(
+  bytes: Buffer,
+  scope: IndexManifestScope = 'approved-observer',
+): { groups: string[] } {
+  if (bytes.length > LIMIT || hash(bytes) !== INDEX_MANIFEST_DIGEST[scope])
+    throw new Error('manifest mismatch');
   const spec = record(JSON.parse(bytes.toString('utf8')));
   if (!Array.isArray(spec.indexes) || !Array.isArray(spec.fieldOverrides))
     throw new Error('invalid manifest');
@@ -395,9 +402,12 @@ export async function collectInventory(
   mark: InventoryStageMarker = () => undefined,
   current?: BootstrapReceipt,
   resolveImage?: (image: string) => Promise<void>,
+  candidateSource?: string,
 ) {
+  const scope = candidateSource === undefined ? 'approved-observer' : 'release-candidate';
   mark('source_manifest');
-  const { groups } = verifyManifest(manifest);
+  const { groups } = verifyManifest(manifest, scope);
+  const source = text(candidateSource ?? SOURCE, /^[a-f0-9]{40}$/);
   mark('index_comparison');
   const composites =
     global?.composites ??
@@ -422,10 +432,16 @@ export async function collectInventory(
     global?.evidence === 'pinned-gcloud-576-complete-lists' ||
     global?.evidence === 'reviewed-local-gcloud-586-complete-lists';
   mark('index_comparison');
-  const indexes = await compareIndexInventory(manifest, composites, fields, {
-    compositesComplete: true,
-    fieldsComplete: complete,
-  });
+  const indexes = await compareIndexInventory(
+    manifest,
+    composites,
+    fields,
+    {
+      compositesComplete: true,
+      fieldsComplete: complete,
+    },
+    scope,
+  );
   mark('database_metadata');
   const database = record(await read(`https://firestore.googleapis.com/v1/${DATABASE}`));
   mark('recovery_metadata');
@@ -525,8 +541,8 @@ export async function collectInventory(
       : { status: 'unknown', reason: 'editor_target_unbound_or_not_collected' };
   return {
     format: 1,
-    candidateSource: SOURCE,
-    manifestSha256: MANIFEST_HASH,
+    candidateSource: source,
+    manifestSha256: INDEX_MANIFEST_DIGEST[scope],
     target: DATABASE,
     observedAt: new Date(now).toISOString(),
     indexes,
@@ -719,7 +735,7 @@ async function main(mark: InventoryStageMarker) {
       ? 'infra/gcp/firestore/firestore.indexes.json'
       : '.approved-index-source/infra/gcp/firestore/firestore.indexes.json',
   );
-  verifyManifest(manifest);
+  verifyManifest(manifest, releasePreflight ? 'release-candidate' : 'approved-observer');
   mark('protected_context');
   verifyPreAuthEnvironment(process.env);
   const diagnosticRecipient = verifyFailureRecipient(process.env);
@@ -727,7 +743,13 @@ async function main(mark: InventoryStageMarker) {
     verifyPrerequisitesBinding(process.env);
     return;
   }
-  const current = reviewedCurrentEnvironment(process.env, process.env.GITHUB_SHA ?? '');
+  const candidateSource = releasePreflight
+    ? text(process.env.RELEASE_SHA, /^[a-f0-9]{40}$/)
+    : undefined;
+  const current = reviewedCurrentEnvironment(
+    process.env,
+    candidateSource ?? process.env.GITHUB_SHA ?? '',
+  );
   const started = Date.now();
   mark('credential_file');
   const identity = verifyWifEnvironment(process.env, (file) => {
@@ -818,6 +840,7 @@ async function main(mark: InventoryStageMarker) {
     mark,
     current,
     createImageResolutionReader(token.trim(), fetch, started + 60000),
+    candidateSource,
   );
   mark('receipt_serialization');
   const output = JSON.stringify({

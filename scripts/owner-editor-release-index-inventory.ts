@@ -9,6 +9,11 @@ import type { CommandResult, CommandRunner } from '../packages/setup/src/runner.
 
 export const OWNER_EDITOR_RELEASE_MANIFEST_SHA256 =
   '5baaca10aa089b2eac771de7c9086317206bd937d09a89ea6e937ac945e03cd1';
+export const INDEX_MANIFEST_DIGEST = {
+  'approved-observer': OWNER_EDITOR_RELEASE_MANIFEST_SHA256,
+  'release-candidate': '6d865448c246fd9ac1bcbe179204becfb23fabfee0b45369103b1352345fc553',
+} as const;
+export type IndexManifestScope = keyof typeof INDEX_MANIFEST_DIGEST;
 const PROJECT_ID = 'bmson-assistant';
 const DATABASE_ID = 'assistant-production';
 const PREFIX = `projects/${PROJECT_ID}/databases/${DATABASE_ID}/collectionGroups/`;
@@ -219,9 +224,10 @@ export async function compareIndexInventory(
   composites: unknown[],
   overrides: unknown[],
   coverage: IndexInventoryCoverage,
+  scope: IndexManifestScope = 'approved-observer',
 ): Promise<OwnerEditorIndexInventoryResult> {
   const digest = sha256(manifest);
-  if (manifest.length > MAX_MANIFEST_BYTES || digest !== OWNER_EDITOR_RELEASE_MANIFEST_SHA256)
+  if (manifest.length > MAX_MANIFEST_BYTES || digest !== INDEX_MANIFEST_DIGEST[scope])
     return {
       status: 'unknown',
       manifestSha256: digest,
