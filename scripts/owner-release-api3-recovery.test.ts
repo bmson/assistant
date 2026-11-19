@@ -402,8 +402,21 @@ describe('recover a partially staged Firestore transition', () => {
     });
     advance(f, pin);
     assertClosed(f, { web, agent });
-    f.pair.web.service.urls.push('https://candidate-12345-1---assistant-web-fixture-uw.a.run.app');
+  });
+
+  it.each(roles)('rejects a stale candidate URL in the final %s inventory', (role) => {
+    const f = scenario();
+    for (const side of roles) f.setRouting(side, [route(f.add(side, 'p'))]);
+    const { service } = f.pair[role];
+    service.urls.push(service.uri.replace('https://', `https://${candidate}---`));
     expect(() => planApi3ForwardRecovery(f.review, f.pair, settle(f))).toThrow();
+  });
+
+  it('accepts both canonical agent URLs in the final inventory', () => {
+    const f = scenario();
+    for (const role of roles) f.setRouting(role, [route(f.add(role, 'p'))]);
+    f.pair.agent.service.urls.push('https://assistant-agent-83709630368.us-west1.run.app');
+    assertClosed(f, { web: phase('web', 'p'), agent: phase('agent', 'p') });
   });
 
   it.each([false, true])(

@@ -33,6 +33,7 @@ type Obj = Record<string, unknown>;
 const sha = /^[a-f0-9]{64}$/;
 const sourceSha = /^[a-f0-9]{40}$/;
 const allocation = 'TRAFFIC_TARGET_ALLOCATION_TYPE_REVISION';
+const agentRegionalUri = 'https://assistant-agent-83709630368.us-west1.run.app';
 const manualZero = { scalingMode: 'MANUAL', manualInstanceCount: 0 };
 const revisionKeys = new Set<string>(TEMPLATE_FIELDS);
 
@@ -495,6 +496,15 @@ export function planApi3ForwardRecovery(
       },
     };
     verifyCurrentSnapshot(binding, current.service, revision);
+    if (role === 'agent') {
+      const urls = current.service.urls;
+      requireProof(
+        Array.isArray(urls) &&
+          urls.includes(agentUri) &&
+          new Set(urls).size === urls.length &&
+          urls.every((uri) => uri === agentUri || uri === agentRegionalUri),
+      );
+    }
     bindings[role] = binding;
   }
   requireProof(matching(settlement.serviceSha256, serviceSha256));
