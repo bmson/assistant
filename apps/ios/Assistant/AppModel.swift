@@ -5584,12 +5584,16 @@ final class AppModel {
                 }
             }
             setActivityThought(thought, proposedDetail: detail)
-            _ = await notifyOnce(
-                key: "\(taskId ?? streamID)-\(finalStatus ?? "reply")",
-                title: completedWithoutReply ? "Task complete; reply not yet available" : succeeded ? "\(agentName) finished" : "\(agentName) stopped",
-                body: succeeded ? "Your result is ready." : "Open the conversation to check the task.",
-                route: .chat
-            )
+            // Ordinary answers use the server's answer-ready notification,
+            // where quiet hours, the conversation route, and retry are handled.
+            if !succeeded {
+                _ = await notifyOnce(
+                    key: "\(taskId ?? streamID)-\(finalStatus ?? "reply")",
+                    title: completedWithoutReply ? "Task complete; reply not yet available" : "\(agentName) stopped",
+                    body: "Open the conversation to check the task.",
+                    route: .chat
+                )
+            }
             guard connectionIsCurrent(client, version: version), self.conversationId == conversationId,
                   ordinaryTurnToken == nil || ordinaryTurn?.token == ordinaryTurnToken else { return }
             await systemSurfaces.finish(
@@ -5694,7 +5698,6 @@ final class AppModel {
         let version = idlePollingVersion
         let connectionRevision = connectionVersion
         let requestCursor = cursor
-        let notificationTitle = "\(agentName) replied"
         guard let updates = try? await client.updates(
             conversationId: conversationId,
             taskId: nil,
@@ -5742,21 +5745,6 @@ final class AppModel {
         // inbox as well as the retained receipt in this conversation.
         if openDecisionSignature != decisionsBefore {
             Task { [weak self] in await self?.refreshOverview(reportFailure: false) }
-        }
-        if !newlyVisibleAssistantIDs.isEmpty,
-           connectionVersion == connectionRevision,
-           idlePollingVersion == version,
-           self.client?.configuration == client.configuration,
-           self.conversationId == conversationId,
-           bootstrap?.identity.id == ownerID {
-            await scheduleLocalNotification(
-                notificationTitle,
-                "A new response is ready.",
-                .chat,
-                nil,
-                ownerID,
-                conversationId
-            )
         }
         return changed
     }

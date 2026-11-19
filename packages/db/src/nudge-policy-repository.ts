@@ -1,4 +1,5 @@
 import {
+  answerReadyPingId,
   curiosityNudgePingId,
   insideQuietHours,
   type NudgePolicyRepository,
@@ -17,9 +18,12 @@ export function createPostgresNudgePolicyRepository(db: Db): NudgePolicyReposito
     evaluate(agent, opts) {
       const now = opts.now ?? new Date();
       const channel = opts.channel ?? 'out-of-band';
-      const id = channel.startsWith('curiosity-nudge:')
-        ? curiosityNudgePingId(agent.id, channel)
-        : undefined;
+      const answerReady = channel.startsWith('answer-ready:');
+      const id = answerReady
+        ? answerReadyPingId(agent.id, channel)
+        : channel.startsWith('curiosity-nudge:')
+          ? curiosityNudgePingId(agent.id, channel)
+          : undefined;
       return db.transaction(async (tx) => {
         let decision: PingDecision = { deliver: true };
         if (opts.urgency === 'ambient') {
@@ -31,6 +35,12 @@ export function createPostgresNudgePolicyRepository(db: Db): NudgePolicyReposito
           await tx.execute(
             sql`select pg_advisory_xact_lock(hashtext(${`assistant:ambient-ping:${agent.id}:${midnight.toISOString()}`}))`,
           );
+          // A retry can cross midnight. Serialize the same answer identity
+          // independently of the day used for the ambient quota.
+          if (answerReady) {
+            await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${id}))`);
+          }
+          let reservedAnswer = false;
           if (id) {
             const [prior] = await tx
               .select()
@@ -39,14 +49,16 @@ export function createPostgresNudgePolicyRepository(db: Db): NudgePolicyReposito
               .limit(1);
             if (prior) {
               if (prior.agentId !== agent.id || prior.channel !== channel)
-                throw new Error('Curiosity nudge reservation ownership mismatch');
-              return {
-                deliver: prior.delivered,
-                ...(!prior.delivered &&
-                (prior.reason === 'quiet-hours' || prior.reason === 'daily-cap')
-                  ? { reason: prior.reason }
-                  : {}),
-              };
+                throw new Error('Nudge reservation ownership mismatch');
+              if (answerReady && prior.delivered) reservedAnswer = true;
+              else
+                return {
+                  deliver: prior.delivered,
+                  ...(!prior.delivered &&
+                  (prior.reason === 'quiet-hours' || prior.reason === 'daily-cap')
+                    ? { reason: prior.reason }
+                    : {}),
+                };
             }
           }
           const [prefs] = await tx
@@ -56,7 +68,13 @@ export function createPostgresNudgePolicyRepository(db: Db): NudgePolicyReposito
             .limit(1);
           if (prefs && insideQuietHours(prefs, ownerLocalMinutes(agent.timezone, now))) {
             decision = { deliver: false, reason: 'quiet-hours' };
-          } else if (prefs?.ambientDailyCap != null) {
+          }
+          if (reservedAnswer) {
+            return decision.deliver && prefs?.ambientDailyCap === 0
+              ? { deliver: false, reason: 'daily-cap' }
+              : decision;
+          }
+          if (decision.deliver && prefs?.ambientDailyCap != null) {
             const [used] = await tx
               .select({ value: count() })
               .from(proactivePings)

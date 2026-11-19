@@ -1,9 +1,18 @@
+import { createHash } from 'node:crypto';
+
 /**
  * The nudge policy's storage-free half: the decision types and the owner-local
  * clock arithmetic both adapters share, so quiet hours and the ambient daily
  * cap mean exactly the same thing on PostgreSQL and Firestore. See
  * `evaluateOutOfBandPing` in core for the policy itself.
  */
+
+export function answerReadyPingId(agentId: string, channel: string): string {
+  const hex = createHash('sha256')
+    .update(JSON.stringify([agentId, channel]))
+    .digest('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
 
 export type PingUrgency = 'ambient' | 'interrupt';
 export type PingSuppression = 'quiet-hours' | 'daily-cap';
