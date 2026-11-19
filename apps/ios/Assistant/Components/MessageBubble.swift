@@ -1575,6 +1575,7 @@ enum MessageResponseCard: Identifiable {
         let lead: String
         let title: String
         let presentation: Presentation?
+        let compactCoverage: String?
         let sections: [Section]
 
         init?(data: [String: JSONValue]) {
@@ -1670,6 +1671,7 @@ enum MessageResponseCard: Identifiable {
             self.lead = lead
             self.title = text(data, "title")
             self.presentation = Presentation(rawValue: text(data, "presentation"))
+            self.compactCoverage = data["compactCoverage"]?.string
             self.sections = sections
         }
 

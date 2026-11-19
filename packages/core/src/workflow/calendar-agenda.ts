@@ -292,6 +292,38 @@ function dayKey(event: ResponseCard, zone?: string): string {
   }).format(new Date(start));
 }
 
+function agendaDayKey(
+  event: ResponseCard,
+  zone: string | undefined,
+  window: PersonalReadRequest['timeWindow'],
+  requestedDay: string,
+): string {
+  if (event.windowMembership === 'source-date-only') return 'unverified';
+  const startsOn = dayKey(event, zone);
+  if (!window || !validDate(requestedDay) || !validDate(startsOn) || startsOn >= requestedDay)
+    return startsOn;
+  const intersectsDay = eventSources(event).every((source) => {
+    const start = text(source.start);
+    const end = text(source.end);
+    if (source.allDay === true) {
+      return (
+        !!validZone(source.calendarTimeZone) &&
+        validDate(start) &&
+        validDate(end) &&
+        start < requestedDay &&
+        end > requestedDay
+      );
+    }
+    return (
+      INSTANT.test(start) &&
+      INSTANT.test(end) &&
+      Date.parse(start) < Date.parse(window.timeMin) &&
+      Date.parse(end) > Date.parse(window.timeMin)
+    );
+  });
+  return intersectsDay ? requestedDay : startsOn;
+}
+
 function dateLabel(day: string, zone?: string): string {
   if (!validDate(day)) return 'Dates not verified';
   const label = formatter('date-label', 'en-US', {
@@ -851,6 +883,7 @@ function calendarPairAttentionByDay(
   include: boolean,
   asksAboutDriving: boolean,
   householdDetailsByEvent: ReadonlyMap<ResponseCard, CalendarHouseholdItemV1 | undefined>,
+  agendaDays: ReadonlyMap<ResponseCard, string>,
 ): Map<string, CalendarPairAttention> {
   const byDay = new Map<string, CalendarPairAttention>();
   if (!include || !zone) return byDay;
@@ -868,7 +901,7 @@ function calendarPairAttentionByDay(
     return {
       event,
       eventId: text(event.id),
-      agendaDay: event.windowMembership === 'source-date-only' ? 'unverified' : dayKey(event, zone),
+      agendaDay: agendaDays.get(event) ?? 'unverified',
       startMs,
       endMs,
       sources,
@@ -1059,6 +1092,15 @@ function calendarPairAttentionByDay(
   return byDay;
 }
 
+function boundedAgendaLead(value: string, maxLength = 440): string {
+  const line = value.replace(/\s+/g, ' ').trim();
+  if (line.length <= maxLength) return line;
+  return `${line
+    .slice(0, maxLength - 1)
+    .replace(/[\uD800-\uDBFF]$/, '')
+    .trimEnd()}…`;
+}
+
 /**
  * An evidence-only agenda in the existing primary briefing contract. Older
  * native clients already render every supplied row; six-row previews belong
@@ -1096,26 +1138,29 @@ export function calendarAgendaCards(input: {
   const zone = validZone(input.ownerTimeZone) ?? validZone(input.request?.timeZone);
   const scope =
     names.length === 1
-      ? (names[0] as string)
+      ? boundedAgendaLead(names[0] ?? '', 180)
       : names.length > 1
         ? `${names.length} calendars`
         : 'the requested calendar';
-  const warning = !complete
-    ? 'Coverage is incomplete; some events or calendars may be missing.'
-    : '';
+  const window = input.request?.timeWindow;
+  const dayAt = (instant: string) =>
+    dayKey({ kind: 'calendar-event', id: '', start: instant }, zone);
+  const windowStartDay = window ? dayAt(window.timeMin) : 'unverified';
+  const endMs = Date.parse(window?.timeMax ?? '');
+  const singleDay =
+    Number.isFinite(endMs) &&
+    endMs > Date.parse(window?.timeMin ?? '') &&
+    dayAt(new Date(endMs - 1).toISOString()) === windowStartDay;
   const groups = new Map<string, ResponseCard[]>();
+  const agendaDays = new Map<ResponseCard, string>();
   for (const event of input.events) {
-    const day = event.windowMembership === 'source-date-only' ? 'unverified' : dayKey(event, zone);
-    groups.set(day, [...(groups.get(day) ?? []), event]);
+    const day = agendaDayKey(event, zone, window, singleDay ? windowStartDay : 'unverified');
+    agendaDays.set(event, day);
+    const group = groups.get(day);
+    if (group) group.push(event);
+    else groups.set(day, [event]);
   }
-  if (!groups.size) {
-    const requestDay = input.request?.timeWindow?.timeMin;
-    const day =
-      requestDay && zone
-        ? dayKey({ kind: 'calendar-event', id: '', start: requestDay }, zone)
-        : 'unverified';
-    groups.set(day, []);
-  }
+  if (!groups.size) groups.set(windowStartDay, []);
   const householdDetailsByEvent = new Map(
     input.events.map((event) => [event, householdItemDetails(event)] as const),
   );
@@ -1125,13 +1170,25 @@ export function calendarAgendaCards(input: {
     input.request?.includeCalendarOverlapSummary !== false,
     asksAboutDriving(input.requestText ?? ''),
     householdDetailsByEvent,
+    agendaDays,
   );
   const readCoverage = coverageDetails(rows);
   const coverageSummary = householdCoverageSummary(rows, complete);
   const freshnessSummary = householdFreshnessSummary(rows);
+  const phoneGap = rows.some(
+    (row) => record(record(row.result).phoneCalendarCoverage).complete === false,
+  );
+  const compactCoverage =
+    complete && !groups.has('unverified') && !coverageSummary.startsWith('Coverage incomplete:')
+      ? 'Coverage complete for the checked sources.'
+      : phoneGap
+        ? 'Coverage is incomplete. On the sharing iPhone, open More → iPhone calendars → Sync now, then ask again.'
+        : groups.has('unverified') && complete
+          ? 'Some event dates could not be verified. Check the source details.'
+          : 'Coverage is incomplete. Check the source details and retry the calendar lookup.';
   return [...groups.entries()]
     .sort(([a], [b]) => a.localeCompare(b))
-    .map(([day, events]) => {
+    .map(([day, events], index) => {
       const groupComplete = complete && day !== 'unverified';
       events.sort(
         (a, b) =>
@@ -1150,23 +1207,30 @@ export function calendarAgendaCards(input: {
           );
         });
       const emptyLead = unresolvedScope
-        ? `Couldn’t resolve ${ownerCalendarToolName(input.request?.calendarScope ?? { name: 'the requested calendar' })} in the checked calendars. Which calendar should I use?`
+        ? `Couldn’t resolve ${boundedAgendaLead(ownerCalendarToolName(input.request?.calendarScope ?? { name: 'the requested calendar' }), 180)} in the checked calendars. Which calendar should I use?`
         : complete
           ? `No events returned from ${scope} for ${dateLabel(day).split(' · ')[0]}.`
           : usable.length
-            ? `No matching events were verified in the checked subset. ${warning}`
-            : `Couldn’t load ${scope}. Please retry the calendar lookup.`;
+            ? 'No matching events were verified in the checked subset.'
+            : `Couldn’t load ${scope}.`;
       const hasPossibleCopies =
         (pairAttention.get(day)?.duplicateCount ?? 0) > 0 ||
         (pairAttention.get(day)?.sourceIdentityDisagreementCount ?? 0) > 0;
-      const lead = events.length
-        ? `${events.length} calendar ${events.length === 1 ? 'entry' : 'entries'} from ${scope}.${hasPossibleCopies ? ' Some listings may be copies; both remain visible.' : ''}${warning ? ` ${warning}` : ''}`
-        : emptyLead;
+      const lead = boundedAgendaLead(
+        events.length
+          ? `${events.length} calendar ${events.length === 1 ? 'entry' : 'entries'} from ${scope}.${hasPossibleCopies ? ' Some listings may be copies; both remain visible.' : ''}`
+          : emptyLead,
+      );
       const items = events.map((event) => {
         const differences = sourceDifferences(event, zone);
         const householdDetails = householdDetailsByEvent.get(event);
         const status = text(event.status).toLowerCase();
+        const startsOn = dayKey(event, zone);
+        const timeLabel = eventTime(event, zone);
         const note = [
+          startsOn < day && validDate(startsOn) && validDate(day)
+            ? `Started ${dateLabel(startsOn).split(' · ')[0]}.`
+            : '',
           ownerRSVPNote(event),
           status === 'cancelled' ? 'Cancelled' : '',
           event.probableMatch === true
@@ -1204,7 +1268,7 @@ export function calendarAgendaCards(input: {
               ? 'Time unavailable'
               : differences?.timeDiffers && event.probableMatch !== true
                 ? 'Time differs by source'
-                : eventTime(event, zone),
+                : timeLabel,
           ...(event.allDay !== true &&
           event.windowMembership !== 'source-date-only' &&
           (!differences?.timeDiffers || event.probableMatch === true) &&
@@ -1405,6 +1469,7 @@ export function calendarAgendaCards(input: {
         date: dateLabel(day, zone),
         ...(zone ? { timeZone: zone } : {}),
         lead,
+        compactCoverage: index === 0 ? compactCoverage : '',
         sections,
         complete: groupComplete,
         householdDay: {
@@ -1457,6 +1522,7 @@ export function calendarAgendaSummary(
         text(card.date),
         displayZone ? `Display time zone: ${displayZone}` : 'Display time zone unavailable.',
         text(card.lead),
+        text(card.compactCoverage),
       ].filter(Boolean);
       const sections = list(card.sections).map(record).filter(Boolean);
       const agendaRows = sections

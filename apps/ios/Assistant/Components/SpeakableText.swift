@@ -123,7 +123,7 @@ enum SpeakableText {
         case let .generated(generated):
             sentence = generatedCardSpeech(generated)
         case let .briefing(briefing):
-            sentence = spoken(briefing.lead)
+            sentence = join([spoken(briefing.lead), spoken(briefing.compactCoverage ?? "")])
         case let .route(route):
             sentence = join(["\(RouteCardView.duration(route.durationSeconds)) to \(spoken(route.destination.label))",
                              RouteCardView.distance(route.distanceMeters)])

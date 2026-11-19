@@ -83,7 +83,13 @@ struct BriefingCardView: View {
     }
 
     private var calendarAgendaBody: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        let coverageSections = card.sections.filter { section in
+            guard card.compactCoverage != nil,
+                  case let .list(kind, title, _, _, _, _, _, _) = section,
+                  kind == "attention" else { return false }
+            return title == "Calendars not checked" || title == "Calendar read coverage"
+        }
+        return VStack(alignment: .leading, spacing: 12) {
             calendarAgendaHeader
             if !card.lead.isEmpty {
                 Text(card.lead)
@@ -91,7 +97,13 @@ struct BriefingCardView: View {
                     .foregroundStyle(AssistantTheme.ink(for: colorScheme))
                     .fixedSize(horizontal: false, vertical: true)
             }
-            ForEach(Array(card.sections.enumerated()), id: \.offset) { _, section in
+            if let coverage = card.compactCoverage, !coverage.isEmpty {
+                Text(coverage)
+                    .font(.footnote)
+                    .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            ForEach(Array(card.sections.filter { !coverageSections.contains($0) }.enumerated()), id: \.offset) { _, section in
                 switch section {
                 case let .agenda(title, complete, omittedCount, items):
                     calendarAgendaSection(title: title, complete: complete, omittedCount: omittedCount, items: items)
@@ -120,6 +132,15 @@ struct BriefingCardView: View {
                     }
                 case let .weather(title, location, temperature, condition, symbol, detail):
                     sectionView(.weather(title: title, location: location, temperature: temperature, condition: condition, symbol: symbol, detail: detail))
+                }
+            }
+            if !coverageSections.isEmpty {
+                CardDisclosure(collapsedLabel: "Calendar coverage details", expandedLabel: "Hide calendar coverage details", standalone: false) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(Array(coverageSections.enumerated()), id: \.offset) { _, section in
+                            sectionView(section)
+                        }
+                    }
                 }
             }
         }
@@ -183,7 +204,7 @@ struct BriefingCardView: View {
                     .font(.caption).foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
                     .fixedSize(horizontal: false, vertical: true)
             }
-            if !complete {
+            if !complete && card.compactCoverage == nil {
                 Text("Some calendars could not be read, so this may be incomplete.")
                     .font(.caption).foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
                     .fixedSize(horizontal: false, vertical: true)
