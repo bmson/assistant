@@ -1,8 +1,18 @@
 import { randomUUID } from 'node:crypto';
+import { notificationDeliveryKey, proactiveSmsQuotaName } from '@assistant/persistence';
 import { eq, inArray } from 'drizzle-orm';
 import { expect, it } from 'vitest';
 import { createDb } from './client.js';
-import { agents, channelBindings, conversations, costEvents, tasks, toolCalls } from './schema.js';
+import {
+  agents,
+  channelBindings,
+  conversations,
+  costEvents,
+  maintenanceCursors,
+  notificationPrefs,
+  tasks,
+  toolCalls,
+} from './schema.js';
 import { createPostgresSmsChannelRepository } from './sms-channel-repository.js';
 import { assertAllocatedTestTarget } from './test-target.js';
 
@@ -64,6 +74,54 @@ it('converges concurrent first SMS peers on one owner conversation and a return 
     } finally {
       await db.$client.end();
     }
+  }
+});
+
+it('serializes proactive SMS quota across workers, retries and owner-local midnight', async () => {
+  const db = createDb(allocatedTestDatabaseUrl());
+  const ownerId = randomUUID();
+  const beforeMidnight = new Date('2026-11-18T07:59:00Z');
+  const afterMidnight = new Date('2026-11-18T08:00:00Z');
+  const key = (id: string) => notificationDeliveryKey('sms-attempt', id);
+  try {
+    await db.insert(agents).values({
+      id: ownerId,
+      name: 'SMS quota',
+      email: `${ownerId}@example.test`,
+      workspacePrefix: `sms-quota-${ownerId}`,
+      timezone: 'America/Los_Angeles',
+    });
+    const reserve = (id: string, now = beforeMidnight) =>
+      createPostgresSmsChannelRepository(db).reserveProactiveAttempt(ownerId, key(id), now);
+    expect(await reserve('same-operation')).toBe('reserved');
+    const outcomes = await Promise.all([
+      reserve('same-operation'),
+      reserve('two'),
+      reserve('three'),
+      reserve('four'),
+      reserve('five'),
+    ]);
+    expect(outcomes.sort()).toEqual([
+      'proactive-sms-already-reserved',
+      'proactive-sms-daily-cap',
+      'proactive-sms-daily-cap',
+      'reserved',
+      'reserved',
+    ]);
+    expect(await reserve('next-day', afterMidnight)).toBe('reserved');
+    expect(await reserve('late-old-worker', beforeMidnight)).toBe('proactive-sms-daily-cap');
+    await db.insert(notificationPrefs).values({
+      agentId: ownerId,
+      quietStartMin: 0,
+      quietEndMin: 7 * 60,
+    });
+    expect(await reserve('quiet-after-midnight', afterMidnight)).toBe('quiet-hours');
+  } finally {
+    await db
+      .delete(maintenanceCursors)
+      .where(eq(maintenanceCursors.name, proactiveSmsQuotaName(ownerId)));
+    await db.delete(agents).where(eq(agents.id, ownerId));
+    await db.$client.end();
   }
 });
 

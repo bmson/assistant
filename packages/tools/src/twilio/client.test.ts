@@ -136,6 +136,22 @@ describe('TwilioClient resilience', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it('allows the quota-bound outbox to own every definitive retry', async () => {
+    const fetchMock = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(
+        Response.json({ code: 20429, message: 'too many requests' }, { status: 429 }),
+      );
+    const client = new TwilioClient('AC123', AUTH_TOKEN, '+15550000000', {
+      fetch: fetchMock,
+      maxRetries: 3,
+    });
+    await expect(
+      client.send('+15551112222', 'hello', undefined, { retryRejected: false }),
+    ).rejects.toThrow('twilio send failed: 20429');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps explicit client rejections definitive', async () => {
     const fetchMock = vi
       .fn<typeof globalThis.fetch>()

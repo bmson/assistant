@@ -9,6 +9,7 @@ import type {
   ExecutionPersistence,
   FinalChannelDeliveryResult,
   NotificationDeliveryResult,
+  OwnerNoticePurpose,
 } from '@assistant/persistence';
 import type { ToolDispatcher } from '@assistant/tools/dispatcher';
 import type { ToolRegistry } from '@assistant/tools/registry';
@@ -63,6 +64,7 @@ export interface OwnerNotifier {
     text: string;
     /** Stable logical notice identity, reused when the source event is replayed. */
     deliveryKey?: string;
+    purpose?: OwnerNoticePurpose;
     taskId?: string;
     /**
      * The dashboard thread that already owns this notice, when one exists.
