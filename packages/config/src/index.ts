@@ -282,6 +282,7 @@ const ConfigSchema = z.object({
     .refine((days) => days === 0 || days >= 30, {
       message: 'HISTORY_RETENTION_DAYS must be 0 (keep forever) or at least 30',
     }),
+  COST_UNKNOWN_MODEL_SETTLEMENT_TTL_MINUTES: z.coerce.number().int().min(1).max(1440).default(30),
   /**
    * Same for the cost ledger. The floor is higher because budget hard caps
    * count a rolling month of cost_events — pruning inside that window would
