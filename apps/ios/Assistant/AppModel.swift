@@ -276,8 +276,10 @@ final class AppModel {
     private(set) var bootstrap: BootstrapResponse?
     let phoneCalendarSharing: PhoneCalendarSharingCoordinator
     let edits = OptimisticEditStore()
+    let nativeMemoryCorrectionEnabled: Bool
+    let memoryCorrections: NativeMemoryCorrectionConsumer
     @ObservationIgnored private var memoryErasureToken: UUID? {
-        didSet { edits.retryBlockedResources = memoryErasureToken == nil ? [] : [.memory] }
+        didSet { updateMemoryCorrectionRetryInterlock() }
     }
     private(set) var overview: OverviewResponse? {
         get { edits.visible.overview }
@@ -552,6 +554,7 @@ final class AppModel {
         scheduleLocalNotification: LocalNotificationScheduler? = nil,
         systemSurfaces: (any AppSystemSurfaces)? = nil,
         phoneCalendarSharing: PhoneCalendarSharingCoordinator? = nil,
+        memoryCorrections: NativeMemoryCorrectionConsumer? = nil,
         captureCurrentPlace: @escaping @MainActor () async -> (location: CLLocation, label: String)? = {
             await LocationManager.shared.captureCurrentPlace()
         },
@@ -560,6 +563,10 @@ final class AppModel {
         }
     ) {
         self.defaults = defaults
+        // Production uses the existing editor until the server can attribute a saved edit.
+        // An explicitly supplied consumer enables the isolated recovery tests.
+        self.nativeMemoryCorrectionEnabled = memoryCorrections != nil
+        self.memoryCorrections = memoryCorrections ?? NativeMemoryCorrectionConsumer(storage: nil)
         self.systemSurfaces = systemSurfaces ?? ProductionAppSystemSurfaces()
         self.phoneCalendarSharing = phoneCalendarSharing ?? PhoneCalendarSharingCoordinator()
         self.cardFormMobileSessionFactory = cardFormMobileSessionFactory
@@ -584,6 +591,7 @@ final class AppModel {
         } else if let configuration = try? Self.configuration(urlString: serverURL, token: KeychainStore.readToken()) {
             client = APIClient(configuration: configuration)
         }
+        self.memoryCorrections.onInterlockChanged = { [weak self] in self?.updateMemoryCorrectionRetryInterlock() }
         // RootView's `.task` starts the automatic connect after the first
         // render. Without seeding this, that render fell through to the
         // Connection form, whose appearance latched `hasPresentedConnection`
@@ -1884,6 +1892,7 @@ final class AppModel {
     }
 
     private func resetConnectedState(preserveCardFormRecoveryFence: Bool = false) {
+        memoryCorrections.retire()
         phoneCalendarSyncRevision += 1
         phoneCalendarSyncTask?.cancel()
         phoneCalendarSyncTask = nil
@@ -3742,6 +3751,43 @@ final class AppModel {
         }
     }
 
+    private func updateMemoryCorrectionRetryInterlock() {
+        edits.retryBlockedResources = Set(memoryCorrections.blockedMemoryIDs.map { MobileEditResource.memoryTarget($0) })
+            .union(memoryErasureToken == nil ? [] : [.memory])
+    }
+
+    @discardableResult
+    private func bindMemoryCorrectionConsumer() -> Bool {
+        guard let client, let owner = bootstrap?.identity.id, !owner.isEmpty, memoryErasureToken == nil else { return false }
+        let version = connectionVersion
+        let server = client.configuration.baseURL.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        memoryCorrections.bind(scope: .init(ownerID: owner, serverIdentity: server), transport: client, bindingID: version,
+            isCurrent: { [weak self] in
+                guard let self else { return false }
+                return self.connectionIdentityIsCurrent(client, version: version) && self.bootstrap?.identity.id == owner && self.memoryErasureToken == nil
+            }, hasGenericWrite: { [weak self] id in self?.edits.hasUnresolvedMemoryWrite(memoryID: id) ?? true })
+        return true
+    }
+
+    func openNativeMemoryCorrection(memoryID: String) async {
+        guard nativeMemoryCorrectionEnabled else { return }
+        guard bindMemoryCorrectionConsumer() else {
+            memoryCorrections.retire()
+            await memoryCorrections.open(memoryID: memoryID)
+            return
+        }
+        await memoryCorrections.open(memoryID: memoryID)
+    }
+
+    private func nativeCorrectionAllowsLegacyWrite(memoryID: String) async -> Bool {
+        // Preserve legacy behavior before a verified bootstrap; no new binary/server fence.
+        guard nativeMemoryCorrectionEnabled, bootstrap != nil else { return true }
+        guard bindMemoryCorrectionConsumer() else { return false }
+        let permitted = await memoryCorrections.permitsLegacyWrite(memoryID: memoryID)
+        if !permitted { errorMessage = "Check the earlier correction for this saved note before making another change." }
+        return permitted
+    }
+
     func createMemory(_ memory: MemoryMutation) async -> Bool {
         let id = "local:" + UUID().uuidString
         let fact = WorkspaceMemoryFact(id: id, content: memory.content, kind: "fact", domain: memory.domain,
@@ -3752,9 +3798,14 @@ final class AppModel {
         }) { try await $0.createMemory(memory) }
     }
 
+    private func memoryEditResources(for id: String) -> Set<MobileEditResource> {
+        nativeMemoryCorrectionEnabled ? memoryEditResources.union([.memoryTarget(id)]) : memoryEditResources
+    }
+
     func correctMemory(id: String, content: String) async -> Bool {
         guard !id.hasPrefix("local:") else { return false }
-        return enqueueEdit("Memory correction", draft: content, resources: memoryEditResources, patch: { state in
+        guard await nativeCorrectionAllowsLegacyWrite(memoryID: id) else { return false }
+        return enqueueEdit("Memory correction", draft: content, resources: memoryEditResources(for: id), patch: { state in
             if let index = state.workspace?.memory.facts.firstIndex(where: { $0.id == id }) {
                 state.workspace?.memory.facts[index].content = content
             }
@@ -3770,7 +3821,8 @@ final class AppModel {
 
     func updateMemory(id: String, action: String, prominence: String? = nil, refreshAfterSave: Bool = true) async -> Bool {
         guard !id.hasPrefix("local:") else { return false }
-        return enqueueEdit("Memory changes", draft: action + " " + (prominence ?? ""), resources: memoryEditResources, patch: { state in
+        guard await nativeCorrectionAllowsLegacyWrite(memoryID: id) else { return false }
+        return enqueueEdit("Memory changes", draft: action + " " + (prominence ?? ""), resources: memoryEditResources(for: id), patch: { state in
             switch action {
             case "forget", "reject", "archive":
                 state.workspace?.memory.facts.removeAll { $0.id == id }

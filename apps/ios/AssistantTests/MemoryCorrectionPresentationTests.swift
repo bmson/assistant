@@ -88,6 +88,26 @@ final class MemoryCorrectionPresentationTests: XCTestCase {
         XCTAssertEqual(state.draft, snapshot().content)
     }
 
+    func testEqualVersionPendingCheckCompletesWithoutAdmittingTerminalOrStaleResponses() throws {
+        var state = MemoryCorrectionPresentation(snapshot: snapshot())
+        let operation = try authorize(&state)
+        XCTAssertTrue(state.receiveOutcome(presentationID: state.presentationID, operation: operation,
+                                          version: 1, disposition: .uncertain))
+        XCTAssertEqual(state.checkResult(), .checkResult(operation))
+        XCTAssertFalse(state.receiveOutcome(presentationID: state.presentationID, operation: operation,
+                                           version: 1, disposition: .saved(readback: nil)))
+        XCTAssertFalse(state.receiveOutcome(presentationID: state.presentationID, operation: operation,
+                                           version: 0, disposition: .pending))
+        XCTAssertFalse(state.receiveOutcome(presentationID: UUID(), operation: operation,
+                                           version: 1, disposition: .pending))
+        XCTAssertTrue(state.isChecking)
+        XCTAssertTrue(state.receiveOutcome(presentationID: state.presentationID, operation: operation,
+                                          version: 1, disposition: .pending))
+        XCTAssertEqual(state.phase, .pending)
+        XCTAssertEqual(state.outcomeVersion, 1)
+        XCTAssertTrue(state.canCheckResult)
+    }
+
     func testReadRefreshDoesNotResolveUnknownOrSilentlyRebaseDraft() throws {
         var state = MemoryCorrectionPresentation(snapshot: snapshot())
         state.editDraft("My kept correction")
@@ -175,6 +195,41 @@ final class MemoryCorrectionPresentationTests: XCTestCase {
         let boundReadRequest = try refreshRequest(&state)
         XCTAssertTrue(state.receiveConfirmedReadback(for: boundReadRequest, snapshot: saved))
         XCTAssertEqual(state.statusText, "Saved.")
+    }
+
+    func testUnchangedNoWriteKeepsOriginalDraftAndNeverAcceptsReadbackAttribution() throws {
+        var state = MemoryCorrectionPresentation(snapshot: snapshot())
+        state.editDraft("My unchanged draft stays visible")
+        let operation = try authorize(&state)
+        XCTAssertTrue(state.receiveOutcome(presentationID: state.presentationID, operation: operation,
+                                           version: 1, disposition: .unchangedNoWrite))
+
+        XCTAssertEqual(state.phase, .unchangedNoWrite)
+        XCTAssertEqual(state.openedSnapshot, snapshot())
+        XCTAssertEqual(state.reviewedSnapshot, snapshot())
+        XCTAssertEqual(state.draft, "My unchanged draft stays visible")
+        XCTAssertNil(state.currentSnapshot)
+        XCTAssertNil(state.resultReadback)
+        XCTAssertFalse(state.canRequestAuthorization)
+        XCTAssertTrue(state.canRefreshSavedNote)
+        XCTAssertTrue(state.statusText?.contains("No correction was applied") == true)
+
+        let changed = snapshot(revision: "r2", content: "Changed after the no-write receipt")
+        let readRequest = try refreshRequest(&state)
+        XCTAssertTrue(state.receiveCurrentSnapshot(for: readRequest, snapshot: changed))
+        XCTAssertEqual(state.phase, .unchangedNoWrite)
+        XCTAssertEqual(state.currentSnapshot, changed)
+        XCTAssertNil(state.resultReadback)
+        XCTAssertTrue(state.canReviewCurrent)
+        let noWriteReadback = try refreshRequest(&state)
+        XCTAssertFalse(state.receiveConfirmedReadback(for: noWriteReadback, snapshot: changed))
+        XCTAssertEqual(state.phase, .unchangedNoWrite)
+
+        state.reviewCurrentKeepingDraft()
+        XCTAssertEqual(state.phase, .editing)
+        XCTAssertEqual(state.reviewedSnapshot, changed)
+        XCTAssertEqual(state.draft, "My unchanged draft stays visible")
+        XCTAssertNil(state.operation)
     }
 
     func testLateReadFromAAfterNewOperationBCannotReplaceCurrentText() throws {
