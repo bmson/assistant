@@ -3,6 +3,7 @@ import type {
   Basic5PresentationRequestClassCounts,
   Basic5PresentationRequestDiagnostics,
 } from './basic5-browser-acceptance-support.js';
+import { BASIC5_AUTHENTICATED_NAVIGATION_COUNT } from './basic5-browser-acceptance-support.js';
 import type {
   Basic5ReplyObservation,
   Basic5SaveObservationDiagnostic,
@@ -230,9 +231,9 @@ function safePresentationRequestDiagnostics(
     ) ||
     !Number.isSafeInteger(value.bucketMostRecentNavigation) ||
     Number(value.bucketMostRecentNavigation) < 0 ||
-    Number(value.bucketMostRecentNavigation) > 6 ||
+    Number(value.bucketMostRecentNavigation) > BASIC5_AUTHENTICATED_NAVIGATION_COUNT ||
     !Array.isArray(value.byNavigation) ||
-    value.byNavigation.length !== 7 ||
+    value.byNavigation.length !== BASIC5_AUTHENTICATED_NAVIGATION_COUNT + 1 ||
     !count(presentationRequests)
   )
     return null;
@@ -418,7 +419,7 @@ function safeCheckpoint(value: unknown): Basic5CiFixtureCheckpoint | null {
     typeof value.stage !== 'string' ||
     !CHECKPOINT_STAGES.includes(value.stage) ||
     !count(value.authenticatedNavigationCount) ||
-    value.authenticatedNavigationCount > 6 ||
+    value.authenticatedNavigationCount > BASIC5_AUTHENTICATED_NAVIGATION_COUNT ||
     !['applyCount', 'durableReadbackCount', 'freshPageReadbackCount'].every(
       (key) => count(value[key]) && Number(value[key]) <= 4,
     )

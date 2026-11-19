@@ -47,6 +47,38 @@ interface UnknownAttemptSummary {
   estimateComplete: boolean;
 }
 
+interface ModelCostEvidenceGroup {
+  provider: string | null;
+  model: string | null;
+  basis: CostBasis;
+  micros: number;
+  count: number;
+}
+
+function evidenceDimension(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : null;
+}
+
+function compareEvidenceDimension(left: string | null, right: string | null): number {
+  const a = left ?? '';
+  const b = right ?? '';
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function modelEvidenceRows(groups: Map<string, ModelCostEvidenceGroup>) {
+  return [...groups.values()]
+    .sort((a, b) => {
+      if (a.micros !== b.micros) return a.micros > b.micros ? -1 : 1;
+      const providerOrder = compareEvidenceDimension(a.provider, b.provider);
+      if (providerOrder !== 0) return providerOrder;
+      const modelOrder = compareEvidenceDimension(a.model, b.model);
+      return modelOrder || (a.basis < b.basis ? -1 : a.basis > b.basis ? 1 : 0);
+    })
+    .map(({ micros, ...row }) => ({ ...row, usd: microsToUsd(micros).toFixed(6) }));
+}
+
 export function summarizeUnknownAttemptEstimates(
   estimates: readonly unknown[],
   truncated: boolean,
@@ -143,8 +175,10 @@ export async function getFirestoreMobileCosts(store: InstallationStore, agentId:
   if (!owner) throw new Error('Cost dashboard owner is missing');
   const fence = await readPrivacyErasureFence(store, owner.id);
   const since = monthStart(store.now());
+  const until = new Date(Date.UTC(since.getUTCFullYear(), since.getUTCMonth() + 1, 1));
   const bySource = new Map<string, { micros: number; count: number }>();
   const byModel = new Map<string, { micros: number; count: number }>();
+  const byModelEvidence = new Map<string, ModelCostEvidenceGroup>();
   const byTask = new Map<string, number>();
   const byEvidence = new Map<CostBasis, { micros: number; count: number }>();
   const totals = await new FirestoreCostRepository(store).totals();
@@ -187,6 +221,37 @@ export async function getFirestoreMobileCosts(store: InstallationStore, agentId:
         aggregate.micros = addMicros(aggregate.micros, usdToMicros(Number(call.costUsd)));
         aggregate.count += 1;
         byModel.set(call.model, aggregate);
+      },
+    ),
+    scan<CostEvent>(
+      store
+        .collection('costEvents')
+        .where('createdAt', '>=', since)
+        .where('createdAt', '<', until)
+        .orderBy('createdAt')
+        .select('createdAt', 'usd', 'source', 'evidence'),
+      (event) => {
+        if (
+          !(event.createdAt instanceof Date) ||
+          event.createdAt < since ||
+          event.createdAt >= until
+        )
+          throw new Error('Invalid model evidence timestamp');
+        if (event.source !== 'model') return;
+        const basis = costBasis(event.evidence);
+        const provider = evidenceDimension(event.evidence?.provider);
+        const model = evidenceDimension(event.evidence?.model);
+        const key = JSON.stringify([provider, model, basis]);
+        const modelEvidence = byModelEvidence.get(key) ?? {
+          provider,
+          model,
+          basis,
+          micros: 0,
+          count: 0,
+        };
+        modelEvidence.micros = addMicros(modelEvidence.micros, storedLedgerUsdToMicros(event.usd));
+        modelEvidence.count += 1;
+        byModelEvidence.set(key, modelEvidence);
       },
     ),
   ]);
@@ -253,6 +318,7 @@ export async function getFirestoreMobileCosts(store: InstallationStore, agentId:
     totals,
     bySource: ranked(bySource).map(({ key, ...value }) => ({ source: key, ...value })),
     byModel: ranked(byModel).map(({ key, ...value }) => ({ model: key, ...value })),
+    byModelEvidence: modelEvidenceRows(byModelEvidence),
     topTasks,
     held,
     dispatchingAttempts,

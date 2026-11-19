@@ -187,6 +187,57 @@ function agentReady() {
 function resumed() {
   return step(step(step(agentReady(), 'createR'), 'attachR'), 'promoteR');
 }
+describe('optional Calendar callback release context', () => {
+  it('preserves an existing callback and credential references when no override is supplied', () => {
+    const state = fixture();
+    const preserved = [
+      {
+        name: 'GOOGLE_CALENDAR_OAUTH_CALLBACK_URL',
+        value: 'https://existing.example.com/api/oauth/google-calendar/callback',
+      },
+      {
+        name: 'AUTH_GOOGLE_SECRET',
+        valueSource: { secretKeyRef: { secret: 'existing-secret', version: 'latest' } },
+      },
+      {
+        name: 'BOT_GOOGLE_REFRESH_TOKEN',
+        valueSource: { secretKeyRef: { secret: 'legacy-bot', version: '1' } },
+      },
+    ];
+    const containers = state.snapshot.template.containers as { env: unknown[] }[];
+    containers[0]?.env.push(...preserved);
+    for (const role of ['P', 'R'] as const) {
+      const template = creationTemplate(state.snapshot.template, state.context, role);
+      const env = (template.containers as { env: unknown[] }[])[0]?.env;
+      for (const entry of preserved) expect(env).toContainEqual(entry);
+    }
+  });
+  it('copies the one optional callback into P and R while retaining private configuration', () => {
+    const state = fixture();
+    const callback = 'https://bot.bmson.com/api/oauth/google-calendar/callback';
+    state.context.releaseEnv.GOOGLE_CALENDAR_OAUTH_CALLBACK_URL = callback;
+    for (const role of ['P', 'R'] as const) {
+      const template = creationTemplate(state.snapshot.template, state.context, role);
+      const env = (template.containers as { env: unknown[] }[])[0]?.env;
+      expect(env).toContainEqual({ name: 'GOOGLE_CALENDAR_OAUTH_CALLBACK_URL', value: callback });
+      expect(env).toContainEqual({
+        name: 'PRIVATE',
+        valueSource: { secretKeyRef: { secret, version: '1' } },
+      });
+    }
+    expect(JSON.stringify(state.snapshot.template)).not.toContain(callback);
+  });
+  it.each([
+    '',
+    'http://bot.bmson.com/api/oauth/google-calendar/callback',
+    'https://bot.bmson.com/api/oauth/google-calendar/callback,PRIVATE=x',
+  ])('rejects invalid optional callback context %s', (value) => {
+    const state = fixture();
+    state.context.releaseEnv.GOOGLE_CALENDAR_OAUTH_CALLBACK_URL = value;
+    expect(() => creationTemplate(state.snapshot.template, state.context, 'P')).toThrow();
+  });
+});
+
 describe('source-only lifecycle model', () => {
   it('completes ordered exact creation/attachment/promotion/retirement/resume/cleanup', () => {
     const s = step(resumed(), 'closeP');

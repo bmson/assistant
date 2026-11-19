@@ -214,11 +214,30 @@ describe('bounded connections list navigation', () => {
   });
   it('keeps empty and current navigation states honest', () => {
     const snapshot = createProductVisualData(true).map;
-    expect(
-      renderToStaticMarkup(
-        <ConnectionsList snapshot={snapshot} contextHref="/profile/knowledge?view=connections" />,
-      ),
-    ).toContain('No matching connections in this loaded view');
+    const emptyHtml = renderToStaticMarkup(
+      <ConnectionsList snapshot={snapshot} contextHref="/profile/knowledge?view=connections" />,
+    );
+    expect(emptyHtml).toContain('No matching connections in this loaded view.');
+    expect(emptyHtml).toContain(
+      'Open a person in People to review their family relationships and see available changes.',
+    );
+    expect(emptyHtml).toContain('href="/people"');
+    expect(emptyHtml).toContain('>Open People</a>');
+    expect(emptyHtml).not.toContain('/people?');
+
+    const populatedHtml = renderToStaticMarkup(
+      <ConnectionsList
+        snapshot={createProductVisualData(false).map}
+        contextHref="/profile/knowledge?view=connections"
+      />,
+    );
+    expect(populatedHtml).toContain('Browse Alex');
+    expect(populatedHtml).not.toContain('No matching connections in this loaded view.');
+    expect(populatedHtml).not.toContain(
+      'Open a person in People to review their family relationships',
+    );
+    expect(populatedHtml).not.toContain('href="/people"');
+
     const nav = renderToStaticMarkup(<MemoryNavigation current="connections" />);
     expect(nav.match(/aria-current="page"/g)).toHaveLength(1);
     expect(nav).toContain('Saved notes');

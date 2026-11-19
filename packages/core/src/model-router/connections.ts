@@ -1,5 +1,5 @@
 import { type Config, parseFirestoreEmbeddingSpace } from '@assistant/config';
-import type { Records } from '@assistant/persistence';
+import { estimatedCostConnectionId, type Records } from '@assistant/persistence';
 
 import { decryptStoredCredential } from '../mcp-secrets.js';
 import {
@@ -46,11 +46,7 @@ export { GATEWAY_CONNECTION_ID } from '@assistant/persistence';
  * gateways use the owner-chosen slug embedded in the model ID.
  */
 export function connectionIdForModel(modelId: string): string {
-  if (/^vertex[:/]/i.test(modelId)) return 'vertex';
-  if (modelId.startsWith('openai:')) return 'openai';
-  const gateway = /^gw:([^:]+):/.exec(modelId);
-  if (gateway?.[1]) return gateway[1];
-  return 'openrouter';
+  return estimatedCostConnectionId(modelId);
 }
 
 /** Which router a request goes through. */

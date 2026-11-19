@@ -131,6 +131,42 @@ describe('bounded WEB-17 preview diagnostics', () => {
     expect(JSON.stringify(result)).not.toContain('rawUrl');
   });
 
+  it('accepts only the six fixed PostgreSQL agent-resolution call phases', () => {
+    const phases = [
+      'owner_assertion_call_started',
+      'owner_assertion_call_returned',
+      'owner_assertion_call_threw',
+      'agent_row_lookup_call_started',
+      'agent_row_lookup_call_returned',
+      'agent_row_lookup_call_threw',
+    ];
+    const nonce = 'Abcdef0123456789_-xyz0';
+    const input = [
+      ...phases.map((phase) =>
+        JSON.stringify({
+          kind: 'WEB17_CHAT_ALL_STAGE',
+          nonce,
+          prefetch: false,
+          phase,
+          elapsed: 'under_1s',
+        }),
+      ),
+      JSON.stringify({
+        kind: 'WEB17_CHAT_ALL_STAGE',
+        nonce,
+        prefetch: false,
+        phase: 'owner_assertion_sql_failed',
+        elapsed: 'under_1s',
+      }),
+    ]
+      .map((event) => `[WEB17_CHAT_ALL_STAGE] ${event}`)
+      .join('\n');
+
+    const result = projectWeb17PreviewDiagnostics(input);
+    expect(result.chatAllStageEvents.map((event) => event.phase)).toEqual(phases);
+    expect(JSON.stringify(result)).not.toContain('owner_assertion_sql_failed');
+  });
+
   it('caps server stage markers while retaining their safe correlation fields', () => {
     const events = Array.from(
       { length: WEB17_PREVIEW_CHAT_ALL_STAGE_EVENT_CAP + 3 },

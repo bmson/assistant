@@ -16,10 +16,11 @@
  * change. During a stream that leaves exactly one row re-rendering per token.
  */
 
+import type { EstimatedCostQuote } from '@assistant/persistence';
 import type { CardForm, CardFormValues } from '@assistant/persistence/card-form';
 import type { UIMessage } from 'ai';
 import Link from 'next/link';
-import { memo } from 'react';
+import { memo, useMemo } from 'react';
 import { refreshSavedCardInline } from '@/app/cards/actions';
 import { chipsOf } from '@/lib/chat-cues';
 import {
@@ -39,8 +40,14 @@ import { ActionChips } from './action-chips';
 import { ApprovalGroup } from './approval-group';
 import { ApprovalSummaryCard } from './approval-summary';
 import type { CardFormDraft, CardFormIdentity } from './card-form-operations';
+import {
+  estimatedCostQuoteKey,
+  isCostQuotePayload,
+  latestEstimatedCostQuotes,
+} from './estimated-cost-decision';
 import type { InlineApprovalPart } from './inline-approval';
 import { InlineBudgetRequest, type InlineBudgetRequestPart } from './inline-budget-request';
+import { InlineEstimatedCostRequest } from './inline-estimated-cost-request';
 import { type InlineSuggestionPart, SuggestionCard } from './inline-suggestion';
 import { MessageMarkdown } from './markdown';
 import {
@@ -84,6 +91,8 @@ interface ChatMessageRowProps {
   onRunForReal: (text: string) => void;
   conversationId?: string;
   formSessionScope?: string;
+  visibleEstimatedCostQuoteKeys?: string;
+  costTrackingRefreshKey?: string;
   formDraft?: CardFormDraft | null;
   formError?: string | null;
   onChangeForm?: (identity: CardFormIdentity, form: CardForm, values: CardFormValues) => void;
@@ -107,6 +116,8 @@ const ChatMessageRow = memo(function ChatMessageRow({
   onRunForReal,
   conversationId,
   formSessionScope,
+  visibleEstimatedCostQuoteKeys,
+  costTrackingRefreshKey,
   formDraft,
   formError,
   onChangeForm,
@@ -115,7 +126,11 @@ const ChatMessageRow = memo(function ChatMessageRow({
   onDiscardForm,
 }: ChatMessageRowProps) {
   const parts = message.parts as Array<
-    UIMessage['parts'][number] | InlineApprovalPart | InlineBudgetRequestPart | InlineSuggestionPart
+    | UIMessage['parts'][number]
+    | InlineApprovalPart
+    | InlineBudgetRequestPart
+    | InlineSuggestionPart
+    | EstimatedCostQuote
   >;
   const approvalSummary = approvalSummaryOf(parts);
   const approvalParts = parts.filter(
@@ -124,6 +139,15 @@ const ChatMessageRow = memo(function ChatMessageRow({
   const budgetParts = parts.filter(
     (part): part is InlineBudgetRequestPart => part.type === 'budget-request',
   );
+  const visibleQuotes =
+    visibleEstimatedCostQuoteKeys === undefined
+      ? null
+      : new Set(visibleEstimatedCostQuoteKeys.split('|'));
+  const estimatedCostParts = parts
+    .filter(isCostQuotePayload)
+    .filter((part) => visibleQuotes === null || visibleQuotes.has(estimatedCostQuoteKey(part)));
+  if (estimatedCostParts.length === 0 && parts.length > 0 && parts.every(isCostQuotePayload))
+    return null;
   const suggestionParts = parts.filter(
     (part): part is InlineSuggestionPart =>
       part.type === 'suggestion' &&
@@ -148,7 +172,7 @@ const ChatMessageRow = memo(function ChatMessageRow({
   const visibleTextParts =
     approvalSummary !== null
       ? []
-      : approvalParts.length > 0 || budgetParts.length > 0
+      : approvalParts.length > 0 || budgetParts.length > 0 || estimatedCostParts.length > 0
         ? textParts.filter((part) => !isDecisionProseNotice(part.text))
         : textParts;
   // Whitespace-only text parts are the residue of a [break]
@@ -340,6 +364,14 @@ const ChatMessageRow = memo(function ChatMessageRow({
       {budgetParts.map((part) => (
         <InlineBudgetRequest key={part.taskId} part={part} />
       ))}
+      {estimatedCostParts.map((part) => (
+        <InlineEstimatedCostRequest
+          key={part.operationId}
+          part={part}
+          formSessionScope={formSessionScope}
+          trackingRefreshKey={costTrackingRefreshKey}
+        />
+      ))}
       <SuggestionCard parts={suggestionParts} timeZone={agentTimezone} />
       {approvalSummary ? <ApprovalSummaryCard summary={approvalSummary} /> : null}
       {renderCards ? (
@@ -427,6 +459,7 @@ export const ChatLog = memo(function ChatLog({
   onCarryForm,
   onDiscardForm,
 }: ChatLogProps) {
+  const currentCostQuotes = useMemo(() => latestEstimatedCostQuotes(log), [log]);
   // Carried forward as the list is walked rather than re-scanned backwards from
   // each row, which turned a long thread into quadratic work.
   let lastUserText: string | undefined;
@@ -453,6 +486,14 @@ export const ChatLog = memo(function ChatLog({
             onRunForReal={onRunForReal}
             conversationId={conversationId}
             formSessionScope={formSessionScope}
+            costTrackingRefreshKey={`${log.at(-1)?.id ?? ''}:${busy ? 'working' : 'settled'}`}
+            visibleEstimatedCostQuoteKeys={(message.parts as readonly unknown[])
+              .filter(isCostQuotePayload)
+              .filter(
+                (part) => currentCostQuotes.get(part.operationId) === estimatedCostQuoteKey(part),
+              )
+              .map(estimatedCostQuoteKey)
+              .join('|')}
             formDraft={formDraft}
             formError={formError}
             onChangeForm={onChangeForm}

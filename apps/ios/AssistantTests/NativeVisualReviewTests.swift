@@ -557,16 +557,59 @@ final class NativeVisualReviewTests: XCTestCase {
             let transcript = try XCTUnwrap(descendants(window).compactMap { $0 as? UIScrollView }
                 .filter { !($0 is UITextView) }.max { $0.bounds.height < $1.bounds.height })
             let viewport = transcript.frame
-            let top = -transcript.adjustedContentInset.top
-            var bottom = max(top, transcript.contentSize.height - transcript.bounds.height
-                + transcript.adjustedContentInset.bottom)
-            for _ in 0..<4 where abs(transcript.contentOffset.y - bottom) > 1 {
-                transcript.setContentOffset(CGPoint(x: transcript.contentOffset.x, y: bottom), animated: false)
-                try await Task.sleep(for: .milliseconds(100))
-                window.layoutIfNeeded()
-                bottom = max(top, transcript.contentSize.height - transcript.bounds.height
-                    + transcript.adjustedContentInset.bottom)
+            // A UIKit offset request can race SwiftUI's deferred initial bottom
+            // positioning or lazy-row layout. Require actual stable geometry,
+            // not a fixed delay or a test-only follow/Jump state override.
+            func settleTranscript(atNewest: Bool) async throws -> Bool {
+                let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+                var previous: [CGFloat]?
+                var stableSamples = 0
+                var offsetRequests = 0
+                while ContinuousClock.now < deadline {
+                    window.layoutIfNeeded()
+                    let minimum = -transcript.adjustedContentInset.top
+                    let maximum = max(minimum, transcript.contentSize.height - transcript.bounds.height
+                        + transcript.adjustedContentInset.bottom)
+                    let target = atNewest ? maximum : minimum
+                    if abs(transcript.contentOffset.y - target) > 1 {
+                        transcript.setContentOffset(CGPoint(x: transcript.contentOffset.x, y: target), animated: false)
+                        offsetRequests += 1
+                        stableSamples = 0
+                        previous = nil
+                    }
+                    // Yield to the main run loop so queued SwiftUI positioning
+                    // and geometry observers can compete before we sample again.
+                    try await Task.sleep(for: .milliseconds(16))
+                    window.layoutIfNeeded()
+                    let currentMinimum = -transcript.adjustedContentInset.top
+                    let currentMaximum = max(currentMinimum, transcript.contentSize.height - transcript.bounds.height
+                        + transcript.adjustedContentInset.bottom)
+                    let currentTarget = atNewest ? currentMaximum : currentMinimum
+                    let presentedOffset = transcript.layer.presentation()?.bounds.minY ?? transcript.bounds.minY
+                    let geometry = [transcript.contentOffset.y, presentedOffset, transcript.contentSize.height,
+                        transcript.bounds.height, transcript.frame.minY, transcript.frame.height,
+                        currentMinimum, currentMaximum]
+                    let atTarget = abs(transcript.contentOffset.y - currentTarget) <= 1
+                        && abs(presentedOffset - currentTarget) <= 1
+                    let idle = !transcript.isTracking && !transcript.isDragging && !transcript.isDecelerating
+                    let unchanged = previous.map { prior in
+                        zip(prior, geometry).allSatisfy { abs($0.0 - $0.1) <= 0.5 }
+                    } ?? false
+                    stableSamples = atTarget && idle && unchanged ? stableSamples + 1 : 0
+                    previous = geometry
+                    // No offset writes occur during these consecutive samples.
+                    if stableSamples >= 4 {
+                        print("FULLHEIGHT_SCROLL_SETTLED variant=\(variant) newest=\(atNewest) offset=\(transcript.contentOffset.y) requests=\(offsetRequests) stableSamples=\(stableSamples)")
+                        return true
+                    }
+                }
+                print("FULLHEIGHT_SCROLL_TIMEOUT variant=\(variant) newest=\(atNewest) offset=\(transcript.contentOffset.y) requests=\(offsetRequests) stableSamples=\(stableSamples)")
+                return false
             }
+            let newestSettled = try await settleTranscript(atNewest: true)
+            let top = -transcript.adjustedContentInset.top
+            let bottom = max(top, transcript.contentSize.height - transcript.bounds.height
+                + transcript.adjustedContentInset.bottom)
             let newestOffset = transcript.contentOffset.y
             func attach(_ state: String) {
                 var rendered = false
@@ -670,6 +713,7 @@ final class NativeVisualReviewTests: XCTestCase {
             // so a failing simulator run remains reviewable.
             attach("newest-recovery")
             logScrollGeometry("newest-before-assertions")
+            XCTAssertTrue(newestSettled, "Newest transcript geometry must settle before capture")
             XCTAssertLessThanOrEqual(abs(newestOffset - bottom), 1,
                 "The newest-state capture must begin at the actual transcript bottom")
             XCTAssertEqual(transcript.frame.height, viewport.height, accuracy: 1)
@@ -677,16 +721,17 @@ final class NativeVisualReviewTests: XCTestCase {
                 "The dedicated fixture must contain enough distinct rows to scroll")
             XCTAssertTrue(model.hasComposerRecovery(in: scope))
 
-            transcript.setContentOffset(CGPoint(x: transcript.contentOffset.x, y: top), animated: false)
-            try await Task.sleep(for: .milliseconds(350))
-            window.layoutIfNeeded()
+            let olderSettled = try await settleTranscript(atNewest: false)
             let olderOffset = transcript.contentOffset.y
             attach("older-transcript")
             logScrollGeometry("older-before-assertions", olderOffset: olderOffset)
+            XCTAssertTrue(olderSettled, "Older transcript geometry must settle without further offset writes before capture")
             XCTAssertEqual(transcript.frame.height, viewport.height, accuracy: 1,
                 "Floating recovery and Jump controls must not reserve a transcript viewport lane")
             XCTAssertLessThan(olderOffset, newestOffset - 2,
                 "The older capture must be a real scroll position away from newest")
+            XCTAssertLessThan(transcript.contentOffset.y, newestOffset - 2,
+                "Rendering the older capture must preserve its actual scroll position")
 
             if variant == "contrast-accessibility3" {
                 let composer = descendants(window).compactMap { $0 as? UITextView }
@@ -2483,6 +2528,85 @@ final class NativeVisualReviewTests: XCTestCase {
                     window.isHidden = true
                     window.rootViewController = nil
                     XCTAssertTrue(window.isHidden && window.rootViewController == nil)
+                }
+            }
+        }
+        XCTAssertTrue(NativeReviewProtocol.externalRequests.isEmpty)
+        XCTAssertTrue(NativeReviewProtocol.mutations.isEmpty)
+    }
+
+    @MainActor
+    func testBriefingLongSourceQualificationsAndMetadata() async throws {
+        enum BudgetError: Error { case exceeded, imageUnavailable }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(90))
+        var retainedBytes = 0
+        let byteLimit = 32 * 1024 * 1024
+        let fixture = try NativeReviewFixture()
+        NativeReviewProtocol.install(fixture.responses)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [NativeReviewProtocol.self]
+        let client = APIClient(configuration: .init(baseURL: URL(string: "https://native-review.test")!, token: "fixture-only"), session: URLSession(configuration: configuration))
+        let suite = "assistant.briefing-full-detail-review"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defaults.removePersistentDomain(forName: suite)
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = AppModel(apiClient: client, defaults: defaults)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let previous = scene.keyWindow
+        defer { previous?.makeKey() }
+        let qualification = "The phone calendar was not checked, and permission was denied for the shared family calendar. These checked sources therefore cannot establish the complete household schedule. The two returned listings retain their original times and time zones; matching titles do not prove that they are the same occurrence. An accepted RSVP does not establish physical attendance or driving responsibility. FINAL SOURCE QUALIFICATION: confirm the missing sources before relying on this plan."
+        let metadata = "America/Los_Angeles versus Europe/London · source freshness unavailable · exact source scope remains incomplete"
+        for agenda in [false, true] {
+            let card = try XCTUnwrap(MessageResponseCard.BriefingCard(data: [
+                "id": .string("synthetic-full-source-detail"), "title": .string("Checked calendar sources"),
+                "date": .string("Synthetic review"), "lead": .string("Coverage is incomplete; original source facts remain visible."),
+                "presentation": agenda ? .string("calendar-agenda") : .null,
+                "sections": .array([.object(["type": .string("coverage"), "title": .string("Calendar read coverage"),
+                    "items": .array([.object(["title": .string("Phone and shared calendars unavailable"),
+                        "detail": .string(qualification), "meta": .string(metadata)])])])])
+            ]))
+            for scheme in [ColorScheme.light, .dark] {
+                for (width, size) in [(CGFloat(320), DynamicTypeSize.large), (CGFloat(320), .accessibility5), (CGFloat(390), .large)] {
+                    guard ContinuousClock.now < deadline else { throw BudgetError.exceeded }
+                    let window = UIWindow(windowScene: scene)
+                    window.frame = CGRect(x: 0, y: 0, width: width, height: 700)
+                    window.overrideUserInterfaceStyle = scheme == .light ? .light : .dark
+                    let host = UIHostingController(rootView: ScrollView {
+                        BriefingCardView(card: card).padding(16)
+                    }.environment(model).environment(\.colorScheme, scheme).environment(\.dynamicTypeSize, size)
+                        .transaction { $0.animation = nil; $0.disablesAnimations = true })
+                    window.rootViewController = host
+                    window.makeKeyAndVisible()
+                    defer { window.isHidden = true; window.rootViewController = nil }
+                    try await Task.sleep(for: .milliseconds(500))
+                    window.layoutIfNeeded()
+                    func scrolls(_ view: UIView) -> [UIScrollView] {
+                        ((view as? UIScrollView).map { [$0] } ?? []) + view.subviews.flatMap(scrolls)
+                    }
+                    let scroll = try XCTUnwrap(scrolls(window).max { $0.bounds.height < $1.bounds.height })
+                    let key = "briefing-full-\(agenda ? "agenda" : "legacy")-\(scheme == .light ? "light" : "dark")-\(Int(width))-\(size.isAccessibilitySize ? "AX5" : "default")"
+                    for step in 0..<20 {
+                        guard ContinuousClock.now < deadline else { throw BudgetError.exceeded }
+                        let png: Data = try autoreleasepool {
+                            let format = UIGraphicsImageRendererFormat(); format.scale = 1
+                            let image = UIGraphicsImageRenderer(bounds: window.bounds, format: format).image { _ in
+                                XCTAssertTrue(window.drawHierarchy(in: window.bounds, afterScreenUpdates: true))
+                            }
+                            guard let data = image.pngData(), data.count > 5_000 else { throw BudgetError.imageUnavailable }
+                            return data
+                        }
+                        guard png.count <= byteLimit - retainedBytes else { throw BudgetError.exceeded }
+                        retainedBytes += png.count
+                        let attachment = XCTAttachment(data: png, uniformTypeIdentifier: "public.png")
+                        attachment.name = key + "-scroll-\(step)"; attachment.lifetime = .keepAlways; add(attachment)
+                        let bottom = max(-scroll.adjustedContentInset.top, scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom)
+                        if scroll.contentOffset.y >= bottom - 1 { break }
+                        scroll.setContentOffset(CGPoint(x: 0, y: min(bottom, scroll.contentOffset.y + scroll.bounds.height * 0.75)), animated: false)
+                        try await Task.sleep(for: .milliseconds(80))
+                        window.layoutIfNeeded()
+                    }
+                    XCTAssertGreaterThanOrEqual(scroll.contentOffset.y + 1, max(-scroll.adjustedContentInset.top, scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom), "All qualifications must be captured through the bottom")
+                    window.isHidden = true; window.rootViewController = nil
                 }
             }
         }

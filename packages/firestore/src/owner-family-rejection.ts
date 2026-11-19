@@ -3,6 +3,7 @@ import {
   canonicalizeKnowledgeAssertionDirection,
   type OwnerEditorApply,
   type OwnerEditorClaim,
+  type OwnerEditorFamilyFields,
   type OwnerEditorOperationRecord,
   type OwnerEditorReply,
   ownerEditorCommitRevision,
@@ -36,6 +37,7 @@ import {
   VectorValue,
 } from '@google-cloud/firestore';
 import { decodeMemoryRecord } from './memory-record.js';
+import { readFirestoreOwnerEditorFamily } from './owner-editor-graph.js';
 import { ownerEditorFirestorePrivacyToken } from './owner-editor-repository.js';
 import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from './store.js';
 
@@ -259,7 +261,25 @@ function closeRecord(
 }
 
 function cursorData(snapshot: DocumentSnapshot, store: InstallationStore, ownerId: string) {
-  if (!snapshot.exists || snapshot.get('name') !== cacheBarrierName(ownerId))
+  if (!snapshot.exists) {
+    // Preview derives a stable virtual initial barrier without mutating state.
+    // The first successful claimed removal creates it atomically with its
+    // source marker and terminal operation receipt.
+    const digest = createHash('sha256')
+      .update('owner-family-source-rejection-initial-cursor-v1\n')
+      .update(stableJson([store.installationId, ownerId]))
+      .digest('hex');
+    const revision = `${digest.slice(0, 8)}-${digest.slice(8, 12)}-5${digest.slice(13, 16)}-8${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
+    return parseInactiveOwnerFamilyRemovalCacheCursor({
+      version: 1,
+      ownerId,
+      installationLineageId: store.installationId,
+      revision,
+      protocolVersion: 1,
+      state: 'active',
+    });
+  }
+  if (snapshot.get('name') !== cacheBarrierName(ownerId))
     throw new Error('Owner rejection protocol cursor unavailable');
   let raw: unknown;
   try {
@@ -351,6 +371,7 @@ async function closureInTransaction(
       privacyGeneration,
       epochState,
       cache,
+      cacheMissing: !cacheCursor.exists,
       relation,
       markerKey,
       existingMarker: existing,
@@ -360,6 +381,7 @@ async function closureInTransaction(
       checkpointRef: checkpointDoc.ref,
       assertionRef: assertionDoc.ref,
       relationRef: relationDoc.ref,
+      sourceMemoryRef: memoryDoc.ref,
       ownerCardRef: ownerCard.ref,
     };
   }
@@ -571,6 +593,7 @@ async function closureInTransaction(
     privacyGeneration,
     epochState,
     cache,
+    cacheMissing: !cacheCursor.exists,
     relation,
     markerKey,
     existingMarker: null as Marker | null,
@@ -580,6 +603,7 @@ async function closureInTransaction(
     checkpointRef: checkpointDoc.ref,
     assertionRef: assertionDoc.ref,
     relationRef: relationDoc.ref,
+    sourceMemoryRef: memoryDoc.ref,
     ownerCardRef: ownerCard.ref,
   };
 }
@@ -590,6 +614,8 @@ export async function readOwnerFamilyRejectionReview(input: {
   ownerId: string;
   relationId: string;
   scope: OwnerEditorClaim['scope'];
+  expectedFamilyScopeRevision?: string;
+  familyFields?: OwnerEditorFamilyFields;
 }): Promise<{ revision: string } | null> {
   try {
     return await input.store.db.runTransaction(async (tx) => {
@@ -601,6 +627,17 @@ export async function readOwnerFamilyRejectionReview(input: {
         input.store.installationId,
         input.scope,
       );
+      if (input.expectedFamilyScopeRevision !== undefined || input.familyFields !== undefined) {
+        if (!input.expectedFamilyScopeRevision || !input.familyFields) return null;
+        const displayed = await readFirestoreOwnerEditorFamily(
+          input.store,
+          input.ownerId,
+          input.familyFields,
+          input.relationId,
+          tx,
+        );
+        if (displayed?.target?.revision !== input.expectedFamilyScopeRevision) return null;
+      }
       return closure.existingMarker || !closure.rows ? null : { revision: closure.rows.revision };
     });
   } catch {
@@ -609,8 +646,9 @@ export async function readOwnerFamilyRejectionReview(input: {
 }
 
 /**
- * Inactive direct-import source contract. No HTTP/issuer/barrel is wired to this function.
- * The durable cursor must already exist in active protocol state; this never initializes it.
+ * Reject one reviewed family claim under its existing owner-editor operation claim.
+ * The first successful transaction also creates the source-rejection cache barrier;
+ * owner epoch/readiness and privacy admission remain mandatory.
  */
 export async function rejectOwnerFamilyClaimInFirestore(input: {
   store: InstallationStore;
@@ -863,6 +901,10 @@ export async function rejectOwnerFamilyClaimInFirestore(input: {
       ownerAuthored: false,
       updatedAt: FieldValue.serverTimestamp(),
     });
+    tx.update(closure.sourceMemoryRef, {
+      ownerFamilyRejectedContentHash: plan.retained.sourceContentHash,
+      retrievalRevision: randomUUID(),
+    });
     tx.set(
       closure.ownerCardRef,
       encodeRecord({
@@ -873,10 +915,19 @@ export async function rejectOwnerFamilyClaimInFirestore(input: {
       }),
     );
     tx.update(closure.checkpointRef, { updatedAt: FieldValue.serverTimestamp() });
-    tx.update(store.doc('maintenanceCursors', cacheBarrierName(configuredOwnerId)), {
-      cursor: JSON.stringify({ ...closure.cache, revision: randomUUID() }),
-      updatedAt: FieldValue.serverTimestamp(),
-    });
+    const nextCacheCursor = JSON.stringify({ ...closure.cache, revision: randomUUID() });
+    const cacheRef = store.doc('maintenanceCursors', cacheBarrierName(configuredOwnerId));
+    if (closure.cacheMissing)
+      tx.create(cacheRef, {
+        name: cacheBarrierName(configuredOwnerId),
+        cursor: nextCacheCursor,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+    else
+      tx.update(cacheRef, {
+        cursor: nextCacheCursor,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
     tx.update(store.doc('maintenanceCursors', epochName(configuredOwnerId)), {
       updatedAt: FieldValue.serverTimestamp(),
     });

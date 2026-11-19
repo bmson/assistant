@@ -1,3 +1,4 @@
+import type { OwnerEditorReply } from '@assistant/persistence/owner-editor';
 import {
   Children,
   type ComponentProps,
@@ -7,18 +8,23 @@ import {
 } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
+import type { OwnerEditorOperationState } from '@/lib/owner-editor-operation';
 import {
+  OwnerEditorCloseGuidance,
   OwnerEditorConflictReview,
   OwnerEditorControls,
   type OwnerEditorControlsProps,
   OwnerEditorDraftCache,
+  OwnerEditorOptionalDetails,
   OwnerEditorPeopleSelectors,
+  OwnerEditorRelationshipField,
   OwnerEditorRemovalActions,
   OwnerEditorRemovalSummary,
   OwnerEditorTimingHelp,
   ownerEditorAliasesFromText,
   ownerEditorAliasesToText,
   ownerEditorConflictIntent,
+  ownerEditorIdentityRequestFields,
   selectCreatedFamilyPerson,
 } from './owner-editor-controls';
 
@@ -37,6 +43,143 @@ const base: OwnerEditorControlsProps = {
   },
   createGrant,
 };
+
+const readyOperationState: OwnerEditorOperationState = {
+  phase: 'ready',
+  reviewRequired: false,
+  reviewTargetId: null,
+  marker: null,
+  busy: false,
+  reply: null,
+  fieldErrors: {},
+  message: '',
+};
+
+describe('owner editor close guidance follows the active operation marker', () => {
+  it('uses unsent draft wording for a ready form', () => {
+    const html = renderToStaticMarkup(
+      <OwnerEditorCloseGuidance state={readyOperationState} grant={createGrant} targetId={null} />,
+    );
+    expect(html).toContain('Closing does not save this draft. Reloading may lose it.');
+    expect(html).not.toContain('The result of this save is not confirmed.');
+  });
+
+  it('keeps draft wording when validation leaves the form editable', () => {
+    const html = renderToStaticMarkup(
+      <OwnerEditorCloseGuidance
+        state={{ ...readyOperationState, fieldErrors: { name: 'Enter a name.' } }}
+        grant={createGrant}
+        targetId={null}
+      />,
+    );
+    expect(html).toContain('Closing does not save this draft. Reloading may lose it.');
+    expect(html).not.toContain('The result of this save is not confirmed.');
+  });
+
+  it('leaves a conflict review to its existing operation status', () => {
+    const html = renderToStaticMarkup(
+      <OwnerEditorCloseGuidance
+        state={{ ...readyOperationState, phase: 'resolved', reviewRequired: true }}
+        grant={createGrant}
+        targetId={null}
+      />,
+    );
+    expect(html).toBe('');
+  });
+
+  it('uses uncertainty wording only for a pending marker scoped to this form', () => {
+    const marker = {
+      id: createGrant.issuedOperationHandle,
+      command: 'create_person' as const,
+      targetId: null,
+    };
+    const pendingState: OwnerEditorOperationState = {
+      ...readyOperationState,
+      phase: 'pending',
+      marker,
+      message: 'The result is unknown. Check the same save before trying again.',
+    };
+    const html = renderToStaticMarkup(
+      <OwnerEditorCloseGuidance state={pendingState} grant={createGrant} targetId={null} />,
+    );
+    expect(pendingState.reply).toBeNull(); // A persisted marker alone does not prove dispatch.
+    expect(html).toContain(
+      'The result of this save is not confirmed. Reopen this page to check the same save before trying again.',
+    );
+
+    const matchingReply: OwnerEditorReply = {
+      version: 1,
+      authority: 'unresolved',
+      command: 'create_person',
+      operationId: createGrant.operationId,
+      outcome: 'outcome_unknown',
+      reason: 'receipt_unavailable',
+    };
+    const matchingReplyState = { ...pendingState, reply: matchingReply };
+    const matchingReplyHtml = renderToStaticMarkup(
+      <OwnerEditorCloseGuidance state={matchingReplyState} grant={createGrant} targetId={null} />,
+    );
+    expect(matchingReplyHtml).toContain('The result of this save is not confirmed.');
+
+    const mismatchingReplyState = {
+      ...pendingState,
+      reply: { ...matchingReply, operationId: '99999999-9999-4999-8999-999999999999' },
+    };
+    const mismatchingReplyHtml = renderToStaticMarkup(
+      <OwnerEditorCloseGuidance
+        state={mismatchingReplyState}
+        grant={createGrant}
+        targetId={null}
+      />,
+    );
+    expect(mismatchingReplyHtml).toContain(
+      'Closing does not save this draft. Reloading may lose it.',
+    );
+    expect(mismatchingReplyHtml).not.toContain('The result of this save is not confirmed.');
+    expect(mismatchingReplyState.message).toBe(pendingState.message);
+
+    const otherFormMarkers = [
+      { ...marker, id: 'another-issued-handle' },
+      { ...marker, command: 'update_person_identity' as const },
+      { ...marker, targetId: contact },
+    ];
+    for (const marker of otherFormMarkers) {
+      const otherForm = renderToStaticMarkup(
+        <OwnerEditorCloseGuidance
+          state={{ ...pendingState, marker }}
+          grant={createGrant}
+          targetId={null}
+        />,
+      );
+      expect(otherForm).toContain('Closing does not save this draft. Reloading may lose it.');
+      expect(otherForm).not.toContain('The result of this save is not confirmed.');
+    }
+
+    const withoutGrant = renderToStaticMarkup(
+      <OwnerEditorCloseGuidance state={pendingState} grant={null} targetId={null} />,
+    );
+    expect(withoutGrant).toContain('Closing does not save this draft. Reloading may lose it.');
+
+    const withoutTarget = renderToStaticMarkup(
+      <OwnerEditorCloseGuidance state={pendingState} grant={createGrant} targetId={undefined} />,
+    );
+    expect(withoutTarget).toContain('Closing does not save this draft. Reloading may lose it.');
+  });
+
+  it.each(['checking', 'resolved', 'blocked'] as const)(
+    'leaves %s status wording to the operation status',
+    (phase) => {
+      const html = renderToStaticMarkup(
+        <OwnerEditorCloseGuidance
+          state={{ ...readyOperationState, phase }}
+          grant={createGrant}
+          targetId={null}
+        />,
+      );
+      expect(html).toBe('');
+    },
+  );
+});
 
 function actualSelectorNodes(node: ReactNode): ReactElement<ComponentProps<'select'>>[] {
   const selects: ReactElement<ComponentProps<'select'>>[] = [];
@@ -135,8 +278,12 @@ it('distinguishes the exact person deletion impact from removing one retained-so
   const person = renderToStaticMarkup(<OwnerEditorRemovalSummary name="Sam" impact={impact} />);
   expect(person).toContain('2 saved facts');
   expect(person).toContain('3 saved dates');
-  expect(person).toContain('4 recorded connections');
-  expect(person).toContain('5 other saved source notes stay saved');
+  expect(person).toContain('4 recorded connections are affected.');
+  expect(person).toContain('supported only by deleted facts disappear');
+  expect(person).toContain(
+    'supported by retained notes stay saved with their profile links cleared',
+  );
+  expect(person).toContain('5 affected source notes stay saved');
   const connection = renderToStaticMarkup(
     <OwnerEditorRemovalSummary sentence="Sam is Alex’s parent." />,
   );
@@ -156,6 +303,7 @@ describe('actual owner editor controls server boundary (not mounted browser proo
           contactId: contact,
           name: 'Sam',
           aliases: [],
+          relationship: 'sister',
           revision: 'a'.repeat(64),
           grant: { ...createGrant, command: 'update_person_identity' },
         }}
@@ -168,8 +316,8 @@ describe('actual owner editor controls server boundary (not mounted browser proo
       />,
     );
     expect(html).toContain('Add person');
-    expect(html).toContain('Edit name and aliases');
-    expect(html).toContain('Add family relationship');
+    expect(html).toContain('Edit details');
+    expect(html).toContain('Add connection');
     expect((html.match(/disabled=""/g) ?? []).length).toBe(3);
     expect(html).not.toContain('issued-test-handle'); // Not a hidden writable action/form ID.
     expect(html).not.toContain('updateContactRelationship');
@@ -181,6 +329,32 @@ describe('actual owner editor controls server boundary (not mounted browser proo
     expect(html).not.toContain('Add person');
     expect(html).not.toContain('Correct');
     expect(html).not.toContain('<form');
+  });
+});
+
+describe('owner relationship label control', () => {
+  it('renders the owner-facing relationship field as a bounded text value with validation feedback', () => {
+    const html = renderToStaticMarkup(
+      <OwnerEditorRelationshipField
+        fieldId="person-relationship"
+        value="daughter"
+        error="Use 80 characters or fewer."
+        onChange={() => {}}
+      />,
+    );
+    expect(html).toContain('for="person-relationship"');
+    expect(html).toContain('Relationship to you');
+    expect(html).toContain('maxLength="80"');
+    expect(html).toContain('value="daughter"');
+    expect(html).toContain('aria-invalid="true"');
+    expect(html).toContain('Use 80 characters or fewer.');
+  });
+  it('includes the relationship with the existing identity mutation fields', () => {
+    expect(ownerEditorIdentityRequestFields('Sam Rivera', 'Sam, Jr.\nSamuel', 'daughter')).toEqual({
+      name: 'Sam Rivera',
+      aliases: ['Sam, Jr.', 'Samuel'],
+      relationship: 'daughter',
+    });
   });
 });
 
@@ -311,8 +485,12 @@ describe('actual selector and memory-only draft lifecycle regressions', () => {
   it('shows latest ALL aliases separately from intended aliases before explicit review', () => {
     const html = renderToStaticMarkup(
       <OwnerEditorConflictReview
-        latestIdentity={{ name: 'New saved name', aliases: ['Old name', 'Another alias'] }}
-        intendedIdentity={{ name: 'My intended name', aliases: 'My alias' }}
+        latestIdentity={{
+          name: 'New saved name',
+          aliases: ['Old name', 'Another alias'],
+          relationship: 'sister',
+        }}
+        intendedIdentity={{ name: 'My intended name', aliases: 'My alias', relationship: 'friend' }}
         relationships={[]}
         missing={false}
         canReview={true}
@@ -324,8 +502,10 @@ describe('actual selector and memory-only draft lifecycle regressions', () => {
       'Your draft',
       'New saved name',
       'Old name, Another alias',
+      'Relationship to you: sister',
       'My intended name',
       'My alias',
+      'Relationship to you: friend',
       'I reviewed the latest values — keep my draft for editing',
     ])
       expect(html).toContain(text);
@@ -333,7 +513,7 @@ describe('actual selector and memory-only draft lifecycle regressions', () => {
   });
   it('successful identity clears only completed draft; next open includes backend retained old-name alias', () => {
     const cache = new OwnerEditorDraftCache();
-    cache.setIdentity({ name: 'Intended', aliases: 'Local' });
+    cache.setIdentity({ name: 'Intended', aliases: 'Local', relationship: 'friend' });
     const family = {
       subject: contact,
       object: other,
@@ -357,15 +537,24 @@ describe('actual selector and memory-only draft lifecycle regressions', () => {
       revision: 'b'.repeat(64),
     };
     expect(cache.complete(reply, null)).toBe('update_person_identity');
-    expect(cache.identity({ name: 'Saved', aliases: 'Local, Previous saved name' })).toEqual({
+    expect(
+      cache.identity({
+        name: 'Saved',
+        aliases: 'Local, Previous saved name',
+        relationship: 'sister',
+      }),
+    ).toEqual({
       name: 'Saved',
       aliases: 'Local, Previous saved name',
+      relationship: 'sister',
     });
     expect(cache.family('family')).toEqual(family);
     expect(cache.family('correction:one')).toEqual(family);
-    cache.setIdentity({ name: 'New intent', aliases: 'Preserved' });
+    cache.setIdentity({ name: 'New intent', aliases: 'Preserved', relationship: 'friend' });
     cache.complete({ ...reply, outcome: 'conflict', reason: 'contact_changed' }, contact);
-    expect(cache.identity({ name: 'Latest', aliases: 'Different' }).name).toBe('New intent');
+    expect(
+      cache.identity({ name: 'Latest', aliases: 'Different', relationship: 'colleague' }).name,
+    ).toBe('New intent');
     cache.complete({ ...reply, command: 'correct_owner_family_relationship' }, 'one');
     expect(cache.family('correction:one')).toBeUndefined();
     expect(cache.family('family')).toEqual(family);
@@ -417,7 +606,7 @@ it('actual caller intent helper distinguishes missing family draft from placehol
   const live = ownerEditorConflictIntent({
     ...input,
     command: 'create_person',
-    createDraft: { name: 'Private intended name', aliases: 'Sam, Jr.' },
+    createDraft: { name: 'Private intended name', aliases: 'Sam, Jr.', relationship: '' },
   });
   const liveHTML = renderToStaticMarkup(
     <OwnerEditorConflictReview
@@ -445,7 +634,11 @@ it('actual alias codec preserves commas on name-only edit and freshly reopened b
   expect(ownerEditorAliasesFromText(ownerEditorAliasesToText(saved))).toEqual(saved);
   expect(ownerEditorAliasesFromText('Sam, Jr.\r\n Another alias \r\n')).toEqual(saved);
   const cache = new OwnerEditorDraftCache();
-  cache.setIdentity({ name: 'Intended rename', aliases: ownerEditorAliasesToText(saved) });
+  cache.setIdentity({
+    name: 'Intended rename',
+    aliases: ownerEditorAliasesToText(saved),
+    relationship: 'friend',
+  });
   cache.complete(
     {
       version: 1,
@@ -463,6 +656,7 @@ it('actual alias codec preserves commas on name-only edit and freshly reopened b
   const fresh = cache.identity({
     name: 'Saved rename',
     aliases: ownerEditorAliasesToText([...saved, 'Previous, Name']),
+    relationship: 'sister',
   });
   expect(ownerEditorAliasesFromText(fresh.aliases)).toEqual([...saved, 'Previous, Name']);
 });
@@ -478,4 +672,29 @@ it('describes rejecting a recorded claim without implying an end date or a visua
   );
   expect(html).toContain('rejected');
   expect(html).toContain('does not record that the relationship ended');
+});
+
+it('keeps optional context collapsed but exposes invalid fields for correction', () => {
+  const field = (
+    <label>
+      From
+      <input type="date" defaultValue="2026-01-01" />
+    </label>
+  );
+  const collapsed = renderToStaticMarkup(
+    <OwnerEditorOptionalDetails summary="Dates and context (optional)">
+      {field}
+    </OwnerEditorOptionalDetails>,
+  );
+  expect(collapsed).not.toContain('open=""');
+  expect(collapsed).toContain('<summary');
+  expect(collapsed).toContain('2026-01-01');
+  const invalid = renderToStaticMarkup(
+    <OwnerEditorOptionalDetails summary="Dates and context (optional)" hasErrors>
+      {field}
+      <p role="alert">Check the date.</p>
+    </OwnerEditorOptionalDetails>,
+  );
+  expect(invalid).toContain('open=""');
+  expect(invalid).toContain('Check the date.');
 });

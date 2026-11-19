@@ -359,6 +359,50 @@ final class AssistantMarkdownTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testCompactCalendarConflictSnapshotsPreserveGroupedSources() throws {
+        let json = #"""
+        {"id":"calendar-conflict-review","role":"assistant","parts":[{"type":"data-card","data":{
+          "kind":"calendar-conflicts","id":"conflicts","title":"Possible overlap","complete":true,
+          "conflicts":[{"id":"game-gala","overlapStart":"2026-11-08T01:00:00Z","overlapEnd":"2026-11-08T02:30:00Z",
+            "evidenceNote":"The game and gala overlap. Your attendance is not confirmed.","groups":[
+              {"events":[
+                {"id":"family-game","title":"United v Palo Alto (5:10PM)","calendar":"Family","start":"2026-11-08T00:25:00Z","end":"2026-11-08T02:30:00Z","location":"Crocker Amazon Soccer Fields, 785 Moscow St, San Francisco, CA 94112"},
+                {"id":"team-game","title":"26/27 U13B Azul vs Palo Alto SC 13/14B Gold","calendar":"SF United Soccer","start":"2026-11-08T01:10:00Z","end":"2026-11-08T02:30:00Z","location":"Crocker Amazon, 1669 Geneva Avenue, San Francisco, CA 94134"}]},
+              {"events":[{"id":"gala","title":"Casino Night Gala","calendar":"SF United Soccer","start":"2026-11-08T01:00:00Z","end":"2026-11-08T06:30:00Z","location":"Leon Event Hall, 5051 Mission Street, San Francisco, CA 94112"}]}
+            ]}]
+        }}]}
+        """#
+        let message = try JSONDecoder().decode(ChatMessage.self, from: Data(json.utf8))
+        let cards = message.parts.compactMap(MessageResponseCard.init(part:))
+        guard case let .calendarConflicts(_, _, conflicts, _)? = cards.first else {
+            return XCTFail("Expected conflict card")
+        }
+        XCTAssertEqual(conflicts.count, 1)
+        XCTAssertEqual(conflicts[0].groups.count, 2)
+        XCTAssertEqual(conflicts[0].groups[0].count, 2)
+        XCTAssertEqual(conflicts[0].groups[0][1].start, "2026-11-08T01:10:00Z")
+        XCTAssertTrue(conflicts[0].groups[0][1].location.contains("1669 Geneva Avenue"))
+
+        for (name, scheme, size) in [
+            ("compact-light", ColorScheme.light, DynamicTypeSize.large),
+            ("compact-dark", .dark, .large),
+            ("compact-accessible", .light, .accessibility3),
+        ] {
+            let view = RichResponseCards(cards: cards)
+                .padding(12).frame(width: 320).background(AssistantTheme.stage)
+                .environment(\.colorScheme, scheme)
+                .environment(\.dynamicTypeSize, size)
+            let renderer = ImageRenderer(content: view)
+            renderer.scale = 2
+            let image = try XCTUnwrap(renderer.uiImage)
+            let attachment = XCTAttachment(image: image)
+            attachment.name = "calendar-conflicts-\(name)"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+    }
+
     func testBriefingAgendaOmittedCountRejectsMalformedValues() throws {
         for (index, value) in ["0", "-1", "1.5", "\"2\"", "9007199254740992", "9223372036854775808"].enumerated() {
             let payload = """
@@ -382,7 +426,7 @@ final class AssistantMarkdownTests: XCTestCase {
             """
         }.joined(separator: ",")
         let json = """
-        {"id":"agenda-review","role":"assistant","parts":[{"type":"data-card","data":{"kind":"briefing","id":"agenda-review","presentation":"calendar-agenda","title":"Agenda","date":"Tuesday, October 27 · Pacific Time","lead":"Eight events across Personal and Work; all calendars checked.","sections":[{"type":"agenda","title":"Tuesday, October 27","complete":true,"items":[\(rows)]}]}}]}
+        {"id":"agenda-review","role":"assistant","parts":[{"type":"data-card","data":{"kind":"briefing","id":"agenda-review","presentation":"calendar-agenda","title":"Agenda","date":"Tuesday, October 27 · Pacific Time","lead":"Eight events across Personal and Work; all calendars checked.","sections":[{"type":"agenda","title":"Tuesday, October 27","complete":true,"items":[\(rows)]},{"type":"attention","title":"Calendar source differences","items":[{"title":"Source titles differ","detail":"Personal: United v Palo Alto; Team: Azul vs Palo Alto Gold. Both locations retained."}]}]}}]}
         """
         let message = try JSONDecoder().decode(ChatMessage.self, from: Data(json.utf8))
         let cards = message.parts.compactMap(MessageResponseCard.init(part:))

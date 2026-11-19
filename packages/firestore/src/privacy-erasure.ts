@@ -254,16 +254,17 @@ export class FirestorePrivacyErasureRepository implements PrivacyErasureReposito
     generation: string,
     collection: string,
     countKey?: CountKey,
+    ownerField: 'agentId' | 'ownerId' = 'agentId',
   ): Promise<void> {
     for (;;) {
       const removed = await this.store.db.runTransaction(async (tx) => {
         const jobRef = await this.activeJob(tx, agentId, generation);
         const page = await tx.get(
-          this.store.collection(collection).where('agentId', '==', agentId).limit(PAGE_SIZE),
+          this.store.collection(collection).where(ownerField, '==', agentId).limit(PAGE_SIZE),
         );
         for (const doc of page.docs) {
           if (
-            doc.get('agentId') !== agentId ||
+            doc.get(ownerField) !== agentId ||
             typeof doc.get('id') !== 'string' ||
             documentKey(doc.get('id')) !== doc.id
           )
@@ -1479,6 +1480,13 @@ export class FirestorePrivacyErasureRepository implements PrivacyErasureReposito
       'occasions',
     );
     await this.eraseOccasions(agentId, job.generation);
+    await this.deleteOwned(
+      agentId,
+      job.generation,
+      'ownerFamilyClaimRejections',
+      undefined,
+      'ownerId',
+    );
     await this.deleteOwned(agentId, job.generation, 'knowledgeGraphAssertionEvidence');
     await this.deleteOwned(agentId, job.generation, 'knowledgeGraphAssertions');
     await this.deleteOwned(agentId, job.generation, 'knowledgeGraphRelations', 'graphRelations');

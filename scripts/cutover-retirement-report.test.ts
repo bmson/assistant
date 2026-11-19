@@ -361,30 +361,106 @@ describe('Firestore release path proof', () => {
   });
 
   it('holds for this repository', async () => {
+    const testStarted = performance.now();
+    const markPhase = (
+      phase: string,
+      state: 'start' | 'end',
+      phaseStarted: number,
+      detail: Record<string, number> = {},
+    ) => {
+      try {
+        const now = performance.now();
+        process.stderr.write(
+          `${JSON.stringify({
+            phase,
+            state,
+            elapsedMs: Number((now - testStarted).toFixed(3)),
+            ...(state === 'end' ? { durationMs: Number((now - phaseStarted).toFixed(3)) } : {}),
+            ...detail,
+          })}\n`,
+        );
+      } catch {
+        // Diagnostic logging must not affect the repository proof or its assertions.
+      }
+    };
+
+    let phaseStarted = performance.now();
+    markPhase('imports', 'start', phaseStarted);
     const { execFileSync } = await import('node:child_process');
     const { readFileSync } = await import('node:fs');
+    markPhase('imports', 'end', phaseStarted);
+
     const root = new URL('..', import.meta.url).pathname;
-    const files = execFileSync('git', ['ls-files'], { cwd: root, encoding: 'utf8' })
+    phaseStarted = performance.now();
+    markPhase('git-ls-files', 'start', phaseStarted);
+    const paths = execFileSync('git', ['ls-files'], { cwd: root, encoding: 'utf8' })
       .split('\n')
-      .filter(Boolean)
-      .flatMap((path) => {
-        try {
-          const bytes = readFileSync(join(root, path));
-          return bytes.includes(0) ? [] : [{ path, text: bytes.toString('utf8') }];
-        } catch {
+      .filter(Boolean);
+    markPhase('git-ls-files', 'end', phaseStarted, { trackedPaths: paths.length });
+
+    let readFiles = 0;
+    let skippedUnreadable = 0;
+    let skippedBinary = 0;
+    let textFiles = 0;
+    let bytesRead = 0;
+    phaseStarted = performance.now();
+    markPhase('read-filter', 'start', phaseStarted, { trackedPaths: paths.length });
+    const files = paths.flatMap((path) => {
+      try {
+        const bytes = readFileSync(join(root, path));
+        readFiles++;
+        bytesRead += bytes.length;
+        if (bytes.includes(0)) {
+          skippedBinary++;
           return [];
         }
-      });
+        textFiles++;
+        return [{ path, text: bytes.toString('utf8') }];
+      } catch {
+        skippedUnreadable++;
+        return [];
+      }
+    });
+    markPhase('read-filter', 'end', phaseStarted, {
+      trackedPaths: paths.length,
+      readFiles,
+      skippedUnreadable,
+      skippedBinary,
+      textFiles,
+      bytesRead,
+    });
+
+    phaseStarted = performance.now();
+    markPhase('analyze', 'start', phaseStarted, { textFiles: files.length });
     const { firestorePath, findings } = analyzeRepository(files);
-    expect(firestorePath.problems).toEqual([]);
-    const blocking = findings
-      .filter((item) =>
-        ['release-pipeline', 'backup-tooling', 'terraform', 'ci-workflow', 'unclassified'].includes(
-          item.class,
-        ),
-      )
-      .map((item) => item.path);
-    expect(blocking).toEqual([]);
+    markPhase('analyze', 'end', phaseStarted, {
+      problems: firestorePath.problems.length,
+      closureFiles: firestorePath.closure.length,
+      findings: findings.length,
+    });
+
+    phaseStarted = performance.now();
+    markPhase('assertions', 'start', phaseStarted);
+    try {
+      expect(firestorePath.problems).toEqual([]);
+      const blocking = findings
+        .filter((item) =>
+          [
+            'release-pipeline',
+            'backup-tooling',
+            'terraform',
+            'ci-workflow',
+            'unclassified',
+          ].includes(item.class),
+        )
+        .map((item) => item.path);
+      expect(blocking).toEqual([]);
+    } finally {
+      markPhase('assertions', 'end', phaseStarted, {
+        problems: firestorePath.problems.length,
+        findings: findings.length,
+      });
+    }
     // This integration proof reads every tracked text file. Retain a bounded
     // deadline without applying the unit-test default to repository-wide I/O.
   }, 20_000);

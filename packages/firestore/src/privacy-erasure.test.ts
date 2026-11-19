@@ -290,6 +290,12 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore privacy erasure
       store.doc('memoryContentHashes', hash).set({ memoryId }),
       store.doc('knowledgeGraphSources', memoryId).set({ memoryId, contentHash: hash }),
       store.doc('knowledgeGraphRelations', relationId).set({ id: relationId, agentId }),
+      store
+        .doc('ownerFamilyClaimRejections', relationId)
+        .set({ id: relationId, ownerId: agentId, sourceText: 'private family source' }),
+      store
+        .doc('ownerFamilyClaimRejections', foreignId)
+        .set({ id: foreignId, ownerId: foreignId, sourceText: 'foreign family source' }),
       store.doc('knowledgeGraphAssertions', assertionId).set({
         id: assertionId,
         agentId,
@@ -487,6 +493,8 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore privacy erasure
     expect((await store.doc('toolCache', phoneCalendarCacheKey(agentId)).get()).exists).toBe(false);
     expect((await store.doc('recallSurfaces', foreignRecallSurfaceId).get()).exists).toBe(true);
     expect((await store.doc('knowledgeGraphEntities', entityId).get()).exists).toBe(false);
+    expect((await store.doc('ownerFamilyClaimRejections', relationId).get()).exists).toBe(false);
+    expect((await store.doc('ownerFamilyClaimRejections', foreignId).get()).exists).toBe(true);
     expect((await store.doc('knowledgeGraphAssertions', assertionId).get()).exists).toBe(false);
     expect(
       (await store.doc('knowledgeGraphAssertionEvidence', assertionEvidenceId).get()).exists,

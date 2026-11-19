@@ -4,9 +4,12 @@ import { test } from 'node:test';
 import { createManifest, validateManifest } from './release-manifest.mjs';
 import { deriveSchemaVersion } from './release-schema-version.mjs';
 
-const contract = JSON.parse(await readFile(new URL('./release-contracts.json', import.meta.url)));
+// Frozen from de288a875b7526fa58c371edd8ca0065ab22e49e; this remains historical schema-135 evidence.
+const contract = JSON.parse(
+  await readFile(new URL('./fixtures/release-contracts.schema135.json', import.meta.url)),
+);
 const journal = JSON.parse(
-  await readFile(new URL('../../packages/db/drizzle/meta/_journal.json', import.meta.url)),
+  await readFile(new URL('./fixtures/postgres-journal.schema135.json', import.meta.url)),
 );
 const historical134 = JSON.parse(
   await readFile(new URL('./fixtures/release-contracts.schema134.json', import.meta.url)),
@@ -28,7 +31,7 @@ function manifest(schemaVersion, selected = roles, sourceContract = contract) {
   });
 }
 
-test('all five current PostgreSQL role contracts target schema 135 exactly', () => {
+test('all five frozen historical PostgreSQL role contracts target schema 135 exactly', () => {
   assert.equal(deriveSchemaVersion('postgres', journal, contract), 135);
   assert.equal(validateManifest(manifest(135)), true);
   for (const role of roles) {

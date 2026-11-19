@@ -145,8 +145,10 @@ export function ProviderBillingCards({ reports }: { reports: ProviderBilling[] }
                       </div>
                     ))}
                     <p className="mt-2 text-xs text-muted">
-                      {report.forecast.message} Observed {report.forecast.observedDays} of{' '}
-                      {report.forecast.daysInMonth} days through {report.forecast.through}.
+                      {report.forecast.message}{' '}
+                      {report.forecast.throughBasis === 'provider_reported_usage'
+                        ? `Provider usage through ${report.forecast.through}.`
+                        : `Fetch time ${report.forecast.through} used as a proxy for the usage cutoff; provider usage timestamp unavailable.`}
                     </p>
                   </div>
                 ) : report.status === 'reported' ? (

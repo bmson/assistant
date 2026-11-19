@@ -1,5 +1,30 @@
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
+/** A parked observation may release only its own current admitted send. */
+export function ownsEstimatedCostAdmission(input: {
+  taskId: string;
+  conversationId: string;
+  scopeGeneration: number;
+  current: {
+    taskId?: string;
+    conversationId: string;
+    scopeGeneration: number;
+    clientOperationId: string;
+  } | null;
+  pendingOperationId?: string;
+  cancellingOperationId?: string;
+}): boolean {
+  const current = input.current;
+  return (
+    !!current &&
+    current.taskId === input.taskId &&
+    current.conversationId === input.conversationId &&
+    current.scopeGeneration === input.scopeGeneration &&
+    current.clientOperationId === input.pendingOperationId &&
+    current.clientOperationId !== input.cancellingOperationId
+  );
+}
+
 export function validRecoveryTask(value: string | null): string | null {
   return value && UUID.test(value) ? value : null;
 }
@@ -53,6 +78,8 @@ export function requestStatusNote(status: string | null): string {
       return 'This request needs your approval. Review its saved approval card in this chat.';
     case 'waiting_budget':
       return 'This request needs a budget decision. Review its saved budget card in this chat.';
+    case 'waiting_estimated_cost':
+      return 'This request is waiting for spending permission. Review its request card in this chat; if it has not appeared yet, keep this chat open or refresh.';
     case 'needs_attention':
       return 'This request needs your attention. Review its saved explanation in this chat.';
     case 'pending':

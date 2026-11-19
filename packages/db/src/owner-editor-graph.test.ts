@@ -14,6 +14,7 @@ function fixture(count: number) {
       name: `Person ${i}`,
       aliases: [],
       trust: i === 0 ? 'owner' : 'unknown',
+      relationship: 'daughter',
     },
     native: { id: `native-${i}`, updated_at: '2026-10-25T12:00:00.123456+00:00' },
   }));
@@ -66,6 +67,7 @@ describe('actual bounded PG editor snapshot reads offline', () => {
         contactId: first.contact.id,
       });
       expect(snapshot.identity?.revision).toBe(point?.revision);
+      expect(snapshot.identity?.relationship).toBe('daughter');
       first.native.updated_at = '2026-10-25T12:00:00.123457+00:00';
       expect(
         (await postgresOwnerEditorViewSnapshot(f.db, f.ownerId, { contactId: first.contact.id }))

@@ -23,6 +23,7 @@ import {
   compareTimelineRows,
   decodeTaskTimelineCursor,
   encodeTaskTimelineCursor,
+  estimatedCostOperationLocator,
   type TaskTimelineKind,
   timelineTime,
 } from '@assistant/persistence';
@@ -34,7 +35,8 @@ export const terminalTaskStatuses = ['done', 'failed', 'cancelled'] as const;
 export type ActivityFilter = 'all' | 'needs-you' | 'working' | 'scheduled' | 'completed';
 
 function statusesForFilter(filter: ActivityFilter): string[] | undefined {
-  if (filter === 'needs-you') return ['waiting_approval', 'waiting_budget', 'needs_attention'];
+  if (filter === 'needs-you')
+    return ['waiting_approval', 'waiting_budget', 'waiting_estimated_cost', 'needs_attention'];
   if (filter === 'working') return ['pending', 'running'];
   if (filter === 'scheduled') return ['sleeping', 'waiting_event'];
   if (filter === 'completed') return [...terminalTaskStatuses];
@@ -55,6 +57,7 @@ export interface ActivityItem {
   hasPendingApproval: boolean;
   hasActiveAutonomy: boolean;
   stuckWaiting: boolean;
+  estimatedCostOperationId?: string | null;
 }
 
 export type ActivityStatus = Pick<
@@ -69,6 +72,7 @@ export type ActivityStatus = Pick<
   | 'hasPendingApproval'
   | 'hasActiveAutonomy'
   | 'stuckWaiting'
+  | 'estimatedCostOperationId'
 >;
 
 export interface ActivityList {
@@ -80,10 +84,11 @@ function activityItem(
   row: Omit<ActivityTaskRecord, 'agentId' | 'conversationId' | 'externalEventId' | 'trigger'>,
   pendingApprovalTaskIds: Set<string>,
 ): ActivityItem {
-  const { autonomyGrant, ...task } = row;
+  const { autonomyGrant, state, ...task } = row;
   const hasPendingApproval = pendingApprovalTaskIds.has(task.id);
   return {
     ...task,
+    estimatedCostOperationId: estimatedCostOperationLocator(task.status, state),
     progress: activityProgress(task.status, task.progress),
     hasPendingApproval,
     hasActiveAutonomy: activeAutonomyGrant({ ...task, autonomyGrant }, Date.now()) !== null,
@@ -104,6 +109,7 @@ function activityStatus(task: ActivityTaskRecord, hasPendingApproval: boolean): 
     hasPendingApproval: item.hasPendingApproval,
     hasActiveAutonomy: item.hasActiveAutonomy,
     stuckWaiting: item.stuckWaiting,
+    estimatedCostOperationId: item.estimatedCostOperationId,
   };
 }
 
@@ -128,6 +134,7 @@ export async function getActivityStatus(db: Db, taskId: string): Promise<Activit
       externalEventId: tasks.externalEventId,
       type: tasks.type,
       status: tasks.status,
+      state: tasks.state,
       title: tasks.title,
       progress: tasks.progress,
       trust: tasks.trust,
@@ -199,6 +206,7 @@ export async function listActivity(
         id: tasks.id,
         type: tasks.type,
         status: tasks.status,
+        state: tasks.state,
         title: tasks.title,
         progress: tasks.progress,
         trust: tasks.trust,

@@ -35,8 +35,14 @@ export function memoryPersonConnectionHref(
   contactId: string | null | undefined,
   relationId: string | null | undefined,
   contextHref: string,
+  peopleQuery = '',
 ): string | null {
-  const personHref = memoryPersonEditorHref(contactId, contextHref);
+  const baseHref = memoryPersonEditorHref(contactId, contextHref);
+  const query = peopleQuery.trim().slice(0, 120);
+  const personHref =
+    baseHref && query
+      ? `${baseHref}${baseHref.includes('?') ? '&' : '?'}q=${encodeURIComponent(query)}`
+      : baseHref;
   if (!personHref || !relationId || !UUID.test(relationId)) return personHref;
   const id = relationId.toLowerCase();
   return `${personHref}${personHref.includes('?') ? '&' : '?'}connectionId=${id}#person-connection-${id}`;

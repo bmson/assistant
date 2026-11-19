@@ -10,6 +10,7 @@ RUN npm install --global corepack@0.36.0 && corepack enable \
 
 # Manifests first: dependency layers survive source edits.
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
+COPY patches ./patches
 COPY packages/config/package.json ./packages/config/
 COPY packages/persistence/package.json ./packages/persistence/
 COPY packages/db/package.json ./packages/db/

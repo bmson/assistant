@@ -1,0 +1,30 @@
+✔ 132 bridge is compatible before migration and declares compatibility at 133 (0.745625ms)
+✔ final 133 target ranges are exact and keep API and Firestore contracts unchanged (0.405042ms)
+✔ web-only 133 release needs live agent metadata from the 132 bridge, not old 132-only serving (0.427709ms)
+✔ the additive command constraint keeps existing minimums and supports schema 134 only (0.967833ms)
+✔ frozen pre-creation schema-134 contract preserves its exact five commands (0.061208ms)
+✔ web-only schema 134 requires compatible live-agent metadata (0.084458ms)
+✔ all five frozen historical PostgreSQL role contracts target schema 135 exactly (1.66875ms)
+✔ frozen historical 134 contract still accepts 134 and rejects 135 (0.15275ms)
+✔ web-only schema 135 still requires live-agent metadata that covers 135 (0.082791ms)
+✔ Calendar server entry points require schema 136 and all released roles admit it (1.069667ms)
+✔ a web-only Calendar release requires live-agent compatibility with schema 136 (0.123334ms)
+✔ all budget writers require the estimated cost schema and retain Firestore compatibility (1.721916ms)
+✔ a web-only release cannot run with an escrow-unaware agent (0.212833ms)
+✔ manifest pins selected service images by immutable digest and contract range (0.696709ms)
+✔ manifest rejects mutable tags, missing selected images, incompatible schema, and incompatible mixed release (0.240917ms)
+✔ a selected worker outside its schema range fails closed (0.082458ms)
+✔ web-only release is allowed only with proven compatible live agent metadata (0.101209ms)
+✔ journal-derived schema matches current artifacts and blocks older or unreviewed schemas (0.217167ms)
+✔ schema-135 role build definitions keep every released image and entrypoint visible (3.450125ms)
+✔ migration and portable transport tools remain explicit in the source/build path (1.860833ms)
+✔ current schema 137 qualification binds coherent artifacts, exact test selection and role ranges (0.395792ms)
+✔ forward qualification retains populated data through the 0135 to 0137 tail (0.116833ms)
+ℹ tests 22
+ℹ suites 0
+ℹ pass 22
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 56.845833

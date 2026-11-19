@@ -38,7 +38,8 @@ function usePollingHost(
   const serverIdsRef = { current: new Set<string>() };
   const setActivity = vi.fn(),
     setPollTrouble = vi.fn(),
-    onTaskTerminal = vi.fn();
+    onTaskTerminal = vi.fn(),
+    onEstimatedCostParked = vi.fn();
   const setAsyncTurn = vi.fn((value) => {
     asyncTurnRef.current = value;
   });
@@ -73,6 +74,7 @@ function usePollingHost(
     setLiveRecall: vi.fn(),
     setPollTrouble,
     onTaskTerminal,
+    onEstimatedCostParked,
   });
   const cleanup = effects.mount?.();
   return {
@@ -80,6 +82,7 @@ function usePollingHost(
     messages,
     asyncTurnRef,
     setAsyncTurn,
+    setAsyncNote,
     setMessages,
     pendingUpdates,
     cursorRef,
@@ -89,6 +92,7 @@ function usePollingHost(
     setActivity,
     setPollTrouble,
     onTaskTerminal,
+    onEstimatedCostParked,
     cleanup: cleanup as () => void,
   };
 }
@@ -109,6 +113,82 @@ afterEach(() => {
   vi.useRealTimers();
 });
 describe('actual polling effect recovery lifecycle (controlled hook host)', () => {
+  it('releases a durably parked admission even before its exact card is visible', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => response('waiting_estimated_cost')),
+    );
+    const mounted = usePollingHost();
+    await flush();
+    expect(mounted.asyncTurnRef.current).toBeNull();
+    expect(mounted.onEstimatedCostParked).toHaveBeenCalledExactlyOnceWith(taskId);
+    expect(mounted.notes.at(-1)).toMatchObject({ taskId, retryable: false });
+    expect(mounted.notes.at(-1)?.text).toMatch(/request card in this chat.*not appeared/i);
+    expect(mounted.notes.at(-1)?.text).not.toMatch(/Activity|complete|finished/i);
+    expect(mounted.onTaskTerminal).not.toHaveBeenCalled();
+    mounted.cleanup();
+  });
+  it.each([true, false])(
+    'only the exact request card clears the parked notice (matching=%s)',
+    async (matching) => {
+      const quote = {
+        type: 'estimated-cost-approval',
+        operationId: 'operation-a',
+        taskId: matching ? taskId : 'other-task',
+        quoteId: 'quote',
+        quoteVersion: 'v1',
+        requestText: 'Original request',
+        expiresAt: '2030-01-01T00:00:00Z',
+        complete: true,
+        canApprove: true,
+        nextAttemptMicros: 1,
+        allowanceMicros: 1,
+        recordedDailyMicros: 0,
+        recordedMonthlyMicros: 0,
+        totalHeldMicros: 0,
+        eligibleHistoricalUnknownMicros: 0,
+        pendingApprovalMicros: 1,
+        dailyCeilingMicros: 2,
+        monthlyCeilingMicros: 2,
+        dailyProjectedGrossMicros: 1,
+        monthlyProjectedGrossMicros: 1,
+      };
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () =>
+          response('waiting_estimated_cost', [{ id: 'card', role: 'assistant', parts: [quote] }]),
+        ),
+      );
+      const mounted = usePollingHost();
+      await flush();
+      expect(mounted.asyncTurnRef.current).toBeNull();
+      if (matching) expect(mounted.setAsyncNote).toHaveBeenLastCalledWith(null);
+      else expect(mounted.notes.at(-1)?.text).toMatch(/request card in this chat/i);
+      mounted.cleanup();
+    },
+  );
+  it('a delayed parked response for A cannot settle B or invoke its admission cleanup', async () => {
+    let resolve!: (value: Response) => void;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        () =>
+          new Promise<Response>((done) => {
+            resolve = done;
+          }),
+      ),
+    );
+    const mounted = usePollingHost();
+    const newer = '44444444-4444-4444-8444-444444444444';
+    mounted.asyncTurnRef.current = { taskId: newer, cursor: '' };
+    resolve(response('waiting_estimated_cost'));
+    await flush();
+    expect(mounted.asyncTurnRef.current?.taskId).toBe(newer);
+    expect(mounted.setAsyncTurn).not.toHaveBeenCalled();
+    expect(mounted.onEstimatedCostParked).not.toHaveBeenCalled();
+    expect(mounted.notes).toEqual([]);
+    mounted.cleanup();
+  });
   it('cancelled terminal poll and remount preserve uncertainty with zero dispatches', async () => {
     const fetcher = vi.fn<typeof fetch>().mockImplementation(async () => response('cancelled'));
     vi.stubGlobal('fetch', fetcher);

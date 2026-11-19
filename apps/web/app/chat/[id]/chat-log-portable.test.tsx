@@ -1,3 +1,4 @@
+import type { EstimatedCostQuote } from '@assistant/persistence';
 import type { UIMessage } from 'ai';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -67,6 +68,64 @@ function render(log = messages, notificationMode = false, streaming = false) {
 // Every inline control is backed by a Server Action with a PostgreSQL and a
 // Firestore path, so the transcript offers the same controls in both drivers.
 describe('chat transcript controls', () => {
+  it('shows the newest cost review per request while retaining independent requests and newer chat text', () => {
+    const quote: EstimatedCostQuote = {
+      type: 'estimated-cost-approval',
+      operationId: 'operation-a',
+      taskId: 'task-a',
+      requestText: 'Original A request',
+      quoteId: 'old-a',
+      quoteVersion: 'v1',
+      expiresAt: '2026-09-22T12:10:00Z',
+      nextAttemptMicros: 17_500,
+      allowanceMicros: 200_000,
+      recordedDailyMicros: 270_000,
+      recordedMonthlyMicros: 2_710_000,
+      totalHeldMicros: 5_760_000,
+      eligibleHistoricalUnknownMicros: 5_760_000,
+      pendingApprovalMicros: 200_000,
+      dailyCeilingMicros: 6_000_000,
+      monthlyCeilingMicros: 50_000_000,
+      dailyProjectedGrossMicros: 6_230_000,
+      monthlyProjectedGrossMicros: 8_670_000,
+      complete: true,
+      canApprove: true,
+    };
+    const html = render([
+      { id: 'old', role: 'assistant', parts: [quote] },
+      {
+        id: 'b',
+        role: 'assistant',
+        parts: [
+          {
+            ...quote,
+            operationId: 'operation-b',
+            taskId: 'task-b',
+            requestText: 'Independent B request',
+            quoteId: 'b',
+            allowanceMicros: 400_000,
+          },
+        ],
+      },
+      {
+        id: 'newer-text',
+        role: 'user',
+        parts: [{ type: 'text', text: 'Preserve this newer chat text' }],
+      },
+      {
+        id: 'new',
+        role: 'assistant',
+        parts: [{ ...quote, quoteId: 'new-a', quoteVersion: 'v2', allowanceMicros: 300_000 }],
+      },
+    ] as unknown as UIMessage[]);
+    expect(html.match(/data-decision-card="true"/g)).toHaveLength(2);
+    expect(html).toContain('Original A request');
+    expect(html).toContain('Independent B request');
+    expect(html).toContain('Preserve this newer chat text');
+    expect(html).toContain('$0.30');
+    expect(html).toContain('$0.40');
+    expect(html).not.toContain('$0.20');
+  });
   beforeEach(() => {
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(new Date('2026-09-22T12:01:00.000Z'));

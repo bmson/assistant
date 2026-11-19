@@ -1,0 +1,12 @@
+
+ RUN  v5.0.5 /Users/baldvinsmarason/.codex/worktrees/ai-calendar-server-release/assistant
+
+
+ Test Files  3 passed (3)
+      Tests  49 passed (49)
+   Start at  00:10:27
+   Duration  3.60s (transform 58%, import 26%, environment 10%, tests 5%)
+
+    Isolate  3 workers spawned · ~172ms startup each (spawn + environment, per file)
+             at least ~343ms faster with isolate: false — reuses workers across files instead of one per file
+

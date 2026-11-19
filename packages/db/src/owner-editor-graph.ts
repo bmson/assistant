@@ -294,6 +294,7 @@ export async function postgresOwnerEditorViewSnapshot(
       name: identity.name,
       aliases: identity.aliases,
       trust: identity.trust,
+      relationship: identity.relationship,
       revision: identity.revision,
     };
   if (!ids.length) return result;

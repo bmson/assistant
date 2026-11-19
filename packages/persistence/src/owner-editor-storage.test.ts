@@ -93,4 +93,49 @@ describe('owner editor persisted operation codec', () => {
       parseOwnerEditorOperationRecord(unchanged);
     }).toThrow();
   });
+  it.each([
+    ['remove_owner_memory', { memoryId: scope.targetId }],
+    ['remove_person', { contactId: scope.targetId }],
+    [
+      'remove_owner_family_relationship',
+      {
+        relationId: scope.targetId,
+        memoryId: '66666666-6666-4666-8666-666666666666',
+        assertionId: '77777777-7777-4777-8777-777777777777',
+      },
+    ],
+  ] as const)('rejects unchanged terminal receipts for %s', (command, ids) => {
+    const saved = record(ids, command);
+    expect(parseOwnerEditorOperationRecord(saved).result).toMatchObject({ outcome: 'saved' });
+    const unchanged = { ...saved, result: { ...saved.result, outcome: 'unchanged' } };
+    expect(() => parseOwnerEditorOperationRecord(unchanged)).toThrow(
+      'removal cannot have an unchanged receipt',
+    );
+  });
+
+  it('binds active removal receipts to exactly their canonical target identities', () => {
+    const person = record({ contactId: scope.targetId }, 'remove_person');
+    expect(parseOwnerEditorOperationRecord(person)).toMatchObject({ command: 'remove_person' });
+    expect(() =>
+      parseOwnerEditorOperationRecord(record({ memoryId: scope.targetId }, 'remove_person')),
+    ).toThrow('Person removal receipt identity');
+    const ids = {
+      relationId: scope.targetId,
+      memoryId: '66666666-6666-4666-8666-666666666666',
+      assertionId: '77777777-7777-4777-8777-777777777777',
+    };
+    expect(
+      parseOwnerEditorOperationRecord(record(ids, 'remove_owner_family_relationship')),
+    ).toMatchObject({ result: { ids } });
+    expect(() =>
+      parseOwnerEditorOperationRecord(
+        record({ ...ids, contactId: scope.targetId }, 'remove_owner_family_relationship'),
+      ),
+    ).toThrow('Family removal receipt identity');
+    expect(() =>
+      parseOwnerEditorOperationRecord(
+        record({ relationId: scope.targetId }, 'remove_owner_family_relationship'),
+      ),
+    ).toThrow('Family removal receipt identity');
+  });
 });

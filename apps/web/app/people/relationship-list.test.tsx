@@ -13,7 +13,7 @@ function relation(overrides: Partial<PersonRelation> = {}): PersonRelation {
     sentence: 'Élise Aubert and Marc Vidal are partners.',
     label: 'Partner',
     otherLabel: 'Marc Vidal',
-    otherContactId: 'contact-marc',
+    otherContactId: '22222222-2222-4222-8222-222222222222',
     otherEntityId: 'entity-marc',
     validFrom: '2016-03',
     validUntil: null,
@@ -23,6 +23,36 @@ function relation(overrides: Partial<PersonRelation> = {}): PersonRelation {
 }
 
 describe('RelationshipList', () => {
+  it('preserves each parallel claim and safe map return when opening the other profile', () => {
+    const ids = ['33333333-3333-4333-8333-333333333333', '44444444-4444-4444-8444-444444444444'];
+    const returnTo = '/profile/knowledge?view=map&entity=alex#knowledge-item';
+    const html = renderToStaticMarkup(
+      <RelationshipList
+        relations={ids.map((id) => relation({ id }))}
+        now={NOW}
+        peopleQuery="Marc & Élise"
+        returnTo={returnTo}
+        selectedRelationId={ids[0]}
+      />,
+    );
+    for (const id of ids) {
+      expect(html).toContain(`connectionId=${id}#person-connection-${id}`);
+    }
+    expect(html).toContain(`returnTo=${encodeURIComponent(returnTo)}`);
+    expect(html).toContain('q=Marc%20%26%20%C3%89lise');
+    expect(html.match(/aria-current="location"/g)).toHaveLength(1);
+  });
+
+  it('drops an untrusted return URL while preserving the exact claim', () => {
+    const id = '33333333-3333-4333-8333-333333333333';
+    const html = renderToStaticMarkup(
+      <RelationshipList relations={[relation({ id })]} now={NOW} returnTo="//evil.invalid/" />,
+    );
+    expect(html).toContain(`connectionId=${id}#person-connection-${id}`);
+    expect(html).not.toContain('returnTo=');
+    expect(html).not.toContain('evil.invalid');
+  });
+
   it('renders the composed sentence rather than rebuilding one', () => {
     // The presenter owns the grammar — symmetric predicates read "A and B are
     // partners", not "A is B's partner".
@@ -58,7 +88,7 @@ describe('RelationshipList', () => {
 
   it('links a relationship whose other end is a contact', () => {
     const html = renderToStaticMarkup(<RelationshipList relations={[relation()]} now={NOW} />);
-    expect(html).toContain('href="/people/contact-marc"');
+    expect(html).toContain('href="/people/22222222-2222-4222-8222-222222222222"');
   });
 
   it('does not link a person who exists only inside a fact', () => {

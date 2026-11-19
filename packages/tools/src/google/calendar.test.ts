@@ -70,6 +70,50 @@ function event(id: string, summary: string, start: string) {
 }
 
 describe('calendar.list_events', () => {
+  it.each([
+    ['2026-07-24T09:00:00Z', 'probableDuplicateOccurrences', 'probable'],
+    ['2026-07-24T09:30:00Z', 'possibleDuplicateOccurrences', 'possible'],
+  ])(
+    'annotates cross-calendar appointment copies at %s without deleting source rows',
+    async (start, field, kind) => {
+      const first = {
+        id: 'family-dentist',
+        summary: 'Dentist Chen',
+        location: 'Sunset Dental, 123 Main Street',
+        start: { dateTime: '2026-07-24T09:00:00Z' },
+        end: { dateTime: '2026-07-24T10:00:00Z' },
+      };
+      const second = {
+        ...first,
+        id: 'medical-dentist',
+        summary: 'Dental appointment Dr Chen',
+        start: { dateTime: start },
+      };
+      const api = apiFor({ 'owner@example.com': [first], 'work@example.com': [second] });
+      const result = (await toolsWith(api)
+        .get('calendar.list_events')
+        ?.tool.execute(
+          {
+            timeMin: '2026-07-24T00:00:00Z',
+            timeMax: '2026-07-25T00:00:00Z',
+            maxResults: 20,
+          },
+          {} as never,
+        )) as Record<string, unknown>;
+      expect(result.events).toHaveLength(2);
+      expect(result[field]).toMatchObject([
+        {
+          event: { calendarId: 'work@example.com', eventId: second.id },
+          possibleCopyOf: { calendarId: 'owner@example.com', eventId: first.id },
+          matchEvidence: { kind, signals: expect.arrayContaining(['title', 'activity', 'venue']) },
+        },
+      ]);
+      expect(JSON.stringify(result)).toContain('Dentist Chen');
+      expect(JSON.stringify(result)).toContain('Dental appointment Dr Chen');
+      expect(JSON.stringify(result)).toMatch(/do not edit|never authorizes editing/);
+    },
+  );
+
   it('preserves explicit attendee identity and RSVP without deriving a name from an email', async () => {
     const api = apiFor({
       'owner@example.com': [

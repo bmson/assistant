@@ -109,6 +109,7 @@ const snapshot = {
     name: contact.name,
     aliases: contact.aliases,
     trust: contact.trust,
+    relationship: contact.relationship,
     revision: displayedRevision,
   },
   people: [{ contactId: contact.id, name: contact.name, revision: displayedRevision }],
@@ -309,7 +310,7 @@ describe('actual page + real issuance builder composition, named reader/fence po
       expect(html).toContain('A note with no recorded validity bounds.');
       expect(html.match(/date unavailable–/g)).toHaveLength(1);
       expect(html).toContain('Edit details');
-      expect(html).toContain('Add person');
+      expect(html).toContain('Add connection');
       expect(html).not.toContain('NaN');
       expect(Number.isNaN(createdAt.getTime())).toBe(true);
       expect(Number.isNaN(validFrom.getTime())).toBe(true);
@@ -436,8 +437,8 @@ describe('actual page + real issuance builder composition, named reader/fence po
     expect(ports.trace).toEqual(['pg-before', 'browse', 'editor', 'pg-after']);
     expect(ports.pgEditor.mock.calls[0]?.[1]).toMatchObject({ contactId: contact.id });
     expect(html).toContain('Edit details');
-    expect(html).toContain('Add person');
-    expect(html).toContain('Add family relationship');
+    expect(html).not.toContain('Add person');
+    expect(html).toContain('Add connection');
     expect(html).toContain('/people?q=retained%20search');
     expect(html).toContain(contact.name);
     expect(html).toContain('view=map');
@@ -476,7 +477,7 @@ describe('actual page + real issuance builder composition, named reader/fence po
       expect(html).toContain(contact.name);
       expect(html).toContain('Add person');
       expect(html).not.toContain('Edit details');
-      expect(html).not.toContain('Add family relationship');
+      expect(html).not.toContain('Add connection');
       expect(html).toContain(
         'Editing is temporarily unavailable. You can still browse this saved information.',
       );
@@ -495,7 +496,7 @@ describe('actual page + real issuance builder composition, named reader/fence po
       ports.fsSnapshot.mockResolvedValue(newerSnapshot);
       const html = renderToStaticMarkup(await dossier());
       expect(html).toContain(contact.name);
-      expect(html).not.toContain('Edit name and aliases');
+      expect(html).not.toContain('Edit details');
       expect(contact.identityRevision).toBe(displayedRevision);
       if (driver === 'firestore') expect(ports.pgRead).not.toHaveBeenCalled();
     },
@@ -682,8 +683,11 @@ it('selects only the exact loaded connection without adding an edit or removal g
   expect(html).toContain(`id="person-connection-${relationId}"`);
   expect(html).toContain('aria-current="location"');
   expect(html).toContain('Sam Rivera is Alex’s friend.');
+  expect(html).toContain(
+    `href="/people/${ownerId}?returnTo=${encodeURIComponent('/profile/knowledge?view=connections&q=Alex')}&amp;connectionId=${relationId}#person-connection-${relationId}"`,
+  );
   expect(html).not.toContain('Remove connection');
-  expect(html).not.toContain('Edit relationship');
+  expect(html).not.toContain('Edit connection');
   expect(ports.pgEditor.mock.calls[0]?.[1]).toMatchObject({
     contactId: contact.id,
     relationIds: [relationId],
@@ -721,7 +725,7 @@ it('selects a loaded non-person connection without adding it to family editor au
   expect(html).toContain('Sam Rivera worked at Praça Studio.');
   expect(html).toContain('not a relationship between people');
   expect(html).toContain(`/profile/knowledge/notes/${sourceMemoryId}`);
-  expect(html).not.toContain('Edit relationship');
+  expect(html).not.toContain('Edit connection');
   expect(html).not.toContain('Remove connection');
   expect(ports.pgEditor.mock.calls[0]?.[1]).toMatchObject({
     contactId: contact.id,
@@ -766,6 +770,6 @@ it('retains a validated selected connection and return context when a dossier re
   expect(html).toContain('Could not load this view');
   expect(html).toContain(`connectionId=${selected}#person-connection-${selected}`);
   expect(html).toContain(`returnTo=${encodeURIComponent(returnTo)}`);
-  expect(html).not.toContain('Edit relationship');
+  expect(html).not.toContain('Edit connection');
   expect(ports.pgEditor).not.toHaveBeenCalled();
 });

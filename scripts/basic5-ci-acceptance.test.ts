@@ -7,6 +7,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { OwnerEditorSavedIds } from '@assistant/persistence';
 import { describe, expect, it, vi } from 'vitest';
+import { BASIC5_LOGICAL_NAVIGATION_STAGES } from './basic5-browser-acceptance-support.js';
 import {
   assertBasic5CiUtilityChildSucceeded,
   assertBasic5CiWorkflowAdmission,
@@ -175,10 +176,22 @@ function validEvidence(): Basic5CiEvidence {
       familyCorrection: true,
       noteCorrection: true,
     },
+    journeyFacts: {
+      navigationStages: [...BASIC5_LOGICAL_NAVIGATION_STAGES],
+      findResultCounts: { people: 2, connections: 2, savedNotes: 2 },
+      exactTargetHrefMatches: { people: 2, connections: 2, savedNotes: 2 },
+      reloadCount: 4,
+      reopenedPageReadbacks: {
+        identity: true,
+        familyAdd: true,
+        familyCorrection: true,
+        noteCorrection: true,
+      },
+    },
     counts: {
       readinessAttempts: 8,
-      pageNavigations: 6,
-      authenticatedPageNavigations: 6,
+      pageNavigations: 16,
+      authenticatedPageNavigations: 16,
       browserHttpRequests: 24,
       browserControlHttpRequests: 16,
       browserPresentationHttpRequests: 8,
@@ -234,6 +247,8 @@ class FakeOps implements Basic5CiOps {
   };
   absent = true;
   failCleanup = false;
+  cleanupFailure?: unknown;
+  absenceFailure?: unknown;
   prepareAdvanceMs = 0;
   prepareThrows = false;
   neverResolvePreparation = false;
@@ -328,6 +343,7 @@ class FakeOps implements Basic5CiOps {
   ): Promise<void> {
     this.events.push('cleanup');
     expect(deadline).toBe(400_000);
+    if (this.cleanupFailure) throw this.cleanupFailure;
     if (this.failCleanup) throw new Error('redacted cleanup error');
   }
   async verifyTargetAbsent(
@@ -336,6 +352,7 @@ class FakeOps implements Basic5CiOps {
     _signal: AbortSignal,
   ): Promise<boolean> {
     this.events.push('verify-absent');
+    if (this.absenceFailure) throw this.absenceFailure;
     return this.absent;
   }
   async writeContentFreeReceipt(
@@ -365,9 +382,9 @@ class FakeDirectChild extends EventEmitter implements Basic5CiDirectChildHandle 
 }
 
 describe('one-shot BASIC5 CI controller', () => {
-  it('accepts producer evidence only after the exact v1 envelope survives JSON roundtrip', async () => {
+  it('accepts producer evidence only after the exact v2 envelope survives JSON roundtrip', async () => {
     const built = validEvidence();
-    expect(built.schemaVersion).toBe(1);
+    expect(built.schemaVersion).toBe(2);
     expect(BASIC5_CI_EVIDENCE_LABEL).toBe(
       'synthetic Auth.js cookie; provider-unqualified local embedding transport',
     );
@@ -379,7 +396,20 @@ describe('one-shot BASIC5 CI controller', () => {
     const result = await runBasic5CiAcceptance(ops);
 
     expect(result.result).toBe('passed');
-    expect(result.schemaVersion).toBe(5);
+    expect(result.schemaVersion).toBe(6);
+    expect(result.journeyFacts).toEqual({
+      navigationStages: [...BASIC5_LOGICAL_NAVIGATION_STAGES],
+      findResultCounts: { people: 2, connections: 2, savedNotes: 2 },
+      exactTargetHrefMatches: { people: 2, connections: 2, savedNotes: 2 },
+      reloadCount: 4,
+      reopenedPageReadbacks: {
+        identity: true,
+        familyAdd: true,
+        familyCorrection: true,
+        noteCorrection: true,
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain('Alex Rivera');
   });
 
   it.each([
@@ -392,7 +422,7 @@ describe('one-shot BASIC5 CI controller', () => {
     {
       name: 'wrong schemaVersion',
       mutate: (evidence: Record<string, unknown>) => {
-        evidence.schemaVersion = 2;
+        evidence.schemaVersion = 1;
       },
     },
     {
@@ -404,7 +434,7 @@ describe('one-shot BASIC5 CI controller', () => {
     {
       name: 'string schemaVersion',
       mutate: (evidence: Record<string, unknown>) => {
-        evidence.schemaVersion = '1';
+        evidence.schemaVersion = '2';
       },
     },
     {
@@ -423,6 +453,29 @@ describe('one-shot BASIC5 CI controller', () => {
       name: 'unknown envelope key',
       mutate: (evidence: Record<string, unknown>) => {
         evidence.extraEnvelopeField = true;
+      },
+    },
+    {
+      name: 'missing leave and reopen journey stage',
+      mutate: (evidence: Record<string, unknown>) => {
+        const journeyFacts = evidence.journeyFacts as { navigationStages: string[] };
+        journeyFacts.navigationStages[2] = 'identity_reopen_person';
+      },
+    },
+    {
+      name: 'missing reopened-page readback',
+      mutate: (evidence: Record<string, unknown>) => {
+        const journeyFacts = evidence.journeyFacts as {
+          reopenedPageReadbacks: Record<string, boolean>;
+        };
+        journeyFacts.reopenedPageReadbacks.familyAdd = false;
+      },
+    },
+    {
+      name: 'unexpected journey fact field',
+      mutate: (evidence: Record<string, unknown>) => {
+        const journeyFacts = evidence.journeyFacts as Record<string, unknown>;
+        journeyFacts.noteText = 'synthetic note content must not enter the receipt';
       },
     },
   ])('holds for malformed evidence envelope: $name', async ({ mutate }) => {
@@ -933,6 +986,53 @@ describe('one-shot BASIC5 CI controller', () => {
     expect(run.snapshotReads).toBe(4);
     expect(run.signals).toEqual([]);
   });
+
+  it('confirms independent first-pass exits together and defers a child of a missing parent', async () => {
+    const sibling = { ...censusChild, pid: 91, startTimeTicks: '3' };
+    const grandchild = { ...censusChild, pid: 92, ppid: 90, startTimeTicks: '4' };
+    const readIdentity = vi.fn(async (pid: number) => (pid === 88 ? censusRoot : undefined));
+    const run = await censusSequence(
+      [
+        censusSnapshot(censusRoot, censusChild, sibling, grandchild),
+        censusSnapshot(censusRoot),
+        censusSnapshot(),
+        censusSnapshot(),
+      ],
+      readIdentity,
+    );
+    expect(run.error).toBeUndefined();
+    expect(run.result?.exitCode).toBe(0);
+    expect(readIdentity).toHaveBeenCalledWith(90);
+    expect(readIdentity).toHaveBeenCalledWith(91);
+    expect(readIdentity).not.toHaveBeenCalledWith(92);
+    expect(run.snapshotReads).toBe(4);
+    expect(run.enrolled).toEqual([88]);
+    expect(run.signals).toEqual([]);
+  });
+
+  it.each([
+    ['still present', '3', 'absence_not_confirmed'],
+    ['reused', '99', 'generation_changed'],
+  ] as const)(
+    'holds if one batched missing PID is %s in the fresh snapshot',
+    async (_label, ticks, reason) => {
+      const sibling = { ...censusChild, pid: 91, startTimeTicks: '3' };
+      const run = await censusSequence(
+        [
+          censusSnapshot(censusRoot, censusChild, sibling),
+          censusSnapshot(censusRoot, { ...sibling, startTimeTicks: ticks }),
+        ],
+        async (pid) => (pid === 88 ? censusRoot : undefined),
+      );
+      expect(run.error).toMatchObject({
+        operationSettled: false,
+        censusDiagnostic: { stage: 'absence_confirmation', reason },
+      });
+      expect(run.snapshotReads).toBe(2);
+      expect(run.enrolled).toEqual([88]);
+      expect(run.signals).toEqual([]);
+    },
+  );
 
   it.each([
     ['same live row', censusChild, 'absence_not_confirmed'],
@@ -2286,9 +2386,10 @@ describe('one-shot BASIC5 CI controller', () => {
 
     expect(result.errorCode).toBe('required_runtime_artifact_identity_incomplete');
     expect(result.targetStatus).toBe('not_allocated');
-    expect(result.acceptanceContract).toBe('basic5-ci-user-flow-control-presentation-v5');
+    expect(result.acceptanceContract).toBe('basic5-ci-user-flow-control-presentation-v7');
     expect(result.claimScope).toMatchObject({
-      behavior: 'four BASIC5 saves: scoped UI success and same-operation durable receipts',
+      behavior:
+        'four BASIC5 saves: exact search links, same-operation durable receipts, and leave/reopen/reload readbacks',
       ancestorWorkspaceDependencies: 'unqualified',
       unexercisedRoutes: 'unqualified',
       containerIndependence: 'unqualified',
@@ -2415,8 +2516,8 @@ describe('one-shot BASIC5 CI controller', () => {
     expect(result.cleanupComplete).toBe(true);
     expect(result.targetStatus).toBe('removed');
     expect(result.controllerScratchStatus).toBe('retained');
-    expect(result.schemaVersion).toBe(5);
-    expect(result.acceptanceContract).toBe('basic5-ci-user-flow-control-presentation-v5');
+    expect(result.schemaVersion).toBe(6);
+    expect(result.acceptanceContract).toBe('basic5-ci-user-flow-control-presentation-v7');
     expect(result.workflowContext).toMatchObject({
       event: 'push',
       ref: 'refs/heads/main',
@@ -2570,6 +2671,86 @@ describe('one-shot BASIC5 CI controller', () => {
     expect(ops.events).toEqual(['preflight', 'prepare', 'case', 'receipt']);
     expect(JSON.stringify(result)).not.toMatch(/pid|https?:\/\/|private/);
   });
+
+  it.each(['cleanup', 'verify-absent'] as const)(
+    'retains a closed %s census diagnostic without claiming cleanup or retrying',
+    async (phase) => {
+      const ops = new FakeOps();
+      const error = new Basic5CiHold(
+        'owned_session_census_unverified',
+        false,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { stage: 'known_identity_read', reason: 'process_stat_permission_denied' },
+      );
+      if (phase === 'cleanup') ops.cleanupFailure = error;
+      else ops.absenceFailure = error;
+      const result = await runBasic5CiAcceptance(ops);
+      expect(result).toMatchObject({
+        result: 'hold',
+        errorCode: 'owned_session_census_unverified',
+        operationSettled: false,
+        cleanupComplete: false,
+        targetStatus: 'unknown',
+        targetRetained: null,
+        cleanupCensusDiagnostic: {
+          stage: 'known_identity_read',
+          reason: 'process_stat_permission_denied',
+        },
+      });
+      expect(ops.writtenReceipt?.cleanupCensusDiagnostic).toEqual(result.cleanupCensusDiagnostic);
+      expect(ops.events.filter((event) => event === 'cleanup')).toHaveLength(1);
+      expect(ops.events).toEqual([
+        'preflight',
+        'prepare',
+        'case',
+        'quiesce',
+        'cleanup',
+        ...(phase === 'verify-absent' ? ['verify-absent'] : []),
+        'receipt',
+      ]);
+      expect(JSON.stringify(result)).not.toMatch(/pid|https?:\/\/|private/);
+    },
+  );
+
+  it.each([
+    { stage: 'snapshot', reason: 'process_census_unavailable', pid: 123, raw: 'private-secret' },
+    { stage: 'private-stage', reason: 'process_census_unavailable' },
+    { stage: 'snapshot', reason: 'private-reason' },
+  ])(
+    'rejects malformed cleanup census diagnostic without leaking its contents',
+    async (diagnostic) => {
+      const ops = new FakeOps();
+      ops.cleanupFailure = new Basic5CiHold(
+        'owned_session_census_unverified',
+        false,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        diagnostic as never,
+      );
+      const result = await runBasic5CiAcceptance(ops);
+      expect(result).toMatchObject({
+        result: 'hold',
+        errorCode: 'cleanup_census_diagnostic_invalid',
+        operationSettled: false,
+        cleanupComplete: false,
+        targetStatus: 'unknown',
+      });
+      expect(result.cleanupCensusDiagnostic).toBeUndefined();
+      expect(JSON.stringify(result)).not.toMatch(
+        /private-secret|private-stage|private-reason|"pid"/,
+      );
+      expect(ops.events.filter((event) => event === 'cleanup')).toHaveLength(1);
+    },
+  );
 
   it.each([
     {
@@ -2872,19 +3053,19 @@ describe('one-shot BASIC5 CI controller', () => {
   it('accepts the control and presentation budgets at their exact bounds', async () => {
     const ops = new FakeOps();
     Object.assign(ops.caseResult.evidence.counts, {
-      browserHttpRequests: 320,
-      browserPageHttpRequests: 319,
+      browserHttpRequests: 832,
+      browserPageHttpRequests: 831,
       browserControlHttpRequests: 64,
-      browserPresentationHttpRequests: 256,
+      browserPresentationHttpRequests: 768,
     });
     const result = await runBasic5CiAcceptance(ops);
     expect(result.result).toBe('passed');
-    expect(result.schemaVersion).toBe(5);
-    expect(result.acceptanceContract).toBe('basic5-ci-user-flow-control-presentation-v5');
+    expect(result.schemaVersion).toBe(6);
+    expect(result.acceptanceContract).toBe('basic5-ci-user-flow-control-presentation-v7');
     expect(result.counts).toMatchObject({
-      browserHttpRequests: 320,
+      browserHttpRequests: 832,
       browserControlHttpRequests: 64,
-      browserPresentationHttpRequests: 256,
+      browserPresentationHttpRequests: 768,
     });
   });
 
@@ -2897,15 +3078,21 @@ describe('one-shot BASIC5 CI controller', () => {
     },
     {
       browserControlHttpRequests: 16,
-      browserPresentationHttpRequests: 257,
-      browserHttpRequests: 273,
-      browserPageHttpRequests: 272,
+      browserPresentationHttpRequests: 769,
+      browserHttpRequests: 785,
+      browserPageHttpRequests: 784,
     },
     {
       browserControlHttpRequests: 64,
-      browserPresentationHttpRequests: 257,
-      browserHttpRequests: 321,
-      browserPageHttpRequests: 320,
+      browserPresentationHttpRequests: 769,
+      browserHttpRequests: 833,
+      browserPageHttpRequests: 832,
+    },
+    {
+      browserControlHttpRequests: 65,
+      browserPresentationHttpRequests: 768,
+      browserHttpRequests: 833,
+      browserPageHttpRequests: 832,
     },
     { browserHttpRequests: 25, browserPageHttpRequests: 24 },
     { browserControlHttpRequests: 0 },

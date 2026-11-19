@@ -13,7 +13,10 @@ import type { InstallationStore } from '../../../packages/firestore/src/store.js
 import { disposeStore, emulatorStore } from '../../../packages/firestore/src/test-store.js';
 import { drainEmailObservers } from '../../../packages/modules/src/email-observers.js';
 import { googleDurableEmailObservers } from '../../../packages/modules/src/google/durable-email-observers.js';
-import { syncMailboxWithDistributedLock } from '../../../packages/modules/src/google/email-sync.js';
+import {
+  renewWatch,
+  syncMailboxWithDistributedLock,
+} from '../../../packages/modules/src/google/email-sync.js';
 
 const SPACE = { provider: 'synthetic', model: 'mail-fixture', dimensions: 1536, revision: '1' };
 const BOT = 'bot@assistant.test';
@@ -33,6 +36,8 @@ interface FakeMessage {
   subject: string;
   body: string;
   authenticated?: boolean;
+  automated?: boolean;
+  labelIds?: string[];
 }
 
 describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
@@ -81,6 +86,8 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
     function gmail(): GoogleClient {
       const api = vi.fn(async (url: string) => {
         if (url.endsWith('/profile')) return { historyId: String(historyId) };
+        if (url.endsWith('/watch'))
+          return { historyId: String(historyId), expiration: String(Date.now() + 86_400_000) };
         if (url.includes('/history?')) {
           const ids = history.splice(0);
           return { history: ids.map((id) => ({ messagesAdded: [{ message: { id } }] })) };
@@ -92,11 +99,12 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         return {
           id: message.id,
           threadId: message.threadId,
-          labelIds: ['INBOX'],
+          labelIds: message.labelIds ?? ['INBOX'],
           snippet: message.body.slice(0, 40),
           payload: {
             mimeType: 'text/plain',
             headers: [
+              ...(message.automated ? [{ name: 'Precedence', value: 'bulk' }] : []),
               { name: 'From', value: message.from },
               { name: 'Subject', value: message.subject },
               { name: 'Message-ID', value: `<${message.id}@mail>` },
@@ -193,6 +201,63 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
     async function lastHistoryId() {
       return (await persistence.emailSync?.syncState(BOT))?.lastHistoryId;
     }
+
+    it('observes auto-archived forwarded mail and requests mailbox-wide history and push coverage', async () => {
+      const mailDeps = deps({ EMAIL_INGEST_MODE: 'forwarded' });
+      await syncMailboxWithDistributedLock(mailDeps);
+      arrive({
+        id: 'archived',
+        from: FRIEND,
+        subject: 'School form',
+        body: 'Please return the signed school form by next Friday.',
+        labelIds: [],
+      });
+      arrive({
+        id: 'sent',
+        from: OWNER,
+        subject: 'Already sent',
+        body: 'A sent copy should not enter incoming observation.',
+        labelIds: ['SENT'],
+      });
+      await syncMailboxWithDistributedLock(mailDeps);
+      const rows = await store.collection('emailIngest').get();
+      expect(rows.docs.map((doc) => doc.get('channelMessageId'))).toEqual(['gmail:archived']);
+      const api = vi.mocked(mailDeps.googleClient.api);
+      const historyCall = api.mock.calls.find(([url]) => String(url).includes('/history?'));
+      expect(historyCall).toBeDefined();
+      expect(new URL(String(historyCall?.[0])).searchParams.has('labelId')).toBe(false);
+      await renewWatch(mailDeps, 'projects/demo-assistant-test/topics/mail');
+      const watchCall = api.mock.calls.find(([url]) => String(url).endsWith('/watch'));
+      expect(JSON.parse(String(watchCall?.[1]?.body))).toEqual({
+        topicName: 'projects/demo-assistant-test/topics/mail',
+      });
+      expect(await lastHistoryId()).toBe(BigInt(historyId));
+    });
+
+    it('finishes automated direct routing as no-op without requiring a conversation', async () => {
+      const mailDeps = deps();
+      await syncMailboxWithDistributedLock(mailDeps);
+      arrive({
+        id: 'auto',
+        from: 'newsletter@example.test',
+        subject: 'Monthly newsletter',
+        body: 'This is an automated newsletter for the owner.',
+        automated: true,
+      });
+      await syncMailboxWithDistributedLock(mailDeps);
+      await drainObservers(mailDeps);
+      const works = await store
+        .collection('emailObserverWork')
+        .where('sourceKey', '==', 'gmail:auto')
+        .get();
+      const routing = works.docs.find(
+        (row) => row.get('observerKey') === 'google.direct-email-routing',
+      );
+      expect(routing?.get('status')).toBe('no_op');
+      expect((await store.collection('tasks').where('type', '==', 'email_triage').get()).size).toBe(
+        0,
+      );
+    });
 
     it('baselines, triages known mail once after durable admission, and advances the cursor', async () => {
       const baselineDeps = deps();

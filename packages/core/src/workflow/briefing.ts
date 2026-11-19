@@ -3,9 +3,12 @@ import {
   agents,
   approvals,
   createPostgresEmailSyncRepository,
+  createPostgresOccasionToolReadRepository,
+  createPostgresOwnerContextRepository,
   type Db,
   emailBookingOccurrences,
   emailIngest,
+  emailIngestReadableSql,
   goals as goalsTable,
   tasks as taskTable,
   watches,
@@ -42,7 +45,6 @@ import {
   isOwnerFacingTask,
   ownerDate,
   ownerDateTime,
-  ownerEventWhen,
   readableSender,
   truncateAtBoundary,
 } from '../owner-text.js';
@@ -52,10 +54,12 @@ import {
   salientEvents,
 } from '../proactive/calendar-salience.js';
 import { isFlightLikeCalendarEvent } from '../proactive/flight-calendar.js';
+import { briefingLifeContext } from '../proactive/life-context.js';
 import { type ProactiveNotifier, pingOwner } from '../proactive/notify.js';
 import {
   agendaSection,
   type BriefingCard,
+  type BriefingListItem,
   type BriefingSection,
   briefingMarkdown,
   listSection,
@@ -63,11 +67,12 @@ import {
 } from './briefing-card.js';
 import {
   type CalendarRelationship,
+  calendarGroupRelationship,
   calendarOverlapAttendanceNote,
-  calendarRelationship,
-  canonicalOccurrenceGroups,
   classifyCalendarOverlap,
+  isCalendarAdvisoryRelationship,
   possibleCalendarIdentityDisagreement,
+  presentationOccurrenceGroups,
   verifiedOwnerParticipation,
 } from './calendar-relationship.js';
 import { weatherResponseCards } from './response-cards.js';
@@ -171,6 +176,7 @@ export interface BriefingCalendarEvent {
   organizer?: string;
   /** Raw "email (responseStatus)" strings, as the calendar adapter renders them. */
   attendees?: readonly string[];
+  links?: readonly unknown[];
 }
 
 export interface BriefingCalendarWindow {
@@ -253,6 +259,8 @@ export function briefingHasNews(counts: {
   watchHits: number;
   securityIncidents?: number;
   bookingCancellations?: number;
+  personalOccasions?: number;
+  openCommitments?: number;
 }): boolean {
   return (
     counts.highlights > 0 ||
@@ -264,7 +272,9 @@ export function briefingHasNews(counts: {
     counts.goalDeltas > 0 ||
     counts.watchHits > 0 ||
     (counts.securityIncidents ?? 0) > 0 ||
-    (counts.bookingCancellations ?? 0) > 0
+    (counts.bookingCancellations ?? 0) > 0 ||
+    (counts.personalOccasions ?? 0) > 0 ||
+    (counts.openCommitments ?? 0) > 0
   );
 }
 
@@ -405,6 +415,8 @@ export interface BriefingResult {
   watchHits: number;
   securityIncidents?: number;
   bookingCancellations?: number;
+  personalOccasions?: number;
+  openCommitments?: number;
 }
 
 export interface CalendarConflict {
@@ -421,7 +433,10 @@ export interface CalendarConflict {
   sourceIdentityDisagreement?: boolean;
 }
 export type CalendarConflictResults = CalendarConflict[] & {
+  /** All timed overlap pairs after presentation grouping, including possible copies. */
   totalCount: number;
+  /** Distinct overlap pairs kept as actionable conflicts after copy filtering. */
+  conflictCount: number;
   detailsOmitted: boolean;
 };
 
@@ -434,6 +449,81 @@ function calendarConflictSideLabel(events: BriefingCalendarEvent[]): string {
       ),
     ),
   ].join(', ');
+}
+
+function calendarConflictSummarySideLabel(events: BriefingCalendarEvent[]): string {
+  const first = events[0];
+  if (!first) return 'Calendar event';
+  const title = collapseWhitespace(first.summary) || 'Untitled event';
+  const calendars = [
+    ...new Set(events.map((event) => collapseWhitespace(event.calendar)).filter(Boolean)),
+  ];
+  return `${title} (${calendars.length ? calendars.join(' + ') : 'Calendar'})`;
+}
+
+function calendarConflictAttendanceSummary(conflict: CalendarConflict): string {
+  if (conflict.classification === 'personal_commitment_conflict')
+    return 'You accepted both invitations; the times overlap.';
+  if (conflict.classification === 'commitments_policy_overlap')
+    return 'Your calendar marks these as commitments; attendance is unconfirmed.';
+  const left = verifiedOwnerParticipation({
+    sourceVariants: conflict.a as unknown as Record<string, unknown>[],
+  });
+  const right = verifiedOwnerParticipation({
+    sourceVariants: conflict.b as unknown as Record<string, unknown>[],
+  });
+  if (left === 'accepted' || right === 'accepted')
+    return 'You accepted one invitation; attendance at the other is unconfirmed.';
+  return 'Who is attending is not recorded.';
+}
+
+export function calendarOverlapBriefingItems(
+  conflicts: CalendarConflict[],
+  conflictCount: number,
+  timeZone: string,
+): BriefingListItem[] {
+  const items = conflicts.map((conflict) => ({
+    title: `${calendarConflictSummarySideLabel(conflict.a)} ${isCalendarAdvisoryRelationship(conflict.relationship) ? 'may be the same event as' : 'overlaps'} ${calendarConflictSummarySideLabel(conflict.b)}`,
+    detail: [
+      `${localDateTime(conflict.overlapStart, timeZone)}–${localDateTime(conflict.overlapEnd, timeZone)}`,
+      conflict.sourceIdentityDisagreement
+        ? 'These entries may be copies with different times; which invitation has the current time is unclear.'
+        : '',
+      isCalendarAdvisoryRelationship(conflict.relationship)
+        ? 'Possibly the same event; verify the invitations before treating this as a scheduling conflict.'
+        : calendarConflictAttendanceSummary(conflict),
+    ]
+      .filter(Boolean)
+      .join(' · '),
+  }));
+  const omittedCount = Math.max(0, conflictCount - conflicts.length);
+  if (omittedCount > 0) {
+    items.push({
+      title: `${omittedCount} more overlaps not shown`,
+      detail: `Showing ${conflicts.length} of ${conflictCount} calendar overlaps.`,
+    });
+  }
+  return items;
+}
+
+export function briefingCalendarPromptLines(
+  section: BriefingSection | undefined,
+  windowHours: number,
+  complete: boolean,
+): string[] {
+  if (section?.type !== 'agenda') return [];
+  if (section.items.length === 0) {
+    return complete
+      ? []
+      : [`Calendar coverage is partial; no activities were returned in the next ${windowHours}h.`];
+  }
+  return [
+    `On the calendar (${section.items.length} schedule item${section.items.length === 1 ? '' : 's'} shown in the next ${windowHours}h${section.omittedCount ? `; ${section.omittedCount} more retrieved activities omitted` : ''}${complete ? '' : '; coverage partial'}):`,
+    ...section.items.map(
+      (item) =>
+        `- ${item.day} ${item.time}: ${collapseWhitespace(item.title)}${item.location ? ` at ${collapseWhitespace(item.location)}` : ''}${item.note ? ` — ${item.note}` : ''}`,
+    ),
+  ];
 }
 
 function calendarConflictAttendanceNote(conflict: CalendarConflict): string {
@@ -454,6 +544,12 @@ interface TimedCalendarEvent extends BriefingCalendarEvent {
   endMs: number;
 }
 
+interface CalendarOccurrenceGroup {
+  events: TimedCalendarEvent[];
+  startMs: number;
+  endMs: number;
+}
+
 /**
  * Overlapping timed events, computed deterministically — a conflict is a fact
  * the owner would want named, and the composer may only ever relay the pairs
@@ -461,7 +557,7 @@ interface TimedCalendarEvent extends BriefingCalendarEvent {
  */
 export function findConflicts(
   events: ReadonlyArray<BriefingCalendarEvent>,
-  _timeZone = 'UTC',
+  timeZone = 'UTC',
 ): CalendarConflictResults {
   const timed = events
     .map((event) => ({ ...event, startMs: Date.parse(event.start), endMs: Date.parse(event.end) }))
@@ -476,7 +572,9 @@ export function findConflicts(
         event.endMs > event.startMs,
     )
     .sort((a, b) => a.startMs - b.startMs);
-  const groups = (canonicalOccurrenceGroups(timed) as TimedCalendarEvent[][])
+  const groups: CalendarOccurrenceGroup[] = (
+    presentationOccurrenceGroups(timed, timeZone) as TimedCalendarEvent[][]
+  )
     .map((group) => ({
       events: group,
       startMs: Math.min(...group.map((event) => event.startMs)),
@@ -484,7 +582,9 @@ export function findConflicts(
     }))
     .sort((a, b) => a.startMs - b.startMs);
   const conflicts: CalendarConflict[] = [];
+  const duplicateListings: CalendarConflict[] = [];
   let totalCount = 0;
+  let conflictCount = 0;
   for (let i = 0; i < groups.length; i++) {
     const earlier = groups[i];
     if (!earlier) continue;
@@ -492,7 +592,15 @@ export function findConflicts(
       const later = groups[j];
       if (!later || later.startMs >= earlier.endMs) break;
       totalCount += 1;
-      if (conflicts.length >= MAX_CONFLICTS) continue;
+      const relationship = calendarGroupRelationship(earlier.events, later.events, timeZone);
+      const isDuplicateListing = isCalendarAdvisoryRelationship(relationship);
+      if (!isDuplicateListing) conflictCount += 1;
+      if (
+        isDuplicateListing
+          ? duplicateListings.length >= MAX_CONFLICTS
+          : conflicts.length >= MAX_CONFLICTS
+      )
+        continue;
       const sourceIdentityDisagreement = earlier.events.some((left) =>
         later.events.some((right) =>
           possibleCalendarIdentityDisagreement(left as CalendarOccurrenceIdentity, right),
@@ -506,32 +614,34 @@ export function findConflicts(
           : 'unspecified',
         sourceVariants: group,
       });
-      const classification = sourceIdentityDisagreement
-        ? 'attendance_unconfirmed'
-        : classifyCalendarOverlap(aggregate(earlier.events), aggregate(later.events));
-      conflicts.push({
+      const classification =
+        sourceIdentityDisagreement || isDuplicateListing
+          ? 'attendance_unconfirmed'
+          : classifyCalendarOverlap(aggregate(earlier.events), aggregate(later.events));
+      const detail: CalendarConflict = {
         a: earlier.events,
         b: later.events,
-        relationship:
-          earlier.events.length === 1 && later.events.length === 1
-            ? calendarRelationship(
-                earlier.events[0] as BriefingCalendarEvent,
-                later.events[0] as BriefingCalendarEvent,
-              )
-            : 'unresolved',
+        relationship,
         attendance: classification === 'personal_commitment_conflict' ? 'confirmed' : 'unresolved',
         classification,
         ...(sourceIdentityDisagreement ? { sourceIdentityDisagreement: true } : {}),
         overlapStart: new Date(Math.max(earlier.startMs, later.startMs)).toISOString(),
         overlapEnd: new Date(Math.min(earlier.endMs, later.endMs)).toISOString(),
-      });
+      };
+      if (isDuplicateListing) duplicateListings.push(detail);
+      else conflicts.push(detail);
     }
   }
-  Object.defineProperties(conflicts, {
+  const details = [...conflicts, ...duplicateListings].slice(
+    0,
+    MAX_CONFLICTS,
+  ) as CalendarConflictResults;
+  Object.defineProperties(details, {
     totalCount: { value: totalCount, enumerable: false },
-    detailsOmitted: { value: totalCount > conflicts.length, enumerable: false },
+    conflictCount: { value: conflictCount, enumerable: false },
+    detailsOmitted: { value: totalCount > details.length, enumerable: false },
   });
-  return conflicts as CalendarConflictResults;
+  return details;
 }
 
 function localDateTime(value: string, timeZone: string): string {
@@ -778,96 +888,99 @@ async function briefingInputsFromSql(
   since: Date,
   now: Date,
 ): Promise<BriefingInputs> {
-  const [mail, bookings, attention, pending, goalDeltas, watchHits] = await Promise.all([
-    db
-      .select({
-        fromEmail: emailIngest.fromEmail,
-        // Nullable until the sender-name backfill lands; falls back to the
-        // address itself wherever it renders.
-        fromName: emailIngest.fromName,
-        subject: emailIngest.subject,
-        category: emailIngest.category,
-        importance: emailIngest.importance,
-        dates: emailIngest.dates,
-        channelMessageId: emailIngest.channelMessageId,
-        authenticated: emailIngest.authenticated,
-      })
-      .from(emailIngest)
-      .where(
-        and(
-          eq(emailIngest.agentId, agentId),
-          eq(emailIngest.pipelineStage, 'complete'),
-          gte(emailIngest.createdAt, since),
-        ),
-      )
-      .orderBy(desc(emailIngest.importance)),
-    db
-      .select({
-        bookingKey: emailBookingOccurrences.bookingKey,
-        lifecycle: emailBookingOccurrences.lifecycle,
-        dates: emailBookingOccurrences.dates,
-        sourceChannelMessageId: emailBookingOccurrences.sourceChannelMessageId,
-        sourceReceivedAt: emailBookingOccurrences.sourceReceivedAt,
-        sourceAuthenticated: emailBookingOccurrences.sourceAuthenticated,
-        version: emailBookingOccurrences.version,
-      })
-      .from(emailBookingOccurrences)
-      .where(
-        and(
-          eq(emailBookingOccurrences.agentId, agentId),
-          eq(emailBookingOccurrences.sourceAuthenticated, true),
-        ),
-      )
-      .limit(2_000),
-    db
-      .select({ title: taskTable.title, progress: taskTable.progress })
-      .from(taskTable)
-      .where(
-        and(
-          eq(taskTable.agentId, agentId),
-          eq(taskTable.status, 'needs_attention'),
-          isNull(taskTable.archivedAt),
-          gte(taskTable.updatedAt, since),
-        ),
-      )
-      .orderBy(desc(taskTable.updatedAt))
-      .limit(10),
-    db
-      .select({ shortCode: approvals.shortCode, summary: approvals.summary })
-      .from(approvals)
-      .innerJoin(taskTable, eq(approvals.taskId, taskTable.id))
-      .where(
-        and(
-          eq(taskTable.agentId, agentId),
-          eq(approvals.status, 'pending'),
-          gt(approvals.expiresAt, now),
-          isNull(taskTable.archivedAt),
-        ),
-      )
-      .limit(10),
-    // Goals that moved in the window — progress, a new next step, a status
-    // change. The standing state is on the Goals page; the digest carries only
-    // what changed.
-    db
-      .select({
-        title: goalsTable.title,
-        status: goalsTable.status,
-        nextAction: goalsTable.nextAction,
-        updatedAt: goalsTable.updatedAt,
-      })
-      .from(goalsTable)
-      .where(and(eq(goalsTable.agentId, agentId), gte(goalsTable.updatedAt, since)))
-      .orderBy(desc(goalsTable.updatedAt))
-      .limit(MAX_GOAL_DELTAS),
-    db
-      .select({ name: watches.name, summary: watchFires.summary })
-      .from(watchFires)
-      .innerJoin(watches, eq(watchFires.watchId, watches.id))
-      .where(and(eq(watchFires.agentId, agentId), gte(watchFires.createdAt, since)))
-      .orderBy(desc(watchFires.createdAt))
-      .limit(MAX_WATCH_HITS),
-  ]);
-  return { mail, bookings, attention, pending, goalDeltas, watchHits };
+  const [mail, bookings, attention, pending, goalDeltas, watchHits, occasions, commitments] =
+    await Promise.all([
+      db
+        .select({
+          fromEmail: emailIngest.fromEmail,
+          // Nullable until the sender-name backfill lands; falls back to the
+          // address itself wherever it renders.
+          fromName: emailIngest.fromName,
+          subject: emailIngest.subject,
+          category: emailIngest.category,
+          importance: emailIngest.importance,
+          dates: emailIngest.dates,
+          channelMessageId: emailIngest.channelMessageId,
+          authenticated: emailIngest.authenticated,
+        })
+        .from(emailIngest)
+        .where(
+          and(
+            eq(emailIngest.agentId, agentId),
+            emailIngestReadableSql(),
+            gte(emailIngest.createdAt, since),
+          ),
+        )
+        .orderBy(desc(emailIngest.importance)),
+      db
+        .select({
+          bookingKey: emailBookingOccurrences.bookingKey,
+          lifecycle: emailBookingOccurrences.lifecycle,
+          dates: emailBookingOccurrences.dates,
+          sourceChannelMessageId: emailBookingOccurrences.sourceChannelMessageId,
+          sourceReceivedAt: emailBookingOccurrences.sourceReceivedAt,
+          sourceAuthenticated: emailBookingOccurrences.sourceAuthenticated,
+          version: emailBookingOccurrences.version,
+        })
+        .from(emailBookingOccurrences)
+        .where(
+          and(
+            eq(emailBookingOccurrences.agentId, agentId),
+            eq(emailBookingOccurrences.sourceAuthenticated, true),
+          ),
+        )
+        .limit(2_000),
+      db
+        .select({ title: taskTable.title, progress: taskTable.progress })
+        .from(taskTable)
+        .where(
+          and(
+            eq(taskTable.agentId, agentId),
+            eq(taskTable.status, 'needs_attention'),
+            isNull(taskTable.archivedAt),
+            gte(taskTable.updatedAt, since),
+          ),
+        )
+        .orderBy(desc(taskTable.updatedAt))
+        .limit(10),
+      db
+        .select({ shortCode: approvals.shortCode, summary: approvals.summary })
+        .from(approvals)
+        .innerJoin(taskTable, eq(approvals.taskId, taskTable.id))
+        .where(
+          and(
+            eq(taskTable.agentId, agentId),
+            eq(approvals.status, 'pending'),
+            gt(approvals.expiresAt, now),
+            isNull(taskTable.archivedAt),
+          ),
+        )
+        .limit(10),
+      // Goals that moved in the window — progress, a new next step, a status
+      // change. The standing state is on the Goals page; the digest carries only
+      // what changed.
+      db
+        .select({
+          title: goalsTable.title,
+          status: goalsTable.status,
+          nextAction: goalsTable.nextAction,
+          updatedAt: goalsTable.updatedAt,
+        })
+        .from(goalsTable)
+        .where(and(eq(goalsTable.agentId, agentId), gte(goalsTable.updatedAt, since)))
+        .orderBy(desc(goalsTable.updatedAt))
+        .limit(MAX_GOAL_DELTAS),
+      db
+        .select({ name: watches.name, summary: watchFires.summary })
+        .from(watchFires)
+        .innerJoin(watches, eq(watchFires.watchId, watches.id))
+        .where(and(eq(watchFires.agentId, agentId), gte(watchFires.createdAt, since)))
+        .orderBy(desc(watchFires.createdAt))
+        .limit(MAX_WATCH_HITS),
+      createPostgresOccasionToolReadRepository(db).list(agentId),
+      createPostgresOwnerContextRepository(db).listOpenCommitments({ agentId, now, limit: 60 }),
+    ]);
+  return { mail, bookings, attention, pending, goalDeltas, watchHits, occasions, commitments };
 }
 
 /** The briefing's portable stores; without them it reads and writes PostgreSQL. */
@@ -975,6 +1088,9 @@ export async function runBriefing(
       MAX_SECURITY_INCIDENTS,
     );
     const { mail, pending, goalDeltas, watchHits } = inputs;
+    const life = briefingLifeContext(inputs, now, agent.timezone);
+    result.personalOccasions = life.occasions.length;
+    result.openCommitments = life.commitments.length;
     // Only work the owner would recognise. A stalled scheduled job or an
     // internal maintenance task is listed on Activity, not in their morning.
     const attention = inputs.attention.filter((row) => isOwnerFacingTask(row.title));
@@ -1055,10 +1171,12 @@ export async function runBriefing(
       (entry) => !inactiveRefs.has(entry.sourceRef),
     );
     const overlaps = findConflicts(calendar?.events ?? [], agent.timezone);
-    const duplicateListings = overlaps.filter(
-      (overlap) => overlap.relationship === 'probable_duplicate',
+    const duplicateListings = overlaps.filter((overlap) =>
+      isCalendarAdvisoryRelationship(overlap.relationship),
     );
-    const conflicts = overlaps.filter((overlap) => overlap.relationship !== 'probable_duplicate');
+    const conflicts = overlaps.filter(
+      (overlap) => !isCalendarAdvisoryRelationship(overlap.relationship),
+    );
     // Salience is judged against the owner's own addresses so an unanswered
     // invitation can be told from one they already accepted, and an in-house
     // organizer from an outside one.
@@ -1084,6 +1202,16 @@ export async function runBriefing(
           );
         })
       : [];
+    const briefingAgenda = calendar
+      ? agendaSection({
+          events: calendar.events,
+          complete: calendar.complete,
+          conflicts: overlaps,
+          salient,
+          timeZone: agent.timezone,
+          now,
+        })
+      : undefined;
     result.mailScanned = mail.length;
     result.highlights = highlights.length;
     result.needsAttention = attention.length;
@@ -1091,7 +1219,7 @@ export async function runBriefing(
     result.upcoming = upcoming.length;
     result.bookingCancellations = cancelledBookingProposals.length;
     result.calendarEvents = calendar?.events.length ?? 0;
-    result.calendarConflicts = conflicts.length;
+    result.calendarConflicts = overlaps.conflictCount;
     result.calendarSalient = salient.length;
     result.goalDeltas = goalDeltas.length;
     result.watchHits = watchHits.length;
@@ -1106,26 +1234,40 @@ export async function runBriefing(
         bookingCancellations: cancelledBookingProposals.length,
         needsAttention: attention.length,
         pendingApprovals: pending.length,
-        calendarConflicts: conflicts.length,
+        calendarConflicts: overlaps.conflictCount,
         calendarSalient: salient.length,
         goalDeltas: goalDeltas.length,
         watchHits: watchHits.length,
         securityIncidents: securityCandidates.length,
+        personalOccasions: life.occasions.length,
+        openCommitments: life.commitments.length,
       })
     ) {
       return result;
     }
 
     const lines: string[] = [];
+    for (const [title, items] of [
+      ['People and important dates', life.occasions],
+      ['Commitments to follow through', life.commitments],
+    ] as const) {
+      if (items.length)
+        lines.push(title, ...items.map((item) => `- ${item.title}: ${item.detail}`));
+    }
     if (conflicts.length > 0) {
       lines.push(
-        `Calendar-entry pairs overlap in the next day or two (${overlaps.totalCount.toLocaleString('en-US')} timed pairs; showing ${conflicts.length} detail${conflicts.length === 1 ? '' : 's'}):`,
+        `Calendar overlaps in the next day or two (${overlaps.conflictCount.toLocaleString('en-US')} distinct conflict pair${overlaps.conflictCount === 1 ? '' : 's'}; showing ${conflicts.length} detail${conflicts.length === 1 ? '' : 's'}):`,
         ...conflicts.map((c) =>
           c.sourceIdentityDisagreement
             ? `- ${c.a[0]?.calendar ?? 'Calendar'} · "${collapseWhitespace(c.a[0]?.summary ?? 'Untitled event')}" and ${c.b[0]?.calendar ?? 'Calendar'} · "${collapseWhitespace(c.b[0]?.summary ?? 'Untitled event')}" may be copies with different times. Assistant cannot confirm whether these are the same event or which time is current. Both entries stay visible; check each invitation.`
             : `- ${c.a[0]?.calendar ?? 'Calendar'} · "${collapseWhitespace(c.a[0]?.summary ?? 'Untitled event')}" overlaps ${c.b[0]?.calendar ?? 'Calendar'} · "${collapseWhitespace(c.b[0]?.summary ?? 'Untitled event')}" (${localDateTime(c.overlapStart, agent.timezone)} to ${localDateTime(c.overlapEnd, agent.timezone)}). ${calendarConflictAttendanceNote(c)}`,
         ),
       );
+      if (overlaps.conflictCount > conflicts.length) {
+        lines.push(
+          `${overlaps.conflictCount - conflicts.length} additional calendar conflict detail${overlaps.conflictCount - conflicts.length === 1 ? '' : 's'} are omitted from this preview.`,
+        );
+      }
     }
     if (duplicateListings.length > 0) {
       lines.push(
@@ -1144,15 +1286,15 @@ export async function runBriefing(
         ...salient.slice(0, MAX_SALIENT).map((scored) => describeSalience(scored, agent.timezone)),
       );
     }
-    if (calendar && calendar.events.length > 0) {
+    const calendarPromptLines = briefingCalendarPromptLines(
+      briefingAgenda,
+      CALENDAR_WINDOW_HOURS,
+      calendar?.complete ?? false,
+    );
+    if (calendarPromptLines.length > 0) {
       lines.push(
-        `${lines.length ? '\n' : ''}On the calendar (${calendar.events.length} event(s) in the next ${CALENDAR_WINDOW_HOURS}h${calendar.complete ? '' : ', coverage partial'}):`,
-        ...calendar.events
-          .slice(0, 10)
-          .map(
-            (event) =>
-              `- ${ownerEventWhen({ start: event.start, end: event.end, allDay: event.allDay }, agent.timezone)}: ${collapseWhitespace(event.summary)}`,
-          ),
+        `${lines.length ? '\n' : ''}${calendarPromptLines[0]}`,
+        ...calendarPromptLines.slice(1),
       );
     }
     if (highlights.length > 0) {
@@ -1267,11 +1409,13 @@ export async function runBriefing(
         bookingCancellations: cancelledBookingProposals.length,
         needsAttention: attention.length,
         pendingApprovals: pending.length,
-        calendarConflicts: conflicts.length,
+        calendarConflicts: overlaps.conflictCount,
         calendarSalient: salient.length,
         goalDeltas: goalDeltas.length,
         watchHits: watchHits.length,
         securityIncidents: claimedSecurity.length,
+        personalOccasions: life.occasions.length,
+        openCommitments: life.commitments.length,
       })
     )
       return result;
@@ -1353,17 +1497,31 @@ export async function runBriefing(
     );
     const buildSections = () =>
       [
-        calendar
-          ? agendaSection({
-              events: calendar.events,
-              complete: calendar.complete,
-              conflicts,
-              salient,
-              timeZone: agent.timezone,
-              now,
-            })
+        briefingAgenda?.type === 'agenda' && briefingAgenda.items.length > 0
+          ? briefingAgenda
+          : undefined,
+        calendar && !calendar.complete && calendar.events.length === 0
+          ? listSection('attention', 'Calendar coverage', [
+              {
+                title: 'Some calendars could not be read',
+                detail: `No activities were returned in the next ${CALENDAR_WINDOW_HOURS}h.`,
+              },
+            ])
+          : undefined,
+        conflicts.length > 0
+          ? listSection(
+              'attention',
+              conflicts.every(
+                (conflict) => conflict.classification === 'personal_commitment_conflict',
+              )
+                ? 'Accepted commitments overlap'
+                : 'Possible calendar overlaps',
+              calendarOverlapBriefingItems(conflicts, overlaps.conflictCount, agent.timezone),
+            )
           : undefined,
         weatherSection(weatherResponseCards(ambient)[0]),
+        listSection('upcoming', 'People and important dates', life.occasions),
+        listSection('attention', 'Commitments to follow through', life.commitments),
         listSection('attention', 'Needs you', [
           ...pending.map((row) => ({ title: row.summary, meta: row.shortCode })),
           ...attention.map((row) => ({
@@ -1431,46 +1589,6 @@ export async function runBriefing(
     // a daily briefing never re-asks a question that was already answered.
     const parts: unknown[] = [{ type: 'data-card', data: card }];
     const proposalSourceById = new Map<string, string>();
-    if (conflicts.length > 0) {
-      parts.push({
-        type: 'data-card',
-        data: {
-          kind: 'calendar-conflicts',
-          id: `calendar-conflicts-${opts.taskId ?? now.toISOString()}`,
-          title: conflicts.every(
-            (conflict) => conflict.classification === 'personal_commitment_conflict',
-          )
-            ? 'You accepted both invitations, and the times overlap'
-            : 'Possible calendar timing overlaps',
-          timeZone: agent.timezone,
-          complete: calendar?.complete ?? false,
-          timedOverlapCount: overlaps.totalCount,
-          overlapDetailsOmitted: overlaps.detailsOmitted,
-          conflicts: conflicts.map((conflict, index) => ({
-            id: `conflict-${index + 1}`,
-            overlapStart: conflict.overlapStart,
-            overlapEnd: conflict.overlapEnd,
-            attendance: conflict.attendance,
-            relationship: conflict.relationship,
-            classification: conflict.classification,
-            ...(conflict.sourceIdentityDisagreement ? { sourceIdentityDisagreement: true } : {}),
-            evidenceNote: conflict.sourceIdentityDisagreement
-              ? 'Assistant cannot confirm whether these are the same event or which time is current. Both entries stay visible; check each invitation.'
-              : calendarConflictAttendanceNote(conflict),
-            groups: [conflict.a, conflict.b].map((events) => ({
-              events: events.map((event) => ({
-                id: event.eventId ?? `${event.calendar}-${event.start}-${event.summary}`,
-                title: event.summary,
-                start: event.start,
-                end: event.end,
-                calendar: event.calendar,
-                location: event.location ?? '',
-              })),
-            })),
-          })),
-        },
-      });
-    }
     for (const entry of [...upcoming, ...cancelledBookingProposals]) {
       if (entry.bookingKey && entry.dateRole === 'event_start' && !proposalCalendarComplete)
         continue;
@@ -1671,6 +1789,14 @@ export function briefingHeadline(result: BriefingResult): string {
   }
   if (result.upcoming > 0)
     parts.push(`${result.upcoming} date${result.upcoming === 1 ? '' : 's'} coming up`);
+  if ((result.personalOccasions ?? 0) > 0)
+    parts.push(
+      `${result.personalOccasions} personal date${result.personalOccasions === 1 ? '' : 's'} coming up`,
+    );
+  if ((result.openCommitments ?? 0) > 0)
+    parts.push(
+      `${result.openCommitments} open commitment${result.openCommitments === 1 ? '' : 's'}`,
+    );
   if ((result.bookingCancellations ?? 0) > 0) {
     const count = result.bookingCancellations ?? 0;
     parts.push(`${count} cancelled booking${count === 1 ? '' : 's'} to review`);
@@ -1698,6 +1824,7 @@ export function briefingSummary(result: BriefingResult): string {
     `${result.needsAttention} needing attention, ${result.pendingApprovals} awaiting approval, ` +
     `${result.calendarEvents} calendar event(s) (${result.calendarConflicts} conflict(s), ${result.calendarSalient} salient), ` +
     `${result.goalDeltas} goal delta(s), ${result.watchHits} watch hit(s), ` +
+    `${result.personalOccasions ?? 0} personal occasion(s), ${result.openCommitments ?? 0} open commitment(s), ` +
     `${result.bookingCancellations ?? 0} cancelled booking reconciliation(s)`
   );
 }

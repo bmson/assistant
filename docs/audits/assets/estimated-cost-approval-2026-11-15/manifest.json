@@ -1,0 +1,45 @@
+{
+  "sourceSha256": {
+    "apps/web/app/chat/[id]/inline-estimated-cost-request.tsx": "9729bce41a26e28c7e93cf3241a5704698e7653e35a8ca528a93df5c06ab7f73",
+    "apps/web/app/chat/[id]/estimated-cost-decision.ts": "a08295693e7888873e5e4f41193a6378469e8839420e3d0197b3519c2ef4d7d6",
+    "apps/web/app/chat/[id]/estimated-cost-transport.ts": "717aa9492f370c6a2a90902d5d52b6b000fd21d9ce9820886b751eeda2eaf9eb",
+    "apps/web/app/chat/[id]/chat-log.tsx": "ee7c149fec85bfd8d9ab1cc7fc89fb4fed9df1b620ee073a7e4ea3abb5357281",
+    "packages/application/src/estimated-cost-approval.ts": "df00508e6a51320d4bd4d4b5e7741489d717b4b82dba2e487b69300bea656231",
+    "apps/web/app/chat/[id]/decision-card.tsx": "9ab241cfc4d0b5045125a2fd4d249d0e37feebb2ae5f92bc0c218abb7f3ee77e",
+    "apps/web/lib/ui.tsx": "a64a0cb631e8e1a173a657a310e2c55efe97714f209b09195c88bc2d8b3885ed",
+    "apps/web/lib/ui-client.tsx": "bda938cb92b29c1865bb71676baa71ac8422a4938903c1ec3452afa1a04d6861",
+    "apps/web/app/globals.css": "ddf7bf8e6254c9475fdb3959e230353804ba6ab80163f7bec76aa8bd1fc39e75",
+    "apps/web/app/conversation.css": "586340b591a37cfe7f51e902db33da14fb9be8f92552b51b7ea5e7d2b3d0f665",
+    "packages/persistence/src/estimated-cost-approval.ts": "0e31605e6a3f3079f86613f2766f136d88b15f108c4822ca8df8c3448e8c297d"
+  },
+  "synthetic": true,
+  "liveSpendingOrProviderCalls": false,
+  "checks": [
+    "45 focused client, transcript and application tests passed",
+    "web typecheck",
+    "application typecheck",
+    "6 browser widths/appearances",
+    "loopback-only synthetic A recovery and independent B"
+  ],
+  "assetsSha256": {
+    "1280-dark.png": "cdfe6be4c163b4e26dcc079e7a0b3e3be1d8bb9d0557668a569e3baa114806f3",
+    "390-dark.png": "c8c5f792dd5e5052bc1e8691586592481e912fae54abf8ceccf2d1d0d774a694",
+    "390-light.png": "f8b6a47e3b2c756dd5921e7c1488f459eb2948bbb1b4e145f22c7889efebe327",
+    "320-dark.png": "f83d25669c872dc681239b9bb80489f805bd709bb68781986b9b0745e1c8cead",
+    "390-recovery-b-completed.png": "65523d86fe92896823358e9e2d22f1fea53e5d709546ecb6957b1286997fdae8",
+    "estimated-cost-client-application-tests.txt": "87ffa32f037b8b6bd0659b28d9fcc7bec55af6959f8315c1d4e96e0cb3396ad3",
+    "browser.txt": "d748fc0cb93074165f88ce5b4e9b9e464e618edcd3fd4aa559fa8769f574fda8",
+    "estimated-cost-application-typecheck.txt": "65216846afa1a25419cb9df86238aa857e6dff3ba7102ec381f0fd99314d8b53",
+    "browser-results.json": "12a642011dee5105160f9dc98b1f410d729f18561f1ce55c1b9459f211938eb3",
+    "estimated-cost-web-typecheck.txt": "f901b55f0f6c4f285ed84e0eb05dcb8d23b66507763ecaafdf7f16e11d7923bc",
+    "1280-light.png": "98756dafdbb838259870dda42d933d443c0db6f369f156043d926115362b276a",
+    "320-light.png": "58d846da529b72cbd18df2b6a4408aaed8ede236b61fe7c8902af917ea156c15"
+  },
+  "assetWhitespaceChanges": {
+    "browser-results.json": {
+      "originalSha256": "7a008e8bad1e2b7e8397f37240d80a1f56f657b99110b6ca8d88712ffcc975b3",
+      "formattedSha256": "12a642011dee5105160f9dc98b1f410d729f18561f1ce55c1b9459f211938eb3",
+      "meaningUnchanged": true
+    }
+  }
+}

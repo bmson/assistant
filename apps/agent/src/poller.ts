@@ -27,6 +27,8 @@ const MAX_CONCURRENT_TASKS = 3;
  * instead and the sweeper runs on Cloud Scheduler.
  */
 export function startPoller(deps: AgentDeps): () => void {
+  if (deps.config.ASSISTANT_RELEASE_WRITES_PAUSED)
+    throw new Error('background dispatch is disabled during release pause');
   if (deps.config.RESTORE_REHEARSAL || deps.config.QUEUE_DRIVER === 'inert')
     throw new Error('background dispatch is disabled during restore rehearsal');
   // Two independent guards. Maintenance is not allowed to queue behind task

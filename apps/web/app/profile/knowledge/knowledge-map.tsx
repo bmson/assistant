@@ -9,7 +9,7 @@ import {
   entityKindPaint,
   humanizeEntityLabel,
 } from '@/lib/knowledge';
-import { memoryPersonEditorHref } from '@/lib/memory-editor-context';
+import { memoryPersonConnectionHref, memoryPersonEditorHref } from '@/lib/memory-editor-context';
 import { memoryNoteHref } from '@/lib/memory-note-context';
 import { btnSm, focusRing } from '@/lib/ui';
 import { knowledgeConnections, layoutFocusRing, layoutKnowledgeMap } from './knowledge-map-model';
@@ -214,6 +214,25 @@ export function KnowledgeMap({
                           source.sourceContent ||
                           'Source preview unavailable in this view.'}
                       </blockquote>
+                      {selected.kind === 'person' &&
+                      memoryPersonConnectionHref(
+                        selected.contactId,
+                        source.id,
+                        focusedHref(selected.id),
+                      ) ? (
+                        <a
+                          className="mt-2 inline-block min-h-11 text-sm text-accent underline"
+                          href={
+                            memoryPersonConnectionHref(
+                              selected.contactId,
+                              source.id,
+                              focusedHref(selected.id),
+                            ) ?? undefined
+                          }
+                        >
+                          Review this connection in {humanizeEntityLabel(selected.label)}’s profile
+                        </a>
+                      ) : null}
                       {memoryNoteHref(source.sourceMemoryId, focusedHref(selected.id)) ? (
                         <a
                           className="mt-2 inline-block min-h-11 text-sm text-accent underline"

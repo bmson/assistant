@@ -325,10 +325,10 @@ describe('actual owner editor operation controller with offline named transport'
     },
   );
   it.each(['remove_person', 'remove_owner_family_relationship'] as const)(
-    'does not create a pending operation for unsupported %s commands',
+    'keeps an ambiguous %s removal pending and recovers its original receipt without redispatch',
     async (command) => {
       const { controller, storage, fetcher } = fixture();
-      const unsupported = { ...grant, command };
+      const removalGrant = { ...grant, command };
       const value =
         command === 'remove_person'
           ? {
@@ -348,12 +348,36 @@ describe('actual owner editor operation controller with offline named transport'
               targetRelationId: relation,
               expectedTargetRevision: 'c'.repeat(64),
             };
-      await controller.apply(value, unsupported, command === 'remove_person' ? contact : relation);
-      expect(controller.getSnapshot().phase).toBe('ready');
-      expect(Object.keys(controller.getSnapshot().fieldErrors)).not.toHaveLength(0);
-      expect(controller.getSnapshot().message).toBe('Check the highlighted fields.');
-      expect(storage.values.size).toBe(0);
-      expect(fetcher).not.toHaveBeenCalled();
+      fetcher.mockRejectedValueOnce(new Error('connection lost after dispatch'));
+      const targetId = command === 'remove_person' ? contact : relation;
+      await controller.apply(value, removalGrant, targetId);
+      expect(controller.getSnapshot().phase).toBe('pending');
+      expect(pending(storage)?.command).toBe(command);
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      await controller.apply(value, removalGrant, targetId);
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      const parsed = parseOwnerEditorRequest(
+        value,
+        command === 'remove_person' ? '/api/people/editor' : '/api/profile/knowledge/family',
+      );
+      if (!parsed.ok || parsed.request.intent !== 'apply') throw Error('Invalid removal fixture');
+      fetcher.mockResolvedValueOnce(
+        response(
+          saved({
+            command,
+            requestHash: ownerEditorRequestHash(parsed.request),
+            ids:
+              command === 'remove_person'
+                ? { contactId: contact }
+                : { relationId: relation, memoryId: contact, assertionId: second },
+          }),
+        ),
+      );
+      await controller.checkPendingResult();
+      expect(fetcher).toHaveBeenCalledTimes(2);
+      expect(fetcher.mock.calls[1]?.[1]?.method ?? 'GET').toBe('GET');
+      expect(controller.getSnapshot().phase).toBe('resolved');
+      expect(pending(storage)).toBeNull();
     },
   );
   it('calls browser fetch through the global receiver on the default transport path', async () => {

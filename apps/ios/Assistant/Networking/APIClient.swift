@@ -138,7 +138,7 @@ private final class NativeCardFormProjectionReadiness: @unchecked Sendable {
     func setEnabled(_ value: Bool) { lock.withLock { enabled = value } }
 }
 
-struct APIClient: Sendable {
+struct APIClient: Sendable, GoogleCalendarConnectionService, McpSignInOptionsService {
     let configuration: APIConfiguration
     let clientID: String?
     /// A test seam. Production passes nothing and reads `Transport.shared` on
@@ -749,6 +749,62 @@ struct APIClient: Sendable {
         value.utf8.count == 36 && UUID(uuidString: value) != nil
     }
 
+    func estimatedCostOverview() async throws -> EstimatedCostOverviewResponse {
+        let url = configuration.baseURL.appending(path: "api/mobile/v1/chat/estimated-cost/overview")
+        let envelope = try await perform(makeRequest(url: url), as: EstimatedCostOverviewResponse.self)
+        guard envelope.isValid else { throw APIError.invalidResponse }
+        return envelope
+    }
+
+    func estimatedCostQuote(operationID: String) async throws -> EstimatedCostQuoteResponse {
+        var components = URLComponents(url: configuration.baseURL.appending(path: "api/mobile/v1/chat/estimated-cost/quote"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [.init(name: "operationId", value: operationID)]
+        guard let url = components?.url else { throw APIError.invalidServerURL }
+        let envelope = try await perform(makeRequest(url: url), as: EstimatedCostQuoteResponse.self)
+        guard envelope.ok, let projection = envelope.request, projection.isValid(for: operationID) else { throw APIError.invalidResponse }
+        return envelope
+    }
+
+    func requestEstimatedCostQuote(operationID: String, quoteRequestID: String) async throws -> EstimatedCostQuoteResponse {
+        struct Body: Encodable { let operationId: String; let quoteRequestId: String }
+        var request = makeRequest(url: configuration.baseURL.appending(path: "api/mobile/v1/chat/estimated-cost/quote"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = try JSONEncoder().encode(Body(operationId: operationID, quoteRequestId: quoteRequestID))
+        let envelope = try await perform(request, as: EstimatedCostQuoteResponse.self)
+        guard envelope.ok, let projection = envelope.request, projection.isValid(for: operationID) else { throw APIError.invalidResponse }
+        return envelope
+    }
+
+    func decideEstimatedCost(_ decision: EstimatedCostDecision) async throws -> EstimatedCostDecisionReceipt {
+        var request = makeRequest(url: configuration.baseURL.appending(path: "api/mobile/v1/chat/estimated-cost/decision"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.httpBody = try JSONEncoder().encode(decision)
+        return try await estimatedCostReceipt(request, decision: decision)
+    }
+
+    func estimatedCostDecisionReceipt(_ decision: EstimatedCostDecision) async throws -> EstimatedCostDecisionReceipt {
+        var components = URLComponents(url: configuration.baseURL.appending(path: "api/mobile/v1/chat/estimated-cost/decision"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [.init(name: "operationId", value: decision.operationId), .init(name: "decisionId", value: decision.decisionId)]
+        guard let url = components?.url else { throw APIError.invalidServerURL }
+        return try await estimatedCostReceipt(makeRequest(url: url), decision: decision)
+    }
+
+    private func estimatedCostReceipt(_ request: URLRequest, decision: EstimatedCostDecision) async throws -> EstimatedCostDecisionReceipt {
+        let (data, response) = try await load(request)
+        guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
+        if (200..<300).contains(http.statusCode) || http.statusCode == 409 {
+            if let envelope = try? JSONDecoder().decode(EstimatedCostDecisionResponse.self, from: data),
+               envelope.ok, let receipt = envelope.receipt,
+               receipt.operationId == decision.operationId, receipt.decisionId == decision.decisionId,
+               receipt.quoteId == decision.quoteId,
+               ((200..<300).contains(http.statusCode) || receipt.status == "stale") { return receipt }
+        }
+        try await validate(http, data: data)
+        throw APIError.invalidResponse
+    }
+
     func updateActivity(id: String, action: String, budgetUsdLimit: Double? = nil) async throws {
         var request = makeRequest(
             url: configuration.baseURL.appending(path: "api/mobile/v1/activity/\(id)")
@@ -1314,6 +1370,48 @@ struct APIClient: Sendable {
         try await get("api/mobile/v1/mcp")
     }
 
+    func mcpSignInOptions(id: String) async throws -> McpSignInOptionsResponse {
+        var request = makeRequest(url: configuration.baseURL.appending(path: "api/mobile/v1/mcp/\(id)/authorization"))
+        request.timeoutInterval = 25
+        return try await perform(request, as: McpSignInOptionsResponse.self)
+    }
+
+    func mcpOAuthStatus(id: String, verifyProvider: Bool = false) async throws -> McpOAuthStatus {
+        let route = configuration.baseURL.appending(path: "api/mobile/v1/mcp/\(id)/oauth")
+        var components = URLComponents(url: route, resolvingAgainstBaseURL: false)
+        if verifyProvider {
+            components?.queryItems = [.init(name: "verify", value: "provider")]
+        }
+        guard let url = components?.url else { throw URLError(.badURL) }
+        var request = makeRequest(url: url)
+        if verifyProvider { request.timeoutInterval = 30 }
+        return try await perform(request, as: McpOAuthStatus.self)
+    }
+
+    func startMcpOAuth(id: String) async throws -> McpOAuthStart {
+        var request = makeRequest(url: configuration.baseURL.appending(path: "api/mobile/v1/mcp/\(id)/oauth"))
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = Data("{}".utf8)
+        return try await perform(request, as: McpOAuthStart.self)
+    }
+
+    func mcpOAuthFlow(id: String, flowId: String, cancel: Bool) async throws -> McpOAuthFlow {
+        let route = configuration.baseURL.appending(path: "api/mobile/v1/mcp/\(id)/oauth/flow")
+        var components = URLComponents(url: route, resolvingAgainstBaseURL: false)
+        components?.queryItems = [.init(name: "flowId", value: flowId)]
+        guard let url = components?.url else { throw URLError(.badURL) }
+        var request = makeRequest(url: url)
+        request.httpMethod = cancel ? "DELETE" : "GET"
+        return try await perform(request, as: McpOAuthFlow.self)
+    }
+
+    func disconnectMcpOAuth(id: String) async throws {
+        var request = makeRequest(url: configuration.baseURL.appending(path: "api/mobile/v1/mcp/\(id)/oauth"))
+        request.httpMethod = "DELETE"
+        _ = try await perform(request, as: McpOAuthStatus.self)
+    }
+
     func createMcpConnection(name: String, endpoint: String, bearerToken: String?) async throws {
         var request = makeRequest(url: configuration.baseURL.appending(path: "api/mobile/v1/mcp"))
         request.httpMethod = "POST"
@@ -1324,14 +1422,14 @@ struct APIClient: Sendable {
         _ = try await perform(request, as: EmptyPayload.self)
     }
 
-    func updateMcpConnection(id: String, action: String) async throws {
+    func updateMcpConnection(id: String, action: String) async throws -> McpConnectionUpdateResponse {
         var request = makeRequest(
             url: configuration.baseURL.appending(path: "api/mobile/v1/mcp/\(id)")
         )
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "content-type")
         request.httpBody = try JSONEncoder().encode(["action": action])
-        _ = try await perform(request, as: EmptyPayload.self)
+        return try await perform(request, as: McpConnectionUpdateResponse.self)
     }
 
     func deleteMcpConnection(id: String) async throws {
@@ -1340,6 +1438,38 @@ struct APIClient: Sendable {
         )
         request.httpMethod = "DELETE"
         _ = try await perform(request, as: OkPayload.self)
+    }
+
+    func googleCalendarStatus(flowID: String? = nil) async throws -> GoogleCalendarStatus {
+        var url = configuration.baseURL.appending(path: "api/mobile/v1/connections/google-calendar")
+        if let flowID {
+            url = url.appending(path: "flow").appending(queryItems: [URLQueryItem(name: "flowId", value: flowID)])
+        }
+        return try await perform(makeRequest(url: url), as: GoogleCalendarStatus.self)
+    }
+
+    func connectGoogleCalendar() async throws -> GoogleCalendarConnectResponse {
+        var request = makeRequest(url: configuration.baseURL.appending(path: "api/mobile/v1/connections/google-calendar/connect"))
+        request.httpMethod = "POST"
+        return try await perform(request, as: GoogleCalendarConnectResponse.self)
+    }
+
+    func cancelGoogleCalendarFlow(id: String) async throws {
+        let url = configuration.baseURL.appending(path: "api/mobile/v1/connections/google-calendar/flow")
+            .appending(queryItems: [URLQueryItem(name: "flowId", value: id)])
+        try await googleCalendarDelete(url)
+    }
+
+    func disconnectGoogleCalendar() async throws {
+        try await googleCalendarDelete(configuration.baseURL.appending(path: "api/mobile/v1/connections/google-calendar"))
+    }
+
+    private func googleCalendarDelete(_ url: URL) async throws {
+        var request = makeRequest(url: url)
+        request.httpMethod = "DELETE"
+        let (data, response) = try await load(request)
+        guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
+        try await validate(http, data: data)
     }
 
     func modelProviders() async throws -> ModelProviderSettings {
@@ -1927,6 +2057,7 @@ struct APIClient: Sendable {
         var request = makeRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "content-type")
+        request.setValue("v1", forHTTPHeaderField: "X-Assistant-Estimated-Cost-Approval")
         if let encodedRequestBody {
             request.httpBody = encodedRequestBody
         } else {

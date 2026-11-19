@@ -1,0 +1,9 @@
+# Estimated cost approval: PostgreSQL transactions
+
+The PostgreSQL implementation stores a pending quote, its original task checkpoint, and its durable review card atomically. Creating the pending quote adds no reservation. Explicit approval atomically creates one decision receipt, one allowance escrow, and one wake of the original task. Recorded historical reservations are not modified by these transactions.
+
+Source validation locks and hashes canonical model, role, connection and budget rows in UTC, preserves the privacy fence, and checks the original task admission and active lease. Frozen historical unknown IDs and amounts are re-read; changed or missing records fail closed. Newly unknown and grant-linked work cannot join the eligible baseline. Expiry is checked against the database clock after waiting for locks. An existing parked request can receive an explicit fresh quote under ordinary capacity if historical pressure clears.
+
+Ten tests passed against a uniquely allocated local database through the repository's canonical runner; the test database was cleaned. They cover A waiting without a hold while B spends, changed-snapshot rejection and explicit refresh, exact refresh replay, concurrent duplicate approvals and conflicting nonce reuse, changed prices without timestamp changes, changed historical outcomes, wrong lease/request/source, ordinary-capacity recovery, source capture without spending, expiry during lock wait, and rollback if the review card cannot be persisted. The database package typecheck passed.
+
+The [manifest](assets/estimated-cost-approval-postgres-2026-11-15/manifest.json) binds the source and retained test logs. These are synthetic database results. They do not establish provider billing, production migration, runtime composition, live task execution, deployment, or user acceptance. The complete server feature remains disabled pending integration and qualification of all writers and dispatchers.

@@ -6,6 +6,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./budget-caps": "./src/budget-caps.ts",
+    "./estimated-cost-approval": "./src/estimated-cost-approval.ts",
     "./situations": "./src/situations-schema.ts",
     "./testing": "./src/contract-suite.ts",
     "./artifact-path": "./src/artifact-path.ts",
@@ -22,7 +23,8 @@
     "./owner-family-presentation": "./src/owner-family-presentation.ts",
     "./owner-family-scope": "./src/owner-family-scope.ts",
     "./owner-family-removal": "./src/owner-family-removal.ts",
-    "./owner-memory-correction": "./src/owner-memory-correction.ts"
+    "./owner-memory-correction": "./src/owner-memory-correction.ts",
+    "./calendar-household-day": "./src/calendar-household-day.ts"
   },
   "dependencies": {
     "zod": "^4.6.7"

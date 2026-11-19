@@ -3,7 +3,7 @@ import { canAddressPersonGraphEdge } from '@assistant/application/people-graph-p
 import Link from 'next/link';
 import { memoryPersonConnectionHref, memoryPersonEditorHref } from '@/lib/memory-editor-context';
 import { memoryNoteHref } from '@/lib/memory-note-context';
-import { Badge, EmptyState } from '@/lib/ui';
+import { Badge, btn, EmptyState } from '@/lib/ui';
 
 /** One loaded source-backed claim per row; parallel sources are not collapsed. */
 export function ConnectionsList({
@@ -95,6 +95,15 @@ export function ConnectionsList({
       })}
     </ul>
   ) : (
-    <EmptyState>No matching connections in this loaded view.</EmptyState>
+    <EmptyState
+      action={
+        <Link href="/people" className={`${btn.outline} min-h-11`}>
+          Open People
+        </Link>
+      }
+    >
+      No matching connections in this loaded view. Open a person in People to review their family
+      relationships and see available changes.
+    </EmptyState>
   );
 }

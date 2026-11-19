@@ -101,6 +101,36 @@ describe('owner editor client helpers', () => {
       '/api/profile/knowledge/family',
     );
     expect(ownerEditorRoute('correct_owner_memory')).toBe('/api/profile/knowledge/memory');
+    expect(ownerEditorRoute('remove_owner_memory')).toBe('/api/profile/knowledge/memory');
+  });
+
+  it('accepts a saved-note removal receipt with only the memory identity', () => {
+    const removalReceipt = {
+      version: 1,
+      authority: 'operation_receipt',
+      command: 'remove_owner_memory',
+      operationId,
+      requestHash,
+      statusVersion: 3,
+      outcome: 'saved',
+      ids: { memoryId: '22222222-2222-4222-8222-222222222222' },
+      revision: 'c'.repeat(64),
+      refreshPending: true,
+    };
+    expect(decodeOwnerEditorReply(removalReceipt)).toMatchObject({
+      command: 'remove_owner_memory',
+      ids: { memoryId: '22222222-2222-4222-8222-222222222222' },
+    });
+    expect(decodeOwnerEditorReply({ ...removalReceipt, outcome: 'unchanged' })).toBeNull();
+    expect(
+      decodeOwnerEditorReply({
+        ...removalReceipt,
+        ids: {
+          memoryId: '22222222-2222-4222-8222-222222222222',
+          contactId: '33333333-3333-4333-8333-333333333333',
+        },
+      }),
+    ).toBeNull();
   });
 
   it('decodes complete authoritative replies and rejects empty or malformed fulfilled JSON', () => {

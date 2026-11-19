@@ -5,6 +5,7 @@ RUN npm install --global corepack@0.36.0 && corepack enable
 # Manifests first: dependency layers survive source edits, so a one-line code
 # change re-runs the build step but not the install.
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json tsconfig.base.json ./
+COPY patches ./patches
 COPY packages/config/package.json ./packages/config/
 COPY packages/persistence/package.json ./packages/persistence/
 COPY packages/db/package.json ./packages/db/

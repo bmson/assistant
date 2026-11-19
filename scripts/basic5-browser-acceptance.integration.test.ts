@@ -30,15 +30,18 @@ import {
   assertBasic5AnonymousPageResponse,
   assertBasic5ReceiptSequence,
   BASIC5_AUTH_COOKIE_NAME,
+  BASIC5_AUTHENTICATED_NAVIGATION_COUNT,
   BASIC5_BROWSER_CONTROL_REQUEST_LIMIT,
   BASIC5_BROWSER_PRESENTATION_REQUEST_LIMIT,
   BASIC5_BROWSER_TOTAL_REQUEST_LIMIT,
   BASIC5_EMBEDDING_DIMENSIONS,
   BASIC5_FIXTURE_CONNECTION_ID,
   BASIC5_FIXTURE_MODEL_ID,
+  BASIC5_LOGICAL_NAVIGATION_STAGES,
   BASIC5_READINESS_ATTEMPT_LIMIT,
   BASIC5_SAVED_STATUS_PATTERN,
   type Basic5BrowserRequestBudgetSnapshot,
+  type Basic5LogicalNavigationStage,
   type Basic5ObservedPost,
   type Basic5PresentationRequestDiagnostics,
   basic5BrowserLaunchOptions,
@@ -56,7 +59,7 @@ import {
   type Basic5SaveObservationDiagnostic,
   observeBasic5Save,
 } from './basic5-browser-save-observation.js';
-import { buildBasic5CiEvidence } from './basic5-ci-acceptance.js';
+import { type Basic5CiJourneyFacts, buildBasic5CiEvidence } from './basic5-ci-acceptance.js';
 import {
   assertBasic5CiProcessRegistryComplete,
   BASIC5_CI_CHROME_EXECUTABLE,
@@ -464,9 +467,12 @@ async function saveWithReceipt(
             saveEnabled: button ? !button.matches(':disabled') : null,
           };
         },
-        operation === 'correct_owner_family_relationship' || operation === 'correct_owner_memory'
+        operation === 'correct_owner_memory'
           ? 'Save correction'
-          : 'Save',
+          : operation === 'correct_owner_family_relationship' ||
+              operation === 'add_family_relationship'
+            ? 'Save connection'
+            : 'Save',
       ),
     parse: async (response) => {
       // Headers remain independently observed. The app itself must consume and
@@ -655,6 +661,18 @@ browserTest(
     let testError: unknown;
     const receipts: Receipt[] = [];
     const durableReadbacks: Record<string, boolean> = {};
+    const journeyFacts: Basic5CiJourneyFacts = {
+      navigationStages: [],
+      findResultCounts: { people: 0, connections: 0, savedNotes: 0 },
+      exactTargetHrefMatches: { people: 0, connections: 0, savedNotes: 0 },
+      reloadCount: 0,
+      reopenedPageReadbacks: {
+        identity: false,
+        familyAdd: false,
+        familyCorrection: false,
+        noteCorrection: false,
+      },
+    };
     const fixtureManifest: {
       databaseTargetDigest: string;
       ownerId: string;
@@ -1200,22 +1218,126 @@ browserTest(
         );
       };
 
-      const personUrl = `${baseUrl}/people/${personId}`;
-      const navigate = async (href: string) => {
-        browserRequestBudget.setNavigationBucket(checkpointAuthenticatedNavigationCount + 1);
+      const recordLogicalNavigation = async (
+        stage: Basic5LogicalNavigationStage,
+        perform: () => Promise<void>,
+      ) => {
+        const nextNavigation = authenticatedPageNavigations + 1;
+        assert.equal(BASIC5_LOGICAL_NAVIGATION_STAGES[authenticatedPageNavigations], stage);
+        browserRequestBudget.setNavigationBucket(nextNavigation);
         retainBrowserRequestCounts(browserRequestBudget.snapshot());
-        await recordFreshPage(page, href);
-        authenticatedPageNavigations += 1;
+        await perform();
+        authenticatedPageNavigations = nextNavigation;
+        journeyFacts.navigationStages.push(stage);
         checkpointAuthenticatedNavigationCount = authenticatedPageNavigations;
         setCheckpoint('authenticated_navigation_complete');
       };
-      await navigate(personUrl);
+      const navigate = (href: string, stage: Basic5LogicalNavigationStage) =>
+        recordLogicalNavigation(stage, () => recordFreshPage(page, href));
+      const followExactTargetHref = async (
+        link: Locator,
+        href: string,
+        stage: Basic5LogicalNavigationStage,
+      ) => {
+        assert.equal(await link.getAttribute('href'), href);
+        const expectedUrl = new URL(href, baseUrl).href;
+        assert.equal(new URL(expectedUrl).origin, new URL(baseUrl).origin);
+        await recordLogicalNavigation(stage, async () => {
+          await Promise.all([
+            page.waitForURL((url) => url.href === expectedUrl, { timeout: 30_000 }),
+            link.click({ timeout: 30_000 }),
+          ]);
+          await page.locator('main').waitFor({ state: 'visible', timeout: 15_000 });
+        });
+      };
+      const reloadCurrentPage = (stage: Basic5LogicalNavigationStage) =>
+        recordLogicalNavigation(stage, async () => {
+          const before = page.url();
+          await page.reload({ waitUntil: 'domcontentloaded', timeout: 30_000 });
+          await page.locator('main').waitFor({ state: 'visible', timeout: 15_000 });
+          assert.equal(page.url(), before);
+          journeyFacts.reloadCount += 1;
+        });
+      const findPersonTarget = async (name: string) => {
+        expect(
+          await page.getByRole('textbox', { name: 'Search people', exact: true }).inputValue(),
+        ).toBe(name);
+        const exactName = page.getByText(name, { exact: true });
+        expect(await exactName.count()).toBe(1);
+        const link = page.getByRole('link').filter({ has: exactName });
+        expect(await link.count()).toBe(1);
+        const href = await link.getAttribute('href');
+        assert(href);
+        const target = new URL(href, baseUrl);
+        expect(target.origin).toBe(new URL(baseUrl).origin);
+        expect(target.pathname).toBe(`/people/${personId}`);
+        expect(target.searchParams.get('q')).toBe(name);
+        journeyFacts.findResultCounts.people += 1;
+        journeyFacts.exactTargetHrefMatches.people += 1;
+        return { link, href };
+      };
+      const findConnectionTarget = async (relationId: string, personName: string) => {
+        expect(
+          await page.getByRole('textbox', { name: 'Search connections', exact: true }).inputValue(),
+        ).toBe(personName);
+        const connectionId = relationId.toLowerCase();
+        const link = page
+          .locator(`a[href*="connectionId=${connectionId}"]`)
+          .filter({ hasText: `Open ${personName} to review this connection` });
+        expect(await link.count()).toBe(1);
+        const href = await link.getAttribute('href');
+        assert(href);
+        const target = new URL(href, baseUrl);
+        expect(target.origin).toBe(new URL(baseUrl).origin);
+        expect(target.pathname).toBe(`/people/${personId}`);
+        expect(target.searchParams.get('connectionId')).toBe(connectionId);
+        expect(target.hash).toBe(`#person-connection-${connectionId}`);
+        const returnTo = target.searchParams.get('returnTo');
+        assert(returnTo);
+        const returnUrl = new URL(returnTo, baseUrl);
+        expect(returnUrl.pathname).toBe('/profile/knowledge');
+        expect(returnUrl.searchParams.get('view')).toBe('connections');
+        expect(returnUrl.searchParams.get('q')).toBe(personName);
+        const row = page.locator('li').filter({ has: link });
+        expect(await row.count()).toBe(1);
+        journeyFacts.findResultCounts.connections += 1;
+        journeyFacts.exactTargetHrefMatches.connections += 1;
+        return { link, href };
+      };
+      const findNoteTarget = async (content: string) => {
+        expect(
+          await page.getByRole('textbox', { name: 'Search saved notes', exact: true }).inputValue(),
+        ).toBe(content);
+        const exactContent = page.getByText(content, { exact: true });
+        expect(await exactContent.count()).toBe(1);
+        const card = page.locator('article').filter({ has: exactContent });
+        expect(await card.count()).toBe(1);
+        const link = card.getByRole('link', { name: 'Open saved note', exact: true });
+        expect(await link.count()).toBe(1);
+        const href = await link.getAttribute('href');
+        assert(href);
+        const target = new URL(href, baseUrl);
+        expect(target.origin).toBe(new URL(baseUrl).origin);
+        expect(target.pathname).toBe(`/profile/knowledge/notes/${noteId}`);
+        const returnTo = target.searchParams.get('returnTo');
+        assert(returnTo);
+        const returnUrl = new URL(returnTo, baseUrl);
+        expect(returnUrl.pathname).toBe('/profile/knowledge');
+        expect(returnUrl.searchParams.get('view')).toBe('library');
+        expect(returnUrl.searchParams.get('q')).toBe(content);
+        journeyFacts.findResultCounts.savedNotes += 1;
+        journeyFacts.exactTargetHrefMatches.savedNotes += 1;
+        return { link, href };
+      };
+
+      const identitySearchUrl = `${baseUrl}/people?q=${encodeURIComponent('Alex Rivera')}`;
+      await navigate(identitySearchUrl, 'identity_people_search');
+      const identityTarget = await findPersonTarget('Alex Rivera');
+      await followExactTargetHref(identityTarget.link, identityTarget.href, 'identity_open_person');
       await page.getByRole('heading', { name: 'Alex Rivera', exact: true }).waitFor();
       await page.getByRole('button', { name: 'Edit details', exact: true }).click();
       const identityDialog = page.getByRole('dialog');
-      await identityDialog
-        .getByRole('heading', { name: 'Edit name and aliases', exact: true })
-        .waitFor();
+      await identityDialog.getByRole('heading', { name: 'Edit details', exact: true }).waitFor();
       await identityDialog.getByLabel('Name', { exact: true }).fill('Alex Rivera Updated');
       const identity = await saveObserved(
         'update_person_identity',
@@ -1246,12 +1368,23 @@ browserTest(
       durableReadbacks.identity = true;
       checkpointDurableReadbackCount = Object.values(durableReadbacks).filter(Boolean).length;
       setCheckpoint('identity_durable_readback_complete');
-      await navigate(personUrl);
+      await navigate(
+        `${baseUrl}/people?q=${encodeURIComponent('Alex Rivera Updated')}`,
+        'identity_leave_to_people_search',
+      );
+      const identityReopenedTarget = await findPersonTarget('Alex Rivera Updated');
+      await followExactTargetHref(
+        identityReopenedTarget.link,
+        identityReopenedTarget.href,
+        'identity_reopen_person',
+      );
+      await reloadCurrentPage('identity_reload_person');
       await page.getByRole('heading', { name: 'Alex Rivera Updated', exact: true }).waitFor();
+      journeyFacts.reopenedPageReadbacks.identity = true;
       checkpointFreshPageReadbackCount += 1;
       setCheckpoint('identity_fresh_page_readback_complete');
 
-      await page.getByRole('button', { name: 'Add family relationship', exact: true }).click();
+      await page.getByRole('button', { name: 'Add connection', exact: true }).click();
       const familyAddDialog = page.getByRole('dialog');
       // The page's person is intentionally the fixed subject, not an editable choice.
       const firstPerson = familyAddDialog.getByLabel('First person', { exact: true });
@@ -1265,12 +1398,13 @@ browserTest(
       await familyAddDialog
         .getByLabel('Relationship of the first person to the second', { exact: true })
         .selectOption('sibling_of');
+      await familyAddDialog.getByText('Dates and context (optional)', { exact: true }).click();
       await familyAddDialog
         .getByLabel('Note (optional)', { exact: true })
         .fill('Synthetic family statement one.');
       const familyAdd = await saveObserved(
         'add_family_relationship',
-        familyAddDialog.getByRole('button', { name: 'Save', exact: true }),
+        familyAddDialog.getByRole('button', { name: 'Save connection', exact: true }),
       );
       ownerPosts.push(familyAdd.observed);
       receipts.push(familyAdd.receipt);
@@ -1304,7 +1438,17 @@ browserTest(
       durableReadbacks.familyAdd = true;
       checkpointDurableReadbackCount = Object.values(durableReadbacks).filter(Boolean).length;
       setCheckpoint('family_add_durable_readback_complete');
-      await navigate(personUrl);
+      await navigate(
+        `${baseUrl}/profile/knowledge?view=connections&q=${encodeURIComponent('Alex Rivera')}`,
+        'family_add_leave_to_connections_search',
+      );
+      const addedRelationTarget = await findConnectionTarget(addedRelationId, 'Alex Rivera');
+      await followExactTargetHref(
+        addedRelationTarget.link,
+        addedRelationTarget.href,
+        'family_add_reopen_person',
+      );
+      await reloadCurrentPage('family_add_reload_person');
       const addedRelationRow = page.locator(`#person-connection-${addedRelationId.toLowerCase()}`);
       await addedRelationRow
         .getByText(
@@ -1312,21 +1456,19 @@ browserTest(
           { exact: true },
         )
         .waitFor();
+      journeyFacts.reopenedPageReadbacks.familyAdd = true;
       checkpointFreshPageReadbackCount += 1;
       setCheckpoint('family_add_fresh_page_readback_complete');
-      await addedRelationRow
-        .getByRole('button', { name: 'Edit relationship', exact: true })
-        .click();
+      await addedRelationRow.getByRole('button', { name: 'Edit connection', exact: true }).click();
       const familyDialog = page.getByRole('dialog');
-      await familyDialog
-        .getByRole('heading', { name: 'Correct family relationship', exact: true })
-        .waitFor();
+      await familyDialog.getByRole('heading', { name: 'Edit connection', exact: true }).waitFor();
+      await familyDialog.getByText('Dates and context (optional)', { exact: true }).click();
       await familyDialog
         .getByLabel('Note (optional)', { exact: true })
         .fill('Synthetic family statement corrected.');
       const familyCorrection = await saveObserved(
         'correct_owner_family_relationship',
-        familyDialog.getByRole('button', { name: 'Save correction', exact: true }),
+        familyDialog.getByRole('button', { name: 'Save connection', exact: true }),
       );
       ownerPosts.push(familyCorrection.observed);
       receipts.push(familyCorrection.receipt);
@@ -1421,7 +1563,20 @@ browserTest(
       durableReadbacks.familyCorrection = true;
       checkpointDurableReadbackCount = Object.values(durableReadbacks).filter(Boolean).length;
       setCheckpoint('family_correction_durable_readback_complete');
-      await navigate(personUrl);
+      await navigate(
+        `${baseUrl}/profile/knowledge?view=connections&q=${encodeURIComponent('Alex Rivera')}`,
+        'family_correction_leave_to_connections_search',
+      );
+      const correctedRelationTarget = await findConnectionTarget(
+        correctedRelationId,
+        'Alex Rivera',
+      );
+      await followExactTargetHref(
+        correctedRelationTarget.link,
+        correctedRelationTarget.href,
+        'family_correction_reopen_person',
+      );
+      await reloadCurrentPage('family_correction_reload_person');
       const correctedRelationRow = page.locator(
         `#person-connection-${correctedRelationId.toLowerCase()}`,
       );
@@ -1432,11 +1587,18 @@ browserTest(
         )
         .waitFor();
       await page.getByText('Synthetic family statement corrected.').waitFor();
+      journeyFacts.reopenedPageReadbacks.familyCorrection = true;
       checkpointFreshPageReadbackCount += 1;
       setCheckpoint('family_correction_fresh_page_readback_complete');
 
-      const noteUrl = `${baseUrl}/profile/knowledge/notes/${noteId}?returnTo=${encodeURIComponent(`/people/${personId}`)}`;
-      await navigate(noteUrl);
+      const originalNoteSearchUrl = `${baseUrl}/profile/knowledge?view=library&q=${encodeURIComponent(OWNER_NOTE_V1)}`;
+      await navigate(originalNoteSearchUrl, 'note_correction_library_search');
+      const originalNoteTarget = await findNoteTarget(OWNER_NOTE_V1);
+      await followExactTargetHref(
+        originalNoteTarget.link,
+        originalNoteTarget.href,
+        'note_correction_open_note',
+      );
       await page.getByText(OWNER_NOTE_V1, { exact: true }).waitFor();
       await page.getByRole('button', { name: 'Edit saved note', exact: true }).click();
       await page.getByLabel('Your corrected note', { exact: true }).fill(OWNER_NOTE_V2);
@@ -1469,8 +1631,17 @@ browserTest(
       durableReadbacks.noteCorrection = true;
       checkpointDurableReadbackCount = Object.values(durableReadbacks).filter(Boolean).length;
       setCheckpoint('note_correction_durable_readback_complete');
-      await navigate(noteUrl);
+      const correctedNoteSearchUrl = `${baseUrl}/profile/knowledge?view=library&q=${encodeURIComponent(OWNER_NOTE_V2)}`;
+      await navigate(correctedNoteSearchUrl, 'note_correction_leave_to_library_search');
+      const correctedNoteTarget = await findNoteTarget(OWNER_NOTE_V2);
+      await followExactTargetHref(
+        correctedNoteTarget.link,
+        correctedNoteTarget.href,
+        'note_correction_reopen_note',
+      );
+      await reloadCurrentPage('note_correction_reload_note');
       await page.getByText(OWNER_NOTE_V2, { exact: true }).waitFor();
+      journeyFacts.reopenedPageReadbacks.noteCorrection = true;
       checkpointFreshPageReadbackCount += 1;
       setCheckpoint('note_correction_fresh_page_readback_complete');
 
@@ -1506,7 +1677,21 @@ browserTest(
       );
       expect(readinessAttempts).not.toBeNull();
       expect(readinessAttempts).toBeLessThanOrEqual(BASIC5_READINESS_ATTEMPT_LIMIT);
-      expect(authenticatedPageNavigations).toBe(6);
+      expect(authenticatedPageNavigations).toBe(BASIC5_AUTHENTICATED_NAVIGATION_COUNT);
+      expect(journeyFacts.navigationStages).toEqual([...BASIC5_LOGICAL_NAVIGATION_STAGES]);
+      expect(journeyFacts.findResultCounts).toEqual({ people: 2, connections: 2, savedNotes: 2 });
+      expect(journeyFacts.exactTargetHrefMatches).toEqual({
+        people: 2,
+        connections: 2,
+        savedNotes: 2,
+      });
+      expect(journeyFacts.reloadCount).toBe(4);
+      expect(journeyFacts.reopenedPageReadbacks).toEqual({
+        identity: true,
+        familyAdd: true,
+        familyCorrection: true,
+        noteCorrection: true,
+      });
       if (processRegistry) assertBasic5CiProcessRegistryComplete(await processRegistry.records());
       setCheckpoint('case_complete');
     } catch (error) {
@@ -1606,6 +1791,7 @@ browserTest(
             ids: receipt.ids ?? null,
           })),
           durableReadbacks,
+          journeyFacts,
           counts: {
             readinessAttempts,
             pageNavigations: authenticatedPageNavigations,

@@ -1,4 +1,5 @@
 import {
+  estimatedCostOperationLocator,
   isChatAdmissionCancellationProjection,
   type Records,
   type TaskDiscoveryRepository,
@@ -25,6 +26,7 @@ const fields = [
   'conversationId',
   'externalEventId',
   'trigger',
+  'state',
 ];
 export class FirestoreTaskDiscoveryRepository implements TaskDiscoveryRepository {
   readonly driver = 'firestore' as const;
@@ -79,6 +81,7 @@ export class FirestoreTaskDiscoveryRepository implements TaskDiscoveryRepository
       const trigger = task.trigger as { source?: unknown; payload?: { canary?: unknown } } | null;
       rows.push({
         id: task.id,
+        estimatedCostOperationId: estimatedCostOperationLocator(task.status, task.state),
         suppressed: isChatAdmissionCancellationProjection(task),
         agentId,
         type: task.type,
