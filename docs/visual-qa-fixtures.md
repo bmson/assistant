@@ -32,3 +32,8 @@ backfill, and segmentation exclude those tagged messages; ordinary owner rows
 remain eligible. The QA writers do not invoke generation providers. This local
 protection does not qualify a live service, production database, or external
 provider workflow.
+
+Run `pnpm exec tsx scripts/visual-qa/inventory-fixtures.ts` with the allocator
+environment for the disposable PostgreSQL installation to get dry-run counts
+of manifest-attributed chats, memories and people. The inventory reports counts
+only and reports documents as untracked.

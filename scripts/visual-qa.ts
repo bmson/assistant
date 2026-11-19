@@ -1,6 +1,8 @@
 /**
  * Visual QA: screenshot every primary surface at desktop and phone widths.
- * Run against a dev server with AUTH_DEV_BYPASS=true:
+ * Run against a dedicated QA dev server using the same allocated QA database.
+ * Start the server with AUTH_DEV_BYPASS=true, AUTH_URL matching
+ * ASSISTANT_QA_WEB_ORIGIN, and the same allocator environment:
  *   pnpm tsx scripts/visual-qa.ts [baseUrl]
  * Output lands in /tmp/visual-qa/.
  *
@@ -11,8 +13,14 @@
 
 import { mkdirSync } from 'node:fs';
 import { chromium } from 'playwright';
+import {
+  requireQaOrigin,
+  restrictQaBrowserContext,
+  verifyQaBrowserInstallation,
+} from './visual-qa/qa-installation.js';
 
-const base = process.argv[2] ?? 'http://127.0.0.1:3000';
+const base = requireQaOrigin(process.argv[2], process.env.ASSISTANT_QA_WEB_ORIGIN);
+await verifyQaBrowserInstallation(base);
 const outDir = '/tmp/visual-qa';
 mkdirSync(outDir, { recursive: true });
 
@@ -30,7 +38,7 @@ const pages: Array<{ name: string; path: string; wait?: number }> = [
   { name: 'profile-about', path: '/profile/about' },
   { name: 'profile-voice', path: '/profile/voice' },
   { name: 'profile-data', path: '/profile/data' },
-  { name: 'profile-memories', path: '/profile/memories' },
+  { name: 'profile-memories', path: '/profile/knowledge?view=library' },
   { name: 'people', path: '/people' },
   // The person page needs a real id. `pnpm tsx scripts/demo-people.ts` prints
   // the ids it creates; pass one to shoot the card itself.
@@ -54,6 +62,7 @@ const browser = await chromium.launch(
 for (const viewport of viewports) {
   const context = await browser.newContext({
     viewport: { width: viewport.width, height: viewport.height },
+    serviceWorkers: 'block',
     // Cards reveal on scroll via `animation-timeline: view()`. A full-page
     // screenshot never scrolls, so without this everything below the first
     // viewport is captured at opacity 0 and the shot looks half-empty.
@@ -62,6 +71,7 @@ for (const viewport of viewports) {
     isMobile: viewport.name === 'phone',
     hasTouch: viewport.name === 'phone',
   });
+  await restrictQaBrowserContext(context, base);
   const page = await context.newPage();
   const errors: string[] = [];
   page.on('pageerror', (err) => errors.push(`${err.message}`));
