@@ -165,8 +165,9 @@ jobs:
             [[ "${codes[0]}" == 0 && "${codes[1]}" == 0 ]]
             printf '%s\n' "$tag" > "$PROOF/${role}-tag.txt"
           }
-          build agent infra/docker/agent.Dockerfile
+          # Start the most memory-intensive build with an empty builder cache.
           build web infra/docker/web.Dockerfile
+          build agent infra/docker/agent.Dockerfile
           build browser infra/docker/browser-job.Dockerfile
           build code infra/docker/code-runner.Dockerfile
           build processor infra/docker/document-processor.Dockerfile
