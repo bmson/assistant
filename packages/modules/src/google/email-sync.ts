@@ -29,7 +29,7 @@ import type {
   Records,
   RecoverableDirectIngest,
 } from '@assistant/persistence';
-import { emailAttachmentManifestDigest } from '@assistant/persistence';
+import { emailAttachmentManifestDigest, extractPracticeChangeMail } from '@assistant/persistence';
 import {
   collectGmailAttachments,
   extractGmailText,
@@ -1641,7 +1641,24 @@ async function processDirectAdmission(
   }
   if (record.scoreStatus === 'pending') {
     const token = `${input.lease?.holder ?? 'unfenced'}:${input.lease?.generation ?? 0}:${randomUUID()}`;
-    const deterministicNoModel = bulkByHeaders(input.message.payload);
+    const receivedAt = gmailReceivedAt(input.message);
+    const practiceOwner =
+      receivedAt &&
+      input.authenticated &&
+      ['owner', 'known'].includes(contentTrust) &&
+      /^.*\bpractice has moved\b/imu.test(input.text)
+        ? await deps.persistence.executionContext.getAgent(input.agentId)
+        : null;
+    const practiceChange =
+      practiceOwner && receivedAt
+        ? extractPracticeChangeMail(
+            input.text,
+            input.provenance,
+            receivedAt,
+            practiceOwner.timezone,
+          )
+        : null;
+    const deterministicNoModel = practiceChange !== null || bulkByHeaders(input.message.payload);
     const claimed = await sync.claimIngestScore(
       input.agentId,
       record.id,
@@ -1654,15 +1671,30 @@ async function processDirectAdmission(
       record = (await sync.ingestRecord(input.channelMessageId)) ?? record;
     } else {
       await input.lease?.assertCurrent();
-      const outcome = await scoreEmailImportanceOutcome(deps.router, {
-        from: input.from,
-        receivedAt: gmailReceivedAt(input.message) ?? new Date(),
-        subject: input.subject,
-        body: input.text,
-        ...(input.message.payload ? { payload: input.message.payload } : {}),
-        contentTrust,
-        authenticated: input.authenticated,
-      });
+      const outcome = practiceChange
+        ? {
+            kind: 'score' as const,
+            outcome: 'deterministic_no_model' as const,
+            score: {
+              category: 'appointment' as const,
+              importance: 4,
+              actionable: true,
+              reason: 'Explicit practice move and field from authenticated sender-authored text.',
+              dates: [practiceChange],
+              cardCandidate: false,
+              nextStep: undefined,
+              securityEvidence: null,
+            },
+          }
+        : await scoreEmailImportanceOutcome(deps.router, {
+            from: input.from,
+            receivedAt: gmailReceivedAt(input.message) ?? new Date(),
+            subject: input.subject,
+            body: input.text,
+            ...(input.message.payload ? { payload: input.message.payload } : {}),
+            contentTrust,
+            authenticated: input.authenticated,
+          });
       await input.lease?.assertCurrent();
       if (outcome.kind === 'budget_blocked') {
         await sync.markIngestScoreBudgetBlocked(

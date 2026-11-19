@@ -9,6 +9,7 @@ import {
   type PulseNoticeInput,
   type PulseNoticeOutcome,
   type PulseRepository,
+  practiceChangeFromMail,
   pulseDailyCap,
   type Records,
   type SuggestionRecord,
@@ -239,7 +240,7 @@ export class FirestorePulseRepository implements PulseRepository {
       .where('agentId', '==', agentId)
       .where('actionable', '==', true)
       .where('createdAt', '>=', input.since)
-      .where('createdAt', '<=', input.until)
+      .where('createdAt', '<=', input.now)
       .where('importance', '>=', input.minImportance)
       .orderBy('importance', 'desc')
       .orderBy('createdAt', 'asc')
@@ -258,6 +259,9 @@ export class FirestorePulseRepository implements PulseRepository {
         if (typeof row.id !== 'string' || documentKey(row.id) !== doc.id || row.agentId !== agentId)
           continue;
         if (!emailIngestReadable(row)) continue;
+        const practiceChange = practiceChangeFromMail(row);
+        if (!practiceChange && row.createdAt > input.until) continue;
+        if (practiceChange && new Date(practiceChange.iso) <= input.now) continue;
         if (!row.providerThreadId) continue;
         if (row.obligationStatus === 'resolved' || row.obligationStatus === 'superseded') continue;
         if (
@@ -340,6 +344,7 @@ export class FirestorePulseRepository implements PulseRepository {
           category: row.category,
           importance: row.importance,
           obligationStatus: row.obligationStatus ?? 'unknown',
+          ...(practiceChange ? { practiceChange } : {}),
           ...security,
         });
         if (rows.length >= input.limit) return rows;
@@ -470,6 +475,8 @@ export class FirestorePulseRepository implements PulseRepository {
           (current.obligationVersion ?? 0) !== source.obligationVersion ||
           !current.actionable ||
           !emailIngestReadable(current) ||
+          (source.practiceChange !== undefined &&
+            practiceChangeFromMail(current)?.dateEvidence !== source.practiceChange.dateEvidence) ||
           !['unknown', 'open', 'snoozed'].includes(current.obligationStatus ?? 'unknown') ||
           (current.obligationStatus === 'snoozed' &&
             current.obligationSnoozedUntil &&

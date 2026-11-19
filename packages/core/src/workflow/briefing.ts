@@ -10,6 +10,7 @@ import {
   emailIngest,
   emailIngestReadableSql,
   goals as goalsTable,
+  proactiveMoments,
   tasks as taskTable,
   watches,
   watchFires,
@@ -24,7 +25,7 @@ import {
   resolveBookingLocalDateTime,
   type SecurityIncidentAttentionCandidate,
 } from '@assistant/persistence';
-import { and, desc, eq, gt, gte, isNull } from 'drizzle-orm';
+import { and, desc, eq, gt, gte, isNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import {
   getAgent,
@@ -908,6 +909,13 @@ async function briefingInputsFromSql(
           and(
             eq(emailIngest.agentId, agentId),
             emailIngestReadableSql(),
+            sql`NOT (
+              ${emailIngest.dates} @> '[{"kind":"practice-change"}]'::jsonb
+              AND EXISTS (SELECT 1 FROM ${proactiveMoments}
+                WHERE ${proactiveMoments.agentId} = ${emailIngest.agentId}
+                  AND ${proactiveMoments.momentKey} = 'mail-action:' || ${emailIngest.channelMessageId}
+                  AND ${proactiveMoments.kind} = 'practice-change')
+            )`,
             gte(emailIngest.createdAt, since),
           ),
         )
