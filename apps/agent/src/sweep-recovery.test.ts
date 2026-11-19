@@ -317,6 +317,76 @@ async function firestore(): Promise<Fixture> {
   };
 }
 
+it.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
+  'finds outage mail and its booking after a backlog of unrelated records',
+  async () => {
+    const store = emulatorStore(() => end);
+    const agentId = randomUUID();
+    try {
+      await store.doc('agents', agentId).set({ id: agentId, timezone: 'UTC' });
+      const { mail, bookings } = records(agentId);
+      const batch = store.db.batch();
+      for (const row of mail) batch.create(store.doc('emailIngest', row.id), row);
+      // Put the matching sources in the second Firestore 'in' query.
+      for (let i = 0; i < 30; i++) {
+        const id = `routine-${i}`;
+        batch.create(store.doc('emailIngest', id), {
+          id,
+          agentId,
+          channelMessageId: id,
+          authenticated: true,
+          subject: 'Routine mail',
+          importance: 1,
+          createdAt: end,
+          providerReceivedAt: end,
+        });
+      }
+      for (const row of bookings) {
+        const id = `zz-test-${row.id}`;
+        batch.create(store.doc('emailBookingOccurrences', id), { ...row, id });
+      }
+      await batch.commit();
+
+      // A busy mailbox can be well ahead of the sweep that retries the digest.
+      const after = new Date(end.getTime() + 60_000);
+      for (let offset = 0; offset < 2000; offset += 400) {
+        const history = store.db.batch();
+        for (let i = offset; i < offset + 400; i++) {
+          const id = `a-history-${i}`;
+          history.create(store.doc('emailBookingOccurrences', id), {
+            id,
+            agentId,
+            sourceChannelMessageId: id,
+            sourceReceivedAt: start,
+          });
+        }
+        await history.commit();
+      }
+      const newer = store.db.batch();
+      for (let i = 0; i < 500; i++) {
+        const id = `after-${i}`;
+        newer.create(store.doc('emailIngest', id), {
+          id,
+          agentId,
+          channelMessageId: id,
+          createdAt: after,
+          providerReceivedAt: after,
+        });
+      }
+      await newer.commit();
+      await publishFirestoreSweepRecovery(store, agentId, elapsed, after);
+      const saved = await store.collection('messages').get();
+      expect(saved.docs.map((doc) => doc.get('text'))).toEqual([
+        expect.stringContaining('Booking cancellation · Saturday booking'),
+      ]);
+      expect(saved.docs[0]?.get('text')).toContain('Important mail · Important notice');
+    } finally {
+      await disposeStore(store);
+    }
+  },
+  90_000,
+);
+
 for (const [driver, fixture] of [
   ['PostgreSQL', postgres],
   ['Firestore', firestore],

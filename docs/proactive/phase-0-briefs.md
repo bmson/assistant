@@ -67,6 +67,8 @@ Shared rules for every brief:
 2. Alert through an interrupt-urgency path (push and, by A17's rules, text), deduped per incident.
 3. When the agent recovers, compose one catch-up digest of what changed during the gap (cancellations, moves, important mail) through the `proactiveMoments` ledger, so nothing is repeated.
 
+The recovery digest reads up to 500 messages received during the outage, newest first, using the provider receipt time. It looks up booking changes by the source messages admitted for that digest. Mail received after recovery and unrelated historical bookings do not displace the evidence.
+
 **Tests.** Unit tests for the heartbeat decision and the digest composition. A test that a simulated 3-hour gap produces exactly one alert and one digest.
 
 **Done when.** A stopped scheduler is reported within 30 minutes, and recovery produces one digest.

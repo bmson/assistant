@@ -291,7 +291,7 @@ export async function publishPostgresSweepRecovery(db: Db, recovery: SweepRecove
             lte(emailIngest.providerReceivedAt, new Date(recovery.toMs)),
           ),
         )
-        .orderBy(desc(emailIngest.createdAt))
+        .orderBy(desc(emailIngest.providerReceivedAt))
         .limit(SOURCE_LIMIT);
       const sourceIds = eligibleMail(mail, recovery).map((row) => row.channelMessageId);
       const bookings = sourceIds.length
@@ -324,8 +324,9 @@ export function publishFirestoreSweepRecovery(
     const snapshot = await store
       .collection('emailIngest')
       .where('agentId', '==', agentId)
-      .where('createdAt', '>=', new Date(recovery.fromMs))
-      .orderBy('createdAt', 'desc')
+      .where('providerReceivedAt', '>', new Date(recovery.fromMs))
+      .where('providerReceivedAt', '<=', new Date(recovery.toMs))
+      .orderBy('providerReceivedAt', 'desc')
       .limit(SOURCE_LIMIT)
       .get();
     const mail = snapshot.docs.flatMap((doc) => {
@@ -335,22 +336,21 @@ export function publishFirestoreSweepRecovery(
         : [];
     });
     const candidates = eligibleMail(mail, recovery);
-    if (!candidates.length) return { mail, bookings: [], calendar: await calendarRead };
-    const sourceIds = new Set(candidates.map((row) => row.channelMessageId));
-    const rows = await store
-      .collection('emailBookingOccurrences')
-      .where('agentId', '==', agentId)
-      .limit(2000)
-      .get();
-    const bookings = rows.docs.flatMap((doc) => {
-      const row = decodeRecord<Booking>(doc.data());
-      return row.agentId === agentId &&
-        typeof row.id === 'string' &&
-        documentKey(row.id) === doc.id &&
-        sourceIds.has(row.sourceChannelMessageId)
-        ? [row]
-        : [];
-    });
+    const sourceIds = [...new Set(candidates.map((row) => row.channelMessageId))];
+    const bookings: Booking[] = [];
+    // Firestore accepts up to 30 values per 'in' query.
+    for (let offset = 0; offset < sourceIds.length; offset += 30) {
+      const rows = await store
+        .collection('emailBookingOccurrences')
+        .where('agentId', '==', agentId)
+        .where('sourceChannelMessageId', 'in', sourceIds.slice(offset, offset + 30))
+        .get();
+      for (const doc of rows.docs) {
+        const row = decodeRecord<Booking>(doc.data());
+        if (row.agentId === agentId && typeof row.id === 'string' && documentKey(row.id) === doc.id)
+          bookings.push(row);
+      }
+    }
     return { mail, bookings, calendar: await calendarRead };
   });
 }
