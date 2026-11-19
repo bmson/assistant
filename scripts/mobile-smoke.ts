@@ -1,8 +1,12 @@
 import { chromium } from 'playwright';
+import { requireQaOrigin } from './visual-qa/qa-installation.js';
 
-// Run this against an owner-authenticated browser session. The smoke opens chat
-// and history but never submits a message or calls a model/provider.
-const baseUrl = (process.env.SMOKE_BASE_URL ?? 'http://localhost:3000').replace(/\/$/, '');
+// Run against the local smoke installation. Opening /chat can initialize the
+// primary conversation, and the method-denial checks send non-GET requests.
+const baseUrl = requireQaOrigin(
+  undefined,
+  (process.env.SMOKE_BASE_URL ?? 'http://127.0.0.1:3000').replace(/\/$/, ''),
+);
 const browserPath = process.env.SMOKE_BROWSER_PATH;
 const browser = await chromium.launch({
   headless: true,

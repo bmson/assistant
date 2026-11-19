@@ -1,3 +1,5 @@
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { resetConfigForTest } from '@assistant/config';
 import type { BrowserContext, Route } from 'playwright';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -35,6 +37,25 @@ describe('dedicated QA origin', () => {
     'http://127.0.0.1',
   ])('refuses an origin outside the exact loopback contract (%s)', (value) => {
     expect(() => requireQaOrigin(undefined, value)).toThrow(/literal loopback HTTP origin/);
+  });
+
+  it('rejects a remote mobile smoke target before Chromium starts', () => {
+    const result = spawnSync(
+      process.execPath,
+      ['--import', 'tsx', fileURLToPath(new URL('../mobile-smoke.ts', import.meta.url))],
+      {
+        env: {
+          ...process.env,
+          SMOKE_BASE_URL: 'https://owner.example.invalid',
+          SMOKE_BROWSER_PATH: '/tmp/assistant-qa-deliberately-absent-browser',
+        },
+        encoding: 'utf8',
+        timeout: 10_000,
+      },
+    );
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('QA requires a literal loopback HTTP origin');
+    expect(result.stderr).not.toContain('browserType.launch');
   });
 });
 
