@@ -537,6 +537,25 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       );
     });
 
+    it('disables a future assignment schedule through the actual Firestore sweep without creating work', async () => {
+      const id = await goal({ title: 'Synthetic held research' });
+      await store.doc('goals', id).update({ researchAssignment: { version: 1, status: 'draft' } });
+      const schedule = await new FirestoreScheduleRepository(store).ensure({
+        agentId,
+        name: `goal:${id}`,
+        cron: '15 9 * * *',
+        taskTemplate: { type: 'scheduled', goalId: id, instruction: 'Must not execute research' },
+        nextRunAt: new Date(Date.now() - 60_000),
+      });
+      const result = await runFirestoreSweep(composed);
+      expect(result).toMatchObject({ ready: true, report: { schedulesFired: 0 } });
+      expect((await store.doc('schedules', schedule.id).get()).get('enabled')).toBe(false);
+      expect((await store.collection('tasks').where('goalId', '==', id).get()).empty).toBe(true);
+      expect(
+        (await store.collection('conversations').where('metadata.goalId', '==', id).get()).empty,
+      ).toBe(true);
+    });
+
     it('runs goal sessions through the portable gate in the Firestore sweep', async () => {
       const schedules = new FirestoreScheduleRepository(store);
       const due = new Date(Date.now() - 60_000);

@@ -3,6 +3,7 @@ import { getQueueNotifier } from '@assistant/core/queue';
 import { enqueueTask } from '@assistant/core/workflow/machine';
 import { cancelQueuedGoalWork, ensureGoalAutomation } from '@assistant/core/workflow/schedules';
 import { conversations, type Db, type GoalRow, goals, tasks } from '@assistant/db';
+import { goalAutomationEligible } from '@assistant/persistence';
 import { and, eq, inArray, isNotNull, isNull, lt, notInArray } from 'drizzle-orm';
 
 import { type GoalStatus, goalStatuses, goalTerminalTaskStatuses } from './queries.js';
@@ -26,7 +27,7 @@ export interface GoalWorkLink {
 type WorkGoal = Pick<GoalRow, 'id' | 'title' | 'description' | 'targetDate' | 'researchAssignment'>;
 
 function assertOrdinaryGoal(goal: Pick<GoalRow, 'researchAssignment'>): void {
-  if (goal.researchAssignment)
+  if (!goalAutomationEligible(goal))
     throw new Error('Research assignments cannot use generic goal work or automation');
 }
 
