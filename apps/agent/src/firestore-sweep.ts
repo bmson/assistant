@@ -103,6 +103,7 @@ export async function runFirestoreSweep(
   };
   const step = (name: string, fn: () => Promise<number>) => attempt(name, fn, 0);
   let releasedReservations = 0;
+  let reservationsMarkedUnknown = 0;
   const report: Record<string, number> = {
     expiredApprovalsWoke: await step(
       'expireStaleApprovals',
@@ -193,12 +194,17 @@ export async function runFirestoreSweep(
     // Expiry includes releasing held reservations whose task died before
     // settling, which would otherwise count against the budget forever.
     purgedExpired: await step('purgeExpired', async () => {
-      const { reservations, ...rest } = await purgeExpired({
+      const {
+        reservations,
+        reservationsMarkedUnknown: markedUnknown,
+        ...rest
+      } = await purgeExpired({
         maintenance,
         costs: persistence.costs,
         recallMetrics: persistence.recallMetrics,
       });
       releasedReservations = reservations;
+      reservationsMarkedUnknown = markedUnknown;
       return Object.values(rest).reduce((sum, count) => sum + count, 0);
     }),
     agedHistory: await step('purgeAgedHistory', async () =>
@@ -206,6 +212,7 @@ export async function runFirestoreSweep(
     ),
   };
   report.releasedReservations = releasedReservations;
+  report.reservationsMarkedUnknown = reservationsMarkedUnknown;
   for (const sweepStep of deps.modules.sweepSteps) {
     if (!sweepStep.portable) continue;
     report[sweepStep.reportKey ?? sweepStep.name] = await step(sweepStep.name, () =>

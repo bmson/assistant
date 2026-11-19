@@ -51,7 +51,7 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 
 | ID  | Item                                                                   | Phase | Size | Depends on | Status                                                        |
 | --- | ---------------------------------------------------------------------- | ----- | ---- | ---------- | ------------------------------------------------------------- |
-| A1  | Reconcile cost holds; holds scoped to their period                     | 0     | L    | —          | open                                                          |
+| A1  | Reconcile cost holds; holds scoped to their period                     | 0     | L    | —          | in review (settlement and period-specific Costs warning)      |
 | A2  | Wake parked work when caps change; honest parked notice                | 0     | M    | —          | open                                                          |
 | A3  | Outage watchdog and "while I was away" digest                          | 0     | M    | H4         | in review (outage alert and calendar/mail recovery)       |
 | A4  | Stop mirroring secondary-chat replies into the primary chat            | 0     | M    | —          | in review (private answer-ready push)                         |

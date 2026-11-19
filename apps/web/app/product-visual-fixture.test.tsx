@@ -595,9 +595,12 @@ vi.mock('@assistant/application/calls', () => ({
       summary: null,
     },
 }));
-vi.mock('@assistant/application/costs', () => ({
-  getCostsDashboard: async () => data().costs,
-}));
+vi.mock('@assistant/application/costs', async () => {
+  const { classifyDailyBudgetHolds } = await vi.importActual<
+    typeof import('@assistant/application/costs')
+  >('@assistant/application/costs');
+  return { classifyDailyBudgetHolds, getCostsDashboard: async () => data().costs };
+});
 vi.mock('@assistant/application/provider-billing', async () => {
   const actual = await vi.importActual<
     typeof import('../../../packages/application/src/provider-billing.js')
