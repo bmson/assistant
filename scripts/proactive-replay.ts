@@ -64,7 +64,7 @@ try {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
-    const benchmark = cases.filter(({ id }) => !id.startsWith('CONTROL-'));
+    const benchmark = cases.filter(({ id }) => implementedIds.has(id));
     const sum = (
       key:
         | 'matched'
