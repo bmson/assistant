@@ -30,7 +30,7 @@ import type {
 export interface ProactiveHealthView extends Omit<ProactiveHealth, 'lastMailAt'> {
   /** ISO string, or null — presentation never receives a Date. */
   lastMailAt: string | null;
-  dailyBudgetHolds: 'within_limit' | 'above_threshold' | 'paused' | 'uncapped' | 'unavailable';
+  dailyBudgetHolds: Awaited<ReturnType<typeof dailyBudgetHoldHealth>>;
   /** Everything is arriving and reachable. */
   healthy: boolean;
 }
@@ -60,6 +60,8 @@ export async function proactiveHealthView(
     dailyBudgetHoldHealth(readTotals),
   ]);
   const warnings = [...health.warnings];
+  if (dailyBudgetHolds === 'at_threshold')
+    warnings.push('Pending cost estimates hold exactly 25% of today’s budget.');
   if (dailyBudgetHolds === 'above_threshold')
     warnings.push(
       'Pending cost estimates hold over 25% of today’s budget. See Costs for the reserved amounts.',

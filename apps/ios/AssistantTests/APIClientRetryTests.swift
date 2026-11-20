@@ -936,7 +936,8 @@ final class APIClientRetryTests: XCTestCase {
 
     func testNoticingHealthDecodesBudgetStatusAndLastMailTime() throws {
         let states = [
-            "within_limit": "At or below 25% of daily cap",
+            "within_limit": "Within daily holds target",
+            "at_threshold": "At 25% of daily cap",
             "above_threshold": "Over 25% of daily cap",
             "paused": "Daily spending cap is zero",
             "uncapped": "No daily cap",
