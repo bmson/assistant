@@ -166,7 +166,7 @@ describe('PostgreSQL memory tool repository', () => {
       confidence: 0.8,
       originTrust: 'owner',
       quarantined: false,
-      subject: `Alex ${randomUUID().slice(0, 8)}`,
+      subject: 'Alex Briarwood',
     });
     expect(saved.saved).toBe(true);
     const [row] = await db

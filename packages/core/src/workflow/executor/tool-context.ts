@@ -5,6 +5,7 @@ import type { ModelMessage } from 'ai';
 import { hashCallbackToken } from '../../browse.js';
 import { isForwardedIngest } from '../../email-provenance.js';
 import type { TaskState, Trust } from '../../events.js';
+import { directOwnerPersonEvidenceText } from '../../memory/person-evidence.js';
 import type { TaskLease } from '../machine.js';
 import { latestOwnerIntent } from '../owner-intent.js';
 import type { ToolContextLike } from './types.js';
@@ -141,6 +142,13 @@ export function createToolContext(args: {
         clarificationContinuation: state.clarificationContinuation,
       },
     ),
+    directOwnerMemorySource:
+      task.type === 'chat_turn' &&
+      task.trust === 'owner' &&
+      (task.trigger as { source?: unknown } | null)?.source === 'chat' &&
+      typeof triggerPayload?.text === 'string'
+        ? directOwnerPersonEvidenceText(triggerPayload.text, task.trigger)
+        : undefined,
     knownAddresses: harvestKnownAddresses(state, task.trigger, task.trust as Trust),
     db,
     now: () => new Date(),

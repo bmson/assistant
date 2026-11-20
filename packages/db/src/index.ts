@@ -53,6 +53,7 @@ export { createPostgresKnowledgeGraphSyncRepository } from './knowledge-graph-sy
 export { createPostgresLocationPingRepository } from './location-ping-repository.js';
 export * from './mcp-oauth-repository.js';
 export { createPostgresMemoryEmbeddingRefreshRepository } from './memory-embedding-refresh-repository.js';
+export { resolvePostgresMemoryPerson } from './memory-person.js';
 export { createPostgresMemorySupersedeRepository } from './memory-supersede-repository.js';
 export { createPostgresMemoryToolRepository } from './memory-tool-repository.js';
 export { createPostgresMessageRepository } from './message-repository.js';

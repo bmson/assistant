@@ -11,7 +11,7 @@ import {
 } from '@assistant/persistence';
 import { and, eq, gt, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
-import { resolveSubjectContact } from './entities.js';
+import { resolvePostgresMemoryPerson } from './memory-person.js';
 import {
   assertPostgresPrivacyObservationFence,
   lockPostgresPrivacyObservationFence,
@@ -122,12 +122,6 @@ export function createPostgresMemoryToolRepository(
             tombstoned: true,
             quarantined: input.quarantined,
           };
-        const subject = input.subject
-          ? await resolveSubjectContact(txDb, {
-              subject: input.subject,
-              relationship: input.subjectRelationship,
-            })
-          : null;
         const [row] = await tx
           .insert(memories)
           .values({
@@ -144,13 +138,31 @@ export function createPostgresMemoryToolRepository(
             confidence: input.confidence.toFixed(2),
             originTrust: input.originTrust,
             quarantined: input.quarantined,
-            subjectContactId: subject?.contactId,
             domain: input.domain,
             sourceTaskId: input.sourceTaskId,
             expiresAt: input.expiresAt,
           })
           .onConflictDoNothing({ target: memories.contentHash })
           .returning({ id: memories.id });
+        if (row && input.subject) {
+          const subject = await resolvePostgresMemoryPerson(txDb, {
+            agentId: input.agentId,
+            subject: input.subject,
+            content: input.content,
+            evidence:
+              input.originTrust === 'owner' && !input.quarantined
+                ? input.personEvidence
+                : input.personEvidence === undefined
+                  ? undefined
+                  : null,
+            relationship: input.subjectRelationship,
+          });
+          if (subject)
+            await tx
+              .update(memories)
+              .set({ subjectContactId: subject.contactId })
+              .where(eq(memories.id, row.id));
+        }
         await assertPostgresPrivacyObservationFence(txDb, input.agentId, observed);
         return {
           ...(row ? { id: row.id } : {}),

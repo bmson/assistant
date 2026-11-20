@@ -1,9 +1,12 @@
 import type { CodeJobLease } from './code-jobs.js';
+import type { GroundedPersonEvidence } from './person-evidence.js';
 
 /** One message of a transcript the extraction jobs read. */
 export interface ExtractionMessage {
   id: string;
   role: 'user' | 'assistant';
+  /** Direct owner chat provenance, when established by the driver. */
+  directOwnerChat?: boolean;
   text: string;
   createdAt: Date;
 }
@@ -49,6 +52,7 @@ export interface ExtractedMemoryFact {
   subject: string;
   subjectContactId?: string | null;
   relationship: string;
+  personEvidence?: GroundedPersonEvidence | null;
 }
 
 export interface ExtractedOccasion {

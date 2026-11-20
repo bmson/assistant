@@ -249,6 +249,8 @@ On eligible turns, automatic recall embeds the query and prefers qualifying segm
 
 Extraction proposes useful information from permitted sources. Saved memories carry origin trust and can be quarantined. Consolidation resolves duplication and contradictions, assigns domains, and rebuilds the profile. Owner confirmation has precedence in conflict handling. Experience memories can expire; current personal knowledge and superseded historical facts have different use conditions.
 
+Chat saves and nightly chat extraction can reconcile a legacy inferred People entry when a standalone owner chat statement explicitly identifies it and a stored email or phone corroborates the claim. Shared identifiers, contradictory identity evidence, and aliases already held by another person do not authorize a People change. An ambiguous fact can still be saved without a person link. The confirmed person keeps their ID and existing family links. Reconciliation defers entries with separately reviewed or linked data that the save cannot safely move.
+
 Corrections can immediately supersede contradicted facts and invalidate the compiled card. Supported portable commands embed before their transaction and compare source content so a concurrent edit does not silently overwrite newer information. A failed profile rebuild must not retain a fact retired by the same supported correction path.
 
 Forgetting removes usable content and derived graph data and retains tombstones. Those suppress re-extraction from the same source; they do not promise that unrelated newly supplied evidence can never mention the same subject. Hidden messages, archived records, stale facts, and forgotten facts are distinct states.

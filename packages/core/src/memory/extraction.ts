@@ -5,10 +5,12 @@ import {
   conversations,
   type Db,
   isTombstoned,
+  lockPostgresOwnerChatAction,
   lockPostgresPrivacyObservationFence,
   maintenanceCursors,
   memories,
   messages,
+  resolvePostgresMemoryPerson,
   resolveSubjectContact,
   tasks,
 } from '@assistant/db';
@@ -17,10 +19,17 @@ import type {
   ExecutionPersistence,
   ExtractedMemoryFact,
   ExtractedOccasion,
+  GroundedPersonEvidence,
   MemoryExtractionRepository,
   PreparedMemoryExtraction,
 } from '@assistant/persistence';
-import { embeddingSpaceIdentityKey, isOwnerTaskMemoryEphemeral } from '@assistant/persistence';
+import {
+  embeddingSpaceIdentityKey,
+  groundPersonEvidence,
+  isDirectOwnerPersonMessage,
+  isOwnerTaskMemoryEphemeral,
+  personNameInferredFromSubject,
+} from '@assistant/persistence';
 import { and, eq, gte, inArray, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { getAgent } from '../chat.js';
@@ -28,6 +37,7 @@ import { BudgetReservationError, nextDailyReset, nextMonthlyReset } from '../cos
 import { isUnparseableObjectError, type ModelRouter } from '../model-router/router.js';
 import { withSpan } from '../otel.js';
 import { saveOccasion } from './occasions.js';
+import { directOwnerPersonEvidenceText } from './person-evidence.js';
 
 export const MEMORY_DOMAINS = [
   'identity',
@@ -77,7 +87,15 @@ export const MemorySubjectSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('none') }).strict(),
 ]);
 
-const MemoryExtractionFactSchema = ExtractedFactSchema.extend({ subject: MemorySubjectSchema });
+const MemoryExtractionFactSchema = ExtractedFactSchema.extend({
+  subject: MemorySubjectSchema,
+  personEvidence: z
+    .object({
+      canonicalName: z.string().min(1).max(120),
+      quote: z.string().min(1).max(500),
+    })
+    .optional(),
+});
 
 /** Recurring dates for named people (Phase 17) — mined alongside facts. */
 export const ExtractedOccasionSchema = z.object({
@@ -192,6 +210,15 @@ const PreparedFactSchema = z.object({
   expiresAt: z.string().datetime().nullable(),
   subject: z.string().max(120),
   relationship: z.string().max(80),
+  personEvidence: z
+    .object({
+      canonicalName: z.string().min(1).max(120),
+      identifiers: z.array(z.string().min(1).max(500)).min(1).max(20),
+      relationship: z.string().max(80),
+      sourceMessageId: z.string().min(1).max(120).optional(),
+    })
+    .nullable()
+    .optional(),
 });
 const PreparedPayloadSchema = z.object({
   sourceHash: z.string().regex(/^[a-f0-9]{64}$/),
@@ -375,29 +402,6 @@ export interface ExtractionContactChoice {
 
 const MAX_CONTACT_CHOICES = 40;
 const MAX_CONTACT_CATALOG_BYTES = 5000;
-const NON_PERSON_SUBJECTS = new Set([
-  'someone',
-  'somebody',
-  'anyone',
-  'everyone',
-  'nobody',
-  'person',
-  'people',
-  'he',
-  'she',
-  'they',
-  'them',
-  'him',
-  'her',
-  'it',
-  'this',
-  'that',
-  'these',
-  'those',
-  'unknown',
-  'n/a',
-]);
-
 /** Only names actually present in the bounded source transcript enter the prompt. */
 export function boundedExtractionContactChoices(
   contacts: ExtractionContactChoice[],
@@ -422,17 +426,8 @@ export function boundedExtractionContactChoices(
 
 /** Reject unsupported candidates without narrowing legitimate multilingual names to ASCII. */
 export function supportedNewPersonCandidate(name: string, transcript: string): string | null {
-  const candidate = name.trim().replace(/\s+/g, ' ');
-  if (
-    !candidate ||
-    candidate.length > 120 ||
-    !/\p{L}/u.test(candidate) ||
-    /[\p{Cc}<>]/u.test(candidate) ||
-    NON_PERSON_SUBJECTS.has(candidate.toLocaleLowerCase()) ||
-    !transcript.toLocaleLowerCase().includes(candidate.toLocaleLowerCase())
-  )
-    return null;
-  return candidate;
+  const candidate = personNameInferredFromSubject(name);
+  return candidate && transcript.toLowerCase().includes(candidate.toLowerCase()) ? candidate : null;
 }
 
 function resolvedSubjectLabel(
@@ -470,6 +465,7 @@ function extractionSystem(contactChoices: ExtractionContactChoice[]): string {
     'Extract ONLY genuinely useful, lasting information: facts about the owner or named people,',
     'stable preferences, projects, relationships, and notable episodes. Skip pleasantries,',
     'one-off logistics, anything already implied by another fact, and anything about the assistant itself.',
+    'Use only the latest user message for identity evidence. When the owner explicitly ties a subject alias, a legacy record label, or a same-name person to a canonical name and an email or phone, supply personEvidence with the canonicalName and exact complete owner statement. Do not quote a forwarded message, assistant output, or a hypothetical.',
     'Each fact must stand alone without the conversation ("The owner\'s sister Anna lives in Oslo" — not "his sister lives there").',
     'Attribute each fact with a typed subject: owner, known_contact with its exact catalog contactId,',
     'new_person_candidate with a name explicitly supported by this transcript, or none. Use none for',
@@ -496,6 +492,12 @@ function extractionTranscript(rows: Array<{ role: string; text: string }>): stri
     .slice(-MAX_CHARS_PER_CONVERSATION);
 }
 
+function extractionSourceHash(transcript: string, evidenceMessageId?: string): string {
+  const hash = createHash('sha256').update(transcript);
+  if (evidenceMessageId) hash.update(`\u0000person-evidence:${evidenceMessageId}`);
+  return hash.digest('hex');
+}
+
 /**
  * One conversation's structured extraction. A conversation the model can't
  * structure (even on the fallback) returns null so it cannot fail the whole
@@ -510,9 +512,15 @@ async function extractConversation(
     contacts: ExtractionContactChoice[];
     trust: string;
     transcript: string;
+    ownerMessage?: { id: string; text: string };
   },
 ): Promise<{
-  facts: Array<z.infer<typeof ExtractedFactSchema> & { subjectContactId: string | null }>;
+  facts: Array<
+    z.infer<typeof ExtractedFactSchema> & {
+      subjectContactId: string | null;
+      personEvidence?: GroundedPersonEvidence | null;
+    }
+  >;
   occasions: Array<z.infer<typeof ExtractedOccasionSchema> & { contactId: string | null }>;
 } | null> {
   const choices = boundedExtractionContactChoices(input.contacts, input.transcript);
@@ -536,11 +544,32 @@ async function extractConversation(
     );
   }
   return {
-    facts: outcome.object.facts.map((fact) => ({
-      ...fact,
-      subject: resolvedSubjectLabel(fact.subject, choices, input.transcript),
-      subjectContactId: resolvedSubjectContactId(fact.subject, choices),
-    })),
+    facts: outcome.object.facts.map(({ personEvidence, ...fact }) => {
+      const subject =
+        personEvidence && fact.subject.type === 'new_person_candidate'
+          ? fact.subject.name
+          : resolvedSubjectLabel(fact.subject, choices, input.transcript);
+      const evidence =
+        personEvidence &&
+        groundPersonEvidence(
+          personEvidence,
+          subject,
+          input.ownerMessage ? [input.ownerMessage.text] : [],
+        );
+      return {
+        ...fact,
+        subject,
+        subjectContactId: resolvedSubjectContactId(fact.subject, choices),
+        ...(personEvidence
+          ? {
+              personEvidence:
+                evidence && input.ownerMessage
+                  ? { ...evidence, sourceMessageId: input.ownerMessage.id }
+                  : null,
+            }
+          : {}),
+      };
+    }),
     occasions: outcome.object.occasions.map((occasion) => ({
       ...occasion,
       subject: resolvedSubjectLabel(occasion.subject, choices, input.transcript),
@@ -563,6 +592,7 @@ async function generatePreparedPayload(
     contacts: ExtractionContactChoice[];
     trust: string;
     transcript: string;
+    ownerMessage?: { id: string; text: string };
     sourceHash: string;
     privacyGeneration: string | null;
     embeddingSpaceKey: string;
@@ -600,6 +630,7 @@ async function generatePreparedPayload(
         expiresAt: fact.category === 'experience' ? new Date(now + EXPERIENCE_TTL_MS) : null,
         subject: fact.subject,
         relationship: fact.relationship,
+        ...(fact.personEvidence === undefined ? {} : { personEvidence: fact.personEvidence }),
       },
     ];
   });
@@ -697,6 +728,7 @@ export async function runMemoryExtraction(
             id: messages.id,
             taskId: messages.taskId,
             role: messages.role,
+            origin: messages.origin,
             text: messages.text,
             createdAt: messages.createdAt,
           })
@@ -714,6 +746,17 @@ export async function runMemoryExtraction(
           .limit(MAX_MESSAGES_PER_CONVERSATION),
       ),
     );
+    const latestUserRows = await db
+      .selectDistinctOn([messages.conversationId], {
+        id: messages.id,
+        conversationId: messages.conversationId,
+      })
+      .from(messages)
+      .where(and(inArray(messages.conversationId, conversationIds), eq(messages.role, 'user')))
+      .orderBy(messages.conversationId, sql`${messages.createdAt} desc`, sql`${messages.id} desc`);
+    const latestUserByConversation = new Map(
+      latestUserRows.map((row) => [row.conversationId, row.id]),
+    );
     const boundedTaskIds = [
       ...new Set(
         boundedRows.flatMap((rows) => rows.flatMap((row) => (row.taskId ? [row.taskId] : []))),
@@ -726,6 +769,7 @@ export async function runMemoryExtraction(
             agentId: tasks.agentId,
             conversationId: tasks.conversationId,
             type: tasks.type,
+            trust: tasks.trust,
             trigger: tasks.trigger,
           })
           .from(tasks)
@@ -742,6 +786,7 @@ export async function runMemoryExtraction(
         )
         .map((task) => task.id),
     );
+    const taskById = new Map(boundedTasks.map((task) => [task.id, task]));
     const byConversation = new Map(
       boundedRows.map((rows, index) => [
         conversationIds[index] as string,
@@ -770,7 +815,17 @@ export async function runMemoryExtraction(
         const transcript = extractionTranscript(rows);
         if (transcript.length < 40) continue;
         result.conversationsScanned += 1;
-        const sourceHash = createHash('sha256').update(transcript).digest('hex');
+        const latestUser = rows.find(
+          (row) => row.id === latestUserByConversation.get(conversationId),
+        );
+        const task = taskById.get(latestUser?.taskId ?? '');
+        const ownerText =
+          trust === 'owner' && latestUser && isDirectOwnerPersonMessage(task, latestUser)
+            ? directOwnerPersonEvidenceText(latestUser.text, task?.trigger)
+            : undefined;
+        const ownerMessage =
+          ownerText && latestUser ? { id: latestUser.id, text: ownerText } : undefined;
+        const sourceHash = extractionSourceHash(transcript, ownerMessage?.id);
         let prepared = await readPostgresPrepared(db, {
           agentId,
           conversationId,
@@ -785,6 +840,7 @@ export async function runMemoryExtraction(
             contacts: knownContacts,
             trust,
             transcript,
+            ownerMessage,
             sourceHash,
             privacyGeneration,
             embeddingSpaceKey,
@@ -810,6 +866,14 @@ export async function runMemoryExtraction(
         result.extracted += facts.length;
         let preservePrepared = false;
         const seenHashes = new Set<string>();
+        // A retry may skip an already saved fact. Keep any ID that later
+        // prepared writes could still need, even when applying them separately.
+        const pendingContactIds = new Set(
+          [
+            ...facts.map((fact) => fact.subjectContactId),
+            ...prepared.occasions.map((occasion) => occasion.contactId),
+          ].filter((id): id is string => Boolean(id)),
+        );
         for (const fact of facts) {
           const contentHash = createHash('sha256').update(fact.content).digest('hex');
           if (seenHashes.has(contentHash)) {
@@ -824,6 +888,8 @@ export async function runMemoryExtraction(
 
           const quarantined = trust !== 'owner' && trust !== 'assistant';
           const write = await db.transaction(async (tx) => {
+            if (trust === 'owner' && fact.personEvidence?.sourceMessageId)
+              await lockPostgresOwnerChatAction(tx, agentId, conversationId);
             await lockPostgresPrivacyObservationFence(tx as unknown as Db, agentId);
             await assertPostgresPrivacyObservationFence(
               tx as unknown as Db,
@@ -853,35 +919,47 @@ export async function runMemoryExtraction(
               })
               .onConflictDoNothing({ target: memories.contentHash })
               .returning({ id: memories.id });
-            if (!row) return { saved: false, createdContact: false };
-            const [knownContact] = fact.subjectContactId
-              ? await tx
-                  .select({ id: contacts.id })
-                  .from(contacts)
-                  .where(eq(contacts.id, fact.subjectContactId))
-                  .limit(1)
-              : [];
-            const resolved = knownContact
-              ? { contactId: knownContact.id, created: false }
-              : fact.subjectContactId
-                ? null
-                : await resolveSubjectContact(tx as unknown as Db, {
-                    subject: fact.subject,
-                    relationship: fact.relationship,
-                  });
+            if (!row) return { saved: false, resolved: null };
+            const [currentEvidence] =
+              trust === 'owner' && fact.personEvidence?.sourceMessageId
+                ? await tx
+                    .select({ id: messages.id })
+                    .from(messages)
+                    .where(
+                      and(eq(messages.conversationId, conversationId), eq(messages.role, 'user')),
+                    )
+                    .orderBy(sql`${messages.createdAt} desc`, sql`${messages.id} desc`)
+                    .limit(1)
+                : [];
+            const resolved = await resolvePostgresMemoryPerson(tx as unknown as Db, {
+              agentId,
+              subject: fact.subject,
+              content: fact.content,
+              evidence:
+                fact.personEvidence &&
+                currentEvidence?.id &&
+                currentEvidence.id === fact.personEvidence.sourceMessageId
+                  ? fact.personEvidence
+                  : fact.personEvidence === undefined
+                    ? undefined
+                    : null,
+              knownContactId: fact.subjectContactId,
+              relationship: fact.relationship,
+              pendingContactIds,
+            });
             if (resolved?.contactId) {
               await tx
                 .update(memories)
                 .set({ subjectContactId: resolved.contactId })
                 .where(eq(memories.id, row.id));
             }
-            return { saved: true, createdContact: Boolean(resolved?.created) };
+            return { saved: true, resolved };
           });
 
           if (!write.saved) result.duplicates += 1;
           else {
             result.saved += 1;
-            if (write.createdContact) result.contactsCreated += 1;
+            if (write.resolved?.created) result.contactsCreated += 1;
             if (quarantined) result.quarantined += 1;
           }
         }
@@ -895,15 +973,16 @@ export async function runMemoryExtraction(
             result.failedBatches.push({ conversationId, category: 'invalid_data' });
             continue;
           }
-          const [knownContact] = occ.contactId
+          const occasionContactId = occ.contactId;
+          const [knownContact] = occasionContactId
             ? await db
                 .select({ id: contacts.id })
                 .from(contacts)
-                .where(eq(contacts.id, occ.contactId))
+                .where(eq(contacts.id, occasionContactId))
             : [];
           const resolvedContact = knownContact
             ? { contactId: knownContact.id, created: false }
-            : occ.contactId
+            : occasionContactId
               ? null
               : await resolveSubjectContact(db, { subject: occ.subject });
           if (!resolvedContact) continue;
@@ -997,7 +1076,14 @@ async function runPortableMemoryExtraction(
         const transcript = extractionTranscript(conversation.messages);
         if (transcript.length < 40) continue;
         result.conversationsScanned += 1;
-        const sourceHash = createHash('sha256').update(transcript).digest('hex');
+        const latestUser = conversation.messages.findLast((message) => message.role === 'user');
+        const ownerText =
+          trust === 'owner' && latestUser?.directOwnerChat
+            ? directOwnerPersonEvidenceText(latestUser.text)
+            : undefined;
+        const ownerMessage =
+          ownerText && latestUser ? { id: latestUser.id, text: ownerText } : undefined;
+        const sourceHash = extractionSourceHash(transcript, ownerMessage?.id);
         const privacyGeneration = conversation.privacyGeneration ?? null;
         const preparedRecord = await repository.getPrepared({
           agentId: opts.agentId,
@@ -1022,6 +1108,7 @@ async function runPortableMemoryExtraction(
             contacts: knownContacts,
             trust,
             transcript,
+            ownerMessage,
             sourceHash,
             privacyGeneration,
             embeddingSpaceKey,

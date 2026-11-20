@@ -8,8 +8,8 @@ import type {
   MemoryToolRepository,
 } from '@assistant/persistence';
 import { embeddingSpaceIdentityKey, snapshotEmbeddingSpace } from '@assistant/persistence';
-import { resolveFirestoreSubjectContact } from './contact-lookup.js';
 import { FirestoreMemoryRepository } from './memory.js';
+import { FirestoreMemoryPeople, readFirestoreMemoryPeople } from './memory-person.js';
 import {
   assertPrivacyErasureFenceUnchanged,
   assertPrivacyErasureInactiveInTransaction,
@@ -69,18 +69,6 @@ export class FirestoreMemoryToolRepository implements MemoryToolRepository {
     const configuredSpaceKey = embeddingSpaceIdentityKey(this.embeddingSpace);
     if (input.embeddingSpaceKey !== configuredSpaceKey)
       throw new Error('Memory embedding space identity does not match the configured space');
-    const tombstone = await this.store.doc('memoryTombstones', input.contentHash).get();
-    if (tombstone.exists)
-      return { saved: false, duplicate: false, tombstoned: true, quarantined: input.quarantined };
-    const subjectContactId = input.subject
-      ? await resolveFirestoreSubjectContact(
-          this.store,
-          input.agentId,
-          input.subject,
-          input.subjectRelationship,
-          input.observedPrivacyGeneration,
-        )
-      : null;
     const now = this.store.now();
     const id = randomUUID();
     const saved = await this.vectors.save(
@@ -101,7 +89,7 @@ export class FirestoreMemoryToolRepository implements MemoryToolRepository {
         content: input.content,
         importance: input.importance,
         quarantined: input.quarantined,
-        subjectContactId,
+        subjectContactId: null,
         domain: input.domain ?? null,
         validFrom: null,
         validUntil: null,
@@ -113,6 +101,29 @@ export class FirestoreMemoryToolRepository implements MemoryToolRepository {
         lastConsolidatedAt: null,
       },
       input.observedPrivacyGeneration,
+      input.subject
+        ? async (tx) => {
+            const people = new FirestoreMemoryPeople(
+              tx,
+              this.store,
+              input.agentId,
+              await readFirestoreMemoryPeople(tx, this.store, input.agentId),
+            );
+            const subjectContactId = await people.resolve({
+              subject: input.subject ?? '',
+              content: input.content,
+              evidence:
+                input.originTrust === 'owner' && !input.quarantined
+                  ? input.personEvidence
+                  : input.personEvidence === undefined
+                    ? undefined
+                    : null,
+              relationship: input.subjectRelationship,
+            });
+            people.stageWrites();
+            return subjectContactId;
+          }
+        : undefined,
     );
     if (saved)
       return {

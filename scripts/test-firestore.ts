@@ -76,6 +76,7 @@ const files = [
   'apps/agent/src/firestore-graph-sync.test.ts',
   'apps/agent/src/firestore-memory-consolidation.test.ts',
   'apps/agent/src/firestore-memory-extraction.test.ts',
+  'apps/agent/src/c4-people-identity.e2e.test.ts',
   'apps/agent/src/firestore-watches.test.ts',
   'apps/agent/src/firestore-reminders.test.ts',
   'apps/agent/src/firestore-cloudtasks.test.ts',

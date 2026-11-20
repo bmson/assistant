@@ -20,6 +20,7 @@ import {
 import {
   type ConversationSearchRepository,
   embeddingSpaceIdentityKey,
+  groundPersonEvidence,
   type MemoryToolRepository,
   type TaskRepository,
 } from '@assistant/persistence';
@@ -132,6 +133,15 @@ export function registerPortableMemoryTools(
           .max(120)
           .default('')
           .describe('Who the fact is about: "owner", a person\'s name, or empty if about no one.'),
+        personEvidence: z
+          .object({
+            canonicalName: z.string().min(1).max(120),
+            quote: z.string().min(1).max(500),
+          })
+          .optional()
+          .describe(
+            'Only for an explicitly stated alternate name, existing record label, or ambiguous same-name person. Copy the complete owner-authored statement tying the subject to a canonical name and its email address or phone number.',
+          ),
         domain: z
           .enum(['identity', 'work', 'home', 'relationships', 'preferences', 'health', 'other'])
           .optional(),
@@ -191,6 +201,17 @@ export function registerPortableMemoryTools(
           originTrust: ctx.trust,
           quarantined,
           subject: args.subject || undefined,
+          ...(args.personEvidence
+            ? {
+                personEvidence: groundPersonEvidence(
+                  args.personEvidence,
+                  args.subject,
+                  ctx.trust === 'owner' && !ctx.tainted && ctx.directOwnerMemorySource
+                    ? [ctx.directOwnerMemorySource]
+                    : [],
+                ),
+              }
+            : {}),
           domain: args.domain,
           sourceTaskId: ctx.taskId,
           expiresAt,
