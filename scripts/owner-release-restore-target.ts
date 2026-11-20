@@ -29,6 +29,12 @@ import {
   reviewedCurrentEnvironment,
 } from './owner-release-current-snapshot.js';
 import { createImageResolutionReader } from './owner-release-image-resolution.js';
+import {
+  bothPriorSuccessorsAbsent,
+  selectedReclosedPredecessor,
+  verifyPinnedReclosedArtifacts,
+  verifyPinnedReclosedNativeRole,
+} from './owner-release-reclosed-hosted.js';
 import { assertResumeRevisionsAbsent } from './owner-release-resume-absence.js';
 import {
   assertRestoreTargetReviewFresh,
@@ -119,6 +125,7 @@ export async function checkpointNativeRole(
   runId: string,
   source: string,
   read: Read,
+  dormantPredecessor?: string,
 ) {
   const url = RUN_ROOT + binding.service;
   const service = object(await read(url));
@@ -126,6 +133,7 @@ export async function checkpointNativeRole(
   const suffix = `${runId}-1-${source.slice(0, 8)}`;
   const allowed = new Set([
     binding.revision,
+    ...(dormantPredecessor ? [dormantPredecessor] : []),
     ...['p', 'r', 'park'].map((phase) => `assistant-${role}-${phase}-${suffix}`),
   ]);
   const revisions = new Set([binding.revision]);
@@ -154,6 +162,34 @@ export async function checkpointNativeRole(
     [...revisions].map(async (id) => [id, await read(`${url}/revisions/${id}`)] as const),
   );
   return { service, revisions: Object.fromEntries(entries) };
+}
+
+type ObservedRole = Awaited<ReturnType<typeof checkpointNativeRole>>;
+
+/** The general checkpoint models the baseline as an original-only template. Use
+ * that projection solely after the raw dormant role proves the exact signed baseline. */
+export function checkpointDormantBaseline(
+  role: Role,
+  raw: ObservedRole,
+  expected: string,
+  original: CurrentBinding,
+  verify: (role: Role, raw: ObservedRole) => { originalTemplate: unknown },
+): ObservedRole {
+  if (!Object.hasOwn(raw.revisions, expected)) return raw;
+  requireProof(
+    bootstrapDigest(raw.service) === original.serviceSha256 &&
+      bootstrapDigest(raw.revisions[original.revision]) === original.revisionSha256,
+  );
+  const { originalTemplate } = verify(role, raw);
+  return {
+    service: {
+      ...raw.service,
+      latestCreatedRevision: original.revision,
+      latestReadyRevision: original.revision,
+      template: originalTemplate,
+    },
+    revisions: { [original.revision]: raw.revisions[original.revision] },
+  };
 }
 
 async function checkStagedPair(env: NodeJS.ProcessEnv, stage: Exclude<Stage, 'before_mutation'>) {
@@ -196,17 +232,48 @@ async function checkStagedPair(env: NodeJS.ProcessEnv, stage: Exclude<Stage, 'be
   const read = estimatedCostMetadataRead(token, deadline);
   const resolve = createImageResolutionReader(token, fetch, deadline);
   await Promise.all(roles.map((role) => resolve(context.images[role])));
+  const previous = selectedReclosedPredecessor(env);
+  if (previous) {
+    requireProof(env.RUNNER_TEMP);
+    verifyPinnedReclosedArtifacts(env.RUNNER_TEMP);
+  }
   const observe = async () => {
+    const dormant = previous && stage === 'pre_admission_restore' ? previous : undefined;
     const [agent, web] = await Promise.all(
       roles.map((role) =>
-        checkpointNativeRole(role, current.services[role], signed.runId, current.source, read),
+        checkpointNativeRole(
+          role,
+          current.services[role],
+          signed.runId,
+          current.source,
+          read,
+          dormant?.[role],
+        ),
       ),
     );
     requireProof(agent && web);
     const pair = { agent, web };
-    verifyRestoreCheckpointPair(context, pair, stage);
+    const projected = (role: Role) =>
+      dormant
+        ? checkpointDormantBaseline(
+            role,
+            pair[role],
+            dormant[role],
+            current.services[role],
+            (role, raw) =>
+              verifyPinnedReclosedNativeRole(role, raw, pack.nativeBinding, 'closed', current),
+          )
+        : pair[role];
+    verifyRestoreCheckpointPair(
+      context,
+      { agent: projected('agent'), web: projected('web') },
+      stage,
+    );
     if (stage === 'before_admission' || stage === 'pre_admission_restore') {
-      await assertResumeRevisionsAbsent(current, signed.runId, token, deadline);
+      await Promise.all([
+        assertResumeRevisionsAbsent(current, signed.runId, token, deadline),
+        ...(previous ? [bothPriorSuccessorsAbsent(token, deadline)] : []),
+      ]);
     }
     return bootstrapDigest(pair);
   };

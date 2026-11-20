@@ -15,6 +15,7 @@ import {
   type BootstrapReceipt,
   bootstrapDigest,
   object,
+  type ReclosedPair,
   verifyCurrentSnapshot,
 } from './owner-release-current-snapshot.js';
 
@@ -61,6 +62,7 @@ export async function verifyEstimatedCostReleaseMetadata(
   profile: EstimatedCostReleaseProfile,
   current: BootstrapReceipt,
   read: ReadJson,
+  reclosed?: ReclosedPair,
 ) {
   requireProof(current.source === profile.source);
   const project = object(
@@ -94,7 +96,13 @@ export async function verifyEstimatedCostReleaseMetadata(
     const revision = await read(
       `https://run.googleapis.com/v2/${binding.service}/revisions/${binding.revision}`,
     );
-    verifyCurrentSnapshot(binding, service, revision, current.kind === 'disabled-bootstrap');
+    verifyCurrentSnapshot(
+      binding,
+      service,
+      revision,
+      current.kind === 'disabled-bootstrap',
+      reclosed?.[role],
+    );
     // Independent checks on both the service template and immutable selected
     // revision prevent a truthful manifest from concealing another binding.
     for (const raw of [service, revision])

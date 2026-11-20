@@ -4,6 +4,7 @@ import type { ArchivedRoleEvidence } from './owner-archived-runtime-pack.js';
 import {
   type BootstrapReceipt,
   bootstrapDigest,
+  type ReclosedPair,
   reviewedCurrentEnvironment,
 } from './owner-release-current-snapshot.js';
 import { registerImageResolution } from './owner-release-image-resolution.js';
@@ -118,6 +119,7 @@ export function verifyArchivedOriginalNativePair(
   current: BootstrapReceipt,
   pack: ArchivedPack,
   pair: NativePair,
+  reclosed?: ReclosedPair,
 ) {
   const baseline = object(object(pack.nativeBinding).roles);
   for (const role of roleNames) {
@@ -130,7 +132,10 @@ export function verifyArchivedOriginalNativePair(
         typeof revision.uid === 'string' &&
         bootstrapDigest(revision.uid) === binding.revisionUidSha256 &&
         tagHash(revision.uid) === current.services[role].proof.uid &&
-        bootstrapDigest(service.template) === archivedServiceTemplate[role],
+        (reclosed
+          ? bootstrapDigest(reclosed[role].originalTemplate) === archivedServiceTemplate[role] &&
+            bootstrapDigest(service) === current.services[role].serviceSha256
+          : bootstrapDigest(service.template) === archivedServiceTemplate[role]),
     );
   }
 }

@@ -14,6 +14,7 @@ import {
 } from './owner-web-release-lifecycle-model.js';
 import {
   nativeObject,
+  nativeRevisionName,
   projectNativeWebSnapshot,
   requireNative,
 } from './owner-web-release-native-proof.js';
@@ -173,6 +174,12 @@ export function nativeFixtureSession(deps: FixtureDependencies, modes: readonly 
     const revisions = names(post);
     const raw = await json(WEB_SERVICE),
       native: Record<string, unknown> = {};
+    const reclosed = original.context.currentBinding?.reclosed;
+    if (
+      reclosed &&
+      nativeRevisionName(nativeObject(raw).latestCreatedRevision) === reclosed.predecessorRevision
+    )
+      revisions.push(reclosed.predecessorRevision);
     for (const name of revisions) native[name] = await json(`${WEB_SERVICE}/revisions/${name}`);
     return projectNativeWebSnapshot(raw, native, original.context);
   }

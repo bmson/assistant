@@ -1,5 +1,6 @@
 import { revisionWithRequestedImage } from './owner-release-image-resolution.js';
 import { nativeServiceDefaults } from './owner-release-native-service-defaults.js';
+import { verifyHostedReclosedBaseline } from './owner-release-reclosed-hosted.js';
 /** Fixed-service BASIC5 rollout barrier. Called only by the protected paired release. */
 
 import { createHash } from 'node:crypto';
@@ -30,6 +31,7 @@ import {
   initializePairedWebLifecycle,
   pairedWebContext,
   protectedNativeReleaseDependencies,
+  reclosedWebCreationBinding,
   runPairedWebLifecyclePhase,
 } from './owner-web-release-native-controller.js';
 import {
@@ -315,25 +317,28 @@ export async function runWebTagAdmission(mode: string | undefined) {
     return { ...raw, proofs } as Capture;
   };
   if (mode === '--capture' && bootstrap && preclosed) {
-    const service = await io.readService(),
-      revision = await io.readRevision(bootstrap.services.web.revision);
-    await ensureResolution(revision, bootstrap.services.web.image);
-    verifyCurrentSnapshot(bootstrap.services.web, service, revision);
-    const deps = await protectedNativeReleaseDependencies({
-      recordIntent: () => {},
-      initialize: () => '',
-      readCurrent: () => {
-        throw new Error('No lifecycle yet');
-      },
-      recordCheckpoint: () => {},
-    });
-    const agentService = await readBootstrapNative(deps, bootstrap.services.agent.service);
-    const agentRevision = await readBootstrapNative(
-      deps,
-      `${bootstrap.services.agent.service}/revisions/${bootstrap.services.agent.revision}`,
-    );
-    await ensureResolution(agentRevision, bootstrap.services.agent.image);
-    verifyCurrentSnapshot(bootstrap.services.agent, agentService, agentRevision);
+    const reclosed = await verifyHostedReclosedBaseline(bootstrap);
+    if (!reclosed) {
+      const service = await io.readService(),
+        revision = await io.readRevision(bootstrap.services.web.revision);
+      await ensureResolution(revision, bootstrap.services.web.image);
+      verifyCurrentSnapshot(bootstrap.services.web, service, revision);
+      const deps = await protectedNativeReleaseDependencies({
+        recordIntent: () => {},
+        initialize: () => '',
+        readCurrent: () => {
+          throw new Error('No lifecycle yet');
+        },
+        recordCheckpoint: () => {},
+      });
+      const agentService = await readBootstrapNative(deps, bootstrap.services.agent.service);
+      const agentRevision = await readBootstrapNative(
+        deps,
+        `${bootstrap.services.agent.service}/revisions/${bootstrap.services.agent.revision}`,
+      );
+      await ensureResolution(agentRevision, bootstrap.services.agent.image);
+      verifyCurrentSnapshot(bootstrap.services.agent, agentService, agentRevision);
+    }
     save(capturePath, {
       format: 1,
       source,
@@ -416,6 +421,19 @@ export async function runWebTagAdmission(mode: string | undefined) {
     let current: Parameters<typeof pairedWebContext>[0]['current'];
     if (bootstrap) {
       await ensureResolution(native[capture.canonical], bootstrap.services.web.image);
+      const reclosed = preclosed ? await verifyHostedReclosedBaseline(bootstrap) : undefined;
+      const creationBinding =
+        reclosed &&
+        reclosedWebCreationBinding(
+          bootstrap.services.web,
+          native[capture.canonical],
+          reclosed.web.predecessorRevision,
+          reclosed.web.predecessorRevisionSha256,
+        );
+      if (creationBinding)
+        native[creationBinding.predecessorRevision] = await io.readRevision(
+          creationBinding.predecessorRevision,
+        );
       current = {
         revision: bootstrap.services.web.revision,
         binding: {
@@ -424,6 +442,7 @@ export async function runWebTagAdmission(mode: string | undefined) {
           revisionSha256: bootstrap.services.web.revisionSha256,
           reviewedEvidenceSha256: bootstrapEvidence as string,
           preclosed,
+          ...(creationBinding ? { reclosed: creationBinding } : {}),
         },
       };
     } else {

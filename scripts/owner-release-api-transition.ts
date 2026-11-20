@@ -10,6 +10,7 @@ import {
   type BootstrapReceipt,
   bootstrapDigest,
   object,
+  type ReclosedPair,
   RUN_ROOT,
   reviewedCurrentEnvironment,
   verifyCurrentSnapshot,
@@ -68,6 +69,7 @@ export function verifyDrainedApiTransition(
   current: BootstrapReceipt,
   native: NativePair,
   scope: { ownerId: string; installationId: string },
+  reclosed?: ReclosedPair,
 ): void {
   check(current.kind === 'disabled-bootstrap');
   const oldAgent = current.services.agent.proof;
@@ -80,8 +82,9 @@ export function verifyDrainedApiTransition(
     const revision = object(native[role].revision);
     check(binding.proof.source !== current.source);
     check(typeof revision.uid === 'string' && tagHash(revision.uid) === binding.proof.uid);
-    verifyCurrentSnapshot(binding, service, revision, true);
-    verifyBootstrapRevisionTemplate(binding.service, service.template, revision, binding.revision);
+    verifyCurrentSnapshot(binding, service, revision, true, reclosed?.[role]);
+    const originalTemplate = reclosed?.[role].originalTemplate ?? service.template;
+    verifyBootstrapRevisionTemplate(binding.service, originalTemplate, revision, binding.revision);
     for (const resource of [service, revision]) {
       check(
         typeof resource.generation === 'string' && /^[1-9][0-9]{0,18}$/.test(resource.generation),
@@ -90,7 +93,7 @@ export function verifyDrainedApiTransition(
       check(resource.deleteTime === undefined && resource.expireTime === undefined);
     }
     const peer = role === 'agent' ? 'WEB' : 'AGENT';
-    for (const template of [object(service.template), revision]) {
+    for (const template of [object(originalTemplate), revision]) {
       check(
         template.serviceAccount === `assistant-${role}@bmson-assistant.iam.gserviceaccount.com`,
       );
@@ -169,10 +172,13 @@ export async function verifyProductionApiTransition(confirmPreAdmission = false)
     };
   }
   const observePair = async () => {
+    const { verifyHostedReclosedBaseline } = await import('./owner-release-reclosed-hosted.js');
+    const reclosed = await verifyHostedReclosedBaseline(current);
+    if (reclosed) check(pack && restore);
     const [agent, web] = await Promise.all([observe('agent'), observe('web')]);
     const pair = { agent, web };
-    verifyDrainedApiTransition(current, pair, profile);
-    if (pack) verifyArchivedOriginalNativePair(current, pack, pair);
+    verifyDrainedApiTransition(current, pair, profile, reclosed);
+    if (pack) verifyArchivedOriginalNativePair(current, pack, pair, reclosed);
     return pair;
   };
   const pair = await observePair();

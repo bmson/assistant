@@ -38,6 +38,7 @@ import {
   type BootstrapReceipt,
   bootstrapDigest,
   disabled,
+  type ReclosedPair,
   reviewedCurrentEnvironment,
   verifyCurrentSnapshot,
 } from './owner-release-current-snapshot.js';
@@ -403,6 +404,7 @@ export async function collectInventory(
   current?: BootstrapReceipt,
   resolveImage?: (image: string) => Promise<void>,
   candidateSource?: string,
+  reclosed?: ReclosedPair,
 ) {
   const scope = candidateSource === undefined ? 'approved-observer' : 'release-candidate';
   mark('source_manifest');
@@ -461,7 +463,16 @@ export async function collectInventory(
     const currentService = await read(
       `https://run.googleapis.com/v2/${RUN_ROOT}/services/assistant-${service}`,
     );
-    const facts = serviceFacts(currentService, service);
+    // The predecessor still owns the dormant template. Inventory describes the
+    // revision on the canonical route, whose template the protected read bound.
+    const roleEvidence = reclosed?.[service];
+    if (roleEvidence && !current) throw new Error('Reviewed current snapshot required');
+    const facts = serviceFacts(
+      roleEvidence
+        ? { ...record(currentService), template: roleEvidence.originalTemplate }
+        : currentService,
+      service,
+    );
     mark(service === 'agent' ? 'agent_revision' : 'web_revision');
     const revision = record(
       await read(
@@ -483,6 +494,7 @@ export async function collectInventory(
         currentService,
         revision,
         current.kind === 'disabled-bootstrap',
+        roleEvidence,
       );
     const admissionDisabled = disabled(record(currentService));
     const revisionFacts = serviceFacts(
@@ -906,6 +918,12 @@ async function main(mark: InventoryStageMarker) {
   }
   mark('access_token');
   const token = await command(['auth', 'print-access-token', '--quiet'], 16384);
+  const reclosed =
+    current && releasePreflight
+      ? await (await import('./owner-release-reclosed-hosted.js')).verifyHostedReclosedBaseline(
+          current,
+        )
+      : undefined;
   const receipt = await collectInventory(
     createReadOnlyGet(token.trim(), started + 60000),
     manifest,
@@ -924,6 +942,7 @@ async function main(mark: InventoryStageMarker) {
     current,
     createImageResolutionReader(token.trim(), fetch, started + 60000),
     candidateSource,
+    reclosed,
   );
   mark('receipt_serialization');
   const output = JSON.stringify({

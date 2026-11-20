@@ -4,8 +4,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as transition from './owner-release-api-transition.js';
-import type { CurrentBinding } from './owner-release-current-snapshot.js';
+import { bootstrapDigest, type CurrentBinding } from './owner-release-current-snapshot.js';
 import {
+  checkpointDormantBaseline,
   checkpointNativeRole,
   verifyRestoreCheckpoint,
   verifyRestoreJournal,
@@ -128,6 +129,80 @@ describe('checkpoint native revision census', () => {
     expect(Object.keys(got.revisions).sort()).toEqual([old, paused, resumed].sort());
     expect(read).toHaveBeenCalledTimes(4);
   });
+  it('censuses the pinned dormant web and projects only its independently verified signed baseline', async () => {
+    const service = 'projects/bmson-assistant/locations/us-west1/services/assistant-web';
+    const original = 'assistant-web-archived',
+      predecessor = 'assistant-web-p-44632388669-1-bc74fbf7';
+    const nativeOld = { uid: 'signed-original' };
+    const nativePrior = { uid: 'signed-prior', paused: true };
+    const route = [{ revision: original, percent: 100 }];
+    const hosted = {
+      name: service,
+      uid: binding.uid,
+      latestCreatedRevision: `${service}/revisions/${predecessor}`,
+      latestReadyRevision: `${service}/revisions/${predecessor}`,
+      template: { revision: predecessor },
+      scaling: { scalingMode: 'MANUAL', manualInstanceCount: 0 },
+      traffic: route,
+      trafficStatuses: route,
+    };
+    const reviewed = {
+      ...binding,
+      service,
+      revision: original,
+      revisionSha256: bootstrapDigest(nativeOld),
+      serviceSha256: bootstrapDigest(hosted),
+    };
+    const read = vi.fn(async (url: string) => {
+      if (url.endsWith(service)) return hosted;
+      return url.endsWith(original) ? nativeOld : nativePrior;
+    });
+    await expect(checkpointNativeRole('web', reviewed, runId, source, read)).rejects.toThrow();
+    const raw = await checkpointNativeRole('web', reviewed, runId, source, read, predecessor);
+    const originalTemplate = { revision: original, containers: [{ image: 'signed-original' }] };
+    const verify = vi.fn(() => ({ originalTemplate }));
+    const projected = checkpointDormantBaseline('web', raw, predecessor, reviewed, verify);
+    expect(verify).toHaveBeenCalledExactlyOnceWith('web', raw);
+    expect(projected.service).toMatchObject({
+      latestCreatedRevision: original,
+      latestReadyRevision: original,
+      template: originalTemplate,
+      traffic: route,
+    });
+    expect(projected.revisions).toEqual({ [original]: nativeOld });
+    expect(raw.service.template).toEqual({ revision: predecessor });
+    expect(raw.revisions[predecessor]).toEqual(nativePrior);
+
+    expect(() =>
+      checkpointDormantBaseline(
+        'web',
+        { ...raw, service: { ...raw.service, etag: 'drift' } },
+        predecessor,
+        reviewed,
+        verify,
+      ),
+    ).toThrow();
+    expect(() =>
+      checkpointDormantBaseline(
+        'web',
+        { ...raw, revisions: { ...raw.revisions, [original]: { uid: 'different' } } },
+        predecessor,
+        reviewed,
+        verify,
+      ),
+    ).toThrow();
+    expect(verify).toHaveBeenCalledTimes(1);
+
+    const staged = { ...raw, revisions: { [original]: nativeOld } };
+    expect(checkpointDormantBaseline('web', staged, predecessor, reviewed, verify)).toBe(staged);
+    verify.mockImplementation(() => {
+      throw new Error('prior revision cannot be proved');
+    });
+    expect(() => checkpointDormantBaseline('web', raw, predecessor, reviewed, verify)).toThrow(
+      'prior revision cannot be proved',
+    );
+  });
+
   it('rejects substituted service and foreign revision names before dispatching a revision read', async () => {
     for (const override of [
       { uid: 'other' },
