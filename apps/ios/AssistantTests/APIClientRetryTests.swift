@@ -953,6 +953,7 @@ final class APIClientRetryTests: XCTestCase {
             }
             """#.utf8))
             XCTAssertEqual(health.dailyBudgetHoldsLabel, label)
+            XCTAssertNil(health.healthy, "An older response did not report overall health")
             XCTAssertEqual(health.lastMailDate?.timeIntervalSince1970, 1_794_992_400)
         }
     }

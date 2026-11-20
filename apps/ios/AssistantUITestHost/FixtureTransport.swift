@@ -2,21 +2,27 @@
 import Foundation
 import EventKit
 
-/// A private session consumes only the single synthetic overview read. No
-/// request is forwarded, including redirects and mutation attempts.
+/// The fixture serves its overview and, in Noticing scenes, its health response.
 final class FixtureTransport: URLProtocol, @unchecked Sendable {
     final class State: @unchecked Sendable {
         private let lock = NSLock()
         private var data: Data?
+        private var noticing: Data?
         private var count = 0
-        func install(_ value: Data) { lock.lock(); defer { lock.unlock() }; data = value }
+        func install(_ value: Data, noticing: Data? = nil) {
+            lock.lock(); defer { lock.unlock() }
+            data = value
+            self.noticing = noticing
+        }
         func response(for request: URLRequest) -> Data? {
             lock.lock(); defer { lock.unlock() }
-            guard request.httpMethod == "GET", let url = request.url,
-                  url.scheme == "https", url.host == "fixture.invalid",
-                  url.path == "/api/mobile/v1/overview", url.query == nil,
-                  let data else { count = min(count + 1, 999); return nil }
-            return data
+            if request.httpMethod == "GET", let url = request.url,
+               url.scheme == "https", url.host == "fixture.invalid", url.query == nil {
+                if url.path == "/api/mobile/v1/overview", let data { return data }
+                if url.path == "/api/mobile/v1/proactive-health", let noticing { return noticing }
+            }
+            count = min(count + 1, 999)
+            return nil
         }
         var violations: Int { lock.lock(); defer { lock.unlock() }; return count }
     }

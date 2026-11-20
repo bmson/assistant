@@ -4207,6 +4207,7 @@ struct NoticingHealth: Decodable, Sendable {
     }
     let canaries: Canaries?
     let briefing: Briefing?
+    let healthy: Bool?
     let dailyBudgetHolds: String?
     let lastMailAt: String?
     let mailEligibleIntake24h: Int?
