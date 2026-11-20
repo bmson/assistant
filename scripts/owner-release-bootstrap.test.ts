@@ -12,9 +12,11 @@ import {
   reviewedBootstrap,
   verifiedRestoreReceipts,
   verifyBootstrapRevisionTemplate,
+  verifyCanonicalBootstrapAgent,
   verifyCurrentSnapshot,
 } from './owner-release-bootstrap.js';
 import { registerImageResolution } from './owner-release-image-resolution.js';
+import { nativeStableConfigurationDigest } from './owner-web-release-native-proof.js';
 
 const source = 'a'.repeat(40),
   manifest = 'b'.repeat(64),
@@ -115,6 +117,44 @@ function fixture(role: 'agent' | 'web' = 'web') {
     role,
   };
 }
+
+function canonicalAgentFixture() {
+  const f = fixture('agent');
+  const target = f.service.traffic[0]!;
+  const { tag: _tag, percent: _percent, ...revisionTarget } = target;
+  const splitTraffic = [
+    { ...revisionTarget, percent: 100 },
+    { ...revisionTarget, tag: target.tag },
+  ];
+  const container = {
+    ...f.service.template.containers[0]!,
+    env: [
+      ...f.service.template.containers[0]!.env,
+      { name: 'ASSISTANT_RELEASE_API_CONTRACT', value: '3' },
+      { name: 'ASSISTANT_RELEASE_WEB_API_MIN', value: '3' },
+      { name: 'ASSISTANT_RELEASE_WEB_API_MAX', value: '3' },
+      { name: 'MCP_OAUTH_ENABLED', value: 'false' },
+    ],
+  };
+  const template = {
+    ...f.service.template,
+    containers: [container],
+    serviceAccount: 'assistant-agent@bmson-assistant.iam.gserviceaccount.com',
+  };
+  const { revision: _revision, ...revisionTemplate } = template;
+  const service = { ...f.service, template, traffic: splitTraffic };
+  const native = { ...f.native, ...revisionTemplate };
+  const accepted = {
+    kind: 'bootstrap-agent-successor',
+    outcome: 'observed_exact_successor',
+    ...f.expected,
+    uidSha256: bootstrapDigest(native.uid),
+    templateSha256: bootstrapDigest(revisionTemplate),
+    serviceStableConfigSha256: nativeStableConfigurationDigest(service),
+  };
+  return { ...f, service, native, accepted };
+}
+
 describe('reviewed current snapshot and bootstrap restoration', () => {
   it.each(['agent', 'web'] as const)(
     'binds %s index resolution without weakening raw hashes or template drift checks',
@@ -173,6 +213,59 @@ describe('reviewed current snapshot and bootstrap restoration', () => {
       expect(JSON.stringify(native)).toBe(before);
     },
   );
+  it('rejects extra or misbound agent traffic before scaling and during canonical acceptance', () => {
+    const f = canonicalAgentFixture();
+    const [primary, alias] = f.service.traffic;
+    const combined = f.service.trafficStatuses[0]!;
+    const automatic = { ...f.service, scaling: f.receipt.services.agent.automaticScaling };
+    expect(() =>
+      verifyCanonicalBootstrapAgent(f.receipt, automatic, f.native, f.expected, f.accepted),
+    ).not.toThrow();
+    for (const invalid of [
+      { traffic: [primary, { ...alias, revision: 'assistant-agent-old' }] },
+      { traffic: [primary, { ...alias, tag: 'extra-tag' }] },
+      { traffic: [primary, alias, { ...alias, tag: 'extra-tag' }] },
+      { traffic: [combined, { ...primary, percent: 0 }] },
+      { traffic: [primary, alias, { ...primary, percent: 0 }] },
+      { traffic: [primary, primary] },
+      { traffic: [primary, primary, alias] },
+      { trafficStatuses: [{ ...combined, revision: 'assistant-agent-old' }] },
+      { trafficStatuses: [combined, { ...combined, percent: 0, tag: 'extra-tag' }] },
+    ]) {
+      expect(() =>
+        planScalingRestore(f.receipt, 'agent', { ...f.service, ...invalid }, f.native, f.expected),
+      ).toThrow();
+      expect(() =>
+        verifyCanonicalBootstrapAgent(
+          f.receipt,
+          { ...automatic, ...invalid },
+          f.native,
+          f.expected,
+          f.accepted,
+        ),
+      ).toThrow();
+    }
+  });
+
+  it('rejects split traffic on web in either provider field', () => {
+    const f = fixture('web');
+    const { tag, percent: _percent, ...target } = f.service.traffic[0]!;
+    const split = [
+      { ...target, percent: 100 },
+      { ...target, tag },
+    ];
+    for (const field of ['traffic', 'trafficStatuses']) {
+      expect(() =>
+        planScalingRestore(
+          f.receipt,
+          'web',
+          { ...f.service, [field]: split },
+          f.native,
+          f.expected,
+        ),
+      ).toThrow();
+    }
+  });
   it.each(['agent', 'web'] as const)(
     'accepts exact %s full and provider-shaped revision identities without mutating raw evidence',
     (role) => {
@@ -640,56 +733,60 @@ describe('reviewed current snapshot and bootstrap restoration', () => {
     },
   );
 
-  it('restores captured automatic scaling with an etag-only scaling mask and preserves every other setting', async () => {
-    const f = fixture();
-    let current = clone(f.service);
-    const writes: unknown[] = [];
-    const records: unknown[] = [];
-    const io = {
-      now: () => 0,
-      sleep: async () => {},
-      recordIntent: async (x: unknown) => {
-        records.push(x);
-      },
-      request: async (url: string, opt: { method: string; body?: string }) => {
-        if (opt.method === 'PATCH') {
-          expect(url.endsWith('?updateMask=scaling')).toBe(true);
-          const body = JSON.parse(opt.body ?? 'null');
-          writes.push(body);
-          expect(records).toMatchObject([{ outcome: 'attempted' }]);
-          current = {
-            ...current,
-            scaling: body.scaling,
-            etag: 'etag-3',
-            generation: '3',
-            observedGeneration: '3',
-          };
-          return new Response(
-            JSON.stringify({
-              name: 'projects/bmson-assistant/locations/us-west1/operations/op-1',
-              done: true,
-              response: { name: current.name },
-            }),
-            { headers: { 'content-type': 'application/json' } },
-          );
-        }
-        return new Response(JSON.stringify(url.includes('/revisions/') ? f.native : current), {
-          headers: { 'content-type': 'application/json' },
-        });
-      },
-    };
-    const result = await restoreScaling(io, f.receipt, 'web', f.expected);
-    expect(writes).toEqual([
-      {
-        name: f.service.name,
-        etag: f.service.etag,
-        scaling: f.receipt.services.web.automaticScaling,
-      },
-    ]);
-    expect(result.after.template).toEqual(f.service.template);
-    expect(result.after.traffic).toEqual(f.service.traffic);
-    expect(records).toMatchObject([{ outcome: 'attempted' }, { outcome: 'completed' }]);
-  });
+  it.each(['agent', 'web'] as const)(
+    'restores %s automatic scaling with an etag-only scaling mask',
+    async (role) => {
+      const f = role === 'agent' ? canonicalAgentFixture() : fixture(role);
+      let current = clone(f.service);
+      const writes: unknown[] = [];
+      const records: unknown[] = [];
+      const io = {
+        now: () => 0,
+        sleep: async () => {},
+        recordIntent: async (x: unknown) => {
+          records.push(x);
+        },
+        request: async (url: string, opt: { method: string; body?: string }) => {
+          if (opt.method === 'PATCH') {
+            expect(url.endsWith('?updateMask=scaling')).toBe(true);
+            const body = JSON.parse(opt.body ?? 'null');
+            writes.push(body);
+            expect(records).toMatchObject([{ outcome: 'attempted' }]);
+            current = {
+              ...current,
+              scaling: body.scaling,
+              etag: 'etag-3',
+              generation: '3',
+              observedGeneration: '3',
+            };
+            return new Response(
+              JSON.stringify({
+                name: 'projects/bmson-assistant/locations/us-west1/operations/op-1',
+                done: true,
+                response: { name: current.name },
+              }),
+              { headers: { 'content-type': 'application/json' } },
+            );
+          }
+          return new Response(JSON.stringify(url.includes('/revisions/') ? f.native : current), {
+            headers: { 'content-type': 'application/json' },
+          });
+        },
+      };
+      const result = await restoreScaling(io, f.receipt, role, f.expected);
+      expect(writes).toEqual([
+        {
+          name: f.service.name,
+          etag: f.service.etag,
+          scaling: f.receipt.services[role].automaticScaling,
+        },
+      ]);
+      expect(result.after.template).toEqual(f.service.template);
+      expect(result.after.traffic).toEqual(f.service.traffic);
+      expect(result.after.trafficStatuses).toEqual(f.service.trafficStatuses);
+      expect(records).toMatchObject([{ outcome: 'attempted' }, { outcome: 'completed' }]);
+    },
+  );
   it('rejects oversized chunked native responses before mutation', async () => {
     const f = fixture();
     let patch = 0,
