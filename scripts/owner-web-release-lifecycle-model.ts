@@ -155,6 +155,8 @@ function rows(v: Row[]) {
   assert(v.filter((r) => r.percent === 100).length === 1);
   return [...v].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
 }
+
+export { rows as normalizedTrafficRows };
 export function releaseIdentity(c: Context, role: 'P' | 'R') {
   return {
     revision: `assistant-web-${role.toLowerCase()}-${c.runId}-${c.attempt}-${c.source.slice(0, 8)}`,

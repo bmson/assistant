@@ -248,7 +248,7 @@ describe('sanitized native current web profile compatibility', () => {
       projectedTemplate = projected.template as Obj,
       lifecycle = captureLifecycle(context, projected);
 
-    expect(projected.urls).toEqual([tagHash(canonicalUrl), tagHash(serviceRootUrl)]);
+    expect(projected.urls).toEqual([tagHash(canonicalUrl), tagHash(serviceRootUrl)].sort());
     expect(projectedTemplate.containers[0].name).toBe('web-1');
     expect(digest(projectedTemplate)).toBe(projected.revisions[canonical]?.templateSha256);
     expect(lifecycle.phase).toBe('captured');

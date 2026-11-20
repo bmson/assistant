@@ -19,6 +19,7 @@ import {
 import {
   type Context,
   type NativeProof,
+  normalizedTrafficRows,
   type Row,
   releaseIdentity,
   type Snapshot,
@@ -371,8 +372,22 @@ function projectSnapshot(raw: unknown, native: Record<string, unknown>, c: Conte
     Object.entries(native).map(([name, value]) => [name, revisionProof(value, name, c)]),
   );
   requireNative(Array.isArray(s.urls) && s.urls.length <= 9);
-  const urls = s.urls.map((v) => tagHash(uri(v))),
-    latestReady = nativeRevisionName(s.latestReadyRevision),
+  const urls = s.urls.map((v) => tagHash(uri(v)));
+  if (c.currentBinding?.preclosed) {
+    // Cloud Run can list only the service endpoints in urls. For this release's
+    // own targets, the settled traffic status also supplies the verified tag URI.
+    requireNative(new Set(urls).size === urls.length);
+    for (const role of ['P', 'R'] as const) {
+      const id = releaseIdentity(c, role);
+      const address = tagUris[id.tag];
+      if (address) {
+        requireNative(observed.some((row) => row.tag === id.tag && row.revision === id.revision));
+        if (!urls.includes(address)) urls.push(address);
+      }
+    }
+    urls.sort();
+  }
+  const latestReady = nativeRevisionName(s.latestReadyRevision),
     latestCreated = nativeRevisionName(s.latestCreatedRevision);
   requireNative(latestReady === latestCreated && revisions[latestReady]);
   const t = currentSemanticTemplate(
@@ -392,8 +407,8 @@ function projectSnapshot(raw: unknown, native: Record<string, unknown>, c: Conte
     reconciling: false,
     succeeded: nativeObject(s.terminalCondition).state === 'CONDITION_SUCCEEDED',
     ...(c.currentBinding?.preclosed && disabled(s) ? { admissionDisabled: true as const } : {}),
-    desired,
-    observed,
+    desired: c.currentBinding?.preclosed ? normalizedTrafficRows(desired) : desired,
+    observed: c.currentBinding?.preclosed ? normalizedTrafficRows(observed) : observed,
     latestReady,
     latestCreated,
     template: t,
