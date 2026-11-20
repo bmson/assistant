@@ -107,8 +107,8 @@ describe('protected V1 operator entrypoint and private packet envelope', () => {
         const step = workflow
           .split(`name: Download fixed reclosed predecessor ${dir}`)[1]
           ?.split('\n      - ')[0];
-        expect(step).toContain("run-id: '44632388669'");
-        expect(step).toContain(`artifact-ids: '${id}'`);
+        expect(step).toContain('run-id: "44632388669"');
+        expect(step).toContain(`artifact-ids: "${id}"`);
         expect(step).toContain(`/owner-reclosed-predecessor/${dir}`);
         expect(step).toContain("inputs.reclosed_predecessor_run_id == '44632388669'");
         expect(step).toContain('repository: bmson/assistant');

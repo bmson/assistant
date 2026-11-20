@@ -591,8 +591,8 @@ jobs:
         with:
           github-token: ${{ github.token }}
           repository: bmson/assistant
-          run-id: '44632388669'
-          artifact-ids: '14581194317'
+          run-id: "44632388669"
+          artifact-ids: "14581194317"
           merge-multiple: true
           path: ${{ runner.temp }}/owner-reclosed-predecessor/journal
       - name: Download fixed reclosed predecessor manifest
@@ -601,8 +601,8 @@ jobs:
         with:
           github-token: ${{ github.token }}
           repository: bmson/assistant
-          run-id: '44632388669'
-          artifact-ids: '14581827749'
+          run-id: "44632388669"
+          artifact-ids: "14581827749"
           merge-multiple: true
           path: ${{ runner.temp }}/owner-reclosed-predecessor/manifest
       - name: Download fixed reclosed predecessor handoff
@@ -611,8 +611,8 @@ jobs:
         with:
           github-token: ${{ github.token }}
           repository: bmson/assistant
-          run-id: '44632388669'
-          artifact-ids: '14582169166'
+          run-id: "44632388669"
+          artifact-ids: "14582169166"
           merge-multiple: true
           path: ${{ runner.temp }}/owner-reclosed-predecessor/handoff
       - name: Verify the exact prior archive maintenance observation
