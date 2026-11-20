@@ -198,7 +198,7 @@ export function signalContract(
     }));
 }
 
-function emailIngestFixture(
+export function emailIngestFixture(
   agentId: string,
   body: string,
   providerReceivedAt: Date,
