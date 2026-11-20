@@ -30,7 +30,7 @@ export async function resolvePostgresMemoryPerson(
   },
 ): Promise<{ contactId: string; created: boolean } | null> {
   if (!input.subject || input.evidence === null) return null;
-  if (input.evidence) {
+  if (input.evidence || input.subject.trim().toLowerCase() !== 'owner') {
     const owners = await tx.select({ id: agents.id }).from(agents).limit(2);
     if (owners.length !== 1 || owners[0]?.id !== input.agentId) return null;
     // A contact rename, new contact, or address change can invalidate a
@@ -44,7 +44,9 @@ export async function resolvePostgresMemoryPerson(
       .insert(contacts)
       .values({
         name: decision.name,
-        relationship: normalizeMemoryRelationship(input.relationship),
+        relationship: normalizeMemoryRelationship(
+          input.evidence?.relationship ?? input.relationship,
+        ),
         trust: 'unknown',
         identityAuthority: 'inferred',
       })

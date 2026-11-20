@@ -220,10 +220,10 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       const ownerMemory = memories.find((memory) => String(memory.content).startsWith('The owner'));
       expect(ownerMemory).toMatchObject({ confidence: '0.40', subjectContactId: ownerContactId });
       const maria = await store.collection('contacts').where('name', '==', 'Maria').get();
-      expect(maria.size).toBe(1);
+      expect(maria.empty).toBe(true);
       expect(
         memories.find((memory) => String(memory.content).startsWith('Maria'))?.subjectContactId,
-      ).toBe(maria.docs[0]?.get('id'));
+      ).toBeNull();
 
       const notes = (await store.collection('dreamNotes').where('agentId', '==', agentId).get())
         .docs;

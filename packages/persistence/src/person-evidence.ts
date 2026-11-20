@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { normalizeContactAliases } from './contact-names.js';
 import type { Records } from './records.js';
 
@@ -11,8 +12,29 @@ export interface GroundedPersonEvidence {
   canonicalName: string;
   identifiers: string[];
   relationship: string;
-  /** Required for nightly writes, which recheck the latest user message before applying. */
+  /** A direct statement about the subject, with no alias or duplicate mutation authority. */
+  personhood?: true;
+  /** Ordinary named reference, usable with an existing confirmed identity. */
+  reference?: true;
+  /** Source message to recheck before applying the decision. */
   sourceMessageId?: string;
+  sourceTextHash?: string;
+}
+
+export function personSourceTextHash(text: string): string {
+  return createHash('sha256').update(text).digest('hex');
+}
+
+export function isCurrentMemoryPersonEvidence(
+  evidence: GroundedPersonEvidence,
+  message: Pick<Records['messages'], 'id' | 'role' | 'origin' | 'text'>,
+): boolean {
+  return (
+    message.role === 'user' &&
+    message.origin === 'owner' &&
+    message.id === evidence.sourceMessageId &&
+    personSourceTextHash(message.text) === evidence.sourceTextHash
+  );
 }
 
 /** Bind a nightly identity statement to the actual initiating owner chat message. */
@@ -90,7 +112,7 @@ const PERSON_NAME = /^\p{L}[\p{L}\p{M}]*(?:(?:\.? |[.'’\p{Pd}])\p{L}[\p{L}\p{M
 const NON_PERSON_NOUN =
   /\b(?:inventory|warehouse|tracking|reference|serial|product|order|account|ticket|room|model) (?:code|number|id|identifier|label)\b/i;
 const RELATIONSHIP_NAMES =
-  'daughter|son|child|wife|husband|spouse|partner|mother|father|parent|sister|brother|sibling|friend|coworker|colleague';
+  'daughter|son|child|wife|husband|spouse|partner|mother|father|parent|sister|brother|sibling|friend|coworker|co-worker|colleague|neighbou?r|roommate|classmate|teammate|grandmother|grandfather|grandparent|granddaughter|grandson|grandchild|aunt|uncle|cousin|niece|nephew|dentist|nurse|physician|doctor|teacher|lawyer|therapist|coach';
 const EMAIL = /[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+/gi;
 const PHONE = /(?<![\p{L}\p{N}])\+?\d(?:[(). -]*\d){7,14}(?![\p{L}\p{N}])/gu;
 const key = (value: string) => value.normalize('NFC').trim().replace(/\s+/g, ' ').toLowerCase();
@@ -126,6 +148,137 @@ function identifiers(value: string): string[] {
   return [...new Set([...emails, ...phones])];
 }
 
+const rememberedStatement = (text: string) =>
+  text.trim().replace(/^(?:please +)?remember(?: that |: +)/i, '');
+
+function contactList(value: string): string[] {
+  const ids = identifiers(value);
+  return value
+    .replace(EMAIL, '')
+    .replace(PHONE, '')
+    .replace(/\band\b|[ ,;&]/gi, '')
+    ? []
+    : ids;
+}
+
+function possessive(name: string): string {
+  return `${name}(?:['’]s|['’])`;
+}
+
+const RELATIONSHIP_QUALIFIER = '(?:(?:only|former|current|older|younger|eldest|youngest) )?';
+const RELATIONSHIP = `(?:my ${RELATIONSHIP_QUALIFIER}(${RELATIONSHIP_NAMES}) )?`;
+const ALIAS_VERB =
+  '(?:goes by|is (?:also )?known as|is (?:also )?called|uses the (?:name|nickname))';
+const ALIAS_EXPANSION = '(?:short for|a nickname for|an alias for)';
+const CONTACT_CHANNEL = 'email(?: address)?|phone(?: number)?|mobile(?: number)?';
+const CONTACT_ID = `(?:${EMAIL.source}|${PHONE.source})`;
+
+type IdentityStatement = { relationship: string; identifiers: string[] };
+
+function identityStatement(
+  quote: string,
+  name: string,
+  canonical: string,
+  sameName: boolean,
+  complete = true,
+): IdentityStatement | null {
+  const addresses = '\\(([^()]+(?:\\([^()]+\\)[^()]*)*)\\)';
+  const legacyAlias = new RegExp(
+    `^(?:The record ${name} belongs to|${name} is (?:another name|an alias|a nickname|short) for) ${RELATIONSHIP}${canonical} ${addresses}\\.$`,
+    'iu',
+  ).exec(quote);
+  const legacyRelationship = sameName
+    ? new RegExp(
+        `^${canonical} ${addresses} is my ${RELATIONSHIP_QUALIFIER}(${RELATIONSHIP_NAMES})\\.$`,
+        'iu',
+      ).exec(quote)
+    : null;
+  const legacyIds = legacyAlias?.[2] ?? legacyRelationship?.[1];
+  if (legacyIds) {
+    const ids = contactList(legacyIds);
+    return ids.length
+      ? {
+          identifiers: ids,
+          relationship: normalizeMemoryRelationship(legacyAlias?.[1] ?? legacyRelationship?.[2]),
+        }
+      : null;
+  }
+
+  // The name assertion introduces one referent. Every remaining component
+  // must give that same referent an address, so a stray address elsewhere in
+  // the message cannot corroborate the alias.
+  const assertionPatterns = sameName
+    ? [
+        `my ${RELATIONSHIP_QUALIFIER}(${RELATIONSHIP_NAMES}) ${canonical}`,
+        `${canonical} is my ${RELATIONSHIP_QUALIFIER}(${RELATIONSHIP_NAMES})`,
+        `${canonical}`,
+      ]
+    : [
+        `${RELATIONSHIP}${canonical} ${ALIAS_VERB} ${name}`,
+        `my ${RELATIONSHIP_QUALIFIER}(${RELATIONSHIP_NAMES}) ${ALIAS_VERB} ${name}\\s*(?:,|—|–)\\s*${ALIAS_EXPANSION} ${canonical}`,
+        `${name} is (?:another name|an alias|a nickname|short) for ${RELATIONSHIP}${canonical}`,
+        `${RELATIONSHIP}${canonical},? (?:also known as|nicknamed) ${name}`,
+      ];
+  for (const pattern of assertionPatterns) {
+    const assertion = new RegExp(`^(?:${pattern})(?=[.,;:( ]|$)`, 'iu').exec(quote);
+    if (!assertion) continue;
+    const relationship = normalizeMemoryRelationship(assertion[1]);
+    const ids = contactComponents(
+      quote.slice(assertion[0].length),
+      name,
+      canonical,
+      relationship,
+      complete,
+    );
+    if (ids.length) return { identifiers: ids, relationship };
+  }
+  return null;
+}
+
+function contactComponents(
+  tail: string,
+  name: string,
+  canonical: string,
+  relationship: string,
+  complete: boolean,
+): string[] {
+  const genderedPronoun =
+    /^(?:daughter|mother|wife|sister|grandmother|granddaughter|aunt|niece)$/.test(relationship)
+      ? /^(?:his|him|he)$/i
+      : /^(?:son|father|husband|brother|grandfather|grandson|uncle|nephew)$/.test(relationship)
+        ? /^(?:her|she)$/i
+        : null;
+  const namedOwner = `(?:${possessive(name)}|${possessive(canonical)}|her|his|their|whose)`;
+  const object = `(?:${name}|${canonical}|her|him|them)`;
+  const actor = `(?:${name}|${canonical}|she|he|they)`;
+  const coordinator = '(?:and|but)';
+  const address = new RegExp(
+    `^(?:[.,;] +(?:${coordinator} +)?| +${coordinator} +| +(?=whose ))(?:(${namedOwner}) (${CONTACT_CHANNEL}) is|(?:you can )?(?:reach|contact|(?:e-?mail|call|text)) (${object}) at|(${actor}) (?:can be reached at|(?:use|uses) (?:(?:the )?(${CONTACT_CHANNEL}) *)?)) +(${CONTACT_ID})(?=[.,;]| +${coordinator} +|$)`,
+    'iu',
+  );
+  const found: string[] = [];
+  const pronouns = new Set<string>();
+  let remaining = tail;
+  for (let count = 0; count < 3; count += 1) {
+    const component = address.exec(remaining);
+    if (!component) break;
+    const [, owner, ownerChannel, objectPronoun, subjectPronoun, subjectChannel, rawId] = component;
+    for (const part of [owner, objectPronoun, subjectPronoun]) {
+      if (!part) continue;
+      if (genderedPronoun?.test(part)) return [];
+      if (/^(?:she|her)$/i.test(part)) pronouns.add('female');
+      if (/^(?:he|his|him)$/i.test(part)) pronouns.add('male');
+    }
+    if (pronouns.size > 1) return [];
+    const [id] = identifiers(rawId ?? '');
+    const channel = ownerChannel ?? subjectChannel;
+    if (!id || (channel && id.startsWith('email:') !== /^email/i.test(channel))) return [];
+    found.push(id);
+    remaining = remaining.slice(component[0].length);
+  }
+  return !complete || remaining === '.' || remaining === '' ? [...new Set(found)] : [];
+}
+
 export function groundPersonEvidence(
   proposal: PersonEvidenceProposal | undefined,
   subject: string,
@@ -134,44 +287,128 @@ export function groundPersonEvidence(
   if (!proposal) return undefined;
   const canonicalName = personNameInferredFromSubject(proposal.canonicalName);
   if (!canonicalName || !subject.trim() || subject.length > 120) return null;
-  const statement = (text: string) =>
-    text.trim().replace(/^(?:please +)?remember(?: that |: +)/i, '');
-  const quote = unquotePersonRecordLabels(statement(proposal.quote));
-  if (!quote || quote.length > 500 || /[\r\n]/.test(quote)) return null;
-  // Require a full affirmative statement from the admitted source. Accepting a
-  // fragment would let the model cut off a qualifier, negation or attribution.
+  const quote = unquotePersonRecordLabels(rememberedStatement(proposal.quote));
+  const latest = ownerMessages.at(-1);
+  const proposed = proposal.quote.trim();
+  // The full statement carries negations, qualifiers and source attribution.
   if (
-    !/\.$/.test(quote) ||
-    !ownerMessages.some(
-      (text) => text.trim() === proposal.quote.trim() || statement(text) === proposal.quote.trim(),
-    )
+    !quote ||
+    quote.length > 500 ||
+    /[\r\n]/.test(quote) ||
+    !latest ||
+    (latest.trim() !== proposed && rememberedStatement(latest) !== proposed)
   )
     return null;
 
-  const name = escapeRegExp(subject.trim());
-  const canonical = escapeRegExp(canonicalName);
-  const relation = `(?:my (${RELATIONSHIP_NAMES}) )?`;
-  const addresses = '\\(([^()]+(?:\\([^()]+\\)[^()]*)*)\\)';
-  const aliasStatement = new RegExp(
-    `^(?:The record ${name} belongs to|${name} is (?:another name|an alias) for) ${relation}${canonical} ${addresses}\\.$`,
+  const evidence = identityStatement(
+    quote,
+    escapeRegExp(subject.trim()),
+    escapeRegExp(canonicalName),
+    key(subject) === key(canonicalName),
+  );
+  return evidence ? { canonicalName, ...evidence } : null;
+}
+
+/** A source-backed reference, with positive personhood when the source supplies it. */
+export function groundMemoryPersonReference(
+  subject: string,
+  ownerStatement: string,
+): GroundedPersonEvidence | undefined {
+  const canonicalName = subject.trim().replace(/\s+/g, ' ');
+  if (!canonicalName || canonicalName.length > 120 || ownerStatement.length > 2000)
+    return undefined;
+  const name = escapeRegExp(canonicalName);
+  const statement = rememberedStatement(ownerStatement);
+  const negativeOrIndirect =
+    /\b(?:if|suppose|imagine|pretend|fictional|hypothetical|maybe|allegedly|apparently|was incorrect|different person|another person|same name|not true|no longer|(?:in|from) (?:the|a) (?:play|novel|story|game|film)|is a (?:fictional )?character)\b|[?"“”]/iu;
+  const reportedAssertion =
+    /\b(?:according to|for illustration|here is an example|as an example|(?:told|informed|reported to) (?:me|us)|(?:wrote|said|stated|reported|quoted) (?:that|the following))\b/iu;
+  const attributedSpeech =
+    /[,;]\s*(?:(?:says?|said|wrote|reports?|reported|claims?|claimed)\s+[^.!?;]{1,80}|[^.!?;]{1,80}\s+(?:says?|said|wrote|reports?|reported|claims?|claimed))\s*(?=[.!?;]|$)/iu;
+  const illustrativeFrame =
+    /\b(?:(?:this|that|it)\s+(?:is|was)\s+(?:(?:just|only|merely|simply)\s+)?(?:a|an|the)\s+(?:example|illustration|sample|joke|parody|satire)|as\s+(?:a|an)\s+(?:joke|parody|satire))\b/iu;
+  const peopleOptOut =
+    /(?:^|[.!?;,\r\n]\s*)(?:please\s+)?(?:do not|don['’]t|dont|never)\s+(?:save|store|remember|retain|keep)\s+(?:this|that|it|these|those|any of this)(?:\s*,?\s*please)?\s*(?=[.!?;\r\n]|$)/iu;
+  if (
+    negativeOrIndirect.test(statement) ||
+    reportedAssertion.test(statement) ||
+    attributedSpeech.test(statement) ||
+    illustrativeFrame.test(statement) ||
+    peopleOptOut.test(statement)
+  )
+    return undefined;
+  const nameEnd = '(?=$|[^\\p{L}\\p{M}\\p{N}])';
+  const exactName = new RegExp(`(?:^|[^\\p{L}\\p{M}\\p{N}])${name}${nameEnd}`, 'iu');
+  if (!exactName.test(statement)) return undefined;
+
+  const directIdentity = identityStatement(statement, name, name, true, false);
+  const start = '(?:^|[.:;!][ ]+|, +(?:and +)?|[ ]+and +)';
+  const roleEnd = '(?=$|[.!;,]| +(?:and|but|who|at|for|in|from|with|named|called) +)';
+  const contradicts = new RegExp(
+    `${start}${name} (?:is|was) (?:not|never|neither) (?:a |an |my |the )?(?:person|human|${RELATIONSHIP_NAMES}|${name})${roleEnd}`,
     'iu',
-  ).exec(quote);
-  const relationshipStatement =
-    key(subject) === key(canonicalName)
-      ? new RegExp(`^${canonical} ${addresses} is my (${RELATIONSHIP_NAMES})\\.$`, 'iu').exec(quote)
-      : null;
-  const addressList = aliasStatement?.[2] ?? relationshipStatement?.[1];
-  if (!addressList) return null;
-  const contactIdentifiers = identifiers(addressList);
-  const unexpectedText = addressList
-    .replace(EMAIL, '')
-    .replace(PHONE, '')
-    .replace(/[ ,;&]/g, '');
-  if (!contactIdentifiers.length || unexpectedText) return null;
+  );
+  const deniesSameIdentity = new RegExp(
+    `${start}${name} (?:is not|isn['’]t|was not|wasn['’]t) the ${name}${nameEnd}`,
+    'iu',
+  );
+  if (contradicts.test(statement) || deniesSameIdentity.test(statement)) return undefined;
+  const namedRoleEnd =
+    "(?=$|[.!;,:]|['’]s | +(?:at|on|in|is|was|has|had|will|would|can|celebrates|recently) +)";
+  const relationship = new RegExp(
+    `${start}(?:${name} (?:is|is also) my ${RELATIONSHIP_QUALIFIER}(${RELATIONSHIP_NAMES})${roleEnd}|my ${RELATIONSHIP_QUALIFIER}(${RELATIONSHIP_NAMES}) (?:is (?:named |called )?|named |called )?${name}${namedRoleEnd})`,
+    'iu',
+  ).exec(statement);
+  const humanRole =
+    'person|human|woman|man|girl|boy|adult|teenager|dentist|nurse|physician|doctor|teacher|lawyer|therapist|student|colleague|coworker|coach|neighbor|neighbour';
+  const humanDetail = new RegExp(
+    `${start}(?:${possessive(name)} (?:birthday|maiden name|birth name) (?:is|was)|${name} (?:was born|is (?:pregnant|married to|raising (?:a|their|her|his) child)|celebrates (?:a|their|her|his) birthday|graduated (?:from|in)|has (?:a|an|two|three) (?:children?|daughters?|sons?)${roleEnd}|got married))${nameEnd}`,
+    'iu',
+  ).test(statement);
+  const occupation = new RegExp(
+    `${start}${name} (?:is|works as) (?:a|an|the) (?:${humanRole})${roleEnd}`,
+    'iu',
+  ).test(statement);
+  const classification = new RegExp(`${start}${name} (?:is|was) (?:a|an|the) `, 'iu').test(
+    statement,
+  );
+  const roleCompound = new RegExp(
+    `${start}${name} (?:(?:is|is also) my ${RELATIONSHIP_QUALIFIER}(?:${RELATIONSHIP_NAMES})|has (?:a|an|two|three) (?:children?|daughters?|sons?))${nameEnd}(?!${roleEnd}) +\\p{L}`,
+    'iu',
+  ).test(statement);
+  const unverifiedAlias = new RegExp(
+    `(?:${ALIAS_VERB}|also known as|nicknamed) ${name}${nameEnd}|${name} is (?:another name|an alias|a nickname|short) for `,
+    'iu',
+  ).test(statement);
+  const subjectAtStart = new RegExp(`${start}${name}(?=$|[.:;!,'’ ])`, 'giu');
+  const activeName = [...statement.matchAll(subjectAtStart)].some((match) => {
+    const remainder = statement.slice(match.index + match[0].length);
+    // A following name component could refer to another person or an entity.
+    return !/^ +\p{Lu}/u.test(remainder);
+  });
+  const namedParticipant = new RegExp(
+    `${start}I (?:met|spoke with|talked to|called|visited) ${name}${namedRoleEnd}`,
+    'iu',
+  ).test(statement);
+  if (
+    unverifiedAlias ||
+    (classification && !occupation) ||
+    roleCompound ||
+    !(activeName || namedParticipant || directIdentity || relationship || humanDetail || occupation)
+  )
+    return undefined;
+  const statedRelationship = normalizeMemoryRelationship(
+    directIdentity?.relationship || relationship?.[1] || relationship?.[2],
+  );
   return {
     canonicalName,
-    identifiers: contactIdentifiers,
-    relationship: normalizeMemoryRelationship(aliasStatement?.[1] ?? relationshipStatement?.[2]),
+    identifiers: directIdentity?.identifiers ?? statedSubjectIdentifiers(canonicalName, statement),
+    relationship: statedRelationship,
+    reference: true,
+    ...((statedRelationship || humanDetail || occupation) &&
+    personNameInferredFromSubject(canonicalName, ownerStatement)
+      ? { personhood: true }
+      : {}),
   };
 }
 
@@ -221,12 +458,12 @@ const contactIdentifiers = (row: Contact) => [
 ];
 
 // Only a detail expressly attached to this subject can contradict ordinary attribution.
-function statedSubjectIdentifier(subject: string, content: string): string | undefined {
-  const match = new RegExp(
-    `(?:^|[^\\p{L}\\p{N}])${escapeRegExp(subject.trim())}(?:['’]s (?:email(?: address)?|phone(?: number)?) is | (?:uses|can be reached at) )(${EMAIL.source}|${PHONE.source})`,
-    'iu',
-  ).exec(content);
-  return match?.[1] ? identifiers(match[1])[0] : undefined;
+function statedSubjectIdentifiers(subject: string, content: string): string[] {
+  const pattern = new RegExp(
+    `(?:^|[^\\p{L}\\p{M}\\p{N}])${escapeRegExp(subject.trim())}(?:['’]s (?:${CONTACT_CHANNEL}) is | (?:uses|can be reached at) )(${CONTACT_ID})`,
+    'giu',
+  );
+  return [...content.matchAll(pattern)].flatMap((match) => identifiers(match[1] ?? ''));
 }
 
 export const MAX_RECONCILED_PERSON_MEMORIES = 25;
@@ -260,45 +497,52 @@ export function attributeMemoryPerson(
   const unattributed = { kind: 'unattributed' } as const;
   if (!subjectKey || input.evidence === null) return unattributed;
   const exact = rows.filter((row) => names(row).some((name) => key(name) === subjectKey));
-  if (!input.evidence) {
-    const name = personNameInferredFromSubject(input.subject, input.content);
-    if (!name) return unattributed;
-    if (input.knownContactId && (exact.length !== 1 || exact[0]?.id !== input.knownContactId))
-      return unattributed;
-    if (subjectKey === 'owner') {
-      const [owner, second] = rows.filter((row) => row.trust === 'owner');
-      return owner && !second ? { kind: 'identified', contactId: owner.id } : unattributed;
-    }
+  const evidence = input.evidence ?? groundMemoryPersonReference(input.subject, input.content);
+  if (subjectKey === 'owner' && !input.evidence) {
+    const [owner, second] = rows.filter((row) => row.trust === 'owner');
+    return owner && !second ? { kind: 'identified', contactId: owner.id } : unattributed;
+  }
+  if (!evidence) return unattributed;
+  if (evidence.reference) {
+    if (key(evidence.canonicalName) !== subjectKey) return unattributed;
     const [matched, second] = exact;
-    if (second) return unattributed;
-    const prefixMatches = matched
-      ? []
-      : rows.filter((row) =>
-          names(row).some((variant) => {
-            const candidate = key(variant);
-            return (
-              Math.min(subjectKey.length, candidate.length) >= 3 &&
-              (candidate.startsWith(`${subjectKey} `) || subjectKey.startsWith(`${candidate} `))
-            );
-          }),
-        );
-    if (prefixMatches.length > 1) return unattributed;
-    const person = matched ?? prefixMatches[0];
-    if (!person) return { kind: 'create', name };
-    const statedId = statedSubjectIdentifier(input.subject, input.content);
-    if (statedId) {
-      const saved = contactIdentifiers(person);
-      const channel = statedId.split(':')[0];
+    if (second || (input.knownContactId && matched?.id !== input.knownContactId))
+      return unattributed;
+    const statedIds = [
+      ...evidence.identifiers,
+      ...statedSubjectIdentifiers(input.subject, input.content),
+    ];
+    if (!matched) {
+      const relativeName = rows.some((row) =>
+        names(row).some((variant) => {
+          const candidate = key(variant);
+          return candidate.startsWith(`${subjectKey} `) || subjectKey.startsWith(`${candidate} `);
+        }),
+      );
       if (
-        (saved.some((id) => id.startsWith(`${channel}:`)) && !saved.includes(statedId)) ||
-        rows.some((row) => row.id !== person.id && contactIdentifiers(row).includes(statedId))
+        !evidence.personhood ||
+        relativeName ||
+        rows.some((row) => statedIds.some((id) => contactIdentifiers(row).includes(id)))
       )
         return unattributed;
+      return { kind: 'create', name: evidence.canonicalName };
     }
-    return { kind: 'identified', contactId: person.id };
+    if (!evidence.personhood && matched.identityAuthority !== 'owner') return unattributed;
+    if (!compatibleRelationship(evidence.relationship, storedRelationship(matched)))
+      return unattributed;
+    const saved = contactIdentifiers(matched);
+    if (
+      statedIds.some(
+        (id) =>
+          (saved.some((savedId) => savedId.startsWith(`${id.split(':')[0]}:`)) &&
+            !saved.includes(id)) ||
+          rows.some((row) => row.id !== matched.id && contactIdentifiers(row).includes(id)),
+      )
+    )
+      return unattributed;
+    return { kind: 'identified', contactId: matched.id };
   }
 
-  const evidence = input.evidence;
   const explicitIds = identifiers(input.content);
   const canonicalKey = key(evidence.canonicalName);
   const requiredIds = evidence.identifiers;
@@ -316,6 +560,12 @@ export function attributeMemoryPerson(
     subjectKey === canonicalKey ? [] : exact.filter((row) => row.id !== target.id);
   if (duplicateMatches.length > 1) return unattributed;
   const duplicate = duplicateMatches[0];
+  if (
+    input.knownContactId &&
+    input.knownContactId !== target.id &&
+    input.knownContactId !== duplicate?.id
+  )
+    return unattributed;
   if (duplicate) {
     const stored = contactIdentifiers(duplicate);
     if (

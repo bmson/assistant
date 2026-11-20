@@ -128,6 +128,14 @@ export function createToolContext(args: {
             : {}),
         }
       : undefined;
+  const ownerMemoryText =
+    task.type === 'chat_turn' &&
+    task.trust === 'owner' &&
+    (task.trigger as { source?: unknown } | null)?.source === 'chat' &&
+    typeof triggerPayload?.triggerMessageId === 'string' &&
+    typeof triggerPayload.text === 'string'
+      ? directOwnerPersonEvidenceText(triggerPayload.text, task.trigger)
+      : undefined;
   return {
     taskId: task.id,
     agentId: task.agentId,
@@ -143,11 +151,8 @@ export function createToolContext(args: {
       },
     ),
     directOwnerMemorySource:
-      task.type === 'chat_turn' &&
-      task.trust === 'owner' &&
-      (task.trigger as { source?: unknown } | null)?.source === 'chat' &&
-      typeof triggerPayload?.text === 'string'
-        ? directOwnerPersonEvidenceText(triggerPayload.text, task.trigger)
+      ownerMemoryText && typeof triggerPayload?.triggerMessageId === 'string'
+        ? { id: triggerPayload.triggerMessageId, text: ownerMemoryText }
         : undefined,
     knownAddresses: harvestKnownAddresses(state, task.trigger, task.trust as Trust),
     db,

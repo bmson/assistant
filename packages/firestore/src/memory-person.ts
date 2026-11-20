@@ -63,7 +63,7 @@ export class FirestoreMemoryPeople {
     pendingContactIds?: ReadonlySet<string>;
   }): Promise<string | null> {
     if (!input.subject || input.evidence === null) return null;
-    if (input.evidence) {
+    if (input.evidence || input.subject.trim().toLowerCase() !== 'owner') {
       if (this.singleOwner === undefined) {
         const owners = await this.tx.get(this.store.collection('agents').limit(2));
         this.singleOwner =
@@ -82,7 +82,9 @@ export class FirestoreMemoryPeople {
     if (decision.kind === 'create') {
       const marker = await this.tx.get(contactNameRef(this.store, decision.name));
       const id = randomUUID();
-      const relationship = normalizeMemoryRelationship(input.relationship);
+      const relationship = normalizeMemoryRelationship(
+        input.evidence?.relationship ?? input.relationship,
+      );
       this.writes.push(() =>
         stageNewContact(this.tx, this.store, {
           id,

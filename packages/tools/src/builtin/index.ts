@@ -20,8 +20,10 @@ import {
 import {
   type ConversationSearchRepository,
   embeddingSpaceIdentityKey,
+  groundMemoryPersonReference,
   groundPersonEvidence,
   type MemoryToolRepository,
+  personSourceTextHash,
   type TaskRepository,
 } from '@assistant/persistence';
 import { and, eq, gt, gte, isNotNull, isNull, ne, or, sql } from 'drizzle-orm';
@@ -140,7 +142,7 @@ export function registerPortableMemoryTools(
           })
           .optional()
           .describe(
-            'Only for an explicitly stated alternate name, existing record label, or ambiguous same-name person. Copy the complete owner-authored statement tying the subject to a canonical name and its email address or phone number.',
+            'For an alternate name, existing record label, or same-name person that the owner explicitly identifies. Copy the complete latest owner message tying the subject to the canonical name and its email address or phone number.',
           ),
         domain: z
           .enum(['identity', 'work', 'home', 'relationships', 'preferences', 'health', 'other'])
@@ -187,6 +189,13 @@ export function registerPortableMemoryTools(
           args.category === 'experience'
             ? new Date(ctx.now().getTime() + 90 * 24 * 3600 * 1000)
             : null;
+        const source =
+          ctx.trust === 'owner' && !ctx.tainted ? ctx.directOwnerMemorySource : undefined;
+        const evidence = source
+          ? args.personEvidence
+            ? groundPersonEvidence(args.personEvidence, args.subject, [source.text])
+            : groundMemoryPersonReference(args.subject, source.text)
+          : undefined;
         const result = await deps.memory.save({
           agentId: ctx.agentId,
           content: args.content,
@@ -201,15 +210,16 @@ export function registerPortableMemoryTools(
           originTrust: ctx.trust,
           quarantined,
           subject: args.subject || undefined,
-          ...(args.personEvidence
+          ...(args.subject && (args.personEvidence || args.subject.trim().toLowerCase() !== 'owner')
             ? {
-                personEvidence: groundPersonEvidence(
-                  args.personEvidence,
-                  args.subject,
-                  ctx.trust === 'owner' && !ctx.tainted && ctx.directOwnerMemorySource
-                    ? [ctx.directOwnerMemorySource]
-                    : [],
-                ),
+                personEvidence:
+                  evidence && source
+                    ? {
+                        ...evidence,
+                        sourceMessageId: source.id,
+                        sourceTextHash: personSourceTextHash(source.text),
+                      }
+                    : null,
               }
             : {}),
           domain: args.domain,

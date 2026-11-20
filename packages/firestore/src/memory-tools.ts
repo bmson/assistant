@@ -6,8 +6,14 @@ import type {
   MemorySaveInput,
   MemorySaveResult,
   MemoryToolRepository,
+  Records,
 } from '@assistant/persistence';
-import { embeddingSpaceIdentityKey, snapshotEmbeddingSpace } from '@assistant/persistence';
+import {
+  embeddingSpaceIdentityKey,
+  isCurrentMemoryPersonEvidence,
+  isDirectOwnerPersonMessage,
+  snapshotEmbeddingSpace,
+} from '@assistant/persistence';
 import { FirestoreMemoryRepository } from './memory.js';
 import { FirestoreMemoryPeople, readFirestoreMemoryPeople } from './memory-person.js';
 import {
@@ -16,7 +22,7 @@ import {
   privacyErasureGeneration,
   readPrivacyErasureFence,
 } from './privacy-erasure.js';
-import type { InstallationStore } from './store.js';
+import { decodeRecord, type InstallationStore } from './store.js';
 
 function lexicalTerms(query: string): string[] {
   return query
@@ -103,6 +109,37 @@ export class FirestoreMemoryToolRepository implements MemoryToolRepository {
       input.observedPrivacyGeneration,
       input.subject
         ? async (tx) => {
+            const sourceId = input.personEvidence?.sourceMessageId;
+            const taskDoc =
+              sourceId && input.sourceTaskId && input.originTrust === 'owner' && !input.quarantined
+                ? await tx.get(this.store.doc('tasks', input.sourceTaskId))
+                : undefined;
+            const sourceTask = taskDoc?.exists
+              ? decodeRecord<Records['tasks']>(taskDoc.data())
+              : undefined;
+            const conversationDoc =
+              sourceTask?.id === input.sourceTaskId &&
+              sourceTask?.agentId === input.agentId &&
+              sourceTask.conversationId
+                ? await tx.get(this.store.doc('conversations', sourceTask.conversationId))
+                : undefined;
+            const latestUser =
+              conversationDoc?.get('agentId') === input.agentId && sourceTask?.conversationId
+                ? (
+                    await tx.get(
+                      this.store
+                        .collection('messages')
+                        .where('conversationId', '==', sourceTask.conversationId)
+                        .where('role', '==', 'user')
+                        .orderBy('createdAt', 'desc')
+                        .orderBy('id', 'desc')
+                        .limit(1),
+                    )
+                  ).docs[0]
+                : undefined;
+            const source = latestUser
+              ? decodeRecord<Records['messages']>(latestUser.data())
+              : undefined;
             const people = new FirestoreMemoryPeople(
               tx,
               this.store,
@@ -113,7 +150,11 @@ export class FirestoreMemoryToolRepository implements MemoryToolRepository {
               subject: input.subject ?? '',
               content: input.content,
               evidence:
-                input.originTrust === 'owner' && !input.quarantined
+                input.personEvidence &&
+                source &&
+                source.taskId === input.sourceTaskId &&
+                isCurrentMemoryPersonEvidence(input.personEvidence, source) &&
+                isDirectOwnerPersonMessage(sourceTask, source)
                   ? input.personEvidence
                   : input.personEvidence === undefined
                     ? undefined

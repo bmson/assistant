@@ -93,7 +93,7 @@ export interface ToolContextLike {
   tainted: boolean;
   /** Typed provenance and directly authored scope for this task's latest owner turn. */
   ownerIntent?: OwnerIntent;
-  directOwnerMemorySource?: string;
+  directOwnerMemorySource?: { id: string; text: string };
   /** One executor-bound public research call for a source-grounded compound trip. */
   authorizedCompoundTripPublicRead?:
     | { taskId: string; toolName: 'web.search'; query: string }

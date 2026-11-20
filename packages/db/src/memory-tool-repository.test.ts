@@ -156,7 +156,7 @@ describe('PostgreSQL memory tool repository', () => {
     hashes.push(subjectHash);
     const saved = await repo.save({
       agentId: agent.id,
-      content: 'Alex likes hiking.',
+      content: 'Alex Briarwood is my friend and likes hiking.',
       contentHash: subjectHash,
       embedding: vector,
       embeddingSpaceKey: testSpaceKey,
@@ -173,8 +173,8 @@ describe('PostgreSQL memory tool repository', () => {
       .select({ id: memories.id, subjectContactId: memories.subjectContactId })
       .from(memories)
       .where(eq(memories.contentHash, subjectHash));
-    expect(row?.subjectContactId).toBeTruthy();
     if (row?.id) memoryIds.push(row.id);
+    expect(row?.subjectContactId).toBeTruthy();
     if (row?.subjectContactId) contactIds.push(row.subjectContactId);
   });
 

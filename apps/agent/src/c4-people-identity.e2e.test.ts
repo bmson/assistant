@@ -20,6 +20,7 @@ import {
   knowledgeGraphRelations,
   memories,
   messages,
+  occasions,
   recallSurfaces,
   tasks,
   toolCalls,
@@ -52,7 +53,14 @@ const SPACE: EmbeddingSpace = {
   dimensions: 1536,
   revision: '1',
 };
-const embed = async (values: string[]) => values.map(() => [1, ...Array(1535).fill(0)]);
+const recallQuestion = 'Who is my daughter?';
+const confirmedOwnerNote = 'My daughter is Avery Quinn.';
+const embed = async (values: string[]) =>
+  values.map((value) => {
+    // Keep this confirmed source distinguishable when unrelated fixtures share vector scores.
+    const matchesDaughter = value === recallQuestion || value.includes(confirmedOwnerNote);
+    return [Number(matchesDaughter), Number(!matchesDaughter), ...Array(1534).fill(0)];
+  });
 const modelId = 'synthetic/c4';
 const daughterName = 'Avery Quinn';
 const ownerName = 'Jordan Owner';
@@ -137,6 +145,66 @@ const ordinaryConflict = {
   content: 'A different Avery Junior uses avery.work@example.test.',
 };
 
+const organizationFacts = [
+  {
+    subject: 'Copper Lantern',
+    content: 'Copper Lantern is a community center that opens on Saturdays.',
+  },
+  { subject: 'Orchid Press', content: 'Orchid Press is the publisher of the book.' },
+  { subject: 'West Garden', content: 'West Garden is the outdoor venue for the festival.' },
+  { subject: 'Kalliope Cooperative', content: 'Kalliope Cooperative operates the ferry route.' },
+];
+const chatPerson = { subject: 'Luljeta Gjoka', content: 'Luljeta Gjoka is my coworker.' };
+const nightlyPerson = { subject: '朴 素妍', content: '朴 素妍 is my neighbor.' };
+const nightlyPersonSource = `Remember that ${nightlyPerson.content} 朴 素妍 celebrates her birthday on January 23.`;
+const birthdayOf = (name: string, month: number, day: number) => ({
+  subject: { type: 'new_person_candidate', name },
+  kind: 'birthday',
+  label: '',
+  month,
+  day,
+  year: null,
+  notes: '',
+});
+const naturalChatAlias = evidenceFor(
+  'Robin',
+  'Robin Shaw',
+  'My daughter goes by Robin, short for Robin Shaw. Her email is robin@example.test.',
+  'The owner’s daughter Robin Shaw goes by Robin.',
+);
+const naturalNightlyAlias = evidenceFor(
+  'Dori',
+  'Teodora Iliev',
+  'My sister Teodora Iliev goes by Dori. You can reach her at teodora@example.test.',
+  'Teodora Iliev also goes by Dori.',
+);
+const missingIdentifier = evidenceFor(
+  'Ro',
+  'Robin Shaw',
+  'My daughter Robin Shaw goes by Ro. She prefers sketching.',
+  'The owner mentioned the possible alias Ro.',
+);
+const staleSourceClaim = evidenceFor(
+  'Rio',
+  'Robin Shaw',
+  'My daughter Robin Shaw goes by Rio. Her email is robin@example.test.',
+  'The earlier chat used Rio as a possible nickname.',
+);
+const omittedIdentifierEvidence = {
+  subject: missingIdentifier.subject,
+  content: 'The owner used Ro as a nickname.',
+};
+const admissionSubjects = [
+  ...organizationFacts.map((fact) => fact.subject),
+  chatPerson.subject,
+  nightlyPerson.subject,
+  naturalChatAlias.subject,
+  naturalNightlyAlias.subject,
+  missingIdentifier.subject,
+  staleSourceClaim.subject,
+];
+const neutral = (content: string) => ({ subject: '', content });
+
 const nightlyFact = <T extends { subject: string; content: string }>(candidate: T) => ({
   ...candidate,
   content: `Nightly attribution check: ${candidate.content}`,
@@ -178,26 +246,45 @@ const chatCases = [
     text: [
       'Remember that these notes apply.',
       nonPersonSentence,
-      existingAliasFact.content,
       bareHomonymFact.content,
       ordinaryConflict.content,
+      ...organizationFacts.map((fact) => fact.content),
       `${token} and ${extractionToken} are warehouse inventory codes.`,
     ].join(' '),
     saved: [
       tokenFact,
       sentenceFact,
-      existingAliasFact,
       bareHomonymFact,
       ordinaryConflict,
       unspokenClaim,
+      ...organizationFacts,
     ],
     extracted: [
       nightlyFact(sentenceFact),
       nightlyFact(unspokenClaim),
       nightlyFact(ordinaryConflict),
       nightlyHomonymFact,
+      ...organizationFacts.map(nightlyFact),
       { subject: extractionToken, content: 'The inventory code for the warehouse is qa85p3.' },
     ],
+  },
+  { text: `Remember that ${existingAliasFact.content}`, saved: [existingAliasFact], extracted: [] },
+  { text: directAssertion(naturalChatAlias), saved: [naturalChatAlias], extracted: [] },
+  {
+    text: directAssertion(naturalNightlyAlias),
+    saved: [neutral('The owner mentioned a relative’s nickname for nightly review.')],
+    extracted: [naturalNightlyAlias],
+  },
+  { text: `Remember that ${chatPerson.content}`, saved: [chatPerson], extracted: [] },
+  {
+    text: nightlyPersonSource,
+    saved: [neutral('The owner mentioned a neighbor for nightly review.')],
+    extracted: [nightlyPerson],
+  },
+  {
+    text: directAssertion(missingIdentifier),
+    saved: [missingIdentifier, omittedIdentifierEvidence],
+    extracted: [nightlyFact(missingIdentifier), nightlyFact(omittedIdentifierEvidence)],
   },
 ];
 const savedFacts = chatCases.flatMap((entry) => entry.saved);
@@ -217,6 +304,7 @@ function routerFor(
   confirmedText: string,
   saveInputs: typeof savedFacts = savedFacts,
   homonymContactId?: string,
+  onFirstStep?: () => Promise<void>,
 ) {
   let steps = 0;
   let extractionRan = false;
@@ -262,7 +350,12 @@ function routerFor(
               validFrom: '',
               ...('personEvidence' in fact ? { personEvidence: fact.personEvidence } : {}),
             })),
-            occasions: [],
+            occasions:
+              extractionCase?.text === nightlyPersonSource
+                ? [birthdayOf(nightlyPerson.subject, 1, 23)]
+                : extractionCase?.text.includes(organizationFacts[0]?.content ?? '')
+                  ? [birthdayOf('Copper Lantern', 4, 6)]
+                  : [],
           }
         : mode === 'extraction'
           ? { commitments: [], resolvedTitles: [] }
@@ -279,6 +372,7 @@ function routerFor(
     async step(_role: string, input: { messages: unknown }) {
       const messages = JSON.stringify(input.messages ?? []);
       const step = steps++;
+      if (step === 0) await onFirstStep?.();
       if (mode === 'recall' && step > 0 && messages.includes(confirmedText))
         confirmedInContext = true;
       const calls =
@@ -292,7 +386,7 @@ function routerFor(
               {
                 toolCallId: randomUUID(),
                 toolName: 'memory.recall',
-                input: { query: 'Who is my daughter?', limit: 10 },
+                input: { query: recallQuestion, limit: 10 },
               },
             ];
       return {
@@ -374,6 +468,8 @@ for (const driver of ['postgres', 'firestore'] as const) {
       const sharedDuplicateId = randomUUID();
       const sharedContactId = randomUUID();
       const historicalMemoryId = randomUUID();
+      const robinShawId = randomUUID();
+      const teodoraId = randomUUID();
       const conversationIds: string[] = [];
       const scheduledTaskIds: string[] = [];
       const seededMemoryIds: string[] = [historicalMemoryId];
@@ -450,6 +546,28 @@ for (const driver of ['postgres', 'firestore'] as const) {
           identityAuthority: inferred ? ('inferred' as const) : ('owner' as const),
           trust: inferred ? 'unknown' : 'known',
         })),
+        ...[
+          {
+            id: robinShawId,
+            name: 'Robin Shaw',
+            email: 'robin@example.test',
+            relationship: 'daughter',
+          },
+          {
+            id: teodoraId,
+            name: 'Teodora Iliev',
+            email: 'teodora@example.test',
+            relationship: 'sister',
+          },
+        ].map(({ id, name, email, relationship }) => ({
+          id,
+          name,
+          aliases: [],
+          emails: [email],
+          relationship,
+          trust: 'known',
+          identityAuthority: 'owner' as const,
+        })),
       ];
       try {
         if (store) {
@@ -482,7 +600,7 @@ for (const driver of ['postgres', 'firestore'] as const) {
           subject: { label: daughterName, contactId: daughterId, kind: 'person' as const },
           predicate: 'daughter_of',
           object: { label: ownerName, contactId: ownerId, kind: 'person' as const },
-          note: 'My daughter is Avery Quinn.',
+          note: confirmedOwnerNote,
         };
         const graphRouter = { embed, embeddingSpace: async () => SPACE };
         const confirmed = store
@@ -572,6 +690,7 @@ for (const driver of ['postgres', 'firestore'] as const) {
                     extractionToken,
                     nonPersonSentence,
                     unspokenClaim.subject,
+                    ...admissionSubjects,
                     hypotheticalClaim.subject,
                   ].includes(row.name),
               )
@@ -595,7 +714,7 @@ for (const driver of ['postgres', 'firestore'] as const) {
               .filter(
                 (fact) =>
                   [memoryId, historicalMemoryId].includes(fact.id) ||
-                  [...savedFacts, ...extractionFacts, ...replayFacts].some(
+                  [...savedFacts, ...extractionFacts, ...replayFacts, staleSourceClaim].some(
                     (f) => f.content === fact.content,
                   ),
               )
@@ -630,7 +749,11 @@ for (const driver of ['postgres', 'firestore'] as const) {
           };
         }
 
-        async function turn(question: string, script: ReturnType<typeof routerFor>) {
+        async function turn(
+          question: string,
+          script: ReturnType<typeof routerFor>,
+          onAdmitted?: (ownerMessageId: string) => void,
+        ) {
           const chat = getChat();
           const conversation = await chat.createConversation(agentId);
           conversationIds.push(conversation.id);
@@ -638,7 +761,7 @@ for (const driver of ['postgres', 'firestore'] as const) {
           const request = new Request('https://assistant.example/api/chat', {
             method: 'POST',
             body: JSON.stringify({
-              force: question === 'Who is my daughter?',
+              force: question === recallQuestion,
               conversationId: conversation.id,
               clientOperationId: operation,
               messages: [
@@ -652,6 +775,11 @@ for (const driver of ['postgres', 'firestore'] as const) {
           expect(response.status, body).toBe(200);
           const taskId = response.headers.get('x-async-task');
           if (!taskId) throw new Error('Expected async task from chat handler');
+          if (onAdmitted) {
+            const ownerMessageId = response.headers.get('x-owner-message-id');
+            if (!ownerMessageId) throw new Error('Expected the admitted owner-message ID');
+            onAdmitted(ownerMessageId);
+          }
           const run = await executeTask(deps, taskId);
           expect(run.outcome, `${question}: ${JSON.stringify(run)}`).toBe('done');
           const page = await chat.listMessages(agentId, conversation.id, { limit: 20 });
@@ -707,6 +835,16 @@ for (const driver of ['postgres', 'firestore'] as const) {
         expect(extraction.evidence().extractionRan).toBe(true);
         await reopen();
         const afterExtraction = await readback();
+        const nightlyPersonId = afterExtraction.contacts.find(
+          (row) => row.name === nightlyPerson.subject,
+        )?.id;
+        const nightlyPersonBirthdays = nightlyPersonId
+          ? store
+            ? (
+                await store.collection('occasions').where('contactId', '==', nightlyPersonId).get()
+              ).docs.map((doc) => doc.data())
+            : await db.select().from(occasions).where(eq(occasions.contactId, nightlyPersonId))
+          : [];
         let staleSubjectWrite: { id: string; subjectContactId: string | null } | undefined;
         if (store) {
           const id = randomUUID();
@@ -734,10 +872,23 @@ for (const driver of ['postgres', 'firestore'] as const) {
             expect(marker.get('contactId')).toBe(id);
           }
         }
+        let staleMessageId: string | undefined;
+        const staleSource = await turn(
+          directAssertion(staleSourceClaim),
+          routerFor('save', confirmedText, [staleSourceClaim], undefined, async () => {
+            if (!staleMessageId) throw new Error('No owner message was admitted');
+            const text = 'Remember that I withdrew the earlier nickname assertion.';
+            if (store) await store.doc('messages', staleMessageId).update({ text });
+            else await db.update(messages).set({ text }).where(eq(messages.id, staleMessageId));
+          }),
+          (ownerMessageId) => {
+            staleMessageId = ownerMessageId;
+          },
+        );
         const replay = await turn(replaySource, routerFor('save', confirmedText, replayFacts));
         await reopen();
         const afterReplay = await readback();
-        const recall = await turn('Who is my daughter?', routerFor('recall', confirmedText));
+        const recall = await turn(recallQuestion, routerFor('recall', confirmedText));
         await reopen();
         const persisted = await getChat().listMessages(agentId, recall.conversationId, {
           limit: 20,
@@ -756,13 +907,17 @@ for (const driver of ['postgres', 'firestore'] as const) {
             sharedDuplicateId,
             sharedContactId,
             historicalMemoryId,
+            robinShawId,
+            teodoraId,
           },
           before,
           save,
           afterSave,
           extraction: { taskId: task.id, outcome: run.outcome },
           afterExtraction,
+          nightlyPersonBirthdays,
           staleSubjectWrite,
+          staleSource,
           replay,
           afterReplay,
           recall,
@@ -829,12 +984,66 @@ for (const driver of ['postgres', 'firestore'] as const) {
           expect(factAt(afterSave, candidate.content)?.subjectContactId).toBeNull();
         expect(factAt(afterSave, existingAliasFact.content)?.subjectContactId).toBe(daughterId);
         expect(factAt(afterExtraction, caseyEvidence.content)?.subjectContactId).toBe(caseyId);
-        for (const candidate of extractionFacts.slice(1))
+        for (const candidate of extractionFacts.filter(
+          (fact) =>
+            ![caseyEvidence.content, naturalNightlyAlias.content, nightlyPerson.content].includes(
+              fact.content,
+            ),
+        ))
           expect(factAt(afterExtraction, candidate.content)?.subjectContactId).toBeNull();
         expect(afterReplay.contacts).toEqual(afterExtraction.contacts);
+        expect(factAt(afterReplay, staleSourceClaim.content)?.subjectContactId).toBeNull();
         expect(afterReplay.confirmed).toEqual(before.confirmed);
         for (const candidate of replayFacts)
           expect(factAt(afterReplay, candidate.content)?.subjectContactId).toBe(daughterId);
+        for (const state of [afterSave, afterExtraction]) {
+          const unsupportedLabels = [
+            ...organizationFacts.map((fact) => fact.subject),
+            naturalChatAlias.subject,
+            naturalNightlyAlias.subject,
+            missingIdentifier.subject,
+          ];
+          expect(state.contacts.filter((row) => unsupportedLabels.includes(row.name))).toEqual([]);
+          expect(contactAt(state, robinShawId)?.aliases).toEqual([naturalChatAlias.subject]);
+        }
+        expect(contactAt(afterSave, teodoraId)?.aliases).toEqual([]);
+        expect(contactAt(afterExtraction, teodoraId)?.aliases).toEqual([
+          naturalNightlyAlias.subject,
+        ]);
+        expect(factAt(afterSave, naturalChatAlias.content)?.subjectContactId).toBe(robinShawId);
+        expect(factAt(afterExtraction, naturalNightlyAlias.content)?.subjectContactId).toBe(
+          teodoraId,
+        );
+        for (const candidate of [
+          ...organizationFacts,
+          missingIdentifier,
+          omittedIdentifierEvidence,
+        ]) {
+          expect(factAt(afterSave, candidate.content)?.subjectContactId).toBeNull();
+          expect(
+            factAt(afterExtraction, nightlyFact(candidate).content)?.subjectContactId,
+          ).toBeNull();
+        }
+        const chatPersonRow = afterSave.contacts.find((row) => row.name === chatPerson.subject);
+        const nightlyPersonRow = afterExtraction.contacts.find(
+          (row) => row.name === nightlyPerson.subject,
+        );
+        expect(chatPersonRow?.id).toBeTruthy();
+        expect(nightlyPersonRow?.id).toBeTruthy();
+        expect(nightlyPersonBirthdays).toEqual([
+          expect.objectContaining({
+            contactId: nightlyPersonId,
+            kind: 'birthday',
+            month: 1,
+            day: 23,
+          }),
+        ]);
+        expect(before.contacts.some((row) => row.name === chatPerson.subject)).toBe(false);
+        expect(afterSave.contacts.some((row) => row.name === nightlyPerson.subject)).toBe(false);
+        expect(factAt(afterSave, chatPerson.content)?.subjectContactId).toBe(chatPersonRow?.id);
+        expect(factAt(afterExtraction, nightlyPerson.content)?.subjectContactId).toBe(
+          nightlyPersonRow?.id,
+        );
         expect(recall.confirmedInContext).toBe(true);
         expect(evidence.reopenedAnswer).toBe('Your daughter is Avery Quinn.');
       } finally {
@@ -848,6 +1057,14 @@ for (const driver of ['postgres', 'firestore'] as const) {
                 .where(inArray(tasks.conversationId, conversationIds));
               const taskIds = [...scheduledTaskIds, ...taskRows.map((row) => row.id)];
               const contactIds = seed.map((person) => person.id);
+              const namedFixtures = await tx
+                .select({ id: contacts.id })
+                .from(contacts)
+                .where(inArray(contacts.name, admissionSubjects));
+              const fixtureContactIds = [
+                ...contactIds,
+                ...namedFixtures.map((person) => person.id),
+              ];
               await tx
                 .delete(memories)
                 .where(
@@ -859,7 +1076,8 @@ for (const driver of ['postgres', 'firestore'] as const) {
               await tx
                 .delete(knowledgeGraphEntities)
                 .where(inArray(knowledgeGraphEntities.contactId, contactIds));
-              await tx.delete(contacts).where(inArray(contacts.id, contactIds));
+              await tx.delete(occasions).where(inArray(occasions.contactId, fixtureContactIds));
+              await tx.delete(contacts).where(inArray(contacts.id, fixtureContactIds));
               const messageRows = await tx
                 .select({ id: messages.id })
                 .from(messages)

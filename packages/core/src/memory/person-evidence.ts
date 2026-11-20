@@ -14,5 +14,5 @@ export function directOwnerPersonEvidenceText(text: string, trigger?: unknown): 
     trust: 'owner',
     trigger,
   });
-  return intent.sourceActor === 'owner' && intent.separation === 'none' ? text.trim() : undefined;
+  return intent.sourceActor === 'owner' && intent.separation === 'none' ? text : undefined;
 }

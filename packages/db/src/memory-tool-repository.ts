@@ -1,6 +1,8 @@
 import {
   type EmbeddingSpace,
   embeddingSpaceIdentityKey,
+  isCurrentMemoryPersonEvidence,
+  isDirectOwnerPersonMessage,
   type MemoryRecallResult,
   type MemorySaveInput,
   type MemorySaveResult,
@@ -12,11 +14,12 @@ import {
 import { and, eq, gt, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
 import { resolvePostgresMemoryPerson } from './memory-person.js';
+import { lockPostgresOwnerChatAction } from './owner-chat-action-lock.js';
 import {
   assertPostgresPrivacyObservationFence,
   lockPostgresPrivacyObservationFence,
 } from './privacy-erasure-repository.js';
-import { memories, memoryTombstones } from './schema.js';
+import { conversations, memories, memoryTombstones, messages, tasks } from './schema.js';
 
 const LEXICAL_MATCH_BONUS = 0.06;
 
@@ -103,6 +106,29 @@ export function createPostgresMemoryToolRepository(
         throw new Error('Memory writes require an exact embedding space identity');
       return db.transaction(async (tx) => {
         const txDb = tx as unknown as Db;
+        const sourceId = input.personEvidence?.sourceMessageId;
+        const [sourceTask] =
+          sourceId && input.sourceTaskId && input.originTrust === 'owner' && !input.quarantined
+            ? await tx
+                .select({
+                  type: tasks.type,
+                  trust: tasks.trust,
+                  trigger: tasks.trigger,
+                  conversationId: tasks.conversationId,
+                })
+                .from(tasks)
+                .innerJoin(conversations, eq(conversations.id, tasks.conversationId))
+                .where(
+                  and(
+                    eq(tasks.id, input.sourceTaskId),
+                    eq(tasks.agentId, input.agentId),
+                    eq(conversations.agentId, input.agentId),
+                  ),
+                )
+            : [];
+        if (sourceTask?.conversationId) {
+          await lockPostgresOwnerChatAction(txDb, input.agentId, sourceTask.conversationId);
+        }
         const observed = await lockPostgresPrivacyObservationFence(txDb, input.agentId);
         if (input.observedPrivacyGeneration !== undefined)
           await assertPostgresPrivacyObservationFence(
@@ -145,12 +171,29 @@ export function createPostgresMemoryToolRepository(
           .onConflictDoNothing({ target: memories.contentHash })
           .returning({ id: memories.id });
         if (row && input.subject) {
+          const [source] = sourceTask?.conversationId
+            ? await tx
+                .select()
+                .from(messages)
+                .where(
+                  and(
+                    eq(messages.conversationId, sourceTask.conversationId),
+                    eq(messages.role, 'user'),
+                  ),
+                )
+                .orderBy(sql`${messages.createdAt} desc`, sql`${messages.id} desc`)
+                .limit(1)
+            : [];
           const subject = await resolvePostgresMemoryPerson(txDb, {
             agentId: input.agentId,
             subject: input.subject,
             content: input.content,
             evidence:
-              input.originTrust === 'owner' && !input.quarantined
+              input.personEvidence &&
+              source &&
+              source.taskId === input.sourceTaskId &&
+              isCurrentMemoryPersonEvidence(input.personEvidence, source) &&
+              isDirectOwnerPersonMessage(sourceTask, source)
                 ? input.personEvidence
                 : input.personEvidence === undefined
                   ? undefined

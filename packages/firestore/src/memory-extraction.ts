@@ -3,10 +3,13 @@ import {
   type CodeJobLease,
   type CommitmentExtractionApplied,
   type EmbeddingSpace,
+  type ExtractedMemoryFact,
   type ExtractionConversation,
   type ExtractionMessage,
+  isCurrentMemoryPersonEvidence,
   isDirectOwnerPersonMessage,
   isOwnerTaskMemoryEphemeral,
+  MEMORY_EXTRACTION_VERSION,
   type MemoryExtractionApplied,
   type MemoryExtractionRepository,
   type PreparedMemoryExtraction,
@@ -28,7 +31,7 @@ import {
   readCodeJobSteps,
   recordCodeJobStep,
 } from './code-job-checkpoints.js';
-import { contactNameRef, matchSubjectContact, stageNewContact } from './contact-lookup.js';
+import { matchSubjectContact } from './contact-lookup.js';
 import { embeddingSpaceKey as exactEmbeddingSpaceKey, memoryDocument } from './memory.js';
 import { FirestoreMemoryPeople, readFirestoreMemoryPeople } from './memory-person.js';
 import { occasionDateKey, resolveOccasionIdentity } from './occasion-identity.js';
@@ -53,12 +56,10 @@ const ACTIVITY_SCAN_LIMIT = 5000;
 /** Contacts are the attribution vocabulary; beyond this the read fails loudly. */
 const CONTACT_LIMIT = 5000;
 const ACTIVE_STATUSES = ['open', 'snoozed'];
-const PREPARED_VERSION = 'memory-extraction-v3';
 
 type Contact = Records['contacts'];
 type Occasion = Records['occasions'];
 type Commitment = Records['commitments'];
-type SubjectMatch = ReturnType<typeof matchSubjectContact>;
 
 function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
@@ -260,6 +261,9 @@ export class FirestoreMemoryExtractionRepository implements MemoryExtractionRepo
               ...(latestUser && isDirectOwnerPersonMessage(tasks.get(row.taskId ?? ''), row)
                 ? { directOwnerChat: true }
                 : {}),
+              ...(latestUser && row.origin === 'owner' && !row.taskId
+                ? { legacyOwnerAuthored: true }
+                : {}),
               text: row.text,
               createdAt: row.createdAt,
             });
@@ -341,7 +345,7 @@ export class FirestoreMemoryExtractionRepository implements MemoryExtractionRepo
   async savePrepared(input: PreparedMemoryExtraction & { lease: CodeJobLease }): Promise<void> {
     if (
       !/^[a-f0-9]{64}$/.test(input.sourceHash) ||
-      input.extractionVersion !== PREPARED_VERSION ||
+      input.extractionVersion !== MEMORY_EXTRACTION_VERSION ||
       input.payload === null ||
       typeof input.payload !== 'object'
     )
@@ -467,11 +471,11 @@ export class FirestoreMemoryExtractionRepository implements MemoryExtractionRepo
         input.agentId,
         await readFirestoreMemoryPeople(tx, this.store, input.agentId),
       );
-      const evidenceSource =
+      const evidenceSnapshot =
         input.prepared &&
         input.originTrust === 'owner' &&
         !input.quarantined &&
-        input.facts.some((fact) => fact.personEvidence)
+        [...input.facts, ...input.occasions].some((record) => record.personEvidence)
           ? (
               await tx.get(
                 this.store
@@ -480,11 +484,33 @@ export class FirestoreMemoryExtractionRepository implements MemoryExtractionRepo
                   .where('role', '==', 'user')
                   .orderBy('createdAt', 'desc')
                   .orderBy('id', 'desc')
-                  .select('id')
                   .limit(1),
               )
-            ).docs[0]?.get('id')
+            ).docs[0]
           : undefined;
+      const evidenceSource = evidenceSnapshot
+        ? decodeRecord<Records['messages']>(evidenceSnapshot.data())
+        : undefined;
+      const evidenceTaskSnapshot = evidenceSource?.taskId
+        ? await tx.get(this.store.doc('tasks', evidenceSource.taskId))
+        : undefined;
+      const evidenceTask = evidenceTaskSnapshot?.exists
+        ? decodeRecord<Records['tasks']>(evidenceTaskSnapshot.data())
+        : undefined;
+      const admittedSource =
+        evidenceTask?.agentId === input.agentId &&
+        evidenceSource &&
+        evidenceTask.id === evidenceSource.taskId &&
+        isDirectOwnerPersonMessage(evidenceTask, evidenceSource);
+      const currentEvidence = (evidence: ExtractedMemoryFact['personEvidence']) =>
+        evidence &&
+        evidenceSource &&
+        isCurrentMemoryPersonEvidence(evidence, evidenceSource) &&
+        (admittedSource || (evidence.reference && !evidenceSource.taskId))
+          ? evidence
+          : evidence === undefined
+            ? undefined
+            : null;
       const pendingContactIds = new Set(
         [
           ...input.facts.map((fact) => fact.subjectContactId),
@@ -507,61 +533,42 @@ export class FirestoreMemoryExtractionRepository implements MemoryExtractionRepo
             knownContactId: fact.subjectContactId,
             relationship: fact.relationship,
             pendingContactIds,
-            evidence:
-              fact.personEvidence &&
-              evidenceSource === fact.personEvidence.sourceMessageId &&
-              evidenceSource
-                ? fact.personEvidence
-                : fact.personEvidence === undefined
-                  ? undefined
-                  : null,
+            evidence: currentEvidence(fact.personEvidence),
           }),
         );
       }
-      const occasionMatches = input.occasions.map((occasion) => {
-        if (occasion.contactId) {
-          const contactId = people.resolveRedirect(occasion.contactId);
-          return people.contacts.some((contact) => contact.id === contactId) ? { contactId } : null;
-        }
-        return matchSubjectContact(people.contacts, occasion.subject);
-      });
-      const newNames = new Map<string, { name: string }>();
-      const want = (match: SubjectMatch) => {
-        if (!match || !('create' in match)) return;
-        const key = match.create.toLowerCase();
-        if (!newNames.has(key)) newNames.set(key, { name: match.create });
-      };
-      input.occasions.forEach((occasion, index) => {
+      const occasionContacts: Array<string | null> = [];
+      for (const occasion of input.occasions) {
         if (
-          Number.isInteger(occasion.month) &&
-          occasion.month >= 1 &&
-          occasion.month <= 12 &&
-          Number.isInteger(occasion.day) &&
-          occasion.day >= 1 &&
-          occasion.day <= 31
-        )
-          want(occasionMatches[index] ?? null);
-      });
-      const names = [...newNames.entries()];
-      const markers = names.length
-        ? await tx.getAll(...names.map(([, entry]) => contactNameRef(this.store, entry.name)))
-        : [];
-      const marked = new Map<string, string>();
-      const pendingContacts = new Map<
-        string,
-        { name: string; relationship?: string; id: string }
-      >();
-      names.forEach(([key], index) => {
-        const marker = markers[index];
-        if (marker?.exists) marked.set(key, String(marker.get('contactId')));
-        else {
-          const entry = newNames.get(key);
-          if (!entry) return;
-          const id = randomUUID();
-          marked.set(key, id);
-          pendingContacts.set(key, { ...entry, id });
+          !Number.isInteger(occasion.month) ||
+          occasion.month < 1 ||
+          occasion.month > 12 ||
+          !Number.isInteger(occasion.day) ||
+          occasion.day < 1 ||
+          occasion.day > 31
+        ) {
+          occasionContacts.push(null);
+          continue;
         }
-      });
+        if (!input.prepared && occasion.personEvidence === undefined) {
+          // Direct adapter callers can reference an existing contact. Only
+          // source-backed nightly writes can create a contact for a date.
+          const contactId = occasion.contactId && people.resolveRedirect(occasion.contactId);
+          const match = contactId
+            ? people.contacts.find((person) => person.id === contactId) && { contactId }
+            : matchSubjectContact(people.contacts, occasion.subject);
+          occasionContacts.push(match && 'contactId' in match ? match.contactId : null);
+          continue;
+        }
+        occasionContacts.push(
+          await people.resolve({
+            subject: occasion.subject,
+            content: '',
+            knownContactId: occasion.contactId,
+            evidence: currentEvidence(occasion.personEvidence),
+          }),
+        );
+      }
 
       // Query only proposed occasion identities. A 2-row bound detects legacy
       // random-ID duplicates without scanning or rejecting a person's history.
@@ -576,13 +583,7 @@ export class FirestoreMemoryExtractionRepository implements MemoryExtractionRepo
         { contactId: string; kind: string; month: number; day: number }
       >();
       input.occasions.forEach((occasion, index) => {
-        const match = occasionMatches[index];
-        const contactId =
-          match && 'contactId' in match
-            ? match.contactId
-            : match && 'create' in match
-              ? marked.get(match.create.toLowerCase())
-              : undefined;
+        const contactId = occasionContacts[index];
         if (
           !contactId ||
           !Number.isInteger(occasion.month) ||
@@ -629,19 +630,6 @@ export class FirestoreMemoryExtractionRepository implements MemoryExtractionRepo
         occasionsSaved: 0,
         occasionsRejected: 0,
       };
-      for (const pending of pendingContacts.values()) {
-        stageNewContact(tx, this.store, { ...pending, now });
-        result.contactsCreated += 1;
-      }
-      const contactIdFor = (match: SubjectMatch): string | null => {
-        if (!match) return null;
-        if ('contactId' in match) return match.contactId;
-        const key = match.create.toLowerCase();
-        const known = marked.get(key);
-        if (known) return known;
-        return null;
-      };
-
       const written = new Set<string>();
       input.facts.forEach((fact) => {
         if (tombstoned.has(fact.contentHash)) {
@@ -715,7 +703,7 @@ export class FirestoreMemoryExtractionRepository implements MemoryExtractionRepo
           result.occasionsRejected += 1;
           return;
         }
-        const contactId = contactIdFor(occasionMatches[index] ?? null);
+        const contactId = occasionContacts[index];
         if (!contactId) {
           result.occasionsRejected += 1;
           return;
