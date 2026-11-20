@@ -70,6 +70,10 @@ const SNOW_CODES = new Set([71, 73, 75, 77, 85, 86]);
 // the near-surface evidence available here. A conflict does not imply rain.
 const MAX_SNOW_CORROBORATION_TEMP_C = 3;
 
+function minimumRulesOutSnow(lowC: number | undefined): boolean {
+  return typeof lowC === 'number' && Number.isFinite(lowC) && lowC > MAX_SNOW_CORROBORATION_TEMP_C;
+}
+
 function condition(code: number, snowSupported: boolean) {
   return SNOW_CODES.has(code) && !snowSupported
     ? { code: MISSING_WEATHER_CODE, description: UNCERTAIN_PRECIPITATION }
@@ -173,7 +177,11 @@ interface HourlyWeather {
   wind_speed_10m?: number[];
 }
 
-function parseHourly(hourly?: HourlyWeather, units?: Record<string, string>): WeatherHour[] {
+function parseHourly(
+  hourly: HourlyWeather | undefined,
+  units: Record<string, string> | undefined,
+  datesWithWarmMinimum: ReadonlySet<string>,
+): WeatherHour[] {
   const toCelsius = (value: number, unit?: string) =>
     unit === '°F' ? ((value - 32) * 5) / 9 : value;
   const tempUnit = units?.temperature_2m;
@@ -200,7 +208,12 @@ function parseHourly(hourly?: HourlyWeather, units?: Record<string, string>): We
         ...(typeof feels === 'number' && Number.isFinite(feels)
           ? { feelsLikeC: Math.round(toCelsius(feels, units?.apparent_temperature)) }
           : {}),
-        ...condition(code, knownTemperatureUnit && tempC <= MAX_SNOW_CORROBORATION_TEMP_C),
+        ...condition(
+          code,
+          knownTemperatureUnit &&
+            tempC <= MAX_SNOW_CORROBORATION_TEMP_C &&
+            !datesWithWarmMinimum.has(parsed[1]),
+        ),
         precipProbability: hourly?.precipitation_probability?.[index] ?? 0,
         windKmh: Math.round(hourly?.wind_speed_10m?.[index] ?? 0),
       };
@@ -255,7 +268,14 @@ export async function fetchWeather(
   const cur = data.current;
   const day = data.daily;
   if (!cur || typeof cur.temperature_2m !== 'number') return null;
-  const hours = parseHourly(data.hourly, data.hourly_units);
+  // A warm daily minimum contradicts any same-day snow hour. Compare the
+  // provider's Celsius values before rounding either temperature for display.
+  const datesWithWarmMinimum = new Set<string>();
+  for (const [index, date] of (day?.time ?? []).entries()) {
+    const lowC = day?.temperature_2m_min?.[index];
+    if (minimumRulesOutSnow(lowC)) datesWithWarmMinimum.add(date);
+  }
+  const hours = parseHourly(data.hourly, data.hourly_units, datesWithWarmMinimum);
   const dailyCondition = (code: number, date: string | undefined, lowC: number | undefined) =>
     condition(
       code,
@@ -289,7 +309,18 @@ export async function fetchWeather(
   const currentCondition =
     cur.weather_code == null
       ? today
-      : condition(cur.weather_code, cur.temperature_2m <= MAX_SNOW_CORROBORATION_TEMP_C);
+      : condition(
+          cur.weather_code,
+          cur.temperature_2m <= MAX_SNOW_CORROBORATION_TEMP_C &&
+            !minimumRulesOutSnow(day?.temperature_2m_min?.[0]),
+        );
+  if (
+    [currentCondition, today, ...forecast, ...hours].some(
+      (reading) => reading.description === UNCERTAIN_PRECIPITATION,
+    )
+  ) {
+    console.warn('Weather provider snow code lacked supporting temperature evidence');
+  }
   return {
     tempC: Math.round(cur.temperature_2m),
     ...currentCondition,
