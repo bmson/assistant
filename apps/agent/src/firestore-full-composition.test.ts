@@ -91,6 +91,7 @@ const PORTABLE_TOOLS = [
   'occasions.list',
   'occasions.list_birthdays',
   'occasions.save',
+  'occasions.update',
   'owner.notify',
   // Calls stage like jobs and keep their state in callSessions.
   'phone.call',

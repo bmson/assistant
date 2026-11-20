@@ -62,6 +62,7 @@ const files = [
   'apps/agent/src/firestore-portable-web-workspace.test.ts',
   'apps/agent/src/firestore-chat-stop.e2e.test.ts',
   'apps/agent/src/firestore-chat-operation-isolation.e2e.test.ts',
+  'apps/agent/src/occasion-chat-correction.e2e.test.ts',
   'apps/agent/src/firestore-google-calendar.test.ts',
   'apps/agent/src/firestore-schedule.test.ts',
   'apps/agent/src/firestore-repair-schedule.test.ts',

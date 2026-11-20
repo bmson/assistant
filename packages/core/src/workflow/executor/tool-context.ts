@@ -131,6 +131,13 @@ export function createToolContext(args: {
     taskId: task.id,
     agentId: task.agentId,
     conversationId: task.conversationId ?? undefined,
+    ...(task.type === 'chat_turn' &&
+    task.trust === 'owner' &&
+    (task.trigger as { source?: unknown } | null)?.source === 'chat' &&
+    !isForwardedIngest(task) &&
+    typeof triggerPayload?.text === 'string'
+      ? { directOwnerChatText: triggerPayload.text }
+      : {}),
     trust: task.trust as Trust,
     tainted: state.untrustedContext,
     ownerIntent: latestOwnerIntent(

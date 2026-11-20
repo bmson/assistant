@@ -19,3 +19,8 @@ export * from './sports/index.js';
 export * from './voice.js';
 export { dispatchOutbox } from './workflow/dispatch.js';
 export * from './workflow/index.js';
+
+export {
+  matchesOccasionCorrection,
+  parseOccasionCorrection,
+} from './workflow/occasion-correction.js';

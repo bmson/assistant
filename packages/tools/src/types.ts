@@ -26,6 +26,8 @@ export interface ToolContext {
   taskLeaseToken?: string | null;
   agentId: string;
   conversationId?: string;
+  /** Text from the persisted admission of a direct owner dashboard chat turn. */
+  directOwnerChatText?: string;
   trust: Trust;
   /** True once externally controlled content has entered this workflow's model context. */
   tainted: boolean;

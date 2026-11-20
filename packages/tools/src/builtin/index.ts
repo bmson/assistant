@@ -106,6 +106,7 @@ export { registerPortableConversationSearchTool } from './conversation-search.js
 export { registerPortableGraphSnapshotTool } from './graph-snapshot.js';
 export {
   registerPortableBirthdayOccasionTool,
+  registerPortableOccasionCorrectionTool,
   registerPortableOccasionTools,
 } from './occasions.js';
 export { registerPortableReadResultTool } from './read-result.js';

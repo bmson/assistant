@@ -89,6 +89,8 @@ export interface ToolContextLike {
   taskId: string;
   agentId: string;
   conversationId?: string;
+  /** Text from the persisted admission of a direct owner dashboard chat turn. */
+  directOwnerChatText?: string;
   trust: Trust;
   tainted: boolean;
   /** Typed provenance and directly authored scope for this task's latest owner turn. */

@@ -1,7 +1,10 @@
+import { matchesOccasionCorrection, parseOccasionCorrection } from '@assistant/core';
 import { selectUpcomingOccasions } from '@assistant/core/memory/occasions';
-import type {
-  BirthdayOccasionToolRepository,
-  OccasionToolRepository,
+import {
+  type BirthdayOccasionToolRepository,
+  isOccasionCorrectionDate,
+  type OccasionCorrectionRepository,
+  type OccasionToolRepository,
 } from '@assistant/persistence';
 import { z } from 'zod';
 import { register } from '../register.js';
@@ -112,6 +115,60 @@ export function registerPortableOccasionTools(
       },
     },
     { confidentialRead: true },
+  );
+  return registry;
+}
+
+const correctionDate = z.strictObject({
+  month: z.number().int().min(1).max(12),
+  day: z.number().int().min(1).max(31),
+  year: z.number().int().min(1000).max(9999).nullable().optional(),
+});
+
+export function registerPortableOccasionCorrectionTool(
+  registry: ToolRegistry,
+  occasions: OccasionCorrectionRepository,
+): ToolRegistry {
+  register(
+    registry,
+    {
+      name: 'occasions.update',
+      description:
+        'Correct the date of one existing saved occasion at the owner’s explicit request. Use their full saved contact name, occasion kind, and old month/day. Ask for missing details; never guess or create a new occasion. When an old year is supplied, require it to match. When a new year is omitted, preserve the saved year; use null only when the owner requests clearing it.',
+      inputSchema: z.strictObject({
+        subject: z.string().trim().min(1).max(120),
+        kind: z.enum(['birthday', 'anniversary', 'custom']),
+        label: z.string().max(120).optional().describe('The existing occasion label, if supplied.'),
+        expectedDate: correctionDate.describe('The old month/day and optional old year.'),
+        date: correctionDate.describe('The corrected month/day and optional replacement year.'),
+      }),
+      risk: 'autonomous',
+      acceptsUntrustedInput: false,
+      idempotencyKey: (_args, ctx) => `occasions.update:${ctx.taskId}:${ctx.operationId ?? ''}`,
+      execute: async (args, ctx) => {
+        const operationId = ctx.operationId;
+        if (
+          !operationId ||
+          !ctx.conversationId ||
+          !ctx.directOwnerChatText ||
+          ctx.trust !== 'owner' ||
+          ctx.tainted ||
+          ctx.ownerIntent?.sourceActor !== 'owner' ||
+          ctx.ownerIntent.separation === 'unknown'
+        )
+          return { ok: false, outcome: 'owner_request_required' } as const;
+        const requested = parseOccasionCorrection(ctx.directOwnerChatText);
+        if (!requested)
+          return { ok: false, outcome: 'owner_details_required', operationId } as const;
+        if (!matchesOccasionCorrection(requested, args))
+          return { ok: false, outcome: 'owner_action_mismatch', operationId } as const;
+        if (!isOccasionCorrectionDate(args.expectedDate) || !isOccasionCorrectionDate(args.date))
+          return { ok: false, outcome: 'invalid_date', operationId } as const;
+        const result = await occasions.correct({ ...args, agentId: ctx.agentId });
+        return { ...result, ok: 'occasion' in result, operationId };
+      },
+    },
+    { ownerOnly: true, confidentialRead: true, writesMemory: true },
   );
   return registry;
 }

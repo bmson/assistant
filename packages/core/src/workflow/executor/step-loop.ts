@@ -133,6 +133,11 @@ import {
   selectMemoryReadAnswer,
 } from '../memory-read-answer.js';
 import {
+  isOccasionCorrectionRequest,
+  occasionCorrectionReply,
+  parseOccasionCorrection,
+} from '../occasion-correction.js';
+import {
   explicitlyOptsOutOfRecall,
   isConversationLocalContext,
   isExplicitCommitmentReadRequest,
@@ -687,6 +692,13 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     isSelfContainedTextTransformation(ownerText, ownerIntent.externalText);
   const futureWatchIntent =
     directOwner && !restrictedChecklistResume ? detectFutureWatchIntent(ownerText) : null;
+  const occasionCorrection =
+    directOwner &&
+    !restrictedChecklistResume &&
+    Boolean(ctx.directOwnerChatText && isOccasionCorrectionRequest(ctx.directOwnerChatText));
+  const groundedOccasionCorrection = occasionCorrection
+    ? parseOccasionCorrection(ctx.directOwnerChatText ?? '')
+    : undefined;
   const memoryWrite = directOwner && !restrictedChecklistResume && isMemoryWriteRequest(ownerText);
   const detectedLookups =
     directOwner && !restrictedChecklistResume
@@ -723,7 +735,9 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     (lookup) => lookup.destination === 'calendar' || lookup.airportIntent,
   );
   const birthdaySaves =
-    directOwner && !restrictedChecklistResume ? requestedBirthdaySaves(ownerWindow) : [];
+    directOwner && !restrictedChecklistResume && !occasionCorrection
+      ? requestedBirthdaySaves(ownerWindow)
+      : [];
   const situationRequest =
     !publicScope && directOwner && !restrictedChecklistResume && isSituationRequest(ownerText);
   const skillInventoryRequest =
@@ -772,6 +786,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     !isForwardedIngest(task) &&
     ownerIntent.authorizedScopes.includes('private_read') &&
     !situationRequest &&
+    !occasionCorrection &&
     !tripOwnsCalendar;
   let readRequest: PersonalReadRequest | null =
     !eligiblePrivateRead || publicOnly
@@ -1051,6 +1066,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     !restrictedChecklistResume &&
     task.trust === 'owner' &&
     !situationRequest &&
+    !occasionCorrection &&
     isConceptualNoToolRequest(ownerText);
   // Route action requests to the reasoning model (see roleForTask): a goal
   // session, a mission, an email to triage, or a chat/SMS turn the planner
@@ -1062,6 +1078,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     restrictedChecklistResume ||
     readRequest ||
     memoryWrite ||
+    occasionCorrection ||
     liveLookup
       ? 'reason'
       : roleForTask(task, plan);
@@ -3122,9 +3139,11 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         ? `\nThis automatic session is bound to Goal ID ${task.goalId}. Work only on this goal; the runtime owns progress persistence.`
         : '',
       plan ? `\n${renderPlan(plan)}` : '',
-      memoryWrite
-        ? '\nThe owner wants information saved. Use memory.save for supplied facts/preferences or occasions.save for supplied dates. Save only owner-provided or verified details, never an earlier assistant guess. If the actual order or fact is missing, ask for it instead of inventing it. Multiple independent saves may share a tool turn; preserve blank dates and deceased markers instead of guessing. Report confirmed saves and unfinished work separately.'
-        : '',
+      occasionCorrection
+        ? '\nThe owner asked to correct a saved occasion. Use occasions.update only with the stated full saved name, occasion kind or label, old date and corrected date. Ask for the missing details when needed. Use the current tool result for the reply.'
+        : memoryWrite
+          ? '\nThe owner wants information saved. Use memory.save for supplied facts/preferences or occasions.save for supplied dates. Save only owner-provided or verified details, never an earlier assistant guess. If the actual order or fact is missing, ask for it instead of inventing it. Multiple independent saves may share a tool turn; preserve blank dates and deceased markers instead of guessing. Report confirmed saves and unfinished work separately.'
+          : '',
       readRequest ? readLookupDirective(readRequest) : '',
       conceptualNoTool && needsConversationReasoning(ownerText)
         ? CONVERSATION_REASONING_DIRECTIVE
@@ -3182,19 +3201,23 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       readToolEvidence.some(
         (row) => row.toolName === 'watch.create' || row.toolName === 'watch.web',
       );
-    const toolDefs = restrictedChecklistResume
-      ? boundedForcedReadTool
-        ? goalFilteredTools.filter((tool) => tool.name === boundedForcedReadTool)
+    const toolDefs = occasionCorrection
+      ? groundedOccasionCorrection && state.step === 0
+        ? goalFilteredTools.filter((tool) => tool.name === 'occasions.update')
         : []
-      : state.futureWatchRecoveryAttempts === 0 || !futureWatchIntent
-        ? goalFilteredTools
-        : watchRecoveryHasPriorAttempt
-          ? []
-          : goalFilteredTools.filter((tool) =>
-              futureWatchIntent.channel === 'email'
-                ? tool.name === 'watch.create'
-                : tool.name === 'watch.web',
-            );
+      : restrictedChecklistResume
+        ? boundedForcedReadTool
+          ? goalFilteredTools.filter((tool) => tool.name === boundedForcedReadTool)
+          : []
+        : state.futureWatchRecoveryAttempts === 0 || !futureWatchIntent
+          ? goalFilteredTools
+          : watchRecoveryHasPriorAttempt
+            ? []
+            : goalFilteredTools.filter((tool) =>
+                futureWatchIntent.channel === 'email'
+                  ? tool.name === 'watch.create'
+                  : tool.name === 'watch.web',
+              );
     const toolSet = Object.fromEntries(
       toolDefs.map((def) => [
         def.name,
@@ -3387,6 +3410,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       !mustRecordGoalProgress &&
       !readAnswerTurn &&
       !conceptualNoTool &&
+      !occasionCorrection &&
       state.step === 0 &&
       (isUnattendedGoalSession(task) || plan?.action === 'workflow');
 
@@ -3575,8 +3599,11 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         system,
         messages: publicModelWindow(),
         tools: toolSet as never,
-        toolChoice:
-          readAnswerTurn || airportClarificationTurn
+        toolChoice: occasionCorrection
+          ? toolDefs.length
+            ? { type: 'tool', toolName: 'occasions.update' }
+            : 'none'
+          : readAnswerTurn || airportClarificationTurn
             ? 'none'
             : conceptualNoTool || watchRecoveryHasPriorAttempt
               ? 'none'
@@ -3852,6 +3879,14 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
 
     // Recovery turns are model boundaries too. Keep the no-tool guarantee
     // immediately before dispatch so any later retry cannot reopen it.
+    if (!resumingBatch && occasionCorrection) {
+      stepResult = {
+        ...stepResult,
+        toolCalls: toolDefs.length
+          ? stepResult.toolCalls.filter((call) => call.toolName === 'occasions.update').slice(0, 1)
+          : [],
+      };
+    }
     if (!resumingBatch && (readAnswerTurn || conceptualNoTool)) {
       stepResult = { ...stepResult, toolCalls: [] };
     }
@@ -4030,7 +4065,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     // evidence and can leave an otherwise completed lookup sleeping forever.
     const noToolBoundaryFinal =
       !resumingBatch &&
-      (readAnswerTurn || conceptualNoTool) &&
+      (readAnswerTurn || conceptualNoTool || occasionCorrection) &&
       stepResult.toolCalls.length === 0 &&
       stepResult.finishReason === 'tool-calls';
     const successfulFinish =
@@ -4833,6 +4868,12 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       state.contextWindow = compact(rc.window) as unknown as TaskState['contextWindow'];
       if (!(await checkpointTask(deps.persistence?.tasks ?? db, lease, state))) return LOST_LEASE;
       continue;
+    }
+
+    if (occasionCorrection && !stepResult.text.trim()) {
+      const rows = await evidence.taskEvidence({ agentId: task.agentId, taskId: task.id });
+      const reply = occasionCorrectionReply(ctx.directOwnerChatText ?? '', rows);
+      if (reply) stepResult = { ...stepResult, text: reply.text };
     }
 
     // no tool calls → final answer
