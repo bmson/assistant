@@ -54,7 +54,7 @@ async function dropOwnedDatabase(
 }
 
 it.skipIf(!imagesReceipt)(
-  'qualifies the schema 141 migration image, runtime readiness, and generic write compatibility',
+  'qualifies the schema 142 migration image, runtime readiness, and generic write compatibility',
   async () => {
     assertAllocatedTestTarget({
       databaseUrl: process.env.DATABASE_URL,
@@ -82,7 +82,7 @@ it.skipIf(!imagesReceipt)(
       | undefined;
     try {
       await admin`SET statement_timeout = '15s'`;
-      prefixDir = await mkdtemp(join(tmpdir(), 'assistant-memory-witness-role-141-'));
+      prefixDir = await mkdtemp(join(tmpdir(), 'assistant-memory-witness-role-142-'));
       await admin.unsafe(`CREATE DATABASE "${target.databaseName}"`);
       created = true;
       await admin.unsafe(
@@ -96,7 +96,7 @@ it.skipIf(!imagesReceipt)(
       await client`SET statement_timeout = '30s'`;
 
       // The populated historical 0134 prefix remains unchanged. The current
-      // schema 141 image must apply the witness, Calendar, cost, MCP OAuth and bill evidence migrations.
+      // schema 142 image must apply the witness, Calendar, cost, MCP OAuth, bill evidence and signal migrations.
       const forwardEntries = journal.entries.slice(135);
       expect(forwardEntries.map((entry: { tag: string }) => entry.tag)).toEqual([
         '0135_memory_write_witness',
@@ -106,6 +106,7 @@ it.skipIf(!imagesReceipt)(
         '0139_research_assignment_state',
         '0140_cost_event_accounted_at',
         '0141_bill_email_evidence',
+        '0142_signal_store',
       ]);
       const expectedForwardLedger = await Promise.all(
         forwardEntries.map(async (entry: { tag: string; when: number }) => ({
@@ -183,7 +184,7 @@ it.skipIf(!imagesReceipt)(
       });
       await client`SET statement_timeout = '15s'`;
       const firstForward = expectedForwardLedger[0];
-      if (!firstForward) throw new Error('Schema 141 forward migration tail is missing.');
+      if (!firstForward) throw new Error('Schema 142 forward migration tail is missing.');
       const forwardLedger = await client`
         SELECT hash,created_at::text AS "createdAt" FROM drizzle.__drizzle_migrations
         WHERE created_at >= ${firstForward.createdAt}
@@ -241,6 +242,10 @@ it.skipIf(!imagesReceipt)(
         FROM information_schema.columns WHERE table_schema='public'
           AND table_name='email_ingest' AND column_name='bill_evidence'`;
       expect(billEvidence).toEqual({ nullable: 'YES', type: 'jsonb', indexed: true });
+      const [signalStore] = await client`
+        SELECT to_regclass('public.signals')::text AS "tableName",
+               to_regclass('public.signals_agent_kind_at_idx') IS NOT NULL AS indexed`;
+      expect(signalStore).toEqual({ tableName: 'signals', indexed: true });
       const [legacyMcpConnection] = await client`
         SELECT status, enabled, bearer_token_encrypted AS "bearerTokenEncrypted", oauth_state AS "oauthState"
         FROM mcp_connections WHERE id=${legacyMcpId} AND agent_id=${owner}`;
@@ -273,7 +278,7 @@ it.skipIf(!imagesReceipt)(
       const proofDirectory = process.env.ASSISTANT_MEMORY_WITNESS_PROOF_DIR;
       if (proofDirectory) {
         await writeFile(
-          join(proofDirectory, 'schema-141-forward-upgrade.json'),
+          join(proofDirectory, 'schema-142-forward-upgrade.json'),
           `${JSON.stringify(
             {
               prefixLastMigration: prefixEntries.at(-1)?.tag,
