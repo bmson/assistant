@@ -14,7 +14,8 @@ const totals = (dailyHeldUsd: number | undefined, dailyLimitUsd: number): CostTo
 
 it.each([
   [0, 4, 'within_limit'],
-  [1, 4, 'within_limit'],
+  [0.999999, 4, 'within_limit'],
+  [1, 4, 'at_threshold'],
   [1.000001, 4, 'above_threshold'],
   [0, 0, 'paused'],
   [1, 0, 'above_threshold'],
@@ -23,6 +24,7 @@ it.each([
   [NaN, 4, 'unavailable'],
   [-1, 4, 'unavailable'],
   [1, -1, 'unavailable'],
+  [1, NaN, 'unavailable'],
 ] as const)('compares today’s holds %s with today’s cap %s', async (held, cap, expected) => {
   expect(await dailyBudgetHoldHealth(async () => totals(held, cap))).toBe(expected);
 });
