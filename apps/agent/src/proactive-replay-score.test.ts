@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { type ReplayCase, type ReplayTick, scoreReplayCase } from './proactive-replay-score.js';
+import { deliveryMail, replayCardGrounded, replayCases } from './proactive-replay-cases.js';
+import {
+  type ReplayCase,
+  type ReplayTick,
+  scoreReplayCase,
+  scoreReplayKinds,
+} from './proactive-replay-score.js';
 
 const fixture: ReplayCase = {
   id: 'CONTROL-SCORER',
@@ -113,5 +119,230 @@ describe('proactive replay scorer', () => {
       matched: 0.5,
       delivered: 1,
     });
+  });
+});
+
+describe('per-kind replay score', () => {
+  const score = (ticks: ReplayTick[]) => scoreReplayKinds([scoreReplayCase(fixture, ticks, {})]);
+
+  it.each([
+    { ...moment, elapsedMinutes: 11 },
+    { ...moment, elapsedMinutes: 4 },
+    { ...moment, exactSource: false },
+    { ...moment, durableCard: false },
+    { ...moment, groundedCard: false },
+  ])('records timing without awarding credit for invalid delivery', (invalid) => {
+    expect(score([{ ...arrival, moments: [invalid] }, retry])).toMatchObject([
+      {
+        kind: 'mail-action',
+        expected: 1,
+        delivered: 1,
+        matched: 0,
+        recall: 0,
+        precision: 0,
+        misses: 1,
+        falsePositives: 1,
+        expectations: [{ earliestMinutes: 5, latestMinutes: 10, credit: 0 }],
+        observedTiming: [{ tick: 'arrival', elapsedMinutes: invalid.elapsedMinutes }],
+      },
+    ]);
+  });
+
+  it('retains missed deliveries and missing quiet observations', () => {
+    const result = scoreReplayCase(fixture, [], {});
+    expect(scoreReplayKinds([result])).toMatchObject([
+      { kind: 'mail-action', expected: 1, delivered: 0, recall: 0, precision: null, misses: 1 },
+    ]);
+    expect(result.quietChecks).toMatchObject([{ tick: 'retry', observations: 0, violations: 0 }]);
+    expect(result.passed).toBe(false);
+  });
+
+  it('charges wrong kinds and unexpected deliveries to their observed kind', () => {
+    const bill = { ...moment, kind: 'bill-due' };
+    expect(
+      score([
+        { ...arrival, selected: bill.kind, moments: [bill] },
+        retry,
+        { ...arrival, name: 'unexpected tick' },
+      ]),
+    ).toMatchObject([
+      {
+        kind: 'bill-due',
+        expected: 0,
+        delivered: 1,
+        recall: null,
+        precision: 0,
+        falsePositives: 1,
+      },
+      { kind: 'mail-action', expected: 1, delivered: 1, matched: 0, misses: 1, falsePositives: 1 },
+    ]);
+  });
+
+  it('credits a single match and charges known and unattributed duplicates to precision', () => {
+    const duplicate = { ...moment, exactSource: false };
+    const overDelivery = { ...arrival, moments: [duplicate, moment], ownerNotices: 3 };
+    expect(score([overDelivery, retry])).toMatchObject([
+      { kind: null, expected: 0, delivered: 1, matched: 0, falsePositives: 1, precision: 0 },
+      {
+        kind: 'mail-action',
+        expected: 1,
+        delivered: 2,
+        matched: 1,
+        falsePositives: 1,
+        precision: 0.5,
+      },
+    ]);
+  });
+
+  it('applies half credit at the inclusive boundary with incomplete push evidence', () => {
+    const incomplete = { ...moment, elapsedMinutes: 10, durablePushAcknowledged: false };
+    expect(
+      score([{ ...arrival, moments: [incomplete], pushAcknowledged: false }, retry]),
+    ).toMatchObject([
+      {
+        kind: 'mail-action',
+        matched: 0.5,
+        recall: 0.5,
+        precision: 0.5,
+        misses: 0,
+        falsePositives: 0,
+      },
+    ]);
+  });
+
+  it('excludes repeated setup observations while retaining delivery violations during silence', () => {
+    const setup: ReplayCase = {
+      id: 'S14',
+      ticks: {
+        ...fixture.ticks,
+        arrival: {
+          deliveries: 1,
+          kind: 'mail-action',
+          earliestMinutes: 5,
+          latestMinutes: 10,
+          setup: true,
+        },
+      },
+    };
+    const result = scoreReplayCase(
+      setup,
+      [
+        arrival,
+        arrival,
+        { ...retry, selected: 'bill-due', ownerNotices: 1 },
+        { ...retry, pushSinkCalls: 1 },
+      ],
+      {},
+    );
+    expect(result).toMatchObject({
+      expected: 1,
+      setupExpected: 1,
+      delivered: 4,
+      setupDeliveries: 2,
+      quietViolations: 2,
+    });
+    expect(result.quietChecks).toMatchObject([{ tick: 'retry', observations: 2, violations: 2 }]);
+    expect(scoreReplayKinds([result])).toMatchObject([
+      { kind: null, expected: 0, delivered: 2, falsePositives: 2 },
+    ]);
+  });
+});
+
+describe('S08 delivery-date stack', () => {
+  const { facts, ticks } = replayCases.delivery;
+  const original = 'original delivery date morning';
+  const revised = 'revised delivery date morning';
+  const elapsedMinutes = ticks['revised delivery date morning'].earliestMinutes + 5;
+  const originalSweep: ReplayTick = {
+    ...retry,
+    name: original,
+    elapsedMinutes: 35,
+    reason: 'quiet-briefing',
+    briefing: { outcome: 'quiet', mailScanned: 2 },
+  };
+  const revisedQuiet: ReplayTick = {
+    ...originalSweep,
+    name: revised,
+    elapsedMinutes,
+    briefing: { outcome: 'quiet', mailScanned: 1 },
+  };
+  const stack: ReplayTick = {
+    ...revisedQuiet,
+    reason: null,
+    selected: 'briefing',
+    briefing: { outcome: 'delivered', mailScanned: 1 },
+    moments: [
+      {
+        ...moment,
+        kind: 'delivery-today',
+        elapsedMinutes,
+        durablePushAcknowledged: false,
+      },
+    ],
+    ownerNotices: 1,
+  };
+  const run = (observations: ReplayTick[]) =>
+    scoreReplayCase(replayCases.delivery, observations, facts);
+
+  it('records a completed sweep with no delivery as a miss', () => {
+    const result = run([originalSweep, revisedQuiet]);
+    expect(result).toMatchObject({
+      passed: false,
+      expected: 1,
+      delivered: 0,
+      matched: 0,
+      quietViolations: 0,
+    });
+    expect(scoreReplayKinds([result])).toMatchObject([
+      {
+        kind: 'delivery-today',
+        recall: 0,
+        precision: null,
+        misses: 1,
+      },
+    ]);
+  });
+
+  it('credits a published exact-source stack card with no push', () => {
+    expect(run([originalSweep, stack])).toMatchObject({ passed: true, matched: 1 });
+  });
+
+  it('awards partial credit if a stack card caused a push', () => {
+    const [card] = stack.moments;
+    if (!card) throw new Error('Missing test card');
+    expect(
+      run([
+        originalSweep,
+        {
+          ...stack,
+          pushSinkCalls: 1,
+          pushAcknowledged: true,
+          moments: [{ ...card, durablePushAcknowledged: true }],
+        },
+      ]),
+    ).toMatchObject({ passed: false, matched: 0.5 });
+  });
+
+  it('counts a stale-date delivery as a false positive and retains the revised-date match', () => {
+    const result = run([{ ...stack, name: originalSweep.name }, stack]);
+    expect(result).toMatchObject({ passed: false, matched: 1, quietViolations: 1 });
+    expect(scoreReplayKinds([result])).toMatchObject([
+      { kind: 'delivery-today', recall: 1, precision: 0.5, falsePositives: 1 },
+    ]);
+  });
+
+  it('requires the revised date and an at-home next step on the owner card', () => {
+    const card = {
+      title: 'Store delivery SYN-DELIVERY-08',
+      startsAt: '2026-12-11T01:00:00Z',
+      summary: 'Will someone be home?',
+    };
+    expect(replayCardGrounded('S08', card, stack.name)).toBe(true);
+    expect(
+      replayCardGrounded('S08', { ...card, startsAt: deliveryMail.original.date }, stack.name),
+    ).toBe(false);
+    expect(
+      replayCardGrounded('S08', { ...card, summary: 'Your delivery is ready.' }, stack.name),
+    ).toBe(false);
   });
 });
