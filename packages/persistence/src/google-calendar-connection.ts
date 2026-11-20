@@ -19,17 +19,23 @@ export type GoogleCalendarFlowOutcome = z.infer<typeof googleCalendarFlowOutcome
 const instant = z.string().datetime({ offset: true });
 const account = z.object({ subject: z.string().min(1), email: z.string().email() }).strict();
 export const householdCalendarPurpose = z.enum(['household', 'work_free_busy', 'ignore']);
-export const householdCalendarChoices = z
-  .array(z.object({ id: z.string().min(1).max(512), purpose: householdCalendarPurpose }).strict())
-  .max(50)
-  .refine((choices) => new Set(choices.map(({ id }) => id)).size === choices.length);
+function calendarChoices<T extends z.ZodType<string>>(purpose: T) {
+  return z
+    .array(z.object({ id: z.string().min(1).max(512), purpose }).strict())
+    .max(50)
+    .refine((choices) => new Set(choices.map(({ id }) => id)).size === choices.length);
+}
+
+export const householdCalendarChoices = calendarChoices(householdCalendarPurpose);
+// Older readers preserve a newer purpose without admitting it through their write schema.
+const storedCalendarChoices = calendarChoices(z.string().regex(/^[a-z][a-z0-9_]{0,63}$/));
 export const householdCalendarSettings = z
-  .object({
-    revision: z.string().uuid(),
-    choices: householdCalendarChoices,
-  })
+  .object({ revision: z.string().uuid(), choices: householdCalendarChoices })
   .strict();
-export type HouseholdCalendarSettings = z.infer<typeof householdCalendarSettings>;
+const readableHouseholdCalendarSettings = householdCalendarSettings.extend({
+  choices: storedCalendarChoices,
+});
+export type HouseholdCalendarSettings = z.infer<typeof readableHouseholdCalendarSettings>;
 export const googleCalendarConnectionSchema = z
   .object({
     version: z.union([z.literal(1), z.literal(2)]),
@@ -74,7 +80,7 @@ export const googleCalendarConnectionSchema = z
 export type GoogleCalendarConnectionState = z.infer<typeof googleCalendarConnectionSchema> & {
   household?: HouseholdCalendarSettings;
 };
-export const storedHouseholdCalendarSettings = householdCalendarSettings.extend({
+export const storedHouseholdCalendarSettings = readableHouseholdCalendarSettings.extend({
   connectionId: z.string().uuid(),
 });
 export function readHouseholdCalendarSettings(value: unknown, connectionId?: string) {
@@ -175,7 +181,8 @@ export function createGoogleCalendarConnectionRepository(
         if (
           s.connection?.id !== connectionId ||
           s.connection.status !== 'connected' ||
-          (s.household?.revision ?? null) !== expectedRevision
+          (s.household?.revision ?? null) !== expectedRevision ||
+          (s.household && !householdCalendarChoices.safeParse(s.household.choices).success)
         )
           return { state: s, result: false };
         return {

@@ -53,6 +53,8 @@ Critical paths: A1 → A11 → C2 → D7 (money) and B2 → C6 → D3 (conflict 
 
 The B2 iPhone preview uses the connected personal Google account. It accepts household detail choices for calendars owned by that account and work free/busy choices for readable sources. Unclassified and ignored calendars contribute neither events nor busy times to this preview. Spouse consent, other categories, on-call import and the owner’s full roster are open. The choices have their own record on each store so the existing connection payload stays readable by earlier OAuth code.
 
+The B2 reader bridge preserves newer saved purpose values on both stores. A reader that lacks the purpose excludes that calendar before fetching details, reports incomplete coverage, and refuses edits to the affected setup. Use the reader bridge or newer readers when rolling back after new purposes are saved.
+
 The Phase 0 gate requires seven actual days of evidence covering daily briefing delivery, chat isolation, cost holds under 25% of the daily cap, extraction on days with eligible mail, and zero texts for routine replies. Record owner and household opt-ins before using their optional sources or delivery channels.
 
 H1 covers five of 28 synthetic scenarios on PostgreSQL and Firestore. The seven on-time replay deliveries per driver include both D7 bill reminders. Production recall remains unmeasured. [H1 replay](https://github.com/bmson/assistant/pull/972), [D7 bill timing](https://github.com/bmson/assistant/pull/974), [scorecard and coverage](golden-signals.md#running-the-replay).

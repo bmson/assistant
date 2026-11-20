@@ -4,6 +4,7 @@ import { createFirestoreGoogleCalendarConnectionRepository } from '@assistant/fi
 import {
   GOOGLE_CALENDAR_READ_SCOPE,
   type GoogleCalendarConnectionRepository,
+  type HouseholdCalendarSettings,
 } from '@assistant/persistence';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GET, PUT } from '@/app/api/mobile/v1/connections/google-calendar/household/route';
@@ -73,6 +74,9 @@ describe.each(types)('household Calendar through mobile routes on %s', (driver) 
       resetConfigForTest();
 
       let repository: GoogleCalendarConnectionRepository;
+      let seedStoredChoices: (
+        settings: HouseholdCalendarSettings & { connectionId: string },
+      ) => Promise<unknown>;
       if (driver === 'postgres') {
         const {
           createPostgresGoogleCalendarConnectionRepository,
@@ -81,6 +85,11 @@ describe.each(types)('household Calendar through mobile routes on %s', (driver) 
         const db = getDb();
         owner = await assertPostgresInstallationOwner(db);
         repository = createPostgresGoogleCalendarConnectionRepository(db);
+        seedStoredChoices = (settings) => db.$client`
+          insert into google_household_calendar_choices (agent_id, settings)
+          values (${owner}, ${JSON.stringify(settings)}::jsonb)
+          on conflict (agent_id) do update set settings = excluded.settings
+        `;
       } else {
         const store = getFirestoreInstallationStore();
         cleanup = async () => {
@@ -88,6 +97,8 @@ describe.each(types)('household Calendar through mobile routes on %s', (driver) 
           await store.db.terminate();
         };
         repository = createFirestoreGoogleCalendarConnectionRepository(store);
+        seedStoredChoices = (settings) =>
+          store.doc('googleHouseholdCalendarChoices', owner).set({ agentId: owner, settings });
       }
       const { encryptStoredCredential } = await import('@assistant/core/mcp-secrets');
       const connectionId = randomUUID();
@@ -129,6 +140,27 @@ describe.each(types)('household Calendar through mobile routes on %s', (driver) 
       const family = 'family@example.test';
       const work = 'work@example.test';
       const other = 'other@example.test';
+      const purposeSources = [
+        {
+          id: 'school@example.test',
+          summary: 'Oak School',
+          purpose: 'school',
+          title: 'Science fair',
+        },
+        {
+          id: 'activity@example.test',
+          summary: 'Community club',
+          purpose: 'activity',
+          title: 'Practice',
+        },
+        {
+          id: 'holidays@example.test',
+          summary: 'Holiday calendar',
+          purpose: 'holidays',
+          title: 'Local holiday',
+        },
+      ] as const;
+      let extraRoster = false;
       const providerCalls: string[] = [];
       let rosterMode: 'ready' | 'truncated' | 'unavailable' = 'ready';
       let duringFamilyRead: (() => Promise<unknown>) | undefined;
@@ -171,6 +203,14 @@ describe.each(types)('household Calendar through mobile routes on %s', (driver) 
                 accessRole: 'owner',
                 dataOwner: 'different-owner@example.test',
               },
+              ...(extraRoster
+                ? purposeSources.map(({ id, summary }) => ({
+                    id,
+                    summary,
+                    accessRole: 'owner',
+                    dataOwner: 'personal@example.test',
+                  }))
+                : []),
             ],
             ...(rosterMode === 'truncated' ? { nextPageToken: 'fixture-page' } : {}),
           });
@@ -203,7 +243,9 @@ describe.each(types)('household Calendar through mobile routes on %s', (driver) 
           items: [
             {
               id: 'fixture-event',
-              summary: id === family ? 'Family appointment' : 'Excluded title',
+              summary:
+                purposeSources.find((source) => source.id === id)?.title ??
+                (id === family ? 'Family appointment' : 'Excluded title'),
               start: { dateTime: '2026-11-19T18:00:00Z' },
               end: { dateTime: '2026-11-19T19:00:00Z' },
             },
@@ -324,6 +366,42 @@ describe.each(types)('household Calendar through mobile routes on %s', (driver) 
       providerCalls.length = 0;
       expect((await GET(request(window(ignored.revision)))).status).toBe(409);
       expect(providerCalls).toEqual(['roster', `events:${family}`]);
+      duringFamilyRead = undefined;
+      extraRoster = true;
+      const extendedSettings = {
+        revision: randomUUID(),
+        connectionId,
+        choices: [...withIgnore, ...purposeSources.map(({ id, purpose }) => ({ id, purpose }))],
+      };
+      await seedStoredChoices(extendedSettings);
+      const bridgeSetup = await GET(request());
+      expect(bridgeSetup.status).toBe(200);
+      const bridgeView = await bridgeSetup.json();
+      expect(bridgeView).toMatchObject({
+        state: 'incomplete',
+        remaining: null,
+        revision: extendedSettings.revision,
+      });
+      for (const { id } of purposeSources)
+        expect(bridgeView.calendars).toContainEqual(expect.objectContaining({ id, purpose: null }));
+      providerCalls.length = 0;
+      const bridgePreview = await (await GET(request(window(extendedSettings.revision)))).json();
+      expect(bridgePreview).toMatchObject({
+        complete: false,
+        rows: [
+          { calendar: 'Family', title: 'Family appointment' },
+          { calendar: 'Work', title: 'Busy' },
+        ],
+      });
+      expect(providerCalls).toEqual(['roster', `events:${family}`, `busy:${work}`]);
+      expect(
+        (await PUT(request('', { connectionId, revision: extendedSettings.revision, choices: [] })))
+          .status,
+      ).toBe(409);
+      expect((await repository.get(owner))?.household).toEqual({
+        revision: extendedSettings.revision,
+        choices: extendedSettings.choices,
+      });
       await repository.disconnect(owner);
       expect((await repository.get(owner))?.household).toBeUndefined();
       expect((await GET(request())).status).toBe(503);

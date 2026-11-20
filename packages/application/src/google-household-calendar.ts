@@ -3,6 +3,7 @@ import {
   type GoogleCalendarConnectionRepository,
   type HouseholdCalendarSettings,
   householdCalendarChoices,
+  householdCalendarPurpose,
 } from '@assistant/persistence';
 import { z } from 'zod';
 
@@ -72,6 +73,19 @@ const canShowBusy = (entry: { accessRole: string }) =>
 
 export class HouseholdCalendarConflict extends Error {}
 
+function eligible(purpose: string, calendar: CalendarSource, accountEmail: string) {
+  switch (purpose) {
+    case 'household':
+      return canShowDetails(calendar, accountEmail);
+    case 'work_free_busy':
+      return canShowBusy(calendar);
+    case 'ignore':
+      return true;
+    default:
+      return false;
+  }
+}
+
 function setupView(
   connectionId: string,
   household: HouseholdCalendarSettings | undefined,
@@ -81,22 +95,26 @@ function setupView(
   const purposes = new Map(household?.choices.map(({ id, purpose }) => [id, purpose]));
   const calendars = roster.calendars.map((calendar) => {
     const saved = purposes.get(calendar.id);
-    const unavailable =
-      (saved === 'household' && !canShowDetails(calendar, accountEmail)) ||
-      (saved === 'work_free_busy' && !canShowBusy(calendar));
     return {
       id: calendar.id,
       name: calendar.name,
       canShowDetails: canShowDetails(calendar, accountEmail),
       canShowBusy: canShowBusy(calendar),
-      purpose: unavailable ? null : (saved ?? null),
+      purpose: saved && eligible(saved, calendar, accountEmail) ? saved : null,
     };
   });
+  const available = new Set(
+    calendars.filter(({ purpose }) => purpose !== null).map(({ id }) => id),
+  );
+  const complete =
+    roster.complete &&
+    (household?.choices.every(({ id, purpose }) => purpose === 'ignore' || available.has(id)) ??
+      true);
   return {
-    state: roster.complete ? 'ready' : 'incomplete',
+    state: complete ? 'ready' : 'incomplete',
     connectionId,
     revision: household?.revision ?? null,
-    remaining: roster.complete ? calendars.filter(({ purpose }) => purpose === null).length : null,
+    remaining: complete ? calendars.filter(({ purpose }) => purpose === null).length : null,
     calendars,
   };
 }
@@ -156,19 +174,28 @@ export function createGoogleHouseholdCalendarService(
     async save(ownerId: string, input: z.infer<typeof householdCalendarSave>) {
       const current = await open(ownerId, input);
       if (!current.roster.complete) throw new Error('Household calendar roster incomplete');
+      if (
+        current.household?.choices.some(
+          ({ purpose }) => !householdCalendarPurpose.safeParse(purpose).success,
+        )
+      )
+        throw new HouseholdCalendarConflict();
       const rosterById = new Map(
         current.roster.calendars.map((calendar) => [calendar.id, calendar]),
       );
       for (const choice of input.choices) {
         const calendar = rosterById.get(choice.id);
-        if (
-          !calendar ||
-          (choice.purpose === 'household' && !canShowDetails(calendar, current.accountEmail)) ||
-          (choice.purpose === 'work_free_busy' && !canShowBusy(calendar))
-        )
+        if (!calendar || !eligible(choice.purpose, calendar, current.accountEmail))
           throw new HouseholdCalendarConflict();
       }
-      const settings = { revision: randomUUID(), choices: input.choices };
+      const submitted = new Set(input.choices.map(({ id }) => id));
+      const held =
+        current.household?.choices.filter(({ id, purpose }) => {
+          if (submitted.has(id)) return false;
+          const calendar = rosterById.get(id);
+          return !calendar || !eligible(purpose, calendar, current.accountEmail);
+        }) ?? [];
+      const settings = { revision: randomUUID(), choices: [...input.choices, ...held] };
       if (!(await repository.saveHousehold(ownerId, input.connectionId, input.revision, settings)))
         throw new HouseholdCalendarConflict();
       const persisted = await repository.get(ownerId);
