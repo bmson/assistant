@@ -2,8 +2,11 @@ import { describe, expect, it } from 'vitest';
 import {
   isOccasionCorrectionRequest,
   matchesOccasionCorrection,
+  matchesOccasionTarget,
   occasionCorrectionReply,
+  occasionMutationTool,
   parseOccasionCorrection,
+  parseOccasionDeletion,
 } from './occasion-correction.js';
 
 const request = 'Change Mira Vale’s saved pottery-club anniversary from April 12 to April 14.';
@@ -85,5 +88,68 @@ describe('owner-chat occasion correction evidence', () => {
         },
       ]),
     ).toMatchObject({ confirmed: false, text: expect.stringMatching(/more than one person/) });
+  });
+});
+
+describe('owner-chat occasion deletion evidence', () => {
+  const deleteRequest = 'Delete Mira Vale’s saved pottery-club anniversary on April 12.';
+  const target = {
+    subject: input.subject,
+    kind: input.kind,
+    label: input.label,
+    expectedDate: input.expectedDate,
+  };
+
+  it('requires the owner’s exact target and saved date', () => {
+    expect(occasionMutationTool(deleteRequest)).toBe('occasions.delete');
+    const deletion = parseOccasionDeletion(deleteRequest);
+    expect(deletion).toEqual(target);
+    if (!deletion) throw new Error('Missing grounded deletion');
+    expect(matchesOccasionTarget(deletion, { ...target, subject: 'Rowan Reed' })).toBe(false);
+    expect(matchesOccasionTarget(deletion, { ...target, expectedDate: input.date })).toBe(false);
+    for (const neighboring of [
+      'Delete the calendar invitation for Mira’s birthday on April 12.',
+      'Delete Mira’s birthday invitation on April 12.',
+      'Delete Mira’s birthday email.',
+      'Delete Mira’s birthday on April 12. Do not use tools.',
+    ]) {
+      expect(occasionMutationTool(neighboring)).toBeUndefined();
+    }
+  });
+
+  it('requires a current deletion receipt identifying the removed occasion', () => {
+    const receipt = {
+      status: 'succeeded',
+      toolName: 'occasions.delete',
+      result: {
+        operationId: 'delete-operation',
+        outcome: 'deleted',
+        ok: true,
+        occasion: {
+          id: 'occasion',
+          contactId: 'contact',
+          person: target.subject,
+          kind: target.kind,
+          label: target.label,
+          ...target.expectedDate,
+          year: null,
+        },
+      },
+    };
+    expect(occasionCorrectionReply(deleteRequest, [receipt])).toMatchObject({
+      confirmed: true,
+      text: expect.stringMatching(/Deleted Mira Vale.*April 12/),
+    });
+    expect(
+      occasionCorrectionReply(deleteRequest, [{ ...receipt, fromCurrentTask: false }]),
+    ).toMatchObject({ confirmed: false });
+    expect(
+      occasionCorrectionReply(deleteRequest, [
+        {
+          ...receipt,
+          result: { ok: false, outcome: 'occasion_not_found' },
+        },
+      ]),
+    ).toMatchObject({ confirmed: false });
   });
 });

@@ -22,5 +22,7 @@ export * from './workflow/index.js';
 
 export {
   matchesOccasionCorrection,
+  matchesOccasionTarget,
   parseOccasionCorrection,
+  parseOccasionDeletion,
 } from './workflow/occasion-correction.js';

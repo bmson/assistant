@@ -2,7 +2,12 @@ import { randomUUID } from 'node:crypto';
 import { handleChatTurn } from '@assistant/application';
 import { loadConfig, resetConfigForTest } from '@assistant/config';
 import type { ModelRouter } from '@assistant/core';
-import { contacts, createPostgresApplicationChatPersistence, occasions } from '@assistant/db';
+import {
+  contacts,
+  createPostgresApplicationChatPersistence,
+  occasions,
+  tasks,
+} from '@assistant/db';
 import { assertAllocatedTestTarget } from '@assistant/db/test-target';
 import { FirestoreApplicationChatPersistence } from '@assistant/firestore';
 import { chatAdmissionPayload, type EmbeddingSpace } from '@assistant/persistence';
@@ -115,7 +120,7 @@ describe.each(['postgres', 'firestore'] as const)(
   'F1 occasion correction through owner chat (%s)',
   (driver) => {
     it.skipIf(driver === 'firestore' && !process.env.FIRESTORE_EMULATOR_HOST)(
-      'corrects the same saved occasion, reads it from a fresh chat, and guards an ambiguous edit',
+      'recovers one update and deletion from the same chat turns and verifies fresh readback',
       async () => {
         const databaseUrl = process.env.DATABASE_URL;
         const firestore = driver === 'firestore';
@@ -232,7 +237,11 @@ describe.each(['postgres', 'firestore'] as const)(
             text: string,
             toolName: string,
             args: unknown,
-            allowClarification = false,
+            options: {
+              allowClarification?: boolean;
+              recover?: 'updated' | 'deleted';
+              reviseAfterRollback?: () => Promise<void>;
+            } = {},
           ) => {
             const conversation = await chat.createConversation(agentId);
             const clientOperationId = randomUUID();
@@ -269,10 +278,173 @@ describe.each(['postgres', 'firestore'] as const)(
               triggerMessageId: ownerMessageId,
               phase: 'queued',
             });
-            const completed = await executeAgentTask({ ...deps, router }, taskId);
+            const runTurn = () => executeAgentTask({ ...deps, router }, taskId);
+            const due = async () => {
+              const runAfter = new Date(0);
+              if (store) await store.doc('tasks', taskId).update({ runAfter });
+              else await deps.db.update(tasks).set({ runAfter }).where(eq(tasks.id, taskId));
+            };
+            const readReceipt = async () =>
+              (await persistence.executionEvidence.taskEvidence({ agentId, taskId })).find(
+                (entry) => entry.toolName === toolName,
+              );
+            type PhaseEvidence = {
+              records: Awaited<ReturnType<typeof readStored>>;
+              receipt: Awaited<ReturnType<typeof readReceipt>>;
+              worker: Awaited<ReturnType<typeof runTurn>>;
+            };
+            let completed: Awaited<ReturnType<typeof runTurn>>;
+            let recovery:
+              | {
+                  beforeCommitFailure: PhaseEvidence;
+                  afterCommitFailure: PhaseEvidence;
+                  afterResume: PhaseEvidence;
+                  mismatches: unknown[];
+                }
+              | undefined;
+            if (options.recover) {
+              const operationId = `${taskId}-${toolName.replace('.', '-')}`;
+              const failBeforeCommit = <T>(result: T): T => {
+                const mutation = result as { operationId?: string; outcome?: string } | null;
+                if (mutation?.operationId === operationId && mutation?.outcome === options.recover)
+                  throw new Error('synthetic stop before commit');
+                return result;
+              };
+              const before = await readStored();
+              const postgresTransaction = store ? undefined : deps.db.transaction.bind(deps.db);
+              const firestoreTransaction = store?.db.runTransaction.bind(store.db);
+              const preCommitHook =
+                store && firestoreTransaction
+                  ? vi
+                      .spyOn(store.db, 'runTransaction')
+                      .mockImplementation((work, transactionOptions) =>
+                        firestoreTransaction(
+                          async (tx) => failBeforeCommit(await work(tx)),
+                          transactionOptions,
+                        ),
+                      )
+                  : postgresTransaction
+                    ? vi
+                        .spyOn(deps.db, 'transaction')
+                        .mockImplementation((work, transactionOptions) =>
+                          postgresTransaction(
+                            async (tx) => failBeforeCommit(await work(tx)),
+                            transactionOptions,
+                          ),
+                        )
+                    : undefined;
+              const failedBeforeCommit = await runTurn().finally(() =>
+                preCommitHook?.mockRestore(),
+              );
+              expect(failedBeforeCommit).toMatchObject({
+                outcome: 'failed',
+                detail: expect.stringContaining('synthetic stop before commit'),
+              });
+              const beforeCommitFailure = {
+                records: await readStored(),
+                receipt: await readReceipt(),
+                worker: failedBeforeCommit,
+              };
+              expect(beforeCommitFailure.records).toEqual(expect.arrayContaining(before));
+              expect(beforeCommitFailure.records).toHaveLength(before.length);
+              expect(beforeCommitFailure.receipt).toMatchObject({
+                status: 'executing',
+                result: null,
+                decision: {
+                  modelToolCallId: operationId,
+                  occasionMutation: {
+                    occasionId: fixtureRows[0]?.id,
+                    contactId: mira.id,
+                    expectedVersion: expect.any(String),
+                  },
+                },
+              });
+              await options.reviseAfterRollback?.();
+              const beforeResume = await readStored();
+
+              const load = persistence.toolExecution.load.bind(persistence.toolExecution);
+              const postCommitHook = vi
+                .spyOn(persistence.toolExecution, 'load')
+                .mockImplementation(async (...loadArgs) => {
+                  const row = await load(...loadArgs);
+                  if (
+                    row?.task.id === taskId &&
+                    row.toolCall.toolName === toolName &&
+                    row.toolCall.status === 'succeeded'
+                  )
+                    throw new Error('synthetic stop after durable write');
+                  return row;
+                });
+              let failedAfterCommit: Awaited<ReturnType<typeof runTurn>>;
+              try {
+                await due();
+                failedAfterCommit = await runTurn();
+              } finally {
+                postCommitHook.mockRestore();
+              }
+              expect(failedAfterCommit).toMatchObject({
+                outcome: 'failed',
+                detail: expect.stringContaining('synthetic stop after durable write'),
+              });
+              const afterCommitFailure = {
+                records: await readStored(),
+                receipt: await readReceipt(),
+                worker: failedAfterCommit,
+              };
+              expect(afterCommitFailure.receipt).toMatchObject({
+                id: beforeCommitFailure.receipt?.id,
+                status: 'succeeded',
+                decision: beforeCommitFailure.receipt?.decision,
+                result: {
+                  operationId,
+                  outcome: options.reviseAfterRollback ? 'stale_target' : options.recover,
+                },
+              });
+              if (options.reviseAfterRollback) {
+                expect(afterCommitFailure.records).toEqual(expect.arrayContaining(beforeResume));
+                expect(afterCommitFailure.records).toHaveLength(beforeResume.length);
+              }
+              const originalDispatch = deps.dispatcher.dispatch.bind(deps.dispatcher);
+              const mismatches: unknown[] = [];
+              const resumeHook = vi
+                .spyOn(deps.dispatcher, 'dispatch')
+                .mockImplementation(async (input) => {
+                  if (input.task.id === taskId && input.toolName === toolName) {
+                    mismatches.push(
+                      await originalDispatch({
+                        ...input,
+                        args: { ...input.args, subject: 'Rowan Reed' },
+                      }),
+                    );
+                  }
+                  return originalDispatch(input);
+                });
+              try {
+                await due();
+                completed = await runTurn();
+              } finally {
+                resumeHook.mockRestore();
+              }
+              const afterResume = {
+                records: await readStored(),
+                receipt: await readReceipt(),
+                worker: completed,
+              };
+              expect(mismatches).toEqual([
+                { kind: 'rejected', reason: 'transactional call arguments cannot be verified' },
+              ]);
+              expect(afterResume.records).toEqual(
+                expect.arrayContaining(afterCommitFailure.records),
+              );
+              expect(afterResume.records).toHaveLength(afterCommitFailure.records.length);
+              expect(afterResume.receipt).toEqual(afterCommitFailure.receipt);
+              recovery = { beforeCommitFailure, afterCommitFailure, afterResume, mismatches };
+            } else {
+              completed = await runTurn();
+            }
             const evidence = await persistence.executionEvidence.taskEvidence({ agentId, taskId });
             expect(
-              allowClarification ? ['done', 'needs_attention'] : ['done'],
+              options.allowClarification ? ['done', 'needs_attention'] : ['done'],
               JSON.stringify({ completed, evidence }),
             ).toContain(completed.outcome);
             const toolReceipts = evidence.filter((entry) => entry.toolName === toolName);
@@ -295,6 +467,7 @@ describe.each(['postgres', 'firestore'] as const)(
               ownerMessageId,
               receipt,
               reply,
+              recovery,
             };
           };
 
@@ -304,7 +477,9 @@ describe.each(['postgres', 'firestore'] as const)(
           expect(original).toMatchObject({ month: 4, day: 12 });
           expect(unrelated).toMatchObject({ month: 4, day: 18 });
 
-          const edit = await turn(CORRECTION, 'occasions.update', CHANGE_ARGS);
+          const edit = await turn(CORRECTION, 'occasions.update', CHANGE_ARGS, {
+            recover: 'updated',
+          });
           const toolOperationId = (edit.receipt?.decision as { modelToolCallId?: string })
             ?.modelToolCallId;
           expect(toolOperationId).toBeTruthy();
@@ -339,12 +514,13 @@ describe.each(['postgres', 'firestore'] as const)(
               }),
             ]),
           });
-          await addContact({ id: randomUUID(), name: mira.name });
+          const duplicate = { id: randomUUID(), name: mira.name };
+          await addContact(duplicate);
           const ambiguous = await turn(
             'Change Mira Vale’s saved pottery-club anniversary from April 14 to April 15.',
             'occasions.update',
             { ...CHANGE_ARGS, expectedDate: { month: 4, day: 14 }, date: { month: 4, day: 15 } },
-            true,
+            { allowClarification: true },
           );
           const ambiguousOperationId = (ambiguous.receipt?.decision as { modelToolCallId?: string })
             ?.modelToolCallId;
@@ -359,6 +535,53 @@ describe.each(['postgres', 'firestore'] as const)(
           const afterAmbiguous = await readStored();
           expect(afterAmbiguous).toEqual(expect.arrayContaining(after));
           expect(afterAmbiguous).toHaveLength(after.length);
+          if (store) await store.doc('contacts', duplicate.id).delete();
+          else await deps.db.delete(contacts).where(eq(contacts.id, duplicate.id));
+          const { date: savedDate, ...target } = CHANGE_ARGS;
+          if (!original) throw new Error('Mira’s fixture occasion is missing');
+          const stale = await turn(
+            'Change Mira Vale’s saved pottery-club anniversary from April 14 to April 15.',
+            'occasions.update',
+            { ...target, expectedDate: savedDate, date: { month: 4, day: 15 } },
+            {
+              recover: 'updated',
+              allowClarification: true,
+              async reviseAfterRollback() {
+                // Change the saved row version between attempts without changing the target date.
+                const updatedAt = new Date('2026-10-01T00:00:00.000Z');
+                if (store) await store.doc('occasions', original.id).update({ updatedAt });
+                else
+                  await deps.db
+                    .update(occasions)
+                    .set({ updatedAt })
+                    .where(eq(occasions.id, original.id));
+              },
+            },
+          );
+          expect(stale.receipt?.result).toMatchObject({ ok: false, outcome: 'stale_target' });
+          expect(stale.reply).toMatch(/saved occasion changed/i);
+          const deletion = await turn(
+            'Delete Mira Vale’s saved pottery-club anniversary on April 14.',
+            'occasions.delete',
+            { ...target, expectedDate: savedDate },
+            { recover: 'deleted' },
+          );
+          expect(deletion.receipt?.result).toMatchObject({
+            ok: true,
+            outcome: 'deleted',
+            operationId: `${deletion.taskId}-occasions-delete`,
+            occasion: { id: original?.id, contactId: mira.id, month: 4, day: 14, year: 2020 },
+          });
+          expect(deletion.reply).toMatch(/Deleted Mira Vale/i);
+          const afterDelete = await readStored();
+          expect(afterDelete).toEqual(after.filter((row) => row.id !== original?.id));
+          const freshAfterDelete = await turn(READ, 'occasions.list', { withinDays: 366 });
+          expect(freshAfterDelete.conversationId).not.toBe(deletion.conversationId);
+          expect(freshAfterDelete.reply).toMatch(/Rowan Reed.*04-18/);
+          expect(freshAfterDelete.reply).not.toContain('Mira Vale');
+          expect(freshAfterDelete.receipt?.result).toMatchObject({
+            occasions: expect.not.arrayContaining([expect.objectContaining({ person: mira.name })]),
+          });
           const rowanAfter = await readRowan();
           expect(rowanAfter).toEqual(rowanBefore);
 
@@ -372,6 +595,10 @@ describe.each(['postgres', 'firestore'] as const)(
               fresh,
               ambiguous,
               afterAmbiguous,
+              stale,
+              deletion,
+              afterDelete,
+              freshAfterDelete,
               rowanBefore,
               rowanAfter,
             }),

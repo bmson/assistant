@@ -1,6 +1,6 @@
 import { createPostgresExecutionPersistence, type Db, type TaskRow } from '@assistant/db';
 import type { ExecutionPersistence } from '@assistant/persistence';
-import { isOccasionCorrectionRequest } from './occasion-correction.js';
+import { occasionMutationTool } from './occasion-correction.js';
 import type { ActionEvidence } from './response-contract.js';
 import { isDurableSave } from './saved-work-evidence.js';
 
@@ -72,7 +72,7 @@ export function isSaveStatusQuestion(text: string): boolean {
 
 export function isMemoryWriteRequest(text: string): boolean {
   if (isSaveStatusQuestion(text)) return false;
-  if (isOccasionCorrectionRequest(text)) return true;
+  if (occasionMutationTool(text)) return true;
   if (
     /\b(?:do not|don't|never)\s+(?:save|remember|store|add|update|correct|attach|link)\b/i.test(
       text,

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { configuredOwnerPhoneRecipientFingerprint, outboundEmailAllowed } from '@assistant/config';
 import {
   activeAutonomyGrant,
@@ -1349,8 +1350,10 @@ export class ToolDispatcher {
           ))
       )
         return { kind: 'rejected', reason: readProhibitionReason(input.toolName) };
+      if (compactReceipt && registered.tool.transactionalOutcome)
+        return { kind: 'rejected', reason: 'transactional call arguments cannot be verified' };
       if (compactReceipt) return compactRecordedOutcome(compactReceipt);
-      if (prior?.toolCall.status === 'executing') {
+      if (prior?.toolCall.status === 'executing' && !registered.tool.transactionalOutcome) {
         const error = 'the provider outcome is unknown; the call was not retried automatically';
         const recorded = await this.executionRepository.outcome({
           agentId: input.task.agentId,
@@ -1409,8 +1412,11 @@ export class ToolDispatcher {
         }
         return { kind: 'rejected', reason: error };
       }
-      const outcome = recoveredOutcome(prior);
-      if (outcome) return outcome;
+      // Transactional calls reconcile after schema, trust, policy and argument checks.
+      if (!registered.tool.transactionalOutcome) {
+        const outcome = recoveredOutcome(prior);
+        if (outcome) return outcome;
+      }
     }
     if (registered.flags.internalEventKind) {
       const trigger = input.task.trigger as
@@ -2117,6 +2123,7 @@ export class ToolDispatcher {
       operationId: input.modelToolCallId,
     });
 
+    let resumableCall: { id: string } | undefined;
     // Crash-retry protection: if this exact side effect already succeeded,
     // return the recorded result instead of executing again.
     if (idempotencyKey) {
@@ -2176,14 +2183,22 @@ export class ToolDispatcher {
           ))
       )
         return { kind: 'rejected', reason: readProhibitionReason(input.toolName) };
+      if (
+        registered.tool.transactionalOutcome &&
+        (compactReceipt || (prior && !isDeepStrictEqual(prior.args, args)))
+      )
+        return { kind: 'rejected', reason: 'transactional call arguments cannot be verified' };
       if (compactReceipt) return compactRecordedOutcome(compactReceipt);
       if (prior?.status === 'succeeded') {
         return { kind: 'executed', toolCallId: prior.id, result: prior.result, cached: false };
       }
-      if (prior && prior.status === 'executing') {
+      if (prior?.status === 'executing' && registered.tool.transactionalOutcome) {
+        // The adapter rechecks this row and the current task lease inside the
+        // domain transaction. An executing row has no committed domain mutation.
+        resumableCall = prior;
+      } else if (prior?.status === 'executing') {
         return { kind: 'rejected', reason: 'identical call already executing' };
-      }
-      if (prior) {
+      } else if (prior) {
         return {
           kind: 'rejected',
           reason: `identical call is already recorded as ${prior.status}; refusing an ambiguous side-effect retry`,
@@ -2204,19 +2219,21 @@ export class ToolDispatcher {
     }
     if (reserved?.ok) decision.reservationId = reserved.reservationId;
 
-    const row = await this.executionRepository.start({
-      agentId: input.task.agentId,
-      taskId: input.task.id,
-      step: input.step,
-      toolName: input.toolName,
-      args,
-      idempotencyKey: idempotencyKey ?? null,
-      decision,
-      expectedPolicyFingerprint,
-      ...(expectedPhoneCallOwnerNumberGrant ? { expectedPhoneCallOwnerNumberGrant } : {}),
-      ...(expectedPhoneCallOwnerActionGrant ? { expectedPhoneCallOwnerActionGrant } : {}),
-      ...(expectedOwnerAutonomyGrant ? { expectedOwnerAutonomyGrant } : {}),
-    });
+    const row =
+      resumableCall ??
+      (await this.executionRepository.start({
+        agentId: input.task.agentId,
+        taskId: input.task.id,
+        step: input.step,
+        toolName: input.toolName,
+        args,
+        idempotencyKey: idempotencyKey ?? null,
+        decision,
+        expectedPolicyFingerprint,
+        ...(expectedPhoneCallOwnerNumberGrant ? { expectedPhoneCallOwnerNumberGrant } : {}),
+        ...(expectedPhoneCallOwnerActionGrant ? { expectedPhoneCallOwnerActionGrant } : {}),
+        ...(expectedOwnerAutonomyGrant ? { expectedOwnerAutonomyGrant } : {}),
+      }));
     if (!row) {
       // lost an idempotency race to a concurrent executor
       if (reserved?.ok) await this.costRepository.release(reserved.reservationId).catch(() => {});
@@ -2253,6 +2270,7 @@ export class ToolDispatcher {
       const error = input.ctx.signal.aborted
         ? 'task was cancelled before tool execution'
         : 'task was cancelled or its lease changed before tool execution';
+      if (registered.tool.transactionalOutcome) return { kind: 'rejected', reason: error };
       const persisted = await this.executionRepository.outcome({
         agentId: input.task.agentId,
         taskId: input.task.id,
@@ -2301,6 +2319,36 @@ export class ToolDispatcher {
             ),
           ),
       );
+      if (registered.tool.transactionalOutcome) {
+        const persisted = await this.executionRepository.load(
+          input.task.agentId,
+          input.task.id,
+          row.id,
+        );
+        if (!persisted) throw new Error('Transactional call receipt lookup failed');
+        if (persisted.toolCall.status === 'succeeded') {
+          if (
+            persisted.toolCall.toolName !== input.toolName ||
+            !isDeepStrictEqual(persisted.toolCall.args, args) ||
+            !isDeepStrictEqual(persisted.toolCall.result, result)
+          )
+            throw new Error('Transactional call receipt does not match the admitted operation');
+          return {
+            kind: 'executed',
+            toolCallId: row.id,
+            result: persisted.toolCall.result,
+            cached: false,
+          };
+        }
+        if (
+          persisted.toolCall.status !== 'executing' ||
+          result === null ||
+          typeof result !== 'object' ||
+          !('ok' in result) ||
+          result.ok !== false
+        )
+          throw new Error('Transactional call did not commit its receipt');
+      }
       completedResult = result;
       providerCompleted = true;
       if (reserved?.ok && !isJobPending(result)) {
@@ -2336,6 +2384,10 @@ export class ToolDispatcher {
 
       return { kind: 'executed', toolCallId: row.id, result, cached: false };
     } catch (err) {
+      // Keep the checkpointed call pending for the executor's bounded retry.
+      // The transactional adapter either committed its receipt with the write or
+      // rolled back both. The same pending call can safely reconcile or resume.
+      if (registered.tool.transactionalOutcome) throw err;
       if (providerCompleted) {
         if (reserved?.ok)
           await this.costRepository

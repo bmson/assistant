@@ -133,9 +133,10 @@ import {
   selectMemoryReadAnswer,
 } from '../memory-read-answer.js';
 import {
-  isOccasionCorrectionRequest,
   occasionCorrectionReply,
+  occasionMutationTool,
   parseOccasionCorrection,
+  parseOccasionDeletion,
 } from '../occasion-correction.js';
 import {
   explicitlyOptsOutOfRecall,
@@ -695,10 +696,14 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   const occasionCorrection =
     directOwner &&
     !restrictedChecklistResume &&
-    Boolean(ctx.directOwnerChatText && isOccasionCorrectionRequest(ctx.directOwnerChatText));
-  const groundedOccasionCorrection = occasionCorrection
-    ? parseOccasionCorrection(ctx.directOwnerChatText ?? '')
-    : undefined;
+    ctx.directOwnerChatText &&
+    occasionMutationTool(ctx.directOwnerChatText);
+  const groundedOccasionCorrection =
+    occasionCorrection === 'occasions.delete'
+      ? parseOccasionDeletion(ctx.directOwnerChatText ?? '')
+      : occasionCorrection === 'occasions.update'
+        ? parseOccasionCorrection(ctx.directOwnerChatText ?? '')
+        : undefined;
   const memoryWrite = directOwner && !restrictedChecklistResume && isMemoryWriteRequest(ownerText);
   const detectedLookups =
     directOwner && !restrictedChecklistResume
@@ -3140,7 +3145,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         : '',
       plan ? `\n${renderPlan(plan)}` : '',
       occasionCorrection
-        ? '\nThe owner asked to correct a saved occasion. Use occasions.update only with the stated full saved name, occasion kind or label, old date and corrected date. Ask for the missing details when needed. Use the current tool result for the reply.'
+        ? `\nThe owner requested a saved-occasion change. Use ${occasionCorrection} with the stated full saved name, occasion kind or label, saved date and any supplied corrected date. Ask for missing details. Use the current tool result for the reply.`
         : memoryWrite
           ? '\nThe owner wants information saved. Use memory.save for supplied facts/preferences or occasions.save for supplied dates. Save only owner-provided or verified details, never an earlier assistant guess. If the actual order or fact is missing, ask for it instead of inventing it. Multiple independent saves may share a tool turn; preserve blank dates and deceased markers instead of guessing. Report confirmed saves and unfinished work separately.'
           : '',
@@ -3203,7 +3208,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       );
     const toolDefs = occasionCorrection
       ? groundedOccasionCorrection && state.step === 0
-        ? goalFilteredTools.filter((tool) => tool.name === 'occasions.update')
+        ? goalFilteredTools.filter((tool) => tool.name === occasionCorrection)
         : []
       : restrictedChecklistResume
         ? boundedForcedReadTool
@@ -3601,7 +3606,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         tools: toolSet as never,
         toolChoice: occasionCorrection
           ? toolDefs.length
-            ? { type: 'tool', toolName: 'occasions.update' }
+            ? { type: 'tool', toolName: occasionCorrection }
             : 'none'
           : readAnswerTurn || airportClarificationTurn
             ? 'none'
@@ -3883,7 +3888,13 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       stepResult = {
         ...stepResult,
         toolCalls: toolDefs.length
-          ? stepResult.toolCalls.filter((call) => call.toolName === 'occasions.update').slice(0, 1)
+          ? stepResult.toolCalls
+              .filter((call) => call.toolName === occasionCorrection)
+              .slice(0, 1)
+              .map((call) => ({
+                ...call,
+                toolCallId: `${task.id}-${occasionCorrection.replace('.', '-')}`,
+              }))
           : [],
       };
     }

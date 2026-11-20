@@ -118,6 +118,8 @@ export interface AssistantTool<S extends z.ZodType = z.ZodType, Out = unknown> {
   /** Human-readable action line shown on approval cards. */
   approvalSummary?: (args: z.infer<S>) => string;
   idempotencyKey?: (args: z.infer<S>, ctx: ToolContext) => string;
+  /** With no provider effects or costs, the adapter can commit its result on the executing call row. */
+  transactionalOutcome?: true;
   cacheTtlSeconds?: number;
   /**
    * Pre-flight cost estimate (Phase 27): declared by tools that start

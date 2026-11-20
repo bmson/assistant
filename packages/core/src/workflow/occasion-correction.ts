@@ -14,6 +14,30 @@ const exactCorrection = new RegExp(
   `^${command}(${ownerSubject})['’]s (?:saved )?(.{1,120}?) from (.{1,40}?) to (.{1,40}?)[.!?]?$`,
   'i',
 );
+const deleteCommand = String.raw`(?:(?:please\s+|(?:can|could|would)\s+you\s+)(?:please\s+)?)?(?:delete|remove)\s+`;
+const deleteRequest = new RegExp(
+  String.raw`^${deleteCommand}${ownerSubject}['’]s (?:saved [^;!?\n]{0,120}${occasion}|${occasion}(?=\s+on\b|[.!?]?$))`,
+  'i',
+);
+const exactDelete = new RegExp(
+  `^${deleteCommand}(${ownerSubject})['’]s (?:saved )?(.{1,120}?) on (.{1,40}?)[.!?]?$`,
+  'i',
+);
+
+export function occasionMutationTool(
+  text: string,
+): 'occasions.update' | 'occasions.delete' | undefined {
+  if (isOccasionCorrectionRequest(text)) return 'occasions.update';
+  const request = text.trim();
+  if (
+    !explicitlyDisallowsTools(request) &&
+    !/\b(?:don['’]t|do not|never)\s+(?:delete|remove)\b/i.test(request) &&
+    deleteRequest.test(request)
+  )
+    return 'occasions.delete';
+  return undefined;
+}
+
 const months = [
   'January',
   'February',
@@ -78,19 +102,41 @@ export function parseOccasionCorrection(
   };
 }
 
-export function matchesOccasionCorrection(
-  owner: Omit<OccasionCorrectionInput, 'agentId'>,
-  tool: Omit<OccasionCorrectionInput, 'agentId'>,
-): boolean {
-  const sameDate = (left: OccasionCorrectionDate, right: OccasionCorrectionDate) =>
-    left.month === right.month && left.day === right.day && left.year === right.year;
+type OccasionTarget = Omit<OccasionCorrectionInput, 'agentId' | 'date'>;
+
+export function parseOccasionDeletion(request: string): OccasionTarget | undefined {
+  if (occasionMutationTool(request) !== 'occasions.delete') return undefined;
+  const match = exactDelete.exec(request.trim());
+  if (!match?.[1] || !match[2] || !match[3]) return undefined;
+  const label = match[2].trim();
+  const kind = label.toLowerCase();
+  const expectedDate = parseDate(match[3]);
+  if (!expectedDate) return undefined;
+  return {
+    subject: match[1].trim(),
+    ...(kind === 'birthday' || kind === 'anniversary' ? { kind } : { kind: 'custom', label }),
+    expectedDate,
+  };
+}
+
+function sameDate(left: OccasionCorrectionDate, right: OccasionCorrectionDate): boolean {
+  return left.month === right.month && left.day === right.day && left.year === right.year;
+}
+
+export function matchesOccasionTarget(owner: OccasionTarget, tool: OccasionTarget): boolean {
   return (
     sameOccasionContactName(owner.subject, tool.subject) &&
     owner.kind === tool.kind &&
     owner.label === tool.label &&
-    sameDate(owner.expectedDate, tool.expectedDate) &&
-    sameDate(owner.date, tool.date)
+    sameDate(owner.expectedDate, tool.expectedDate)
   );
+}
+
+export function matchesOccasionCorrection(
+  owner: Omit<OccasionCorrectionInput, 'agentId'>,
+  tool: Omit<OccasionCorrectionInput, 'agentId'>,
+): boolean {
+  return matchesOccasionTarget(owner, tool) && sameDate(owner.date, tool.date);
 }
 
 const correctionMessages = {
@@ -103,6 +149,8 @@ const correctionMessages = {
   date_conflict:
     'That date conflicts with an existing occasion record in People. No date was changed.',
   invalid_date: 'That date isn’t valid. What date should I use?',
+  stale_target:
+    'The saved occasion changed before I could apply your request. Please check its current details in People.',
   occasion_not_found:
     'I couldn’t find a saved occasion matching that old date. What date is currently saved in People?',
   owner_details_required:
@@ -118,10 +166,10 @@ export function occasionCorrectionReply(
   request: string,
   evidence: ActionEvidence[],
 ): { text: string; confirmed: boolean } | undefined {
-  if (!isOccasionCorrectionRequest(request)) return undefined;
-  const calls = evidence.filter(
-    (row) => row.fromCurrentTask !== false && row.toolName === 'occasions.update',
-  );
+  const tool = occasionMutationTool(request);
+  if (!tool) return undefined;
+  const deleting = tool === 'occasions.delete';
+  const calls = evidence.filter((row) => row.fromCurrentTask !== false && row.toolName === tool);
   for (const row of calls) {
     if (row.status !== 'succeeded') continue;
     const result = row.result as {
@@ -156,19 +204,39 @@ export function occasionCorrectionReply(
       (saved.kind === 'custom' ? saved.label : saved.kind)?.replace(/\s+/g, ' ').trim() ||
       'occasion';
     const date = `${months[saved.month - 1]} ${saved.day}${saved.year === null ? '' : `, ${saved.year}`}`;
-    if (result.outcome === 'updated')
+    if (deleting && result.outcome === 'deleted')
+      return { text: `Deleted ${name}’s ${label} on ${date} from People.`, confirmed: true };
+    if (!deleting && result.outcome === 'updated')
       return { text: `Updated ${name}’s ${label} in People to ${date}.`, confirmed: true };
-    if (result.outcome === 'unchanged')
+    if (!deleting && result.outcome === 'unchanged')
       return { text: `${name}’s ${label} is already saved in People as ${date}.`, confirmed: true };
   }
   const last = calls.at(-1);
   const result = last?.status === 'succeeded' ? (last.result as { outcome?: string } | null) : null;
-  const owner = parseOccasionCorrection(request);
   const outcome = result?.outcome;
   const knownOutcome =
     outcome && Object.hasOwn(correctionMessages, outcome)
       ? (outcome as keyof typeof correctionMessages)
       : undefined;
+  if (deleting) {
+    const owner = parseOccasionDeletion(request);
+    const text =
+      outcome === 'ambiguous_contact'
+        ? 'I found more than one person with that saved name. Which person did you mean?'
+        : outcome === 'ambiguous_occasion'
+          ? 'More than one saved occasion matches that date. Which occasion did you mean?'
+          : outcome === 'occasion_not_found'
+            ? 'I couldn’t find a saved occasion matching that date. What date is saved in People?'
+            : outcome === 'contact_not_found' || outcome === 'stale_target'
+              ? correctionMessages[outcome]
+              : !owner
+                ? 'Tell me the full saved name, occasion, and its saved date.'
+                : !isOccasionCorrectionDate(owner.expectedDate)
+                  ? 'What valid date is saved for that occasion?'
+                  : 'I couldn’t confirm that the saved occasion was deleted. Check the occasion in People.';
+    return { text, confirmed: false };
+  }
+  const owner = parseOccasionCorrection(request);
   const text = knownOutcome
     ? correctionMessages[knownOutcome]
     : !owner

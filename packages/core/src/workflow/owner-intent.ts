@@ -8,7 +8,7 @@ import {
 } from './conversation-local-context.js';
 import { detectFutureWatchIntent } from './future-watch-intent.js';
 import { detectLiveLookup } from './live-lookup.js';
-import { isOccasionCorrectionRequest } from './occasion-correction.js';
+import { occasionMutationTool } from './occasion-correction.js';
 import { detectPersonalReadRequest } from './read-intent.js';
 
 export {
@@ -827,7 +827,7 @@ export function extractOwnerIntent(input: {
   }
   const authored = split.authored;
   const scopes = scopesFor(authored);
-  if (isOccasionCorrectionRequest(authored) && !scopes.includes('memory_write'))
+  if (occasionMutationTool(authored) && !scopes.includes('memory_write'))
     scopes.push('memory_write');
   const sourceActor = split.external ? 'mixed' : 'owner';
   const requestKind =

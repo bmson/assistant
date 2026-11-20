@@ -88,6 +88,7 @@ const PORTABLE_TOOLS = [
   'memory.recall',
   'memory.save',
   'mission.update',
+  'occasions.delete',
   'occasions.list',
   'occasions.list_birthdays',
   'occasions.save',
