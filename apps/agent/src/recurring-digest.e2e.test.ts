@@ -49,7 +49,7 @@ const museum = { topic: 'museum exhibits', localTime: '18:30', cadence: { kind: 
 type ToolCall = { name: string; input: Record<string, unknown> };
 type Digest = { scheduleId: string; topic: string; nextRunAt: string; timezone: string };
 
-function scriptedRouter(call?: ToolCall) {
+function scriptedRouter(call?: ToolCall, beforeRecovery?: () => Promise<void>) {
   let stepCount = 0;
   return {
     route: async () => ({
@@ -94,17 +94,33 @@ function scriptedRouter(call?: ToolCall) {
       },
     ) {
       if (!call) throw new Error('Cadence clarification must happen before model tool execution');
-      if (++stepCount === 1) {
+      stepCount += 1;
+      if (stepCount <= (beforeRecovery ? 2 : 1)) {
+        if (stepCount === 2) {
+          expect(JSON.stringify(input.messages)).toContain('topic_mismatch');
+          expect(JSON.stringify(input.messages)).toContain(library.topic);
+          await beforeRecovery?.();
+        }
         expect(input.tools).toHaveProperty([call.name]);
         return {
           ...MODEL,
           text: '',
-          toolCalls: [{ toolCallId: 'f2-digest', toolName: call.name, input: call.input }],
+          toolCalls: [
+            {
+              toolCallId: `f2-digest-${stepCount}`,
+              toolName: call.name,
+              input:
+                beforeRecovery && stepCount === 1
+                  ? { ...call.input, topic: 'garden shows' }
+                  : call.input,
+            },
+          ],
         };
       }
       const receipt = input.messages
         .flatMap(({ content }) => (typeof content === 'string' ? [] : content))
-        .find((part) => part.type === 'tool-result' && part.toolName === call.name)?.output?.value;
+        .findLast((part) => part.type === 'tool-result' && part.toolName === call.name)
+        ?.output?.value;
       const text = receipt?.event
         ? `Library events digest: ${receipt.event}.`
         : receipt?.digests
@@ -198,8 +214,14 @@ it('routes recurring digests through owner chat, persists them once and runs two
       persistence.approvalPolicies,
     );
 
-    const turn = async (requestText: string, call?: ToolCall, replay = false, replyTo?: string) => {
-      const router = scriptedRouter(call);
+    const turn = async (
+      requestText: string,
+      call?: ToolCall,
+      replay = false,
+      replyTo?: string,
+      beforeRecovery?: () => Promise<void>,
+    ) => {
+      const router = scriptedRouter(call, beforeRecovery);
       const conversationId = replyTo ?? (await chat.createConversation(agentId)).id;
       const clientOperationId = randomUUID();
       const body = JSON.stringify({
@@ -233,13 +255,28 @@ it('routes recurring digests through owner chat, persists them once and runs two
       const outcome = await executeTask({ db, persistence, router, dispatcher }, taskId);
       const ledger = await persistence.executionEvidence.taskEvidence({ agentId, taskId });
       const update = await getChatUpdates(chat, { conversationId, taskId });
-      const replies = update?.messages.filter((message) => message.role === 'assistant') ?? [];
+      const history = await chat.listMessages(agentId, conversationId, { limit: 50 });
+      const replyIds = new Set(
+        history?.messages
+          .filter((message) => message.role === 'assistant' && message.taskId === taskId)
+          .map((message) => message.id),
+      );
+      const replies = update?.messages.filter((message) => replyIds.has(message.id)) ?? [];
       const published = replies
         .flatMap((message) =>
           message.parts.flatMap((part) => (part.type === 'text' ? [part.text] : [])),
         )
         .join('\n');
-      return { taskId, retryTaskId, conversationId, outcome, ledger, published };
+      return {
+        requestText,
+        taskId,
+        retryTaskId,
+        conversationId,
+        outcome,
+        ledger,
+        published,
+        replyCount: replies.length,
+      };
     };
 
     const read = async () =>
@@ -253,12 +290,21 @@ it('routes recurring digests through owner chat, persists them once and runs two
     expect(await read()).toEqual([]);
 
     const first = await turn(
-      'Every Friday at 9 a.m., summarize new library events for me.',
+      'Every Friday at 9 a.m., summarize new library events for me here in this chat.',
       duplicateRequest,
       true,
+      undefined,
+      async () => {
+        expect(await read()).toEqual([]);
+      },
     );
     const [libraryRow] = await read();
-    expect(libraryRow).toMatchObject({ agentId, cron: '0 9 * * 5', enabled: true });
+    expect(libraryRow).toMatchObject({
+      agentId,
+      cron: '0 9 * * 5',
+      enabled: true,
+      taskTemplate: { digest: { topic: library.topic }, conversationId: first.conversationId },
+    });
     if (!libraryRow?.nextRunAt) throw new Error('Expected the saved next run');
     const local = new Intl.DateTimeFormat('en-US', {
       timeZone: timezone,
@@ -267,23 +313,54 @@ it('routes recurring digests through owner chat, persists them once and runs two
       minute: '2-digit',
     });
     expect(local.format(libraryRow.nextRunAt)).toBe('Friday 9:00 AM');
-    expect(first.ledger).toHaveLength(1);
+    expect(first.ledger).toHaveLength(2);
     expect(first.ledger[0]).toMatchObject({
+      args: { topic: 'garden shows' },
+      result: { status: 'topic_mismatch', expectedTopic: library.topic },
+    });
+    expect(first.ledger[1]).toMatchObject({
       toolName: 'digest.schedule',
       status: 'succeeded',
       result: {
         scheduleId: libraryRow.id,
         nextRunAt: libraryRow.nextRunAt.toISOString(),
         timezone,
+        conversationId: first.conversationId,
+        inCurrentChat: true,
       },
     });
+    expect(first.outcome.outcome).toBe('done');
     expect(first.published).toContain(libraryRow.id);
 
     const paraphrase = await turn(
       'Could you give me a weekly roundup of new library events on Fridays at 09:00?',
       duplicateRequest,
     );
-    expect(paraphrase.ledger[0]?.result).toMatchObject({ scheduleId: libraryRow.id });
+    expect(paraphrase.ledger[0]?.result).toMatchObject({
+      scheduleId: libraryRow.id,
+      conversationId: first.conversationId,
+      inCurrentChat: false,
+    });
+    expect(paraphrase.published).toContain(`/chat/${first.conversationId}`);
+    expect(await read()).toEqual([libraryRow]);
+
+    const conflict = await turn(
+      'Every Friday at 9 a.m., summarize new library events for me here in this chat.',
+      duplicateRequest,
+      false,
+      paraphrase.conversationId,
+    );
+    expect(conflict.ledger[0]?.result).toMatchObject({
+      status: 'destination_conflict',
+      scheduleId: libraryRow.id,
+      conversationId: first.conversationId,
+    });
+    expect(conflict.published).toContain(`/chat/${first.conversationId}`);
+    expect(conflict.published).toContain(
+      'Do you want to keep that destination or move the digest here?',
+    );
+    expect(conflict.published).not.toContain('Scheduled the');
+    expect(conflict.replyCount).toBe(1);
     expect(await read()).toEqual([libraryRow]);
     const clarified = await turn(
       'Fridays at 9 a.m.',
@@ -298,11 +375,17 @@ it('routes recurring digests through owner chat, persists them once and runs two
     expect(clarified.published).toContain(libraryRow.id);
     expect(await read()).toEqual([libraryRow]);
 
-    const daily = await turn('Prepare a daily recap of museum exhibits at 6:30 pm.', {
-      name: 'digest.schedule',
-      input: museum,
-    });
-    expect(daily.ledger[0]?.result).toMatchObject({ topic: museum.topic });
+    const missingTopic = await turn('Prepare a daily recap of that at 6:30 pm.');
+    expect(missingTopic.ledger).toEqual([]);
+    expect(missingTopic.published).toContain('What topic should the recurring digest cover?');
+    expect(await read()).toEqual([libraryRow]);
+    const daily = await turn(
+      'Museum exhibits.',
+      { name: 'digest.schedule', input: museum },
+      false,
+      missingTopic.conversationId,
+    );
+    expect(daily.ledger[0]?.result).toMatchObject({ topic: 'Museum exhibits' });
     const stored = await read();
     expect(stored).toHaveLength(2);
 
@@ -312,11 +395,17 @@ it('routes recurring digests through owner chat, persists them once and runs two
     });
     expect(fresh.conversationId).not.toBe(first.conversationId);
     expect(fresh.ledger[0]?.result).toMatchObject({
-      digests: expect.arrayContaining(
-        stored.map((row) => expect.objectContaining({ scheduleId: row.id })),
-      ),
+      digests: expect.arrayContaining([
+        expect.objectContaining({
+          scheduleId: libraryRow.id,
+          conversationId: first.conversationId,
+        }),
+        expect.objectContaining({ conversationId: daily.conversationId, topic: 'Museum exhibits' }),
+      ]),
     });
     for (const row of stored) expect(fresh.published).toContain(row.id);
+    expect(fresh.published).toContain(`/chat/${first.conversationId}`);
+    expect(fresh.published).toContain(`/chat/${daily.conversationId}`);
 
     const denied = await turn(
       'Please check the library website for events today.',
@@ -386,6 +475,8 @@ it('routes recurring digests through owner chat, persists them once and runs two
           (message) => message.taskId === taskId && message.text === scheduledReply,
         ),
       ).toHaveLength(1);
+      const other = await chat.listMessages(agentId, paraphrase.conversationId, { limit: 50 });
+      expect(other?.messages.some((message) => message.taskId === taskId)).toBe(false);
       const ledger = await persistence.executionEvidence.taskEvidence({ agentId, taskId });
       expect(ledger).toHaveLength(1);
       expect(ledger[0]).toMatchObject({
@@ -409,6 +500,8 @@ it('routes recurring digests through owner chat, persists them once and runs two
         ambiguous,
         first,
         paraphrase,
+        conflict,
+        missingTopic,
         clarified,
         daily,
         fresh,

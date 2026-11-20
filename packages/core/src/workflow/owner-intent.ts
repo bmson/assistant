@@ -46,6 +46,7 @@ export interface OwnerIntent {
   sourceActor: 'owner' | 'assistant' | 'third_party' | 'mixed' | 'unknown';
   requestKind: OwnerIntentKind;
   ownerAuthoredText: string;
+  clarificationAnswer?: { question: string; text: string; originalRequest: string };
   externalText: string;
   authorizedScopes: OwnerIntentScope[];
   separation: 'clear' | 'none' | 'unknown';
@@ -476,6 +477,41 @@ export function recurringDigestDays(text: string): number[] | null {
   ];
   const days = names.map(([name]) => DIGEST_WEEKDAYS.indexOf(name.slice(0, 3).toLowerCase()));
   return days.length ? [...new Set(days)].sort((a, b) => a - b) : null;
+}
+
+export const DIGEST_TOPIC_QUESTION = 'What topic should the recurring digest cover?';
+
+/** Extract the topic from the authorized request or its bound clarification answer. */
+export function recurringDigestTopic(intent: OwnerIntent): string | null {
+  const answer = intent.clarificationAnswer;
+  const authored = answer?.originalRequest ?? intent.ownerAuthoredText;
+  const match =
+    /\b(?:summari[sz]e\s+|(?:digest|summary|roundup|recap)\s+(?:of|about|on|for)\s+)([^\n!?]+)/i.exec(
+      authored,
+    );
+  const candidate = answer?.question.includes(DIGEST_TOPIC_QUESTION)
+    ? answer.text.replace(/^\s*(?:about|on)\s+/i, '')
+    : (match?.[1] ?? '');
+  const topic = candidate
+    .split(
+      /\s+(?:for\s+me\b|(?:right\s+)?here\b|in\s+this\s+(?:chat|thread|conversation)\b|at\s+(?:\d|noon\b|midnight\b)|on\s+(?:weekdays|Sundays?|Mondays?|Tuesdays?|Wednesdays?|Thursdays?|Fridays?|Saturdays?)\b|(?:every|each)\s+(?:day|week|morning|evening|Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday)\b|(?:daily|weekly)\s*$)/i,
+      1,
+    )[0]
+    ?.trim()
+    .replace(/^[“"']+|[.!?,;:“”"']+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (
+    !topic ||
+    topic.length < 3 ||
+    topic.length > 240 ||
+    /^(?:it|this|that|the above|the same(?: thing| topic)?|this topic|that topic|whatever|anything|something|please)$/i.test(
+      topic,
+    ) ||
+    /[!?]/.test(topic)
+  )
+    return null;
+  return topic;
 }
 
 function affirmativeAction(text: string, requestedAction: string): boolean {
@@ -946,6 +982,11 @@ export function latestOwnerIntent(
   return {
     ...current,
     requestKind: 'new_request',
+    clarificationAnswer: {
+      question: continuation.question,
+      text: current.ownerAuthoredText,
+      originalRequest: continuation.ownerAuthoredText,
+    },
     ownerAuthoredText:
       `${continuation.ownerAuthoredText}\nOwner clarification answer: ${current.ownerAuthoredText}`.trim(),
     authorizedScopes: [...new Set([...continuation.authorizedScopes, ...current.authorizedScopes])],

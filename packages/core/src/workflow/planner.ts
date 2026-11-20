@@ -15,11 +15,13 @@ import {
   normalizeFutureWatchPlan,
 } from './future-watch-intent.js';
 import {
+  DIGEST_TOPIC_QUESTION,
   latestOwnerIntent,
   type OwnerIntent,
   ownerIntentPlannerSegments,
   recurringDigestDays,
   recurringDigestLocalTime,
+  recurringDigestTopic,
 } from './owner-intent.js';
 import { detectPersonalReadRequest, type PersonalReadRequest } from './read-intent.js';
 
@@ -42,7 +44,7 @@ import { detectPersonalReadRequest, type PersonalReadRequest } from './read-inte
 // memory, graph, and Drive reads as calendar/email lookups.
 // v17: explicit no-tool constraints take precedence over automatic source/watch routing.
 // v18: preserve balanced inline quoted literals in owner-request context as inert data segments.
-export const PLANNER_VERSION = 19;
+export const PLANNER_VERSION = 20;
 
 type PlannerBudgetDecision = Extract<BudgetDecision, { mode: 'park' | 'block' }>;
 
@@ -358,6 +360,7 @@ export async function planTask(
     !explicitlyDisallowsTools(latestOwnerRequest);
   if (recurringDigest) {
     const missingInfo = [
+      ...(recurringDigestTopic(ownerIntent) ? [] : [DIGEST_TOPIC_QUESTION]),
       ...(recurringDigestDays(latestOwnerRequest) ? [] : ['Which days should the digest run?']),
       ...(recurringDigestLocalTime(latestOwnerRequest)
         ? []
@@ -366,7 +369,7 @@ export async function planTask(
     if (missingInfo.length) {
       const plan: Plan = {
         action: 'clarify',
-        reasoning: 'The recurring digest needs a precise cadence.',
+        reasoning: 'The recurring digest needs an explicit topic and cadence.',
         steps: [],
         missingInfo,
       };

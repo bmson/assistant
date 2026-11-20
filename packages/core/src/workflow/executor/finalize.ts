@@ -780,6 +780,91 @@ async function recordQualitySignals(
  * response contract still refuses to let prior-turn rows authorise a new
  * send, submission, or booking.
  */
+const digestReceiptSchema = z.object({
+  scheduleId: z.uuid(),
+  conversationId: z.uuid(),
+  inCurrentChat: z.boolean(),
+  topic: z.string(),
+  timezone: z.string(),
+  localTime: z.string(),
+  cadence: z.discriminatedUnion('kind', [
+    z.object({ kind: z.literal('daily') }),
+    z.object({ kind: z.literal('weekly'), days: z.array(z.number().int().min(0).max(6)) }),
+  ]),
+  enabled: z.boolean(),
+  nextRunAt: z.iso.datetime().nullable(),
+  status: z.enum(['saved', 'destination_conflict']).optional(),
+});
+
+function describeDigestReceipt(receipt: z.infer<typeof digestReceiptSchema>): string {
+  const topic = receipt.topic.replace(/[`*_[\]<>]/g, '\\$&');
+  const destination = receipt.inCurrentChat
+    ? 'this chat'
+    : `[the original chat](/chat/${receipt.conversationId})`;
+  const week = [
+    'Sundays',
+    'Mondays',
+    'Tuesdays',
+    'Wednesdays',
+    'Thursdays',
+    'Fridays',
+    'Saturdays',
+  ];
+  const days =
+    receipt.cadence.kind === 'daily'
+      ? 'daily'
+      : new Intl.ListFormat('en-US').format(receipt.cadence.days.map((day) => week[day] ?? ''));
+  const timing = !receipt.enabled
+    ? 'This schedule is disabled.'
+    : receipt.nextRunAt
+      ? `Next run ${new Intl.DateTimeFormat('en-US', { dateStyle: 'medium', timeStyle: 'short', timeZone: receipt.timezone }).format(new Date(receipt.nextRunAt))}.`
+      : 'The next run is pending.';
+  const saved = `“${topic}” is set to post in ${destination} ${days} at ${receipt.localTime} (${receipt.timezone}). ${timing} Schedule ID ${receipt.scheduleId}.`;
+  return receipt.status === 'destination_conflict'
+    ? `${saved} Do you want to keep that destination or move the digest here?`
+    : saved;
+}
+
+function digestReceiptText(rows: ExecutionEvidenceRecord[], draft: string): string | undefined {
+  const results = rows.filter((row) => row.status === 'succeeded');
+  const schedules = results.filter((row) => row.toolName === 'digest.schedule');
+  // Preserve the other parts of compound replies and their saved IDs.
+  if (rows.some((row) => row.toolName !== 'digest.schedule' && row.toolName !== 'digest.list')) {
+    const receipts = new Map<string, string>();
+    for (const row of schedules) {
+      const receipt = digestReceiptSchema.safeParse(row.result);
+      if (receipt.success && !draft.includes(receipt.data.scheduleId)) {
+        receipts.set(receipt.data.scheduleId, describeDigestReceipt(receipt.data));
+      }
+    }
+    return receipts.size ? [draft, ...receipts.values()].join('\n\n') : undefined;
+  }
+  // For a standalone digest turn the stored receipt controls the destination,
+  // even when the model draft describes a different chat.
+  const schedule = schedules.at(-1);
+  if (schedule) {
+    const receipt = digestReceiptSchema.safeParse(schedule.result);
+    if (receipt.success) return describeDigestReceipt(receipt.data);
+    const rejected = z
+      .object({ status: z.enum(['topic_required', 'topic_mismatch']) })
+      .safeParse(schedule.result);
+    if (rejected.success) {
+      return rejected.data.status === 'topic_required'
+        ? 'What topic should the recurring digest cover?'
+        : 'I couldn’t save the digest with the requested topic. Please restate what it should cover.';
+    }
+    return;
+  }
+  const list = results.findLast((row) => row.toolName === 'digest.list');
+  if (!list) return;
+  const entries = z.object({ digests: z.array(digestReceiptSchema) }).safeParse(list.result);
+  if (!entries.success) return;
+  return (
+    entries.data.digests.map(describeDigestReceipt).join('\n\n') ||
+    'You have no saved recurring digests.'
+  );
+}
+
 export async function stageModelFinalResponse(
   deps: ExecutorDeps,
   task: TaskLease,
@@ -1674,24 +1759,7 @@ export async function stageModelFinalResponse(
       contractNotice: checked.blocked || undefined,
     });
   }
-  // Preserve the identity of each digest saved by this turn even if the
-  // model summarizes the action without printing the receipt.
-  const digestReceipts = new Map<string, string>();
-  for (const row of rows) {
-    if (row.toolName !== 'digest.schedule' || row.status !== 'succeeded') continue;
-    const receipt = z
-      .object({
-        scheduleId: z.uuid(),
-        enabled: z.boolean(),
-        nextRunAt: z.iso.datetime().nullable(),
-      })
-      .safeParse(row.result);
-    if (!receipt.success || text.includes(receipt.data.scheduleId)) continue;
-    const { scheduleId, enabled, nextRunAt } = receipt.data;
-    const status = enabled && nextRunAt ? `Next run ${nextRunAt}.` : 'The schedule is disabled.';
-    digestReceipts.set(scheduleId, `Digest schedule ${scheduleId}. ${status}`);
-  }
-  const finalText = [text, ...digestReceipts.values()].filter(Boolean).join('\n\n');
+  const finalText = digestReceiptText(rows, text) ?? text;
   // A known contact's plain answer would otherwise dead-end in the dashboard;
   // propose it back to them (owner-approved) so the thread does not go silent.
   await maybeEnqueueKnownSenderReply(deps, task, finalText);
