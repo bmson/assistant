@@ -48,6 +48,10 @@ on:
         description: Independent signed archive restore target review for this closed bootstrap
         required: false
         type: string
+      reclosed_predecessor_run_id:
+        description: Exact failed deployment run to bind when observing or promoting the restored archived pair
+        type: string
+        required: false
       native_web_qualification:
         description: Read-only native web qualification; no image, release, delivery hold or cleanup
         required: false
@@ -191,6 +195,15 @@ jobs:
           ESTIMATED_COST_RELEASE_PROFILE_JSON: ${{ inputs.estimated_cost_release_profile }}
           ESTIMATED_COST_DRAIN_PACKET_JSON: ${{ inputs.estimated_cost_drain_packet }}
         run: bash infra/gcp/verify-build-only-context.sh
+      - name: Validate reclosed predecessor opt-in before authentication
+        if: inputs.reclosed_predecessor_run_id != ''
+        env:
+          RECLOSED_PREDECESSOR_RUN_ID: ${{ inputs.reclosed_predecessor_run_id }}
+          ARCHIVE_MAINTENANCE_RUN_ID: ${{ inputs.archive_maintenance_run_id }}
+          ARCHIVE_RESTORE_PROOF: ${{ inputs.archive_restore_proof }}
+        run: |
+          [[ "$RECLOSED_PREDECESSOR_RUN_ID" == '44632388669' &&
+             -n "$ARCHIVE_MAINTENANCE_RUN_ID" && -n "$ARCHIVE_RESTORE_PROOF" ]]
       - name: Validate paired archive promotion inputs before authentication
         if: inputs.archive_maintenance_run_id != '' || inputs.archive_restore_proof != ''
         env:
@@ -497,6 +510,7 @@ jobs:
       ESTIMATED_COST_DRAIN_PACKET_JSON: ${{ inputs.estimated_cost_drain_packet }}
       RELEASE_PREBUILT_RUN_ID: ${{ inputs.prebuilt_run_id }}
       API3_RECOVERY_PROOF: ${{ inputs.api3_recovery_proof }}
+      OWNER_RELEASE_RECLOSED_PREDECESSOR_RUN_ID: ${{ inputs.reclosed_predecessor_run_id }}
       ARCHIVE_MAINTENANCE_RUN_ID: ${{ inputs.archive_maintenance_run_id }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -571,6 +585,36 @@ jobs:
         with:
           cosign-release: v3.1.3
           install-dir: ${{ runner.temp }}/estimated-cost-cosign
+      - name: Download fixed reclosed predecessor journal
+        if: inputs.archive_maintenance_run_id != '' && inputs.archive_restore_proof != '' && inputs.reclosed_predecessor_run_id == '44632388669'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          github-token: ${{ github.token }}
+          repository: bmson/assistant
+          run-id: "44632388669"
+          artifact-ids: "14581194317"
+          merge-multiple: true
+          path: ${{ runner.temp }}/owner-reclosed-predecessor/journal
+      - name: Download fixed reclosed predecessor manifest
+        if: inputs.archive_maintenance_run_id != '' && inputs.archive_restore_proof != '' && inputs.reclosed_predecessor_run_id == '44632388669'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          github-token: ${{ github.token }}
+          repository: bmson/assistant
+          run-id: "44632388669"
+          artifact-ids: "14581827749"
+          merge-multiple: true
+          path: ${{ runner.temp }}/owner-reclosed-predecessor/manifest
+      - name: Download fixed reclosed predecessor handoff
+        if: inputs.archive_maintenance_run_id != '' && inputs.archive_restore_proof != '' && inputs.reclosed_predecessor_run_id == '44632388669'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          github-token: ${{ github.token }}
+          repository: bmson/assistant
+          run-id: "44632388669"
+          artifact-ids: "14582169166"
+          merge-multiple: true
+          path: ${{ runner.temp }}/owner-reclosed-predecessor/handoff
       - name: Verify the exact prior archive maintenance observation
         if: inputs.archive_maintenance_run_id != ''
         id: archive_observation
@@ -852,7 +896,7 @@ jobs:
           retention-days: 14
       - name: Remove runner-local private archived runtime inputs
         if: always() && inputs.archive_maintenance_run_id != ''
-        run: /usr/bin/rm -rf -- "$RUNNER_TEMP/owner-archived-runtime-pack" "$RUNNER_TEMP/archive-maintenance"
+        run: /usr/bin/rm -rf -- "$RUNNER_TEMP/owner-archived-runtime-pack" "$RUNNER_TEMP/archive-maintenance" "$RUNNER_TEMP/owner-reclosed-predecessor"
       - name: Keep only the current deployment
         if: vars.CURRENT_ONLY_CLEANUP == 'true' && inputs.archive_maintenance_run_id == ''
         run: >-

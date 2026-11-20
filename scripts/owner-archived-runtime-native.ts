@@ -10,6 +10,13 @@ import {
 
 const originalSource = '1c2ea3907bf17b14368846708002f9d4633f2092';
 const originalManifest = '9ca6dcbb6a1c4b6e25ca6ea857c86ae1c3103a75d9a8e4e26af801f7b1c32647';
+export const RECLOSED_ARCHIVE_RUN_ID = '44632388669';
+const predecessorSource = 'bc74fbf7678231d83049558c2ba3d6f9c29baf09';
+// Exact archived native revisions, excluding the provider's live health conditions only.
+const originalRevisionConfig = {
+  agent: 'f864c06958b2c9321b45daf2ca0b2ba4da412022e1fa45f93fd8c6152ab1ec0b',
+  web: 'fe3d4f57c5c3ce9ff814e31db4709415f8a535a09af303e9ebc1379093970763',
+};
 const roleNames = ['agent', 'web'] as const;
 type Role = (typeof roleNames)[number];
 const digest = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
@@ -73,14 +80,29 @@ function environment(value: unknown) {
   };
 }
 
+type ReclosedObservation = {
+  runId: string;
+  verify: (
+    pair: Record<Role, { service: Obj; revisions: Record<string, Obj> }>,
+  ) => Promise<unknown>;
+};
+
+export function reclosedArchiveOptIn(value: string | undefined) {
+  if (!value) return false;
+  requireProof(value === RECLOSED_ARCHIVE_RUN_ID);
+  return true;
+}
+
 /** Offsets live parent lookup for the explicit archived observer only. Evidence is
  * already verified by the pack reader. Native metadata drift requires new review. */
 export async function observeArchivedRuntimePair(
   binding: unknown,
   roles: Record<Role, ArchivedRoleEvidence>,
   read: (url: string) => Promise<unknown>,
+  reclosed?: ReclosedObservation,
 ) {
   try {
+    if (reclosed) requireProof(reclosedArchiveOptIn(reclosed.runId));
     const packet = exact(binding, ['format', 'roles']);
     requireProof(packet.format === 1);
     const byRole = exact(packet.roles, [...roleNames]);
@@ -97,15 +119,19 @@ export async function observeArchivedRuntimePair(
         const b = reviewed[role];
         const serviceName = `${SERVICE_ROOT}${role}`;
         const revisionName = `${serviceName}/revisions/${b.revision}`;
-        const [serviceValue, revisionValue] = await Promise.all([
+        const paused = `assistant-${role}-p-${RECLOSED_ARCHIVE_RUN_ID}-1-${predecessorSource.slice(0, 8)}`;
+        const [serviceValue, revisionValue, pausedValue] = await Promise.all([
           read(`${RUN_ROOT}${serviceName}`),
           read(`${RUN_ROOT}${revisionName}`),
+          reclosed ? read(`${RUN_ROOT}${serviceName}/revisions/${paused}`) : undefined,
         ]);
         const service = object(serviceValue);
         const revision = object(revisionValue);
+        const { conditions, ...revisionConfig } = revision;
         requireProof(
-          bootstrapDigest(service) === b.serviceSha256 &&
-            bootstrapDigest(revision) === b.revisionSha256 &&
+          (reclosed || bootstrapDigest(service) === b.serviceSha256) &&
+            (bootstrapDigest(revision) === b.revisionSha256 ||
+              (reclosed && bootstrapDigest(revisionConfig) === originalRevisionConfig[role])) &&
             bootstrapDigest(text(service.uid, /^[a-f0-9-]{36}$/)) === b.serviceUidSha256 &&
             bootstrapDigest(text(revision.uid, /^[a-f0-9-]{36}$/)) === b.revisionUidSha256,
         );
@@ -115,13 +141,17 @@ export async function observeArchivedRuntimePair(
           service.name === serviceName &&
             revision.name === revisionName &&
             (revision.service === serviceName || revision.service === `assistant-${role}`) &&
-            service.latestCreatedRevision === revisionName &&
-            service.latestReadyRevision === revisionName &&
+            service.latestCreatedRevision ===
+              (reclosed ? `${serviceName}/revisions/${paused}` : revisionName) &&
+            service.latestReadyRevision === service.latestCreatedRevision &&
             object(service.terminalCondition).state === 'CONDITION_SUCCEEDED' &&
             object(service.scaling).scalingMode === 'AUTOMATIC',
         );
-        requireProof(Array.isArray(revision.conditions));
-        const ready = revision.conditions.map(object).filter((row) => row.type === 'Ready');
+        requireProof(Array.isArray(conditions) && conditions.length <= 16);
+        const nativeConditions = conditions.map(object);
+        if (reclosed)
+          requireProof(nativeConditions.every((row) => row.state === 'CONDITION_SUCCEEDED'));
+        const ready = nativeConditions.filter((row) => row.type === 'Ready');
         requireProof(singleton(ready).state === 'CONDITION_SUCCEEDED');
         for (const rows of [service.traffic, service.trafficStatuses]) {
           const row = singleton(rows);
@@ -139,15 +169,16 @@ export async function observeArchivedRuntimePair(
         const status = singleton(revision.containerStatuses);
         const repository = `us-west1-docker.pkg.dev/bmson-assistant/assistant/${role}`;
         requireProof(
-          template.revision === b.revision &&
+          template.revision === (reclosed ? paused : b.revision) &&
             template.serviceAccount === account &&
             revision.serviceAccount === account &&
-            requested.image === `${repository}@sha256:${digest(roles[role].parent)}` &&
+            (reclosed ||
+              requested.image === `${repository}@sha256:${digest(roles[role].parent)}`) &&
             runtime.image === `${repository}@sha256:${digest(roles[role].child)}` &&
             runtime.name === `${role}-1` &&
             status.name === runtime.name &&
             status.imageDigest === runtime.image &&
-            bootstrapDigest(requested.env) === bootstrapDigest(runtime.env),
+            (reclosed || bootstrapDigest(requested.env) === bootstrapDigest(runtime.env)),
         );
         const get = environment(runtime.env);
         requireProof(
@@ -160,7 +191,15 @@ export async function observeArchivedRuntimePair(
         );
         return {
           serviceName,
-          serviceSha256: b.serviceSha256,
+          serviceSha256: bootstrapDigest(service),
+          ...(reclosed
+            ? {
+                native: {
+                  service,
+                  revisions: { [b.revision]: revision, [paused]: object(pausedValue) },
+                },
+              }
+            : {}),
           owner: get('FIRESTORE_AGENT_ID', /^[A-Za-z0-9_.:-]{1,128}$/),
           workspace: get('ASSISTANT_WORKSPACE_ID', /^[A-Za-z0-9_.:-]{1,128}$/),
         };
@@ -170,6 +209,13 @@ export async function observeArchivedRuntimePair(
       observed[0]?.owner === observed[1]?.owner &&
         observed[0]?.workspace === observed[1]?.workspace,
     );
+    let reclosedNativeSha256: string | undefined;
+    if (reclosed) {
+      requireProof(observed[0]?.native && observed[1]?.native);
+      const current = { agent: observed[0].native, web: observed[1].native };
+      reclosedNativeSha256 = bootstrapDigest(current);
+      await reclosed.verify(current);
+    }
     await Promise.all(
       observed.map(async (item) => {
         const repeated = await read(`${RUN_ROOT}${item.serviceName}`);
@@ -183,6 +229,16 @@ export async function observeArchivedRuntimePair(
       routing: 'canonical_only',
       mutationAuthorized: false,
       trafficAuthorized: false,
+      ...(reclosed
+        ? {
+            reclosedPredecessorRunId: reclosed.runId,
+            reclosedNativeSha256,
+            liveServiceSha256: {
+              agent: observed[0]?.serviceSha256,
+              web: observed[1]?.serviceSha256,
+            },
+          }
+        : {}),
     } as const;
   } catch {
     throw new Error('Archived runtime native pair is unproven');

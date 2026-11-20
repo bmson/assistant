@@ -362,14 +362,41 @@ function projectSnapshot(raw: unknown, native: Record<string, unknown>, c: Conte
       tagUris[row.tag] = tagHash(address);
     }
   }
+  const latestReady = nativeRevisionName(s.latestReadyRevision),
+    latestCreated = nativeRevisionName(s.latestCreatedRevision);
+  requireNative(latestReady === latestCreated);
+  const reclosed = c.currentBinding?.reclosed;
+  const dormant = reclosed && latestReady === reclosed.predecessorRevision ? reclosed : undefined;
   const known = [c.canonical, releaseIdentity(c, 'P').revision, releaseIdentity(c, 'R').revision];
+  if (dormant) {
+    const predecessor = nativeObject(native[dormant.predecessorRevision]);
+    requireNative(
+      c.currentBinding?.preclosed &&
+        disabled(s) &&
+        digest(s) === c.currentBinding.serviceSha256 &&
+        nativeRevisionName(predecessor.name) === dormant.predecessorRevision &&
+        digest(predecessor) === dormant.predecessorRevisionSha256 &&
+        Object.keys(native).length === 2 &&
+        native[c.canonical] &&
+        [desired, observed].every(
+          (rows) =>
+            rows.length === 1 &&
+            rows[0]?.revision === c.canonical &&
+            rows[0].percent === 100 &&
+            !rows[0].tag,
+        ),
+    );
+  }
+  const addressed = Object.entries(native).filter(
+    ([name]) => name !== dormant?.predecessorRevision,
+  );
   requireNative(
-    Object.keys(native).length > 0 &&
-      Object.keys(native).length <= 3 &&
-      Object.keys(native).every((n) => known.includes(n)),
+    addressed.length > 0 &&
+      addressed.length <= 3 &&
+      addressed.every(([name]) => known.includes(name)),
   );
   const revisions = Object.fromEntries(
-    Object.entries(native).map(([name, value]) => [name, revisionProof(value, name, c)]),
+    addressed.map(([name, value]) => [name, revisionProof(value, name, c)]),
   );
   requireNative(Array.isArray(s.urls) && s.urls.length <= 9);
   const urls = s.urls.map((v) => tagHash(uri(v)));
@@ -387,15 +414,18 @@ function projectSnapshot(raw: unknown, native: Record<string, unknown>, c: Conte
     }
     urls.sort();
   }
-  const latestReady = nativeRevisionName(s.latestReadyRevision),
-    latestCreated = nativeRevisionName(s.latestCreatedRevision);
-  requireNative(latestReady === latestCreated && revisions[latestReady]);
-  const t = currentSemanticTemplate(
-    template(s.template),
-    native[latestReady],
-    revisions[latestReady].templateSha256,
-    latestReady === c.canonical && !!c.currentBinding,
-  );
+  const requestedTemplate = template(s.template);
+  let t = requestedTemplate;
+  if (!dormant) {
+    const latest = revisions[latestReady];
+    requireNative(latest);
+    t = currentSemanticTemplate(
+      requestedTemplate,
+      native[latestReady],
+      latest.templateSha256,
+      latestReady === c.canonical && !!c.currentBinding,
+    );
+  }
   const generation = text(s.generation, /^[1-9][0-9]{0,18}$/);
   requireNative(generation === s.observedGeneration);
   return {

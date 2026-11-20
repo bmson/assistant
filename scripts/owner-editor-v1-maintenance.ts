@@ -10,7 +10,11 @@ import {
 } from '@assistant/firestore/owner-editor-maintenance';
 import { GoogleAuth } from 'google-auth-library';
 import { withHostedArchivedRuntimePack } from './owner-archived-runtime-hosted.js';
-import { observeArchivedRuntimePair } from './owner-archived-runtime-native.js';
+import {
+  observeArchivedRuntimePair,
+  RECLOSED_ARCHIVE_RUN_ID,
+  reclosedArchiveOptIn,
+} from './owner-archived-runtime-native.js';
 import {
   createReadOnlyGet,
   requiresBasicEditorPreflight,
@@ -32,6 +36,7 @@ import {
   readTrustedMaintenanceRun,
   writeBeforeMaintenanceReceipt,
 } from './owner-release-maintenance-run.js';
+import { verifyHostedReclosedAutomatic } from './owner-release-reclosed-hosted.js';
 import { recheckReviewedArchivedRuntimeGraph } from './owner-restore-target-verify.js';
 
 const modes = [
@@ -66,6 +71,11 @@ export function verifyOperatorSource(
     Object.keys(env).some((k) => k.startsWith('CLOUDSDK_API_ENDPOINT_OVERRIDES_'))
   )
     throw new Error('Untrusted operator source');
+  if (
+    reclosedArchiveOptIn(env.OWNER_RELEASE_RECLOSED_PREDECESSOR_RUN_ID) &&
+    env.OWNER_EDITOR_MAINTENANCE_MODE !== 'before-maintenance'
+  )
+    throw new Error('Unexpected reclosed predecessor opt-in');
   if (env.OWNER_EDITOR_MAINTENANCE_MODE?.startsWith('prepare-'))
     packetRecipient(env.OWNER_EDITOR_PACKET_RECIPIENT_PUBLIC_KEY ?? '');
   if (env.OWNER_EDITOR_MAINTENANCE_MODE === 'before-maintenance')
@@ -118,9 +128,21 @@ async function observeBeforeMaintenance(env: NodeJS.ProcessEnv, head: string) {
       throw new Error('Reviewed original archive changed');
     const deadline = Date.now() + 60_000;
     const read = createReadOnlyGet(token, deadline);
-    const before = await observeArchivedRuntimePair(pack.nativeBinding, pack.roles, read);
+    const reclosed = reclosedArchiveOptIn(env.OWNER_RELEASE_RECLOSED_PREDECESSOR_RUN_ID)
+      ? {
+          runId: RECLOSED_ARCHIVE_RUN_ID,
+          verify: (pair: Parameters<typeof verifyHostedReclosedAutomatic>[0]['pair']) =>
+            verifyHostedReclosedAutomatic({
+              pair,
+              archivedNativeBinding: pack.nativeBinding,
+              token,
+              env,
+            }),
+        }
+      : undefined;
+    const before = await observeArchivedRuntimePair(pack.nativeBinding, pack.roles, read, reclosed);
     await recheckReviewedArchivedRuntimeGraph(token, pack, fetch, deadline);
-    const after = await observeArchivedRuntimePair(pack.nativeBinding, pack.roles, read);
+    const after = await observeArchivedRuntimePair(pack.nativeBinding, pack.roles, read, reclosed);
     const confirmed = protectedBeforeMaintenanceContext(env, head);
     if (
       bootstrapDigest(before) !== bootstrapDigest(after) ||
