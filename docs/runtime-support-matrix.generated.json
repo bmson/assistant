@@ -2,10 +2,10 @@
   "format": 1,
   "purpose": "Source composition and route drift evidence only; not a deployment or configured-runtime receipt.",
   "runtimeSources": {
-    "packages/config/src/index.ts": "4b5e869fdc45b6630930827b97b8480fa19d6fa567abc18cee7ea5f11fea68b1",
+    "packages/config/src/index.ts": "dfe310dc55100989cb4f22fb5530e5ef4e6f259efacfe721c0477baafe822939",
     "apps/agent/src/deps.ts": "6218d3d687329c914c07683f1c882763e0db5d77d0fd912dc106eca35ac2b5c2",
     "apps/agent/src/index.ts": "bc65b1a16ba83c6351a74e2c071189fb4288d5d3ec2c4425accc185da77fe6ab",
-    "apps/web/lib/server.ts": "6d3a30babe8651e50d9474f4ceed29d3b4c8e59eadd4f45f4ab94eb248ee7af7",
+    "apps/web/lib/server.ts": "44898de9d12ea90ba06de971f0c46482288ded323bb4c0c4a6f30b0d5d58d342",
     "apps/web/proxy.ts": "8deda76cb944ee0e0eb081374fea0010855916ec786d59cd927f8c408eb98d7c",
     "packages/db/drizzle/meta/_journal.json": "701932d10b67c3ee7bb1025044c5d86467de166288ad542134309e244eec8fbd",
     "infra/gcp/release-contracts.json": "9b702961545227dabefe65c3ca652a632aa8dee3d55d36da3fd6b7851b30156f"
@@ -239,7 +239,7 @@
     },
     "apps/web/app/api/mobile/v1/connections/google-calendar/household/route.ts": {
       "methods": ["GET", "PUT"],
-      "sha256": "00e80d25e2e0dacdfa6c6d46c0b5ef9f47ab6c03c0642108b9dd2800a537014a"
+      "sha256": "64bfb424fc5c337402da91faeeca815ccfbbfeaab0f1000fd2ba0b6d8143e59a"
     },
     "apps/web/app/api/mobile/v1/connections/google-calendar/route.ts": {
       "methods": ["DELETE", "GET"],

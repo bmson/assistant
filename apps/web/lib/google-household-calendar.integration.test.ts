@@ -4,7 +4,6 @@ import { createFirestoreGoogleCalendarConnectionRepository } from '@assistant/fi
 import {
   GOOGLE_CALENDAR_READ_SCOPE,
   type GoogleCalendarConnectionRepository,
-  type HouseholdCalendarSettings,
 } from '@assistant/persistence';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GET, PUT } from '@/app/api/mobile/v1/connections/google-calendar/household/route';
@@ -17,16 +16,19 @@ const token = 'synthetic-household-phone-bearer';
 const calendarAccessToken = 'synthetic-personal-calendar-access';
 const types = ['postgres', 'firestore'] as const;
 
-function request(path = '', body?: object, authenticated = true) {
+function request(path = '', body?: object, authenticated = true, extended = false) {
   return new Request(base + path, {
     method: body ? 'PUT' : 'GET',
     headers: {
       ...(authenticated ? { authorization: `Bearer ${token}` } : {}),
       ...(body ? { 'content-type': 'application/json' } : {}),
+      ...(extended ? { 'x-assistant-household-calendar-version': '2' } : {}),
     },
     body: body ? JSON.stringify(body) : undefined,
   });
 }
+
+const v2 = (path = '', body?: object) => request(path, body, true, true);
 
 describe.each(types)('household Calendar through mobile routes on %s', (driver) => {
   const loopbackEmulator = /^(?:127\.0\.0\.1|localhost):\d+$/.test(
@@ -58,6 +60,7 @@ describe.each(types)('household Calendar through mobile routes on %s', (driver) 
         'https://assistant.example.test/api/oauth/google-calendar/callback',
       );
       vi.stubEnv('MCP_ENC_KEY', 'a'.repeat(64));
+      vi.stubEnv('GOOGLE_HOUSEHOLD_EXTENDED_PURPOSES_ENABLED', 'false');
       vi.stubEnv('MOBILE_API_TOKEN', token);
       vi.stubEnv('PERSISTENCE_DRIVER', driver);
       vi.stubEnv('FIRESTORE_AGENT_ID', owner);
@@ -74,9 +77,6 @@ describe.each(types)('household Calendar through mobile routes on %s', (driver) 
       resetConfigForTest();
 
       let repository: GoogleCalendarConnectionRepository;
-      let seedStoredChoices: (
-        settings: HouseholdCalendarSettings & { connectionId: string },
-      ) => Promise<unknown>;
       if (driver === 'postgres') {
         const {
           createPostgresGoogleCalendarConnectionRepository,
@@ -85,11 +85,6 @@ describe.each(types)('household Calendar through mobile routes on %s', (driver) 
         const db = getDb();
         owner = await assertPostgresInstallationOwner(db);
         repository = createPostgresGoogleCalendarConnectionRepository(db);
-        seedStoredChoices = (settings) => db.$client`
-          insert into google_household_calendar_choices (agent_id, settings)
-          values (${owner}, ${JSON.stringify(settings)}::jsonb)
-          on conflict (agent_id) do update set settings = excluded.settings
-        `;
       } else {
         const store = getFirestoreInstallationStore();
         cleanup = async () => {
@@ -97,8 +92,6 @@ describe.each(types)('household Calendar through mobile routes on %s', (driver) 
           await store.db.terminate();
         };
         repository = createFirestoreGoogleCalendarConnectionRepository(store);
-        seedStoredChoices = (settings) =>
-          store.doc('googleHouseholdCalendarChoices', owner).set({ agentId: owner, settings });
       }
       const { encryptStoredCredential } = await import('@assistant/core/mcp-secrets');
       const connectionId = randomUUID();
@@ -161,6 +154,7 @@ describe.each(types)('household Calendar through mobile routes on %s', (driver) 
         },
       ] as const;
       let extraRoster = false;
+      let omittedSource: string | undefined;
       const providerCalls: string[] = [];
       let rosterMode: 'ready' | 'truncated' | 'unavailable' = 'ready';
       let duringFamilyRead: (() => Promise<unknown>) | undefined;
@@ -204,18 +198,21 @@ describe.each(types)('household Calendar through mobile routes on %s', (driver) 
                 dataOwner: 'different-owner@example.test',
               },
               ...(extraRoster
-                ? purposeSources.map(({ id, summary }) => ({
-                    id,
-                    summary,
-                    accessRole: 'owner',
-                    dataOwner: 'personal@example.test',
-                  }))
+                ? purposeSources
+                    .filter(({ id }) => id !== omittedSource)
+                    .map(({ id, summary }) => ({
+                      id,
+                      summary,
+                      accessRole: 'owner',
+                      dataOwner: 'personal@example.test',
+                    }))
                 : []),
             ],
             ...(rosterMode === 'truncated' ? { nextPageToken: 'fixture-page' } : {}),
           });
         }
         if (url.pathname.endsWith('/freeBusy')) {
+          expect(init.method).toBe('POST');
           providerCalls.push(
             'busy:' +
               JSON.parse(String(init.body))
@@ -368,25 +365,115 @@ describe.each(types)('household Calendar through mobile routes on %s', (driver) 
       expect(providerCalls).toEqual(['roster', `events:${family}`]);
       duringFamilyRead = undefined;
       extraRoster = true;
-      const extendedSettings = {
-        revision: randomUUID(),
-        connectionId,
-        choices: [...withIgnore, ...purposeSources.map(({ id, purpose }) => ({ id, purpose }))],
-      };
-      await seedStoredChoices(extendedSettings);
-      const bridgeSetup = await GET(request());
-      expect(bridgeSetup.status).toBe(200);
-      const bridgeView = await bridgeSetup.json();
-      expect(bridgeView).toMatchObject({
+      const starting = (await repository.get(owner))?.household?.revision;
+      const baseline = await (
+        await PUT(v2('', { connectionId, revision: starting, choices: withIgnore }))
+      ).json();
+      const stored = [...withIgnore];
+      let currentRevision = baseline.revision;
+      expect(baseline).toMatchObject({ remaining: 3, extendedPurposesAvailable: false });
+      await verifyPreview(currentRevision);
+
+      expect(
+        (
+          await PUT(
+            v2('', {
+              connectionId,
+              revision: currentRevision,
+              choices: [
+                ...stored,
+                { id: purposeSources[0].id, purpose: purposeSources[0].purpose },
+              ],
+            }),
+          )
+        ).status,
+      ).toBe(409);
+
+      vi.stubEnv('GOOGLE_HOUSEHOLD_EXTENDED_PURPOSES_ENABLED', 'true');
+      resetConfigForTest();
+      expect(await (await GET(v2())).json()).toMatchObject({
+        remaining: 3,
+        extendedPurposesAvailable: true,
+      });
+      expect(
+        (
+          await PUT(
+            request('', {
+              connectionId,
+              revision: currentRevision,
+              choices: [
+                ...stored,
+                { id: purposeSources[0].id, purpose: purposeSources[0].purpose },
+              ],
+            }),
+          )
+        ).status,
+      ).toBe(409);
+      for (const [index, { id, purpose }] of purposeSources.entries()) {
+        expect(
+          (
+            await PUT(
+              v2('', {
+                connectionId,
+                revision: currentRevision,
+                choices: [...choices, { id: other, purpose }],
+              }),
+            )
+          ).status,
+        ).toBe(409);
+        stored.push({ id, purpose });
+        const saved = await PUT(
+          v2('', { connectionId, revision: currentRevision, choices: stored }),
+        );
+        expect(saved.status).toBe(200);
+        const next = await saved.json();
+        expect(next).toMatchObject({ remaining: 2 - index });
+        currentRevision = next.revision;
+        const reopened = await (await GET(v2())).json();
+        expect(reopened).toMatchObject({ revision: currentRevision, remaining: 2 - index });
+        expect(reopened.calendars).toContainEqual(expect.objectContaining({ id, purpose }));
+      }
+
+      async function checkExtendedPreview(ids: readonly string[], complete = true) {
+        providerCalls.length = 0;
+        const preview = await (await GET(v2(window(currentRevision)))).json();
+        expect(preview.complete).toBe(complete);
+        const expectedSources = purposeSources.filter(({ id }) => ids.includes(id));
+        expect(preview.rows).toMatchObject([
+          { calendar: 'Family', title: 'Family appointment' },
+          ...expectedSources.map(({ summary, title }) => ({
+            calendar: summary,
+            title,
+            start: '2026-11-19T18:00:00.000Z',
+            end: '2026-11-19T19:00:00.000Z',
+          })),
+          { calendar: 'Work', title: 'Busy', start: '2026-11-19T20:00:00.000Z' },
+        ]);
+        expect(JSON.stringify(preview)).not.toContain('Private work title');
+        expect(providerCalls).toEqual([
+          'roster',
+          `events:${family}`,
+          ...expectedSources.map(({ id }) => `events:${id}`),
+          `busy:${work}`,
+        ]);
+      }
+
+      await checkExtendedPreview(purposeSources.map(({ id }) => id));
+      const preserved = (await repository.get(owner))?.household;
+      expect(preserved).toEqual({ revision: currentRevision, choices: stored });
+      const legacySetup = await (await GET(request())).json();
+      expect(legacySetup).toMatchObject({
         state: 'incomplete',
         remaining: null,
-        revision: extendedSettings.revision,
+        extendedPurposesAvailable: false,
       });
       for (const { id } of purposeSources)
-        expect(bridgeView.calendars).toContainEqual(expect.objectContaining({ id, purpose: null }));
+        expect(legacySetup.calendars).toContainEqual(
+          expect.objectContaining({ id, purpose: null }),
+        );
       providerCalls.length = 0;
-      const bridgePreview = await (await GET(request(window(extendedSettings.revision)))).json();
-      expect(bridgePreview).toMatchObject({
+      const legacyPreview = await (await GET(request(window(currentRevision)))).json();
+      expect(legacyPreview).toMatchObject({
         complete: false,
         rows: [
           { calendar: 'Family', title: 'Family appointment' },
@@ -395,13 +482,61 @@ describe.each(types)('household Calendar through mobile routes on %s', (driver) 
       });
       expect(providerCalls).toEqual(['roster', `events:${family}`, `busy:${work}`]);
       expect(
-        (await PUT(request('', { connectionId, revision: extendedSettings.revision, choices: [] })))
+        (await PUT(request('', { connectionId, revision: currentRevision, choices: [] }))).status,
+      ).toBe(409);
+      expect(
+        (await PUT(v2('', { connectionId, revision: baseline.revision, choices: [] }))).status,
+      ).toBe(409);
+      expect(
+        (await PUT(v2('', { connectionId: randomUUID(), revision: currentRevision, choices: [] })))
           .status,
       ).toBe(409);
-      expect((await repository.get(owner))?.household).toEqual({
-        revision: extendedSettings.revision,
-        choices: extendedSettings.choices,
+
+      rosterMode = 'unavailable';
+      expect((await GET(v2())).status).toBe(503);
+      expect((await repository.get(owner))?.household).toEqual(preserved);
+      rosterMode = 'ready';
+      omittedSource = purposeSources[0].id;
+      expect(await (await GET(v2())).json()).toMatchObject({
+        state: 'incomplete',
+        remaining: null,
+        revision: currentRevision,
       });
+      await checkExtendedPreview(
+        purposeSources.slice(1).map(({ id }) => id),
+        false,
+      );
+      const partialSave = await PUT(
+        v2('', {
+          connectionId,
+          revision: currentRevision,
+          choices: stored.filter(({ id }) => id !== omittedSource),
+        }),
+      );
+      expect(partialSave.status).toBe(200);
+      currentRevision = (await partialSave.json()).revision;
+      expect((await repository.get(owner))?.household?.choices).toEqual(
+        expect.arrayContaining(stored),
+      );
+      omittedSource = undefined;
+
+      vi.stubEnv('GOOGLE_HOUSEHOLD_EXTENDED_PURPOSES_ENABLED', 'false');
+      resetConfigForTest();
+      for (const [index, { id }] of purposeSources.entries()) {
+        stored[withIgnore.length + index] = { id, purpose: 'ignore' };
+        const result = await PUT(
+          v2('', { connectionId, revision: currentRevision, choices: stored }),
+        );
+        expect(result.status).toBe(200);
+        currentRevision = (await result.json()).revision;
+        const reopened = await (await GET(v2())).json();
+        expect(reopened.calendars).toContainEqual(
+          expect.objectContaining({ id, purpose: 'ignore' }),
+        );
+        await checkExtendedPreview(purposeSources.slice(index + 1).map(({ id }) => id));
+      }
+
+      expect(await (await GET(request())).json()).toMatchObject({ remaining: 0 });
       await repository.disconnect(owner);
       expect((await repository.get(owner))?.household).toBeUndefined();
       expect((await GET(request())).status).toBe(503);

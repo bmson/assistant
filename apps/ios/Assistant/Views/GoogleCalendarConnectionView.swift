@@ -196,6 +196,15 @@ private struct GoogleHouseholdCalendarView: View {
                             Text("Unclassified").tag(nil as GoogleHouseholdCalendarPurpose?)
                             if source.canShowDetails {
                                 Text("Household").tag(Optional(GoogleHouseholdCalendarPurpose.household))
+                                if setup.extendedPurposesAvailable == true || source.purpose == .school {
+                                    Text("School").tag(Optional(GoogleHouseholdCalendarPurpose.school))
+                                }
+                                if setup.extendedPurposesAvailable == true || source.purpose == .activity {
+                                    Text("Activity").tag(Optional(GoogleHouseholdCalendarPurpose.activity))
+                                }
+                                if setup.extendedPurposesAvailable == true || source.purpose == .holidays {
+                                    Text("Holidays").tag(Optional(GoogleHouseholdCalendarPurpose.holidays))
+                                }
                             }
                             if source.canShowBusy {
                                 Text("Work · Free/busy only").tag(Optional(GoogleHouseholdCalendarPurpose.workFreeBusy))
@@ -217,7 +226,7 @@ private struct GoogleHouseholdCalendarView: View {
             } header: {
                 Text("Calendar choices")
             } footer: {
-                Text("Household shows event titles from calendars owned by your Google account. Work shows busy times. Unclassified and ignored calendars stay out of this view.")
+                Text("Calendars selected for details show event titles from calendars owned by your Google account. Work shows busy times. Unclassified and ignored calendars stay out of this view.")
             }
 
             if let setup, setup.remaining != nil {

@@ -73,17 +73,27 @@ const canShowBusy = (entry: { accessRole: string }) =>
 
 export class HouseholdCalendarConflict extends Error {}
 
-function eligible(purpose: string, calendar: CalendarSource, accountEmail: string) {
-  switch (purpose) {
-    case 'household':
-      return canShowDetails(calendar, accountEmail);
-    case 'work_free_busy':
-      return canShowBusy(calendar);
-    case 'ignore':
-      return true;
-    default:
-      return false;
-  }
+function isExtendedPurpose(purpose: string) {
+  return purpose === 'school' || purpose === 'activity' || purpose === 'holidays';
+}
+
+function supportedPurpose(purpose: string, supportsExtended: boolean) {
+  return (
+    householdCalendarPurpose.safeParse(purpose).success &&
+    (supportsExtended || !isExtendedPurpose(purpose))
+  );
+}
+
+function eligible(
+  purpose: string,
+  calendar: CalendarSource,
+  accountEmail: string,
+  supportsExtended: boolean,
+) {
+  if (!supportedPurpose(purpose, supportsExtended)) return false;
+  if (purpose === 'ignore') return true;
+  if (purpose === 'work_free_busy') return canShowBusy(calendar);
+  return canShowDetails(calendar, accountEmail);
 }
 
 function setupView(
@@ -91,6 +101,8 @@ function setupView(
   household: HouseholdCalendarSettings | undefined,
   roster: Roster,
   accountEmail: string,
+  supportsExtended: boolean,
+  extendedPurposesAvailable: boolean,
 ) {
   const purposes = new Map(household?.choices.map(({ id, purpose }) => [id, purpose]));
   const calendars = roster.calendars.map((calendar) => {
@@ -100,7 +112,7 @@ function setupView(
       name: calendar.name,
       canShowDetails: canShowDetails(calendar, accountEmail),
       canShowBusy: canShowBusy(calendar),
-      purpose: saved && eligible(saved, calendar, accountEmail) ? saved : null,
+      purpose: saved && eligible(saved, calendar, accountEmail, supportsExtended) ? saved : null,
     };
   });
   const available = new Set(
@@ -113,6 +125,7 @@ function setupView(
   return {
     state: complete ? 'ready' : 'incomplete',
     connectionId,
+    extendedPurposesAvailable,
     revision: household?.revision ?? null,
     remaining: complete ? calendars.filter(({ purpose }) => purpose === null).length : null,
     calendars,
@@ -126,6 +139,7 @@ export function createGoogleHouseholdCalendarService(
     connectionId: string,
     assertCurrent: () => Promise<void>,
   ) => HouseholdCalendarProvider,
+  extendedPurposesEnabled = false,
 ) {
   async function open(
     ownerId: string,
@@ -162,30 +176,43 @@ export function createGoogleHouseholdCalendarService(
   }
 
   return {
-    async setup(ownerId: string) {
+    async setup(ownerId: string, supportsExtended = false) {
       const current = await open(ownerId);
       return setupView(
         current.connectionId,
         current.household,
         current.roster,
         current.accountEmail,
+        supportsExtended,
+        supportsExtended && extendedPurposesEnabled,
       );
     },
-    async save(ownerId: string, input: z.infer<typeof householdCalendarSave>) {
+    async save(
+      ownerId: string,
+      input: z.infer<typeof householdCalendarSave>,
+      supportsExtended = false,
+    ) {
       const current = await open(ownerId, input);
       if (!current.roster.complete) throw new Error('Household calendar roster incomplete');
       if (
         current.household?.choices.some(
-          ({ purpose }) => !householdCalendarPurpose.safeParse(purpose).success,
+          ({ purpose }) => !supportedPurpose(purpose, supportsExtended),
         )
       )
         throw new HouseholdCalendarConflict();
       const rosterById = new Map(
         current.roster.calendars.map((calendar) => [calendar.id, calendar]),
       );
+      const prior = new Map(current.household?.choices.map(({ id, purpose }) => [id, purpose]));
       for (const choice of input.choices) {
         const calendar = rosterById.get(choice.id);
-        if (!calendar || !eligible(choice.purpose, calendar, current.accountEmail))
+        if (
+          !calendar ||
+          !eligible(choice.purpose, calendar, current.accountEmail, supportsExtended) ||
+          (isExtendedPurpose(choice.purpose) &&
+            !extendedPurposesEnabled &&
+            prior.get(choice.id) !== choice.purpose)
+        )
           throw new HouseholdCalendarConflict();
       }
       const submitted = new Set(input.choices.map(({ id }) => id));
@@ -193,7 +220,7 @@ export function createGoogleHouseholdCalendarService(
         current.household?.choices.filter(({ id, purpose }) => {
           if (submitted.has(id)) return false;
           const calendar = rosterById.get(id);
-          return !calendar || !eligible(purpose, calendar, current.accountEmail);
+          return !calendar || !eligible(purpose, calendar, current.accountEmail, supportsExtended);
         }) ?? [];
       const settings = { revision: randomUUID(), choices: [...input.choices, ...held] };
       if (!(await repository.saveHousehold(ownerId, input.connectionId, input.revision, settings)))
@@ -210,16 +237,26 @@ export function createGoogleHouseholdCalendarService(
         persisted.household,
         current.roster,
         current.accountEmail,
+        supportsExtended,
+        supportsExtended && extendedPurposesEnabled,
       );
     },
-    async preview(ownerId: string, input: z.infer<typeof householdCalendarPreview>) {
+    async preview(
+      ownerId: string,
+      input: z.infer<typeof householdCalendarPreview>,
+      supportsExtended = false,
+    ) {
       const current = await open(ownerId, input);
       if (!current.roster.complete) return { complete: false, rows: [] };
       const choices = new Map(current.household?.choices.map(({ id, purpose }) => [id, purpose]));
-      const details = current.roster.calendars.filter(
-        (entry) =>
-          choices.get(entry.id) === 'household' && canShowDetails(entry, current.accountEmail),
-      );
+      const details = current.roster.calendars.filter((entry) => {
+        const purpose = choices.get(entry.id);
+        return (
+          purpose !== undefined &&
+          (purpose === 'household' || isExtendedPurpose(purpose)) &&
+          eligible(purpose, entry, current.accountEmail, supportsExtended)
+        );
+      });
       const busy = current.roster.calendars.filter(
         (entry) => choices.get(entry.id) === 'work_free_busy' && canShowBusy(entry),
       );

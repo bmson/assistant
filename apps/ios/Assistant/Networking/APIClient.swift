@@ -1458,12 +1458,18 @@ struct APIClient: Sendable, GoogleCalendarConnectionService, McpSignInOptionsSer
         configuration.baseURL.appending(path: "api/mobile/v1/connections/google-calendar/household")
     }
 
+    private func googleHouseholdCalendarRequest(url: URL) -> URLRequest {
+        var request = makeRequest(url: url)
+        request.setValue("2", forHTTPHeaderField: "X-Assistant-Household-Calendar-Version")
+        return request
+    }
+
     func googleHouseholdCalendar() async throws -> GoogleHouseholdCalendarSetup {
-        try await perform(makeRequest(url: googleHouseholdCalendarURL), as: GoogleHouseholdCalendarSetup.self)
+        try await perform(googleHouseholdCalendarRequest(url: googleHouseholdCalendarURL), as: GoogleHouseholdCalendarSetup.self)
     }
 
     func saveGoogleHouseholdCalendar(_ input: GoogleHouseholdCalendarSave) async throws -> GoogleHouseholdCalendarSetup {
-        var request = makeRequest(url: googleHouseholdCalendarURL)
+        var request = googleHouseholdCalendarRequest(url: googleHouseholdCalendarURL)
         request.httpMethod = "PUT"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(input)
@@ -1480,7 +1486,7 @@ struct APIClient: Sendable, GoogleCalendarConnectionService, McpSignInOptionsSer
             query.append(URLQueryItem(name: "revision", value: revision))
         }
         let url = googleHouseholdCalendarURL.appending(queryItems: query)
-        return try await perform(makeRequest(url: url), as: GoogleHouseholdCalendarPreview.self)
+        return try await perform(googleHouseholdCalendarRequest(url: url), as: GoogleHouseholdCalendarPreview.self)
     }
 
     func connectGoogleCalendar() async throws -> GoogleCalendarConnectResponse {

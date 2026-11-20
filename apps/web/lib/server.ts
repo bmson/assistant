@@ -118,6 +118,7 @@ import {
   validateAgentPersistenceConfig,
   validateRestoreRehearsalConfig,
 } from '@assistant/config';
+import { googleHouseholdExtendedPurposesReady } from '@assistant/config/google-calendar';
 import {
   encodeMessageCursor,
   getAgent,
@@ -2282,6 +2283,7 @@ export function getGoogleHouseholdCalendarService() {
         busy: (sources, window) => fetchHouseholdCalendarBusy(client, sources, window),
       };
     },
+    googleHouseholdExtendedPurposesReady(loadConfig()),
   );
 }
 

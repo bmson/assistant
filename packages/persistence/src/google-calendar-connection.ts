@@ -18,7 +18,14 @@ export const googleCalendarFlowOutcome = z.enum([
 export type GoogleCalendarFlowOutcome = z.infer<typeof googleCalendarFlowOutcome>;
 const instant = z.string().datetime({ offset: true });
 const account = z.object({ subject: z.string().min(1), email: z.string().email() }).strict();
-export const householdCalendarPurpose = z.enum(['household', 'work_free_busy', 'ignore']);
+export const householdCalendarPurpose = z.enum([
+  'household',
+  'work_free_busy',
+  'ignore',
+  'school',
+  'activity',
+  'holidays',
+]);
 function calendarChoices<T extends z.ZodType<string>>(purpose: T) {
   return z
     .array(z.object({ id: z.string().min(1).max(512), purpose }).strict())

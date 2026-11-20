@@ -97,6 +97,9 @@ struct GoogleCalendarRequestContext {
 enum GoogleHouseholdCalendarPurpose: String, Codable, Sendable {
     case household
     case workFreeBusy = "work_free_busy"
+    case school
+    case activity
+    case holidays
     case ignore
 }
 
@@ -113,6 +116,7 @@ struct GoogleHouseholdCalendarSetup: Decodable, Sendable {
     let connectionId: String
     let revision: String?
     let remaining: Int?
+    let extendedPurposesAvailable: Bool?
     let calendars: [Source]
 }
 

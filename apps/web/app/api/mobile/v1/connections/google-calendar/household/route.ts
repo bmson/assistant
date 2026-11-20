@@ -15,6 +15,10 @@ function unavailable(error: unknown) {
   return mobileJson({ state: 'unavailable' }, { status: 503 });
 }
 
+function supportsExtendedPurposes(request: Request): boolean {
+  return request.headers.get('x-assistant-household-calendar-version') === '2';
+}
+
 export async function GET(request: Request): Promise<Response> {
   const owner = await authenticateMobileOwner(request);
   if (!owner) return mobileUnauthorized();
@@ -22,7 +26,7 @@ export async function GET(request: Request): Promise<Response> {
   try {
     const service = getGoogleHouseholdCalendarService();
     if (!query.has('timeMin') && !query.has('timeMax'))
-      return mobileJson(await service.setup(owner.ownerId));
+      return mobileJson(await service.setup(owner.ownerId, supportsExtendedPurposes(request)));
     const preview = householdCalendarPreview.safeParse({
       timeMin: query.get('timeMin'),
       timeMax: query.get('timeMax'),
@@ -30,7 +34,9 @@ export async function GET(request: Request): Promise<Response> {
       revision: query.get('revision'),
     });
     if (!preview.success) return mobileJson({ error: 'Invalid preview window' }, { status: 400 });
-    return mobileJson(await service.preview(owner.ownerId, preview.data));
+    return mobileJson(
+      await service.preview(owner.ownerId, preview.data, supportsExtendedPurposes(request)),
+    );
   } catch (error) {
     return unavailable(error);
   }
@@ -44,7 +50,13 @@ export async function PUT(request: Request): Promise<Response> {
   const input = householdCalendarSave.safeParse(body.value);
   if (!input.success) return mobileJson({ error: 'Invalid classifications' }, { status: 400 });
   try {
-    return mobileJson(await getGoogleHouseholdCalendarService().save(owner.ownerId, input.data));
+    return mobileJson(
+      await getGoogleHouseholdCalendarService().save(
+        owner.ownerId,
+        input.data,
+        supportsExtendedPurposes(request),
+      ),
+    );
   } catch (error) {
     return unavailable(error);
   }

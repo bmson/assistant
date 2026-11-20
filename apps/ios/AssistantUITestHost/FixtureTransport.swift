@@ -14,6 +14,13 @@ final class FixtureTransport: URLProtocol, @unchecked Sendable {
         private let calendarRoot = "/api/mobile/v1/connections/google-calendar"
         private let connectionId = "12345678-1234-4123-8123-123456789012"
 
+        private let detailSources = [
+            (id: "family", name: "Family", purpose: "household", title: "Family appointment"),
+            (id: "school", name: "Oak School", purpose: "school", title: "Science fair"),
+            (id: "activity", name: "Community club", purpose: "activity", title: "Practice"),
+            (id: "holidays", name: "Holiday calendar", purpose: "holidays", title: "Local holiday")
+        ]
+
         func install(_ value: Data, householdCalendar: Bool) {
             lock.withLock {
                 data = value
@@ -37,6 +44,8 @@ final class FixtureTransport: URLProtocol, @unchecked Sendable {
         }
 
         private func householdResponse(for request: URLRequest, url: URL) -> Data? {
+            if url.path == calendarRoot + "/household",
+               request.value(forHTTPHeaderField: "x-assistant-household-calendar-version") != "2" { return nil }
             switch (request.httpMethod, url.path) {
             case ("GET", "/api/mobile/v1/bootstrap"):
                 return Data("""
@@ -56,13 +65,15 @@ final class FixtureTransport: URLProtocol, @unchecked Sendable {
                 return householdSetup()
             case ("GET", calendarRoot + "/household"):
                 guard choices["family"] == "household", choices["work"] == "work_free_busy" else { return nil }
-                return Data("""
-                {"complete":true,"rows":[
-                  {"id":"event","title":"Family appointment","calendar":"Family","allDay":false,
-                   "start":"2026-11-19T18:00:00.000Z","end":"2026-11-19T19:00:00.000Z"},
-                  {"id":"busy","title":"Busy","calendar":"Work","allDay":false,
-                   "start":"2026-11-19T20:00:00.000Z","end":"2026-11-19T21:00:00.000Z"}]}
-                """.utf8)
+                let details = detailSources.filter { choices[$0.id] == $0.purpose }.map { source in
+                    ["id": source.id, "title": source.title, "calendar": source.name, "allDay": false,
+                     "start": "2026-11-19T18:00:00.000Z", "end": "2026-11-19T19:00:00.000Z"] as [String: Any]
+                }
+                let busy: [String: Any] = [
+                    "id": "busy", "title": "Busy", "calendar": "Work", "allDay": false,
+                    "start": "2026-11-19T20:00:00.000Z", "end": "2026-11-19T21:00:00.000Z"
+                ]
+                return try? JSONSerialization.data(withJSONObject: ["complete": true, "rows": details + [busy]])
             case ("PUT", calendarRoot + "/household"):
                 guard let body = request.httpBody ?? request.httpBodyStream.map(readBody),
                       let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
@@ -74,8 +85,12 @@ final class FixtureTransport: URLProtocol, @unchecked Sendable {
                     guard let id = row["id"], let purpose = row["purpose"], next[id] == nil else { return nil }
                     next[id] = purpose
                 }
-                guard next == ["family": "household", "work": "work_free_busy"] ||
-                      next == ["family": "household", "work": "work_free_busy", "other": "ignore"] else { return nil }
+                let allowed = Dictionary(uniqueKeysWithValues: detailSources.map { ($0.id, $0.purpose) })
+                guard next["family"] == "household", next["work"] == "work_free_busy", next["other"] == "ignore",
+                      next.allSatisfy({ id, purpose in
+                          id == "work" || id == "other" ||
+                              (allowed[id] != nil && (purpose == allowed[id] || purpose == "ignore"))
+                      }) else { return nil }
                 choices = next
                 revision = UUID().uuidString.lowercased()
                 return householdSetup()
@@ -97,13 +112,17 @@ final class FixtureTransport: URLProtocol, @unchecked Sendable {
         }
 
         private func householdSetup() -> Data? {
-            let calendars = [("family", "Family"), ("work", "Work"), ("other", "Other")].map { id, name in
-                ["id": id, "name": name, "canShowDetails": id == "family", "canShowBusy": true,
+            let sources = detailSources.map { ($0.id, $0.name, true) } + [
+                ("work", "Work", false), ("other", "Other", false)
+            ]
+            let calendars = sources.map { id, name, details in
+                ["id": id, "name": name, "canShowDetails": details, "canShowBusy": true,
                  "purpose": choices[id] as Any? ?? NSNull()]
             }
             return try? JSONSerialization.data(withJSONObject: [
                 "state": "ready", "connectionId": connectionId, "revision": revision as Any? ?? NSNull(),
-                "remaining": 3 - choices.count, "calendars": calendars
+                "remaining": sources.count - choices.count, "calendars": calendars,
+                "extendedPurposesAvailable": true
             ])
         }
         var violations: Int { lock.lock(); defer { lock.unlock() }; return count }
