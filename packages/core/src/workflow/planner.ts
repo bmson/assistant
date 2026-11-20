@@ -14,7 +14,13 @@ import {
   futureWatchRequestGuidance,
   normalizeFutureWatchPlan,
 } from './future-watch-intent.js';
-import { latestOwnerIntent, type OwnerIntent, ownerIntentPlannerSegments } from './owner-intent.js';
+import {
+  latestOwnerIntent,
+  type OwnerIntent,
+  ownerIntentPlannerSegments,
+  recurringDigestDays,
+  recurringDigestLocalTime,
+} from './owner-intent.js';
 import { detectPersonalReadRequest, type PersonalReadRequest } from './read-intent.js';
 
 /**
@@ -36,7 +42,7 @@ import { detectPersonalReadRequest, type PersonalReadRequest } from './read-inte
 // memory, graph, and Drive reads as calendar/email lookups.
 // v17: explicit no-tool constraints take precedence over automatic source/watch routing.
 // v18: preserve balanced inline quoted literals in owner-request context as inert data segments.
-export const PLANNER_VERSION = 18;
+export const PLANNER_VERSION = 19;
 
 type PlannerBudgetDecision = Extract<BudgetDecision, { mode: 'park' | 'block' }>;
 
@@ -259,6 +265,7 @@ export function plannerSystem(
     "Every step must be executable NOW with an available tool. A step that waits for something, runs 'as information becomes available', or promises to notify later is not executable — it is deferred work.",
     "If the request is to keep doing something as you go, continue later, watch for something, or update something over time, choose 'schedule' for a bounded follow-up or 'mission' for open-ended work. Never express deferred work as 'workflow' steps.",
     `For every mission, preserve any owner-requested frequency and local times in cadence. Use {kind:"interval", everyMinutes} for a fixed elapsed interval, or {kind:"local_times", timezone:"IANA/Zone", times:["HH:mm", ...], daysOfWeek:[0-6]} for wall-clock times (omit daysOfWeek for every day). The owner's configured timezone is ${agent.timezone}. If an exact requested cadence or required timezone cannot be represented safely, choose 'clarify' rather than describing a cadence only in reasoning or steps. An omitted cadence means one session every 24 elapsed hours and is only suitable when no other frequency was requested.`,
+    'For a direct owner request for a daily or weekly digest in chat, plan a workflow to save it now with digest.schedule when the topic, day(s) and local clock time are clear. With missing or ambiguous cadence, time, or topic, choose clarify and write only the question. A scheduled digest is different from a one-time summary, a watch, or an explicitly requested goal. For a new named goal use goals.create and preserve the approval. List recurring digests with digest.list in a fresh turn.',
     'Note what information is missing.',
   ].join('\n');
 }
@@ -343,6 +350,29 @@ export async function planTask(
       trigger: task.trigger,
     });
   const latestOwnerRequest = ownerIntent.ownerAuthoredText;
+  const recurringDigest =
+    task.trust === 'owner' &&
+    task.type === 'chat_turn' &&
+    ownerIntent.authorizedScopes.includes('digest_schedule') &&
+    !ownerIntent.authorizedScopes.includes('memory_write') &&
+    !explicitlyDisallowsTools(latestOwnerRequest);
+  if (recurringDigest) {
+    const missingInfo = [
+      ...(recurringDigestDays(latestOwnerRequest) ? [] : ['Which days should the digest run?']),
+      ...(recurringDigestLocalTime(latestOwnerRequest)
+        ? []
+        : ['What time should the digest run? Please include a.m. or p.m.']),
+    ];
+    if (missingInfo.length) {
+      const plan: Plan = {
+        action: 'clarify',
+        reasoning: 'The recurring digest needs a precise cadence.',
+        steps: [],
+        missingInfo,
+      };
+      return (await persistPlan(deps, task, plan, opts)) ? plan : null;
+    }
+  }
   const safeWindow = window.map((message, index) => {
     const latestIndex = window.findLastIndex((candidate) => candidate.role === 'user');
     if (index !== latestIndex || message.role !== 'user') return message;
@@ -350,11 +380,11 @@ export async function planTask(
   });
   const contextText = plannerContext(window, ownerIntent);
   const futureWatch =
-    task.trust === 'owner' && !explicitlyDisallowsTools(latestOwnerRequest)
+    task.trust === 'owner' && !recurringDigest && !explicitlyDisallowsTools(latestOwnerRequest)
       ? detectFutureWatchIntent(latestOwnerRequest)
       : null;
   const conceptual = task.trust === 'owner' && isConceptualNoToolRequest(latestOwnerRequest);
-  if (conceptual && !futureWatch) {
+  if (conceptual && !futureWatch && !recurringDigest) {
     const plan: Plan = {
       action: 'reply',
       reasoning: 'Answer the self-contained conceptual question without external sources',
@@ -367,7 +397,10 @@ export async function planTask(
   // to external or assistant-generated tasks could disclose private calendar
   // data or override an explicit internal action such as a drafted reply.
   const readRequest =
-    task.trust === 'owner' && !futureWatch && ownerIntent.authorizedScopes.includes('private_read')
+    task.trust === 'owner' &&
+    !futureWatch &&
+    !recurringDigest &&
+    ownerIntent.authorizedScopes.includes('private_read')
       ? detectPersonalReadRequest(safeWindow)
       : null;
 
@@ -396,6 +429,7 @@ export async function planTask(
   // carries no ruling, so those still ask here — see TRIAGED_ACTIONABLE.
   if (
     !futureWatch &&
+    !recurringDigest &&
     (task.type === 'chat_turn' || task.type === 'sms_turn') &&
     !wasTriagedActionable(task.trigger)
   ) {
@@ -439,6 +473,12 @@ export async function planTask(
   }
 
   const parsedPlan = PlanSchema.parse(planned.object);
+  // A plan that opens a mission or defers a one-shot follow-up bypasses the
+  // actual schedule write. Keep a standalone digest on the owner-chat tool path.
+  if (recurringDigest && parsedPlan.action !== 'clarify' && parsedPlan.action !== 'workflow') {
+    parsedPlan.action = 'workflow';
+    parsedPlan.steps = ['Save the recurring digest with digest.schedule.'];
+  }
   const plan = futureWatch
     ? normalizeFutureWatchPlan(parsedPlan, futureWatch)
     : normalizePersonalReadPlan(parsedPlan, readRequest);

@@ -154,7 +154,7 @@ function calendarSkillNextStepOutput(projection: string, nextStep: string): stri
  * system will keep, and which the response contract then has to blank out.
  */
 export const SCHEDULE_DIRECTIVE =
-  '\nThis turn defers work to the future. Before you finish, call task.schedule with a concrete time and a self-contained instruction (or mission.update if this belongs to a mission). Do not promise to continue, watch, or keep updating anything unless that call succeeded — if you cannot schedule it, say so plainly and do the part you can do now.';
+  '\nThis turn defers work to the future. Before you finish, call task.schedule for a one-time follow-up, digest.schedule for an explicitly requested recurring digest in owner chat, or mission.update if this belongs to a mission. Do not promise to continue, watch, or keep updating anything unless that call succeeded — if you cannot schedule it, say so plainly and do the part you can do now.';
 
 function executionEvidence(deps: ExecutorDeps): ExecutionEvidenceRepository {
   return deps.persistence?.executionEvidence ?? createPostgresExecutionEvidenceRepository(deps.db);
@@ -1674,9 +1674,27 @@ export async function stageModelFinalResponse(
       contractNotice: checked.blocked || undefined,
     });
   }
+  // Preserve the identity of each digest saved by this turn even if the
+  // model summarizes the action without printing the receipt.
+  const digestReceipts = new Map<string, string>();
+  for (const row of rows) {
+    if (row.toolName !== 'digest.schedule' || row.status !== 'succeeded') continue;
+    const receipt = z
+      .object({
+        scheduleId: z.uuid(),
+        enabled: z.boolean(),
+        nextRunAt: z.iso.datetime().nullable(),
+      })
+      .safeParse(row.result);
+    if (!receipt.success || text.includes(receipt.data.scheduleId)) continue;
+    const { scheduleId, enabled, nextRunAt } = receipt.data;
+    const status = enabled && nextRunAt ? `Next run ${nextRunAt}.` : 'The schedule is disabled.';
+    digestReceipts.set(scheduleId, `Digest schedule ${scheduleId}. ${status}`);
+  }
+  const finalText = [text, ...digestReceipts.values()].filter(Boolean).join('\n\n');
   // A known contact's plain answer would otherwise dead-end in the dashboard;
   // propose it back to them (owner-approved) so the thread does not go silent.
-  await maybeEnqueueKnownSenderReply(deps, task, text);
+  await maybeEnqueueKnownSenderReply(deps, task, finalText);
   return stageFinalResponse(
     deps,
     task,
@@ -1684,8 +1702,8 @@ export async function stageModelFinalResponse(
     window,
     {
       ...pending,
-      text,
-      progress: text.slice(0, 200),
+      text: finalText,
+      progress: finalText.slice(0, 200),
       contractNotice: checked.blocked || undefined,
     },
     {

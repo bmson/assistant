@@ -17,6 +17,7 @@ export const OwnerIntentScopeSchema = z.enum([
   'workspace_write',
   'personal_write',
   'watch_create',
+  'digest_schedule',
   'private_write',
   'memory_write',
   'feedback_write',

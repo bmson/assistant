@@ -119,7 +119,7 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | E8  | Actionable push notifications                                          | 4     | M    | E4         | open                                                          |
 | E9  | More shows only meaningful automations                                 | 3     | S    | A10        | in review (native Automations list)                           |
 | F1  | Tools: `memory.forget`, `contacts.update`, `occasions.update`/`delete` | 2     | M    | —          | open                                                          |
-| F2  | Routing: topic watches, digests, cancel and delete paths               | 2     | M    | —          | open                                                          |
+| F2  | Routing: topic watches, digests, cancel and delete paths               | 2     | M    | —          | in progress (recurring digest routing)                        |
 | F3  | Reply integrity                                                        | 2     | M    | A4         | open                                                          |
 | F4  | Dictated email bodies stay verbatim                                    | 2     | S    | —          | open                                                          |
 | F5  | Follow-up context and spoken register                                  | 5     | M    | A15        | open                                                          |

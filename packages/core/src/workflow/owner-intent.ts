@@ -25,6 +25,7 @@ export type OwnerIntentScope =
   | 'workspace_write'
   | 'personal_write'
   | 'watch_create'
+  | 'digest_schedule'
   | 'private_write'
   | 'memory_write'
   | 'feedback_write';
@@ -437,6 +438,46 @@ function hasUnmatchedQuote(text: string): boolean {
   return curlyOpen !== curlyClose || straight % 2 !== 0;
 }
 
+/** Explicit, unambiguous wall-clock time for a recurring digest. */
+export function recurringDigestLocalTime(text: string): string | null {
+  const times = new Set<string>();
+  const pattern =
+    /\b(?:(1[0-2]|0?[1-9])(?::([0-5]\d))?\s*([ap])\.?m\.?\b|([01]?\d|2[0-3]):([0-5]\d)\b|noon\b|midnight\b)/gi;
+  for (const match of text.matchAll(pattern)) {
+    const [, hour12, minute12, meridiem, hour24, minute24] = match;
+    if (hour12) {
+      const hour = (Number(hour12) % 12) + (meridiem?.toLowerCase() === 'p' ? 12 : 0);
+      times.add(`${String(hour).padStart(2, '0')}:${minute12 ?? '00'}`);
+    } else if (hour24) {
+      times.add(`${hour24.padStart(2, '0')}:${minute24}`);
+    } else {
+      times.add(match[0].toLowerCase() === 'noon' ? '12:00' : '00:00');
+    }
+  }
+  return times.size === 1 ? ([...times][0] ?? null) : null;
+}
+
+const DIGEST_WEEKDAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
+
+/** Bind the requested weekdays before any recurring schedule is written. */
+export function recurringDigestDays(text: string): number[] | null {
+  if (
+    /\b(?:or|either)\b[^.!?;\n]{0,25}\b(?:Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday)s?\b/i.test(
+      text,
+    )
+  ) {
+    return null;
+  }
+  if (/\b(?:every|each)\s+(?:day|morning|evening)|\bdaily\b/i.test(text))
+    return [0, 1, 2, 3, 4, 5, 6];
+  if (/\b(?:every|each|on)\s+weekdays\b/i.test(text)) return [1, 2, 3, 4, 5];
+  const names = [
+    ...text.matchAll(/\b(?:Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday)s?\b/gi),
+  ];
+  const days = names.map(([name]) => DIGEST_WEEKDAYS.indexOf(name.slice(0, 3).toLowerCase()));
+  return days.length ? [...new Set(days)].sort((a, b) => a - b) : null;
+}
+
 function affirmativeAction(text: string, requestedAction: string): boolean {
   const pattern = new RegExp(
     `(?:^|[.!?;\\n]|\\band\\s+)\\s*(?:please\\s+)?(?:(?:(?:can|could|would)\\s+you\\s+(?:please\\s+)?)?${requestedAction})\\b|\\b(?:I want|I need|I'd like|I would like) you to\\s+${requestedAction}\\b|\\bgo ahead and\\s+${requestedAction}\\b`,
@@ -666,6 +707,13 @@ function scopesFor(text: string): OwnerIntentScope[] {
     )
   )
     scopes.add('personal_write');
+  const digestCadence =
+    /\b(?:every\s+(?:day|morning|evening|week|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)|daily|weekly|each\s+(?:day|week|morning|evening|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)|on\s+(?:weekdays|Mondays|Tuesdays|Wednesdays|Thursdays|Fridays|Saturdays|Sundays))\b/i;
+  const digestAction = String.raw`(?:summari[sz]e|(?:give|show|bring|prepare|write|make|create|schedule|set up|post)\b[^!?;\n]{0,100}\b(?:digest|summary|roundup|recap))`;
+  const cadenceFirst = String.raw`(?:every|each|on|daily|weekly)\b[^!?;\n]{0,65}?(?:,\s*|\s+)(?:please\s+)?`;
+  if (digestCadence.test(text) && affirmativeAction(text, `(?:${cadenceFirst})?${digestAction}`)) {
+    scopes.add('digest_schedule');
+  }
   // Registering a confirmation watch is a personal scheduling action. A
   // positively requested application may include the watch after its portal
   // receipt; registration still requires exact approval of every future write.

@@ -182,7 +182,8 @@ const READ_ACTIONS =
   'checked|reviewed|looked (?:at|through|over|in|into)|went (?:through|over)|searched|scanned|read through|pulled up|examined|inspected';
 const RESEARCH_OBJECTS =
   'research|companies|company list|target companies|job boards?|sources?|search results?';
-const BACKGROUND_OBJECTS = 'mission|task|watch(?:er|es)?|monitor(?:ing)?|tracker';
+const BACKGROUND_OBJECTS =
+  'mission|task|watch(?:er|es)?|monitor(?:ing)?|tracker|digest(?: schedule)?';
 
 const FIRST_PERSON_PREFIX = String.raw`\b(?:i|we|the assistant)(?:['’]ve\s+|\s+(?:(?:have|has|had|just|already|successfully|now|am|are|was|were)\s+)*)`;
 
@@ -673,6 +674,14 @@ function supports(
             name === 'applications.watch_confirmation',
         ) ||
         usable.some((item) => {
+          if (item.toolName === 'digest.schedule') {
+            const result = record(item.result);
+            return (
+              result?.enabled === true &&
+              typeof result.scheduleId === 'string' &&
+              typeof result.nextRunAt === 'string'
+            );
+          }
           const receipt = activeWatchReceipt(item);
           if (!receipt) return false;
           const intent = requestText ? detectFutureWatchIntent(requestText) : null;
@@ -1032,6 +1041,7 @@ function toolKind(name: string): ActionKind | undefined {
   if (
     name === 'mission.update' ||
     name === 'task.schedule' ||
+    name === 'digest.schedule' ||
     name === 'applications.watch_confirmation' ||
     name === 'watch.create' ||
     name === 'watch.web'

@@ -122,6 +122,7 @@ const files = [
   'apps/agent/src/firestore-goals-missions.test.ts',
   'apps/agent/src/firestore-proactive-follow-through.test.ts',
   'apps/agent/src/firestore-builtin-tools.test.ts',
+  'apps/agent/src/recurring-digest.e2e.test.ts',
   'apps/web/app/costs/page.test.tsx',
   'apps/web/app/api/mobile/v1/costs/route.test.ts',
   'apps/web/app/packs/actions.firestore.test.ts',
