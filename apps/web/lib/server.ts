@@ -1,5 +1,6 @@
 // Server-only singletons. Cached on globalThis so Next dev hot-reload doesn't
 // leak postgres connection pools on every recompile.
+
 import path from 'node:path';
 import {
   acknowledgeChatMessageDelivery,
@@ -95,6 +96,7 @@ import { readAuditInvestigation } from '@assistant/application/audit-investigati
 import type { CallsPorts } from '@assistant/application/calls';
 import type { GoalInput } from '@assistant/application/goals';
 import { createGoogleCalendarConnectionService } from '@assistant/application/google-calendar-connection';
+import { createGoogleHouseholdCalendarService } from '@assistant/application/google-household-calendar';
 import { GRAPH_EXTRACTION_VERSION } from '@assistant/application/knowledge-graph';
 import type { ModelProviderPorts } from '@assistant/application/model-providers';
 import { listPeopleDirectoryPage, personSummaryFromStoredRow } from '@assistant/application/people';
@@ -122,8 +124,10 @@ import {
   getOrCreatePrimaryConversation,
 } from '@assistant/core/chat';
 import {
+  getGoogleCalendarAccessToken,
   googleCalendarOAuthConfig,
   googleCalendarWriteContractReady,
+  reportGoogleCalendarReadFailure,
 } from '@assistant/core/google-calendar-oauth';
 import {
   decryptStoredCredential,
@@ -243,6 +247,12 @@ import {
   resolveMcpOAuthClient,
 } from '@assistant/tools/mcp-oauth-registration';
 import { createMcpOAuthService } from '@assistant/tools/mcp-oauth-service';
+import {
+  fetchHouseholdCalendarBusy,
+  fetchHouseholdCalendarDetails,
+  fetchHouseholdCalendarRoster,
+  GoogleClient,
+} from '@assistant/tools/modules/google';
 import {
   GcsWorkspaceStore,
   LocalWorkspaceStore,
@@ -2211,8 +2221,7 @@ export async function loadOwnerMemoryCorrectionAuthorizationState(
   });
 }
 
-/** Optional personal Calendar onboarding, using the installation's existing store. */
-export function getGoogleCalendarConnectionService() {
+function googleCalendarConnectionRuntime() {
   const config = loadConfig();
   if (config.PERSISTENCE_DRIVER === 'firestore' && validateAgentPersistenceConfig(config).length)
     throw new Error('Calendar connection unavailable');
@@ -2220,11 +2229,60 @@ export function getGoogleCalendarConnectionService() {
     config.PERSISTENCE_DRIVER === 'firestore'
       ? createFirestoreGoogleCalendarConnectionRepository(getFirestoreInstallationStore())
       : createPostgresGoogleCalendarConnectionRepository(getDb());
+  return { repository, oauth: googleCalendarOAuthConfig(config) };
+}
+
+/** Optional personal Calendar onboarding, using the installation's existing store. */
+export function getGoogleCalendarConnectionService() {
+  const { repository, oauth } = googleCalendarConnectionRuntime();
   return createGoogleCalendarConnectionService({
     repository,
-    config: googleCalendarOAuthConfig(config),
+    config: oauth,
     writeContractReady: googleCalendarWriteContractReady(),
   });
+}
+
+export function getGoogleHouseholdCalendarService() {
+  const { repository, oauth } = googleCalendarConnectionRuntime();
+  if (!oauth) throw new Error('Personal Calendar unavailable');
+  return createGoogleHouseholdCalendarService(
+    repository,
+    (ownerId, connectionId, assertCurrent) => {
+      const client = new GoogleClient({
+        clientId: '',
+        clientSecret: '',
+        refreshToken: '',
+        tokenProvider: {
+          // This client exposes no provider cursor.
+          cursorSecret: '',
+          authorizeRequest: assertCurrent,
+          accessToken: (forceRefresh, rejectedAccessToken) =>
+            getGoogleCalendarAccessToken({
+              config: oauth,
+              repository,
+              ownerId,
+              expectedConnectionId: connectionId,
+              forceRefresh,
+              rejectedAccessToken,
+            }),
+          requestFailed: (failure) =>
+            reportGoogleCalendarReadFailure({
+              repository,
+              ownerId,
+              connectionId,
+              ...failure,
+              // The free/busy endpoint uses POST for a read.
+              method: undefined,
+            }),
+        },
+      });
+      return {
+        roster: () => fetchHouseholdCalendarRoster(client),
+        details: (source, window) => fetchHouseholdCalendarDetails(client, source, window),
+        busy: (sources, window) => fetchHouseholdCalendarBusy(client, sources, window),
+      };
+    },
+  );
 }
 
 /** Read one configured-owner MCP reference. Credentials are never returned to diagnostics. */

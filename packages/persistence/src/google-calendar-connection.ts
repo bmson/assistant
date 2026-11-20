@@ -18,6 +18,18 @@ export const googleCalendarFlowOutcome = z.enum([
 export type GoogleCalendarFlowOutcome = z.infer<typeof googleCalendarFlowOutcome>;
 const instant = z.string().datetime({ offset: true });
 const account = z.object({ subject: z.string().min(1), email: z.string().email() }).strict();
+export const householdCalendarPurpose = z.enum(['household', 'work_free_busy', 'ignore']);
+export const householdCalendarChoices = z
+  .array(z.object({ id: z.string().min(1).max(512), purpose: householdCalendarPurpose }).strict())
+  .max(50)
+  .refine((choices) => new Set(choices.map(({ id }) => id)).size === choices.length);
+export const householdCalendarSettings = z
+  .object({
+    revision: z.string().uuid(),
+    choices: householdCalendarChoices,
+  })
+  .strict();
+export type HouseholdCalendarSettings = z.infer<typeof householdCalendarSettings>;
 export const googleCalendarConnectionSchema = z
   .object({
     version: z.union([z.literal(1), z.literal(2)]),
@@ -59,7 +71,18 @@ export const googleCalendarConnectionSchema = z
         message: 'Calendar event-write credentials require connection contract version 2',
       });
   });
-export type GoogleCalendarConnectionState = z.infer<typeof googleCalendarConnectionSchema>;
+export type GoogleCalendarConnectionState = z.infer<typeof googleCalendarConnectionSchema> & {
+  household?: HouseholdCalendarSettings;
+};
+export const storedHouseholdCalendarSettings = householdCalendarSettings.extend({
+  connectionId: z.string().uuid(),
+});
+export function readHouseholdCalendarSettings(value: unknown, connectionId?: string) {
+  if (value == null || !connectionId) return undefined;
+  const { connectionId: savedConnectionId, ...settings } =
+    storedHouseholdCalendarSettings.parse(value);
+  return savedConnectionId === connectionId ? settings : undefined;
+}
 export type GoogleCalendarPendingFlow = NonNullable<GoogleCalendarConnectionState['flow']>;
 export type GoogleCalendarCredential = NonNullable<GoogleCalendarConnectionState['connection']>;
 export interface GoogleCalendarConnectionStorage {
@@ -80,6 +103,12 @@ export type GoogleCalendarRefreshClaim =
   | { kind: 'disconnected' };
 export interface GoogleCalendarConnectionRepository {
   get(ownerId: string): Promise<GoogleCalendarConnectionState | null>;
+  saveHousehold(
+    ownerId: string,
+    connectionId: string,
+    expectedRevision: string | null,
+    settings: HouseholdCalendarSettings,
+  ): Promise<boolean>;
   begin(
     ownerId: string,
     flow: GoogleCalendarPendingFlow,
@@ -141,6 +170,19 @@ export function createGoogleCalendarConnectionRepository(
 ): GoogleCalendarConnectionRepository {
   return {
     get: (ownerId) => storage.read(ownerId),
+    saveHousehold: (ownerId, connectionId, expectedRevision, settings) =>
+      storage.update(ownerId, (s) => {
+        if (
+          s.connection?.id !== connectionId ||
+          s.connection.status !== 'connected' ||
+          (s.household?.revision ?? null) !== expectedRevision
+        )
+          return { state: s, result: false };
+        return {
+          state: { ...s, household: householdCalendarSettings.parse(settings) },
+          result: true,
+        };
+      }),
     begin: (ownerId, flow, expectedConnectionId) =>
       storage.update(ownerId, (s) => {
         if (
@@ -209,7 +251,7 @@ export function createGoogleCalendarConnectionRepository(
         };
       }),
     disconnect: (ownerId) =>
-      storage.update(ownerId, (s) => ({
+      storage.update(ownerId, ({ household: _household, ...s }) => ({
         state: {
           ...s,
           revision: s.revision + 1,

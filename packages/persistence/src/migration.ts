@@ -1,7 +1,10 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { ExactTimestamp, parseExactTimestamp } from './exact-timestamp.js';
-import { parseGoogleCalendarConnection } from './google-calendar-connection.js';
+import {
+  parseGoogleCalendarConnection,
+  storedHouseholdCalendarSettings,
+} from './google-calendar-connection.js';
 import {
   ownerCallGrantOperationMatchesSlot,
   parseOwnerCallGrantOperation,
@@ -75,6 +78,12 @@ export const MIGRATION_TABLES = [
   {
     table: 'google_calendar_connections',
     collection: 'googleCalendarConnections',
+    id: 'agent_id',
+    scope: 'agent',
+  },
+  {
+    table: 'google_household_calendar_choices',
+    collection: 'googleHouseholdCalendarChoices',
     id: 'agent_id',
     scope: 'agent',
   },
@@ -1094,6 +1103,12 @@ export function validateMigrationReferences(
       } catch {
         throw new Error('Invalid Google Calendar migration state');
       }
+    }
+    if (record.table === 'google_household_calendar_choices') {
+      if (record.id !== sourceAgentId || record.data.agentId !== sourceAgentId)
+        throw new Error('Invalid household Calendar migration owner');
+      requireReference(record, 'agentId', 'google_calendar_connections', true);
+      storedHouseholdCalendarSettings.parse(decodedData(record).settings);
     }
     if (record.table === 'signals') {
       const signal = portableSignal(record);

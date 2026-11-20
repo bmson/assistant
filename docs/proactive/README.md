@@ -51,6 +51,8 @@ Critical paths: A1 → A11 → C2 → D7 (money) and B2 → C6 → D3 (conflict 
 - Chat isolation, checklist deduplication, and self-repair pacing. [A4 private replies](https://github.com/bmson/assistant/pull/948), [A5 checklist](https://github.com/bmson/assistant/pull/944), [A7 pacing](https://github.com/bmson/assistant/pull/947), [A15 originating turn](https://github.com/bmson/assistant/pull/965), [A15 read isolation](https://github.com/bmson/assistant/pull/969).
 - Intake health, local time, weather evidence, and urgent delivery. [A11 mail pipeline](https://github.com/bmson/assistant/pull/957), [A13 owner time](https://github.com/bmson/assistant/pull/952), [A13 Pulse time](https://github.com/bmson/assistant/pull/968), [A16 weather](https://github.com/bmson/assistant/pull/945), [A17 urgent SMS](https://github.com/bmson/assistant/pull/950), [H4 canaries](https://github.com/bmson/assistant/pull/966).
 
+The B2 iPhone preview uses the connected personal Google account. It accepts household detail choices for calendars owned by that account and work free/busy choices for readable sources. Unclassified and ignored calendars contribute neither events nor busy times to this preview. Spouse consent, other categories, on-call import and the owner’s full roster are open. The choices have their own record on each store so the existing connection payload stays readable by earlier OAuth code.
+
 The Phase 0 gate requires seven actual days of evidence covering daily briefing delivery, chat isolation, cost holds under 25% of the daily cap, extraction on days with eligible mail, and zero texts for routine replies. Record owner and household opt-ins before using their optional sources or delivery channels.
 
 H1 covers five of 28 synthetic scenarios on PostgreSQL and Firestore. The seven on-time replay deliveries per driver include both D7 bill reminders. Production recall remains unmeasured. [H1 replay](https://github.com/bmson/assistant/pull/972), [D7 bill timing](https://github.com/bmson/assistant/pull/974), [scorecard and coverage](golden-signals.md#running-the-replay).
@@ -79,7 +81,7 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | A16 | Weather plausibility                                                   | 0     | S    | —          | in review (hourly snow corroboration)                         |
 | A17 | Texts only for urgent items                                            | 0     | S    | —          | in review (urgent SMS quota and retry checks)                 |
 | B1  | Calendar connection health and warning                                 | 1     | S    | —          | open                                                          |
-| B2  | Household calendar setup and classification                            | 1     | M    | B1         | open                                                          |
+| B2  | Household calendar setup and classification                            | 1     | M    | B1         | personal Google Household, Work free/busy and Ignore slice    |
 | B3  | Reliable iPhone calendar snapshots                                     | 1     | M    | —          | open                                                          |
 | B4  | iPhone Contacts import (opt-in)                                        | 4     | M    | C4         | open                                                          |
 | B5  | Places and home-place weather fallback                                 | 1     | M    | —          | open                                                          |

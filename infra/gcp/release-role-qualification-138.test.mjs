@@ -7,15 +7,15 @@ const workflow = await readFile(
   'utf8',
 );
 const title =
-  'qualifies the schema 142 migration image, runtime readiness, and generic write compatibility';
+  'qualifies the schema 143 migration image, runtime readiness, and generic write compatibility';
 const selectedFile = 'packages/db/src/memory-witness-135-role-qualification.test.ts';
 const qualification = await readFile(new URL(`../../${selectedFile}`, import.meta.url), 'utf8');
 
-test('current schema 142 qualification binds coherent artifacts, exact test selection and role ranges', () => {
-  assert.ok(workflow.includes('name: Memory witness schema 142 qualification'));
-  assert.ok(workflow.includes("assert manifest['schemaVersion']==142"));
-  assert.ok(workflow.includes("assert manifest['components'][role]['schema']['min']==142"));
-  assert.ok(workflow.includes("assert manifest['components'][role]['schema']['max']==142"));
+test('current schema 143 qualification binds coherent artifacts, exact test selection and role ranges', () => {
+  assert.ok(workflow.includes('name: Memory witness schema 143 qualification'));
+  assert.ok(workflow.includes("assert manifest['schemaVersion']==143"));
+  assert.ok(workflow.includes("assert manifest['components'][role]['schema']['min']==143"));
+  assert.ok(workflow.includes("assert manifest['components'][role]['schema']['max']==143"));
   assert.ok(workflow.includes(`title='${title}'`));
   assert.ok(qualification.includes(`'${title}'`));
   assert.ok(workflow.includes(`pnpm test ${selectedFile}`));
@@ -23,12 +23,12 @@ test('current schema 142 qualification binds coherent artifacts, exact test sele
   assert.ok(workflow.includes("report.get('numTotalTests')==1"));
   assert.ok(workflow.includes("report.get('numPendingTests')==0"));
   assert.ok(workflow.includes('if not ok: raise SystemExit'));
-  assert.ok(workflow.includes('steps.schema142_populated_test.outcome'));
+  assert.ok(workflow.includes('steps.schema143_populated_test.outcome'));
   assert.ok(!workflow.includes('schema-135-local-image-manifest.json'));
-  assert.ok(workflow.includes('schema-142-local-image-manifest.json'));
+  assert.ok(workflow.includes('schema-143-local-image-manifest.json'));
 });
 
-test('forward qualification retains populated data through the 0135 to 0142 tail', () => {
+test('forward qualification retains populated data through the 0135 to 0143 tail', () => {
   assert.ok(qualification.includes('journal.entries.slice(0, 135)'));
   assert.ok(qualification.includes("toBe('0134_owner_memory_creation')"));
   assert.ok(qualification.includes('journal.entries.slice(135)'));
@@ -41,6 +41,7 @@ test('forward qualification retains populated data through the 0135 to 0142 tail
     '0140_cost_event_accounted_at',
     '0141_bill_email_evidence',
     '0142_signal_store',
+    '0143_google_household_calendar_choices',
   ])
     assert.ok(qualification.includes(migration));
   assert.equal(qualification.split('await runMemoryWitnessMigrationImage(').length - 1, 2);
@@ -69,5 +70,5 @@ test('forward qualification retains populated data through the 0135 to 0142 tail
   assert.ok(qualification.includes('expect(legacyMcpConnection).toEqual({'));
   assert.ok(qualification.includes('oauthState: null'));
   assert.ok(qualification.includes('await qualifyMemoryWitnessRoleImages('));
-  assert.ok(qualification.includes('schema-142-forward-upgrade.json'));
+  assert.ok(qualification.includes('schema-143-forward-upgrade.json'));
 });

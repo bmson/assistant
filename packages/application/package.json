@@ -50,7 +50,8 @@
     "./owner-editor-domain": "./src/owner-editor-domain.ts",
     "./phone-call-owner-grants": "./src/phone-call-owner-grants.ts",
     "./approval-policy-presentation": "./src/approval-policy-presentation.ts",
-    "./google-calendar-connection": "./src/google-calendar-connection.ts"
+    "./google-calendar-connection": "./src/google-calendar-connection.ts",
+    "./google-household-calendar": "./src/google-household-calendar.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"

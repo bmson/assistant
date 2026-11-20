@@ -60,6 +60,10 @@ const expected: MigrationTailMetadata[] = [
     folderMillis: 1795126823025,
     hash: 'f7a937e2cde1800ee035b19a6ecc799e790b62631d77e7027430b3523de5d267',
   },
+  {
+    folderMillis: 1795128160098,
+    hash: '94ff304e909bbf7f077a53c49c7611accc5b1a2ee6fd864e06ea8b76897d04d7',
+  },
 ];
 const applied = (count: number): AppliedMigrationTailRow[] =>
   expected.slice(0, count).map((migration) => ({
@@ -77,7 +81,7 @@ describe('owner-editor migration tail guard', () => {
     expect(shipped).toEqual(expected);
   });
 
-  it.each([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13])(
+  it.each([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14])(
     'accepts canonical strict prefix length %i',
     (count) => {
       expect(() =>
@@ -85,6 +89,18 @@ describe('owner-editor migration tail guard', () => {
       ).not.toThrow();
     },
   );
+
+  it('rejects the standalone B2 migration at the C1 ordinal', () => {
+    expect(() =>
+      assertCompatibleOwnerEditorMigrationTail(expected, [
+        ...applied(12),
+        {
+          hash: '94ff304e909bbf7f077a53c49c7611accc5b1a2ee6fd864e06ea8b76897d04d7',
+          createdAt: '1795127468858',
+        },
+      ]),
+    ).toThrow('Incompatible owner-editor migration ledger.');
+  });
 
   it('rejects the historical contact-only 0131 watermark', () => {
     expect(() =>

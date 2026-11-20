@@ -167,6 +167,54 @@ final class MobileControlsUITests: XCTestCase {
         }
     }
 
+    func testHouseholdCalendarChoicesReopenAndPreview() throws {
+        continueAfterFailure = false
+        executionTimeAllowance = 90
+        let app = XCUIApplication()
+        defer { app.terminate() }
+        app.launchArguments = ["--fixture-case", "household-calendar", "--fixture-theme", "light",
+                               "--fixture-text-size", "default", "--fixture-nonce", UUID().uuidString]
+        app.launch()
+        XCTAssertTrue(app.staticTexts["fixture.ready"].waitForExistence(timeout: 8))
+        let household = app.buttons["Household calendar"]
+        if !household.isHittable { app.swipeUp() }
+        XCTAssertTrue(household.waitForExistence(timeout: 5))
+        household.tap()
+        let remaining = app.staticTexts["household-calendar-remaining"]
+        func expectCount(_ label: String) {
+            let predicate = NSPredicate(format: "exists == true AND label == %@", label)
+            XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: predicate, object: remaining)], timeout: 5), .completed)
+        }
+        func choose(_ source: String, _ label: String) {
+            let picker = app.descendants(matching: .any)["household-calendar-source-" + source].firstMatch
+            XCTAssertTrue(picker.waitForExistence(timeout: 5))
+            picker.tap()
+            let option = app.buttons[label].firstMatch
+            XCTAssertTrue(option.waitForExistence(timeout: 5))
+            option.tap()
+        }
+        expectCount("3 calendars still need a choice")
+        choose("family", "Household")
+        choose("work", "Work · Free/busy only")
+        app.buttons["Save choices"].tap()
+        expectCount("1 calendar still needs a choice")
+        app.buttons["Preview today"].tap()
+        if !app.staticTexts["Busy"].isHittable { app.swipeUp() }
+        XCTAssertTrue(app.staticTexts["Family appointment"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Busy"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["Private work title"].exists)
+
+        choose("other", "Ignore")
+        app.buttons["Save choices"].tap()
+        expectCount("All calendars classified")
+        app.navigationBars["Household calendar"].buttons.firstMatch.tap()
+        if !household.isHittable { app.swipeUp() }
+        XCTAssertTrue(household.waitForExistence(timeout: 5))
+        household.tap()
+        expectCount("All calendars classified")
+        XCTAssertEqual(app.staticTexts["fixture.transport.violations"].label, "0")
+    }
+
     private func launch(_ app: XCUIApplication, fixture: String, theme: String = "light", textSize: String = "default") throws {
         try checkBudget()
         app.launchArguments = ["--fixture-case", fixture, "--fixture-theme", theme,

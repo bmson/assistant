@@ -24,6 +24,7 @@ export interface Records {
     record: Signal;
   };
   googleCalendarConnections: { agentId: string; state: unknown; updatedAt: Date };
+  googleHouseholdCalendarChoices: { agentId: string; settings: unknown };
   ownerEditorOperations: OwnerEditorOperationRecord;
   ownerCallGrantOperations: OwnerCallGrantOperation;
   ownerCallGrantOperationSlots: OwnerCallGrantOperationSlot;

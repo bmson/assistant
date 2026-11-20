@@ -93,3 +93,59 @@ struct GoogleCalendarRequestContext {
     let version: Int
     let client: APIClient
 }
+
+enum GoogleHouseholdCalendarPurpose: String, Codable, Sendable {
+    case household
+    case workFreeBusy = "work_free_busy"
+    case ignore
+}
+
+struct GoogleHouseholdCalendarSetup: Decodable, Sendable {
+    struct Source: Decodable, Identifiable, Sendable {
+        let id: String
+        let name: String
+        let canShowDetails: Bool
+        let canShowBusy: Bool
+        let purpose: GoogleHouseholdCalendarPurpose?
+    }
+
+    let state: String
+    let connectionId: String
+    let revision: String?
+    let remaining: Int?
+    let calendars: [Source]
+}
+
+struct GoogleHouseholdCalendarSave: Encodable, Sendable {
+    struct Choice: Encodable, Sendable {
+        let id: String
+        let purpose: GoogleHouseholdCalendarPurpose
+    }
+
+    let connectionId: String
+    let revision: String?
+    let choices: [Choice]
+}
+
+struct GoogleHouseholdCalendarPreview: Decodable, Sendable {
+    struct Row: Decodable, Identifiable, Sendable {
+        let id: String
+        let title: String
+        let calendar: String
+        let start: String
+        let end: String
+        let allDay: Bool
+
+        var timeLabel: String {
+            if allDay { return "All day" }
+            let iso = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+            guard let start = try? iso.parse(start), let end = try? iso.parse(end) else {
+                return "Time unavailable"
+            }
+            return "\(start.formatted(date: .omitted, time: .shortened)) – \(end.formatted(date: .omitted, time: .shortened))"
+        }
+    }
+
+    let complete: Bool
+    let rows: [Row]
+}
