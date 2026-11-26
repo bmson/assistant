@@ -172,6 +172,7 @@
 		B10000000000000000000041 /* FixtureApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10000000000000000000001 /* FixtureApp.swift */; };
 		B10000000000000000000042 /* FixtureTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10000000000000000000002 /* FixtureTransport.swift */; };
 		B10000000000000000000043 /* MobileControlsUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10000000000000000000003 /* MobileControlsUITests.swift */; };
+		3C0DC79A56B043D9AA3491AE /* HouseholdCalendarUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA099B46701448A18ACC64C9 /* HouseholdCalendarUITests.swift */; };
 		B10000000000000000000044 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000011 /* Assets.xcassets */; };
 		B10000000000000000000045 /* Resources/mermaid.min.js in Resources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000057 /* Resources/mermaid.min.js */; };
 		B10000000000000000000046 /* Resources/mermaid-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000058 /* Resources/mermaid-LICENSE.txt */; };
@@ -332,6 +333,7 @@
 		C10000000000000000000001 /* FixtureApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FixtureApp.swift; sourceTree = "<group>"; };
 		C10000000000000000000002 /* FixtureTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FixtureTransport.swift; sourceTree = "<group>"; };
 		C10000000000000000000003 /* MobileControlsUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileControlsUITests.swift; sourceTree = "<group>"; };
+		AA099B46701448A18ACC64C9 /* HouseholdCalendarUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HouseholdCalendarUITests.swift; sourceTree = "<group>"; };
 		C10000000000000000000013 /* AssistantUITestHost.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AssistantUITestHost.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		C10000000000000000000021 /* AssistantUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AssistantUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		C13A99000000000000000006 /* Models/NativeMemoryCorrectionConsumer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models/NativeMemoryCorrectionConsumer.swift; sourceTree = "<group>"; };
@@ -536,6 +538,7 @@
 			isa = PBXGroup;
 			children = (
 				C10000000000000000000003 /* MobileControlsUITests.swift */,
+				AA099B46701448A18ACC64C9 /* HouseholdCalendarUITests.swift */,
 			);
 			path = AssistantUITests;
 			sourceTree = "<group>";
@@ -924,6 +927,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				B10000000000000000000043 /* MobileControlsUITests.swift in Sources */,
+				3C0DC79A56B043D9AA3491AE /* HouseholdCalendarUITests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
