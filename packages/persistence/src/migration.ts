@@ -6,6 +6,7 @@ import {
   storedHouseholdCalendarSettings,
 } from './google-calendar-connection.js';
 import { homeWeatherSettings } from './home-weather.js';
+import { householdHandoffRecord } from './household-handoff.js';
 import {
   ownerCallGrantOperationMatchesSlot,
   parseOwnerCallGrantOperation,
@@ -1107,6 +1108,12 @@ export function validateMigrationReferences(
       throw new Error('Invalid saved place migration identity');
     if (record.table === 'agents' && record.data.homeWeather != null)
       homeWeatherSettings.parse(decodedData(record).homeWeather);
+    if (record.table === 'household_handoffs') {
+      if (record.id !== sourceAgentId || record.data.agentId !== sourceAgentId)
+        throw new Error('Invalid household handoff migration owner');
+      requireReference(record, 'agentId', 'agents', true);
+      householdHandoffRecord.parse(decodedData(record));
+    }
     if (record.table === 'google_calendar_connections') {
       if (record.id !== sourceAgentId || record.data.agentId !== sourceAgentId)
         throw new Error('Invalid Google Calendar migration owner');

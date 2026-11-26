@@ -1450,7 +1450,13 @@ export class FirestorePrivacyErasureRepository implements PrivacyErasureReposito
     await this.deleteOwned(agentId, job.generation, 'watchFireEffects');
     await this.deleteOwned(agentId, job.generation, 'watchFires');
     await this.deleteOwned(agentId, job.generation, 'signals');
-    await this.deleteOwned(agentId, job.generation, 'householdHandoffs');
+    await this.store.db.runTransaction(async (tx) => {
+      await this.activeJob(tx, agentId, job.generation);
+      const handoff = await tx.get(this.store.doc('householdHandoffs', agentId));
+      if (!handoff.exists) return;
+      if (handoff.get('agentId') !== agentId) throw new Error('Household plan owner mismatch');
+      tx.delete(handoff.ref);
+    });
     await this.deleteOwned(agentId, job.generation, 'savedPlaces');
     await this.eraseSecurityEvidence(agentId, job.generation);
     await this.eraseEmailAttachmentCustodies(agentId, job.generation);
