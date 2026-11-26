@@ -67,7 +67,7 @@ it('preserves a populated household and signal across the Home and Saved places 
           agentId: owner,
           emailIngestId: mail.id,
           at: observed,
-          subjectPersonIds: [],
+          subjectPersonIds: ['synthetic-owner'],
         });
         const calendar = createPostgresGoogleCalendarConnectionRepository(db);
         const connectionId = randomUUID();
