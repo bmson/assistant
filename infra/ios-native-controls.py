@@ -17,7 +17,9 @@ if sys.argv[1] in {'run', 'run-noticing'}:
     from pathlib import Path
     root = Path(os.environ['RUNNER_TEMP']) / (evidence_name + '-evidence')
     root.mkdir(mode=0o700, exist_ok=False)
-    build = Path(os.environ['RUNNER_TEMP']) / ('Assistant-noticing-build' if noticing else 'Assistant-build')
+    # The ordinary app uses this cache even when qualification is skipped.
+    # Each phase still builds its own test specification and owns its result.
+    build = Path(os.environ['RUNNER_TEMP']) / 'Assistant-build'
     env = {k:v for k,v in os.environ.items() if k in {'HOME','USER','LOGNAME','SHELL','TMPDIR','LANG','LC_ALL'}}
     env['PATH'] = '/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin'
     log_bytes = 0
@@ -188,8 +190,11 @@ if sys.argv[1] in {'run', 'run-noticing'}:
         result = root / ('Noticing.xcresult' if noticing else 'capability.xcresult')
         allowance = '120' if noticing else '900'
         output = run('test', ['xcodebuild','test-without-building','-xctestrun',str(runs[0]),'-destination','id='+udid,'-destination-timeout','30','-collect-test-diagnostics','never','-parallel-testing-enabled','NO','-maximum-concurrent-test-simulator-destinations','1','-test-timeouts-enabled','YES','-default-test-execution-time-allowance',allowance,'-maximum-test-execution-time-allowance',allowance,*['-only-testing:'+name for name in named_tests],'-resultBundlePath',str(result)], 150 if noticing else 1020)
-        summary = json.loads(run('summary', ['xcrun','xcresulttool','get','test-results','summary','--path',str(result)], 10))
-        tests = json.loads(run('named-tests', ['xcrun','xcresulttool','get','test-results','tests','--path',str(result)], 10))
+        # Hosted runners can take longer to start xcresulttool than to read the
+        # result. Both commands remain bounded by the overall phase deadline.
+        metadata_seconds = 30 if noticing else 60
+        summary = json.loads(run('summary', ['xcrun','xcresulttool','get','test-results','summary','--path',str(result)], metadata_seconds))
+        tests = json.loads(run('named-tests', ['xcrun','xcresulttool','get','test-results','tests','--path',str(result)], metadata_seconds))
         named = re.search(r'MobileControlsUITests[^\n]{0,160}'+methods[0]+r'[^\n]{0,80}\bpassed\b', output, re.I)
         cases = []
         def visit(node, bundle=False):
