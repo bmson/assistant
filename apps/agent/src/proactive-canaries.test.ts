@@ -22,6 +22,7 @@ import {
   FirestoreScheduleRepository,
 } from '@assistant/firestore';
 import {
+  DAILY_BRIEFING,
   type ExecutionPersistence,
   GOOGLE_CALENDAR_READ_SCOPE,
   type GoogleCalendarConnectionState,
@@ -459,6 +460,9 @@ for (const [driver, fixture] of [
           });
           const pulse = (await repo.pulse(f.owner)).schedule;
           if (pulse) await f.schedule.setOwnerEnabled(f.owner, pulse.id, false);
+          // PostgreSQL seeds a briefing schedule at real time, after the test clock.
+          const briefing = await f.schedule.getByName(f.owner, DAILY_BRIEFING);
+          if (briefing) await f.schedule.setOwnerEnabled(f.owner, briefing.id, false);
           const owner = { id: f.owner, name: 'Private name', timezone: 'America/Los_Angeles' };
           const first = new Date('2026-11-19T07:58:00.000Z');
           const at = (minutes: number) => new Date(first.getTime() + minutes * 60_000);
