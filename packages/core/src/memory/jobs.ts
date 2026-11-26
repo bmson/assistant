@@ -592,7 +592,11 @@ export async function runCodeJob(
     }
     case 'briefing.compose': {
       await deps.heartbeat?.();
-      const result = await runBriefing(deps, { taskId: task.id, agentId: task.agentId });
+      const result = await runBriefing(deps, {
+        taskId: task.id,
+        agentId: task.agentId,
+        trigger: task.trigger,
+      });
       return { done: true, summary: briefingSummary(result), briefingOutcome: result.outcome };
     }
     case 'memory.consolidate': {

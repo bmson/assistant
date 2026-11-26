@@ -804,6 +804,7 @@ export function firestoreOwnerNotices(
       if (!posted) throw new Error('Owner notice was not posted');
       return posted;
     },
+    readBriefingPublication: (agentId, taskId) => notices.readBriefingPublication(agentId, taskId),
     async postWithDecisionFence(input) {
       if (input.agentId !== notices.agentId)
         throw new Error('Owner notice is outside the configured owner');

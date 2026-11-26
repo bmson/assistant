@@ -92,6 +92,7 @@ const files = [
   'apps/agent/src/firestore-reminder-delivery.test.ts',
   'apps/agent/src/firestore-ambient-refresh.test.ts',
   'apps/agent/src/home-weather.integration.test.ts',
+  'apps/agent/src/b5-daily-weather.integration.test.ts',
   'apps/agent/src/saved-places.integration.test.ts',
   'apps/agent/src/firestore-open-loop-sweep.test.ts',
   'apps/agent/src/firestore-email-extraction.test.ts',

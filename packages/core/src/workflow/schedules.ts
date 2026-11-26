@@ -34,7 +34,7 @@ import {
   type SchedulePreparation,
   type ScheduleRunnerOptions,
 } from './schedule-runner.js';
-import { nextRun } from './schedule-time.js';
+import { nextRun, zonedParts } from './schedule-time.js';
 
 export { runScheduleBatch, type ScheduleRunnerOptions } from './schedule-runner.js';
 export { nextRun } from './schedule-time.js';
@@ -620,20 +620,6 @@ export async function prepareGoalSession(
         }
       : {}),
   };
-}
-
-/** The agent-local calendar date and hour of a moment — dedupe granularity. */
-function zonedParts(timeZone: string, at: Date): { date: string; hour: number } {
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    hourCycle: 'h23',
-  }).formatToParts(at);
-  const get = (type: string) => parts.find((part) => part.type === type)?.value ?? '';
-  return { date: `${get('year')}-${get('month')}-${get('day')}`, hour: Number(get('hour')) };
 }
 
 /** The tz's offset-from-UTC at a moment, measured through Intl. */
