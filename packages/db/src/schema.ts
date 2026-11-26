@@ -3,6 +3,7 @@ import type {
   DirectEmailRouting,
   DocumentExtractionMetadata,
   EmailContentProvenanceSnapshot,
+  HomeWeatherSettings,
   ImportArchiveDiagnostics,
   ImportUnitProvenance,
   OwnerCallGrantOperation,
@@ -13,6 +14,7 @@ import type {
   OwnerEditorTerminalResult,
   OwnerMemoryWriteWitness,
   Records,
+  SavedPlaceDetails,
   Signal,
 } from '@assistant/persistence';
 import { sql } from 'drizzle-orm';
@@ -148,6 +150,7 @@ export const agents = pgTable('agents', {
   browserProfilePath: text('browser_profile_path'),
   /** Secret Manager secret NAMES (never raw secrets): { googleRefreshToken, twilioFrom, ... } */
   credentialRefs: jsonb('credential_refs').notNull().default({}),
+  homeWeather: jsonb('home_weather').$type<HomeWeatherSettings>(),
   ...timestamps,
 });
 
@@ -3812,3 +3815,16 @@ export const googleHouseholdCalendarChoices = pgTable('google_household_calendar
     .references(() => googleCalendarConnections.agentId, { onDelete: 'cascade' }),
   settings: jsonb('settings').notNull(),
 });
+
+export const savedPlaces = pgTable(
+  'saved_places',
+  {
+    id: uuid('id').primaryKey(),
+    agentId: uuid('agent_id')
+      .notNull()
+      .references(() => agents.id, { onDelete: 'cascade' }),
+    revision: uuid('revision').notNull(),
+    details: jsonb('details').$type<SavedPlaceDetails>(),
+  },
+  (t) => [index('saved_places_agent_idx').on(t.agentId)],
+);

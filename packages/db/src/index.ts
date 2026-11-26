@@ -69,8 +69,10 @@ export * from './owner-call-operation-repository.js';
 export { createPostgresOwnerCardCompilationRepository } from './owner-card-compilation-repository.js';
 export { lockPostgresOwnerChatAction } from './owner-chat-action-lock.js';
 export {
+  createPostgresHomeWeatherRepository,
   createPostgresOwnerContextRepository,
   listEligibleOwnerCommitments,
+  readPostgresHomeWeather,
 } from './owner-context-repository.js';
 export * from './owner-editor-graph.js';
 export * from './owner-editor-memory.js';
@@ -103,6 +105,7 @@ export { createPostgresRecallSurfacingRepository } from './recall-surfacing-repo
 export { createPostgresReminderRepository } from './reminder-repository.js';
 export * from './research-assignment-repository.js';
 export { assertPostgresRestoreRehearsalReadOnly } from './restore-readonly.js';
+export { createPostgresSavedPlacesRepository } from './saved-places.js';
 export { createPostgresScheduleRepository } from './schedule-repository.js';
 export * from './schema.js';
 export { createPostgresSecurityIncidentRepository } from './security-incident-repository.js';

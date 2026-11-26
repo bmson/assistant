@@ -92,7 +92,7 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | B2  | Household calendar setup and classification                            | 1     | M    | B1         | Household, Work, School, Activity, Holidays and Ignore        |
 | B3  | Reliable iPhone calendar snapshots                                     | 1     | M    | —          | open                                                          |
 | B4  | iPhone Contacts import (opt-in)                                        | 4     | M    | C4         | open                                                          |
-| B5  | Places and home-place weather fallback                                 | 1     | M    | —          | open                                                          |
+| B5  | Places and home-place weather fallback                                 | 1     | M    | —          | in progress (Home and Saved places local)                     |
 | B6  | Weather at each outdoor event's place and time                         | 1     | S    | B5         | open                                                          |
 | B7  | News profile and feeds; public reads without approval                  | 4     | M    | —          | open                                                          |
 | B8  | HealthKit sleep and activity (opt-in)                                  | 4     | L    | G2         | open                                                          |

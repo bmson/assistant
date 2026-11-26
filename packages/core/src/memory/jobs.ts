@@ -771,7 +771,7 @@ export async function runCodeJob(
       return {
         done: true,
         summary: r.computed
-          ? `ambient: refreshed (location${r.hasWeather ? ' + weather' : ', no weather'})`
+          ? `ambient: refreshed (${r.hasLocation ? 'location' : 'saved home'}${r.hasWeather ? ' + weather' : ', no weather'})`
           : 'ambient: no fresh location — snapshot cleared',
       };
     }

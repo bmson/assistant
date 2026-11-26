@@ -5,6 +5,7 @@ import {
   parseGoogleCalendarConnection,
   storedHouseholdCalendarSettings,
 } from './google-calendar-connection.js';
+import { homeWeatherSettings } from './home-weather.js';
 import {
   ownerCallGrantOperationMatchesSlot,
   parseOwnerCallGrantOperation,
@@ -12,6 +13,7 @@ import {
 } from './owner-call-operation-receipt.js';
 import { parseOwnerCorrection } from './owner-memory-correction.js';
 import { parseContactIdentityAuthority } from './profile-contact-identity.js';
+import { savedPlaceRecord } from './saved-places.js';
 import { toolCallReceiptKeyId } from './tool-call-receipts.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -89,6 +91,7 @@ export const MIGRATION_TABLES = [
   },
   { table: 'signals', collection: 'signals', id: 'id', scope: 'agent' },
   { table: 'agents', collection: 'agents', id: 'id', scope: 'agent' },
+  { table: 'saved_places', collection: 'savedPlaces', id: 'id', scope: 'agent' },
   { table: 'ambient_snapshots', collection: 'ambientSnapshots', id: 'id', scope: 'agent' },
   { table: 'anomalies', collection: 'anomalies', id: 'id', scope: 'agent' },
   {
@@ -1039,6 +1042,7 @@ export function validateMigrationReferences(
     });
   };
   const directlyOwned = new Set<MigrationTable>([
+    'saved_places',
     'ambient_snapshots',
     'anomalies',
     'application_confirmations',
@@ -1095,6 +1099,13 @@ export function validateMigrationReferences(
     'writing_samples',
   ]);
   for (const record of records) {
+    if (
+      record.table === 'saved_places' &&
+      savedPlaceRecord.parse(decodedData(record)).id !== record.id
+    )
+      throw new Error('Invalid saved place migration identity');
+    if (record.table === 'agents' && record.data.homeWeather != null)
+      homeWeatherSettings.parse(decodedData(record).homeWeather);
     if (record.table === 'google_calendar_connections') {
       if (record.id !== sourceAgentId || record.data.agentId !== sourceAgentId)
         throw new Error('Invalid Google Calendar migration owner');

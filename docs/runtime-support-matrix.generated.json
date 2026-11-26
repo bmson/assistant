@@ -5,13 +5,13 @@
     "packages/config/src/index.ts": "5a0cf4e452a404f48f2a0b9c3bbd3dcd5627244931a1b5370990570e8879136c",
     "apps/agent/src/deps.ts": "6218d3d687329c914c07683f1c882763e0db5d77d0fd912dc106eca35ac2b5c2",
     "apps/agent/src/index.ts": "bc65b1a16ba83c6351a74e2c071189fb4288d5d3ec2c4425accc185da77fe6ab",
-    "apps/web/lib/server.ts": "44898de9d12ea90ba06de971f0c46482288ded323bb4c0c4a6f30b0d5d58d342",
+    "apps/web/lib/server.ts": "45d9ac060639509d3772b7db2f70e88535622854bd10af60eedaf95480e912cd",
     "apps/web/proxy.ts": "8deda76cb944ee0e0eb081374fea0010855916ec786d59cd927f8c408eb98d7c",
-    "packages/db/drizzle/meta/_journal.json": "701932d10b67c3ee7bb1025044c5d86467de166288ad542134309e244eec8fbd",
-    "infra/gcp/release-contracts.json": "9b702961545227dabefe65c3ca652a632aa8dee3d55d36da3fd6b7851b30156f"
+    "packages/db/drizzle/meta/_journal.json": "6d6e06ebc99a1636334ccd89b5c92a4b4ac67430be1c3e64409ad13b101d9cad",
+    "infra/gcp/release-contracts.json": "1745594adbdc2957d7158881ca6c8a6d65b60944bf9ac56b476622218b26ed73"
   },
-  "latestPostgresMigration": "0143_google_household_calendar_choices",
-  "postgresSchemaVersion": 143,
+  "latestPostgresMigration": "0145_saved_places",
+  "postgresSchemaVersion": 145,
   "releaseContracts": {
     "agent": {
       "apiContract": 3,
@@ -20,8 +20,8 @@
         "max": 3
       },
       "postgresSchema": {
-        "min": 143,
-        "max": 143
+        "min": 145,
+        "max": 145
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -32,8 +32,8 @@
         "max": 3
       },
       "postgresSchema": {
-        "min": 143,
-        "max": 143
+        "min": 145,
+        "max": 145
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -44,8 +44,8 @@
         "max": 1
       },
       "postgresSchema": {
-        "min": 143,
-        "max": 143
+        "min": 145,
+        "max": 145
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -56,8 +56,8 @@
         "max": 1
       },
       "postgresSchema": {
-        "min": 143,
-        "max": 143
+        "min": 145,
+        "max": 145
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -68,8 +68,8 @@
         "max": 1
       },
       "postgresSchema": {
-        "min": 143,
-        "max": 143
+        "min": 145,
+        "max": 145
       },
       "currentPostgresSchemaCompatible": true
     }

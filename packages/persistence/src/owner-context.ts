@@ -1,3 +1,4 @@
+import type { HomeWeatherRepository } from './home-weather.js';
 import type { Records } from './records.js';
 
 export type OwnerCardSnapshot = Pick<Records['ownerCard'], 'content' | 'compiledAt'>;
@@ -18,6 +19,7 @@ export type OwnerCommitment = Records['commitments'];
 export interface OwnerContextRepository {
   readonly kind: 'owner-context-repository';
 
+  getHomeWeather?: HomeWeatherRepository['getHomeWeather'];
   getOwnerCard(agentId: string): Promise<OwnerCardSnapshot | null>;
   getAmbientSnapshot(agentId: string): Promise<OwnerAmbientSnapshot | null>;
   getLatestLocation(input: {

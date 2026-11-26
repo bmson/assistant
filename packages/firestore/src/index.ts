@@ -173,6 +173,7 @@ export {
   type RuntimeDataIssue,
   type RuntimeDataPreflight,
 } from './runtime-data-preflight.js';
+export { createFirestoreSavedPlacesRepository } from './saved-places.js';
 export { FirestoreScheduleRepository } from './schedules.js';
 export { FirestoreSelfImprovementRepository } from './self-improvement.js';
 export { FirestoreSelfMaintenanceRepository } from './self-maintenance.js';

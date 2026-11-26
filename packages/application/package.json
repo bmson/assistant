@@ -20,6 +20,8 @@
     "./security-incidents": "./src/security-incidents.ts",
     "./calendar-duplicates": "./src/calendar-duplicates.ts",
     "./goals": "./src/goals.ts",
+    "./saved-places": "./src/saved-places.ts",
+    "./home-weather": "./src/home-weather.ts",
     "./health": "./src/health.ts",
     "./imports": "./src/imports.ts",
     "./knowledge-graph": "./src/knowledge-graph.ts",

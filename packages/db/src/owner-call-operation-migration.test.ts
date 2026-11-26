@@ -312,10 +312,16 @@ beforeAll(async () => {
     const expectedSignalsHash = createHash('sha256')
       .update(await readFile(join(folder, '0142_signal_store.sql')))
       .digest('hex');
-    const expectedFinalHash = createHash('sha256')
+    const expectedHouseholdCalendarHash = createHash('sha256')
       .update(await readFile(join(folder, '0143_google_household_calendar_choices.sql')))
       .digest('hex');
-    expect(journal.entries.at(-1)?.tag).toBe('0143_google_household_calendar_choices');
+    const expectedHomeWeatherHash = createHash('sha256')
+      .update(await readFile(join(folder, '0144_home_weather.sql')))
+      .digest('hex');
+    const expectedFinalHash = createHash('sha256')
+      .update(await readFile(join(folder, '0145_saved_places.sql')))
+      .digest('hex');
+    expect(journal.entries.at(-1)?.tag).toBe('0145_saved_places');
     const [endpoint] = await client`
       SELECT hash FROM drizzle.__drizzle_migrations ORDER BY id DESC LIMIT 1`;
     expect(endpoint?.hash).toBe(expectedFinalHash);
@@ -326,7 +332,7 @@ beforeAll(async () => {
       SELECT hash,created_at::text AS "createdAt"
       FROM drizzle.__drizzle_migrations ORDER BY id`;
     expect(ledgerBeforeRerun).toHaveLength(journal.entries.length);
-    expect(ledgerBeforeRerun.slice(-10).map(({ hash }) => hash)).toEqual([
+    expect(ledgerBeforeRerun.slice(-12).map(({ hash }) => hash)).toEqual([
       expectedOwnerMemoryHash,
       expectedWitnessHash,
       expectedCalendarHash,
@@ -336,6 +342,8 @@ beforeAll(async () => {
       expectedAccountingHash,
       expectedBillHash,
       expectedSignalsHash,
+      expectedHouseholdCalendarHash,
+      expectedHomeWeatherHash,
       expectedFinalHash,
     ]);
     await client.end();
