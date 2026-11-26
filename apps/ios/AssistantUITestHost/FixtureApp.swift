@@ -66,7 +66,8 @@ private struct FixtureRoot: View {
                     NavigationStack { ApprovalsView().environment(model) }
                         .accessibilityIdentifier("fixture.surface.approvals")
                 } else if arguments.scene == "household-calendar", let model {
-                    NavigationStack { GoogleCalendarConnectionView().environment(model) }
+                    NavigationStack { GoogleCalendarConnectionView() }
+                        .environment(model)
                 } else {
                     ScrollView {
                         ProactiveAlertContent(category: "calendar", urgency: "for_your_attention",
