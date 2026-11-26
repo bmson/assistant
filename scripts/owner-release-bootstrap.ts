@@ -130,6 +130,23 @@ function validateCandidate(
   );
   requireProof(literal(t, 'ASSISTANT_RELEASE_WRITES_PAUSED') === String(paused));
 }
+function verifyPromotedTraffic(value: unknown, role: 'agent' | 'web', expected: CandidateIdentity) {
+  const rows = normalizedAgentRows(value);
+  const tag = `candidate-${expected.runId}-${expected.attempt}`;
+  requireProof(rows.every((row) => row.revision === expected.revision));
+  if (rows.length === 1) {
+    requireProof(rows[0]?.tag === tag && rows[0].percent === 100);
+    return;
+  }
+  // The agent's traffic update can leave its zero-percent tag on a separate row.
+  requireProof(
+    role === 'agent' &&
+      rows.length === 2 &&
+      rows.some((row) => row.tag === '' && row.percent === 100) &&
+      rows.some((row) => row.tag === tag && row.percent === 0),
+  );
+}
+
 export function verifyCanonicalBootstrapAgent(
   receipt: BootstrapReceipt,
   service: unknown,
@@ -181,20 +198,8 @@ export function verifyCanonicalBootstrapAgent(
       literal(r, 'ASSISTANT_RELEASE_WEB_API_MAX') === '3' &&
       literal(r, 'MCP_OAUTH_ENABLED') === 'false',
   );
-  for (const value of [s.traffic, s.trafficStatuses]) {
-    const rows = normalizedAgentRows(value);
-    const tag = `candidate-${expected.runId}-${expected.attempt}`;
-    requireProof(
-      rows.length >= 1 &&
-        rows.length <= 2 &&
-        rows.every(
-          (row) => row.revision === expected.revision && (row.tag === tag || row.tag === ''),
-        ) &&
-        rows.filter((row) => row.tag === tag).length === 1 &&
-        rows.filter((row) => row.percent === 100).length === 1 &&
-        rows.every((row) => row.percent === 100 || (row.percent === 0 && row.tag === tag)),
-    );
-  }
+  for (const value of [s.traffic, s.trafficStatuses])
+    verifyPromotedTraffic(value, 'agent', expected);
 }
 
 export function planScalingRestore(
@@ -213,16 +218,7 @@ export function planScalingRestore(
   requireProof(s.name === b.service && s.uid === b.uid && disabled(s) && s.reconciling !== true);
   requireProof(typeof s.etag === 'string' && s.etag.length > 0);
   validateCandidate(b.service, s, r, expected, role === 'web', !forHold);
-  for (const rows of [s.traffic, s.trafficStatuses]) {
-    const expectedRows = [
-      {
-        revision: expected.revision,
-        tag: `candidate-${expected.runId}-${expected.attempt}`,
-        percent: 100,
-      },
-    ];
-    requireProof(same(normalizedAgentRows(rows), expectedRows));
-  }
+  for (const value of [s.traffic, s.trafficStatuses]) verifyPromotedTraffic(value, role, expected);
   return { name: b.service, etag: s.etag, scaling: object(b.automaticScaling) };
 }
 /** Metadata-only checkpoint: no phase or admission transition is introduced. */
