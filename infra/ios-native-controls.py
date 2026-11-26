@@ -209,8 +209,9 @@ if sys.argv[1] in {'run', 'run-calendar'}:
         ]
         selection = ['-only-testing:AssistantUITests/' + method for method in expected_methods]
         result = root / ('household-calendar.xcresult' if calendar else 'capability.xcresult')
-        allowance = '90' if calendar else '900'
-        output = run('test', ['xcodebuild','test-without-building','-xctestrun',str(runs[0]),'-destination','id='+udid,'-destination-timeout','30','-collect-test-diagnostics','never','-parallel-testing-enabled','NO','-maximum-concurrent-test-simulator-destinations','1','-test-timeouts-enabled','YES','-default-test-execution-time-allowance',allowance,'-maximum-test-execution-time-allowance',allowance,*selection,'-resultBundlePath',str(result)], 150 if calendar else 1020)
+        allowance = '240' if calendar else '900'
+        test_budget = 300 if calendar else 1020
+        output = run('test', ['xcodebuild','test-without-building','-xctestrun',str(runs[0]),'-destination','id='+udid,'-destination-timeout','30','-collect-test-diagnostics','never','-parallel-testing-enabled','NO','-maximum-concurrent-test-simulator-destinations','1','-test-timeouts-enabled','YES','-default-test-execution-time-allowance',allowance,'-maximum-test-execution-time-allowance',allowance,*selection,'-resultBundlePath',str(result)], test_budget)
         summary = json.loads(run('summary', ['xcrun','xcresulttool','get','test-results','summary','--path',str(result)], 30 if calendar else 10))
         tests = json.loads(run('named-tests', ['xcrun','xcresulttool','get','test-results','tests','--path',str(result)], 30 if calendar else 10))
         test_class, test_method = expected_methods[0].split('/')
