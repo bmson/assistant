@@ -23,6 +23,10 @@ for index in $(seq 1 3000); do
     printf '%s\n' 'apps/ios/Assistant/Views/ApprovalsView.swift'
   elif [ "$index" -eq 97 ] && [ "${MOCK_IOS_CHANGE:-true}" = native-host ]; then
     printf '%s\n' 'apps/ios/AssistantUITestHost/FixtureApp.swift'
+  elif [ "$index" -eq 98 ] && [ "${MOCK_IOS_CHANGE:-true}" = calendar-fixture ]; then
+    printf '%s\n' 'apps/ios/AssistantUITests/HouseholdCalendarUITests.swift'
+  elif [ "$index" -eq 99 ] && [ "${MOCK_IOS_CHANGE:-true}" = calendar-view ]; then
+    printf '%s\n' 'apps/ios/Assistant/Views/GoogleCalendarConnectionView.swift'
   else
     printf 'docs/review/path-%04d.md\n' "$index"
   fi
@@ -37,7 +41,7 @@ if [ "$fixture_bytes" -le 65536 ]; then
 fi
 
 run_filter() {
-  local event="$1" expect="$2" ios_change="${3:-true}" native_expect="${4:-false}"
+  local event="$1" expect="$2" ios_change="${3:-true}" native_expect="${4:-false}" calendar_expect="${5:-false}"
   : >"$TEMP_DIR/output"
   EVENT_NAME="$event" \
     BASE_SHA=base \
@@ -47,14 +51,17 @@ run_filter() {
     bash "$SCRIPT_DIR/ios-detect-changes.sh"
   grep -Fx "ios=$expect" "$TEMP_DIR/output" >/dev/null
   grep -Fx "native_controls=$native_expect" "$TEMP_DIR/output" >/dev/null
+  grep -Fx "calendar_smoke=$calendar_expect" "$TEMP_DIR/output" >/dev/null
 }
 
 run_filter pull_request true
 run_filter pull_request false false
-run_filter pull_request true helper true
-run_filter pull_request true native-helper true
+run_filter pull_request true helper true true
+run_filter pull_request true native-helper true true
 run_filter pull_request true native-control true
-run_filter pull_request true native-host true
+run_filter pull_request true native-host true true
+run_filter pull_request true calendar-fixture true true
+run_filter pull_request true calendar-view false true
 run_filter push true
 
 : >"$TEMP_DIR/output"

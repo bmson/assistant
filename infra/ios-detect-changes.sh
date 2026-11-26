@@ -6,6 +6,7 @@ set -euo pipefail
 if [ "${EVENT_NAME:?EVENT_NAME is required}" != "pull_request" ]; then
   echo "ios=true" >> "${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}"
   echo "native_controls=false" >> "$GITHUB_OUTPUT"
+  echo "calendar_smoke=false" >> "$GITHUB_OUTPUT"
   exit 0
 fi
 
@@ -25,4 +26,10 @@ if grep -Eq '^(apps/ios/AssistantUITestHost/|apps/ios/AssistantUITests/|apps/ios
   echo "native_controls=true" >> "$GITHUB_OUTPUT"
 else
   echo "native_controls=false" >> "$GITHUB_OUTPUT"
+fi
+
+if grep -Eq '^(apps/ios/AssistantUITestHost/|apps/ios/AssistantUITests/HouseholdCalendarUITests\.swift$|apps/ios/Assistant\.xcodeproj/(project\.pbxproj|xcshareddata/xcschemes/AssistantUIFixtures\.xcscheme)$|apps/ios/Assistant/(AppModel\.swift|Views/GoogleCalendarConnectionView\.swift|Models/GoogleCalendarConnection\.swift|Networking/APIClient\.swift)$|\.github/workflows/ios\.yml$|infra/ios-native-controls\.py$|infra/ios-detect-changes(\.test)?\.sh$)' <<<"$changed_paths"; then
+  echo "calendar_smoke=true" >> "$GITHUB_OUTPUT"
+else
+  echo "calendar_smoke=false" >> "$GITHUB_OUTPUT"
 fi
