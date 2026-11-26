@@ -91,6 +91,7 @@ export const MIGRATION_TABLES = [
   },
   { table: 'signals', collection: 'signals', id: 'id', scope: 'agent' },
   { table: 'agents', collection: 'agents', id: 'id', scope: 'agent' },
+  { table: 'household_handoffs', collection: 'householdHandoffs', id: 'agent_id', scope: 'agent' },
   { table: 'saved_places', collection: 'savedPlaces', id: 'id', scope: 'agent' },
   { table: 'ambient_snapshots', collection: 'ambientSnapshots', id: 'id', scope: 'agent' },
   { table: 'anomalies', collection: 'anomalies', id: 'id', scope: 'agent' },

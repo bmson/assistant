@@ -4,6 +4,7 @@ import type { DocumentExtractionMetadata } from './document-extraction-metadata.
 /** Portable record shapes. PostgreSQL compatibility is checked by records.test.ts.
  * These types are owned by persistence: change them intentionally, not on every SQL migration. */
 import type { HomeWeatherSettings } from './home-weather.js';
+import type { HouseholdHandoffRecord } from './household-handoff.js';
 import type { KnowledgeGraphAssertion } from './knowledge-graph-sync.js';
 import type {
   OwnerCallGrantOperation,
@@ -18,6 +19,7 @@ import type { Signal } from './signals.js';
 
 export interface Records {
   savedPlaces: SavedPlaceRecord;
+  householdHandoffs: HouseholdHandoffRecord;
   signals: {
     id: string;
     agentId: string;

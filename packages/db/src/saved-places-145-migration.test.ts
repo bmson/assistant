@@ -9,6 +9,7 @@ import { expect, it } from 'vitest';
 import { emailIngestFixture } from '../../persistence/src/signal-test-scenarios.js';
 import { withDisposableTestDatabase } from './disposable-test-database.js';
 import { createPostgresGoogleCalendarConnectionRepository } from './google-calendar-connection-repository.js';
+import { createPostgresHouseholdHandoffRepository } from './household-handoffs.js';
 import { createPostgresHomeWeatherRepository } from './owner-context-repository.js';
 import { createPostgresSavedPlacesRepository } from './saved-places.js';
 import * as schema from './schema.js';
@@ -19,13 +20,14 @@ const journal: { entries: { idx: number; tag: string; when: number }[] } = JSON.
   await readFile(join(migrationsFolder, 'meta/_journal.json'), 'utf8'),
 );
 
-it('preserves a populated household and signal across the Home and Saved places upgrades', async () => {
-  const prefix = await mkdtemp(join(tmpdir(), 'assistant-b5-143-to-145-'));
-  const entries = journal.entries.slice(0, 146);
+it('preserves a populated household and signal across the Home, Saved places, and handoff upgrades', async () => {
+  const prefix = await mkdtemp(join(tmpdir(), 'assistant-d3-143-to-146-'));
+  const entries = journal.entries.slice(0, 147);
   expect(entries.slice(143).map((entry) => entry.tag)).toEqual([
     '0143_google_household_calendar_choices',
     '0144_home_weather',
     '0145_saved_places',
+    '0146_household_handoffs',
   ]);
   const selectThrough = (index: number) =>
     writeFile(
@@ -147,6 +149,29 @@ it('preserves a populated household and signal across the Home and Saved places 
         ).toBe(true);
         await migrate(db, { migrationsFolder: prefix });
         expect(await ledger()).toEqual(afterPlaces);
+        expect(await places.list(owner)).toEqual({ generation: null, places: [place] });
+        expect(await weather.getHomeWeather(owner)).toEqual(home);
+        await expectPriorRecords();
+
+        const [beforeHandoff] =
+          await client`SELECT to_regclass('public.household_handoffs') AS table`;
+        expect(beforeHandoff?.table).toBeNull();
+        await selectThrough(146);
+        await migrate(db, { migrationsFolder: prefix });
+        const handoffLedgerEntry = await ledgerEntry(146);
+        expect(handoffLedgerEntry.hash).toBe(
+          '676b1049e2e167c5213fa062018282f261922be2b4d6261fdd55d40a4d831eb8',
+        );
+        const afterHandoff = [...afterPlaces, handoffLedgerEntry];
+        expect(await ledger()).toEqual(afterHandoff);
+        const handoffs = createPostgresHouseholdHandoffRepository(db);
+        expect(await handoffs.read(owner)).toBeNull();
+        const record = { agentId: owner, revision: randomUUID(), plan: null };
+        expect(await handoffs.change(null, record)).toBe(true);
+        await migrate(db, { migrationsFolder: prefix });
+        expect(await ledger()).toEqual(afterHandoff);
+        expect(await handoffs.read(owner)).toEqual(record);
+        expect(await handoffs.change(null, { ...record, revision: randomUUID() })).toBe(false);
         expect(await places.list(owner)).toEqual({ generation: null, places: [place] });
         expect(await weather.getHomeWeather(owner)).toEqual(home);
         await expectPriorRecords();

@@ -53,7 +53,8 @@
     "./phone-call-owner-grants": "./src/phone-call-owner-grants.ts",
     "./approval-policy-presentation": "./src/approval-policy-presentation.ts",
     "./google-calendar-connection": "./src/google-calendar-connection.ts",
-    "./google-household-calendar": "./src/google-household-calendar.ts"
+    "./google-household-calendar": "./src/google-household-calendar.ts",
+    "./household-handoff": "./src/household-handoff.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"

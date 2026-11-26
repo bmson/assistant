@@ -93,6 +93,7 @@ export * from './graph-date-backfill.js';
 export * from './graph-recall.js';
 export * from './history-recall.js';
 export * from './home-weather.js';
+export * from './household-handoff.js';
 export * from './import-jobs.js';
 export * from './import-overview.js';
 export * from './knowledge-assertions.js';

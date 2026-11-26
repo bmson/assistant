@@ -48,6 +48,7 @@ export {
   postgresActiveGraphWhere,
 } from './graph-recall-repository.js';
 export { createPostgresHistoryRecallRepository } from './history-recall-repository.js';
+export { createPostgresHouseholdHandoffRepository } from './household-handoffs.js';
 export { assertPostgresInstallationOwner } from './installation-owner.js';
 export { createPostgresKnowledgeGraphSyncRepository } from './knowledge-graph-sync-repository.js';
 export { createPostgresLocationPingRepository } from './location-ping-repository.js';

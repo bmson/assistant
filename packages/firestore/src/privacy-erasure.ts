@@ -1450,6 +1450,7 @@ export class FirestorePrivacyErasureRepository implements PrivacyErasureReposito
     await this.deleteOwned(agentId, job.generation, 'watchFireEffects');
     await this.deleteOwned(agentId, job.generation, 'watchFires');
     await this.deleteOwned(agentId, job.generation, 'signals');
+    await this.deleteOwned(agentId, job.generation, 'householdHandoffs');
     await this.deleteOwned(agentId, job.generation, 'savedPlaces');
     await this.eraseSecurityEvidence(agentId, job.generation);
     await this.eraseEmailAttachmentCustodies(agentId, job.generation);
