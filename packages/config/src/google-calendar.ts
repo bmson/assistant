@@ -6,11 +6,18 @@ export type GoogleCalendarOAuthConfig = {
   callbackUrl: string;
 };
 export function googleHouseholdExtendedPurposesReady(
-  config: Pick<Config, 'GOOGLE_HOUSEHOLD_EXTENDED_PURPOSES_ENABLED'>,
+  config: Pick<
+    Config,
+    | 'GOOGLE_HOUSEHOLD_EXTENDED_PURPOSES_ENABLED'
+    | 'GOOGLE_HOUSEHOLD_EXTENDED_PURPOSES_COMPATIBILITY_CONFIRMED'
+  >,
   mode = process.env.NODE_ENV,
 ): boolean {
   return (
-    config.GOOGLE_HOUSEHOLD_EXTENDED_PURPOSES_ENABLED && (mode === 'development' || mode === 'test')
+    config.GOOGLE_HOUSEHOLD_EXTENDED_PURPOSES_ENABLED &&
+    (mode === 'development' ||
+      mode === 'test' ||
+      (mode === 'production' && config.GOOGLE_HOUSEHOLD_EXTENDED_PURPOSES_COMPATIBILITY_CONFIRMED))
   );
 }
 

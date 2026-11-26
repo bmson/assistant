@@ -174,6 +174,7 @@ const ConfigSchema = z.object({
   GOOGLE_CALENDAR_OAUTH_CALLBACK_URL: z.string().default(''),
   /** Local qualification for the extended Household Calendar purposes. */
   GOOGLE_HOUSEHOLD_EXTENDED_PURPOSES_ENABLED: booleanString,
+  GOOGLE_HOUSEHOLD_EXTENDED_PURPOSES_COMPATIBILITY_CONFIRMED: booleanString,
   /** projects/<id>/topics/<name> — enables Gmail push; local dev polls instead. */
   GMAIL_PUBSUB_TOPIC: z.string().default(''),
   GCP_PROJECT: z.string().default(''),

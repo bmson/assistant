@@ -3158,7 +3158,12 @@ it.skipIf(!enabled)(
       });
       const household = {
         revision: randomUUID(),
-        choices: [{ id: 'family@example.test', purpose: 'household' }],
+        choices: [
+          { id: 'family@example.test', purpose: 'household' },
+          { id: 'school@example.test', purpose: 'school' },
+          { id: 'activity@example.test', purpose: 'activity' },
+          { id: 'holidays@example.test', purpose: 'holidays' },
+        ],
       };
       addRecord(source, {
         table: 'google_household_calendar_choices',
