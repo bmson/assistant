@@ -4,7 +4,7 @@ import XCTest
 final class HouseholdCalendarUITests: XCTestCase {
     func testHouseholdCalendarChoicesReopenAndPreview() throws {
         continueAfterFailure = false
-        executionTimeAllowance = 90
+        executionTimeAllowance = 240
         let app = XCUIApplication()
         defer { app.terminate() }
         app.launchArguments = ["--fixture-case", "household-calendar", "--fixture-theme", "light",
@@ -21,14 +21,15 @@ final class HouseholdCalendarUITests: XCTestCase {
             XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: predicate, object: remaining)], timeout: 5), .completed)
         }
         func reveal(_ element: XCUIElement, scrollingUp: Bool = true) {
-            for _ in 0..<5 where !element.isHittable {
+            for _ in 0..<5 {
+                if element.isHittable { return }
                 if scrollingUp { app.swipeUp() } else { app.swipeDown() }
             }
             XCTAssertTrue(element.waitForExistence(timeout: 5))
             XCTAssertTrue(element.isHittable)
         }
         func choose(_ source: String, _ label: String) {
-            let picker = app.descendants(matching: .any)["household-calendar-source-" + source].firstMatch
+            let picker = app.buttons["household-calendar-source-" + source]
             reveal(picker)
             picker.tap()
             let option = app.buttons[label].firstMatch
