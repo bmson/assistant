@@ -260,6 +260,48 @@ describe('source-only lifecycle model', () => {
       releaseIdentity(s.context, 'P').revision,
     );
   });
+  it('plans a new paused successor from the anchored original after a verified reclosure', () => {
+    const initial = fixture();
+    const { context, snapshot } = clone(initial);
+    const proof = snapshot.revisions[context.canonical]!;
+    const originalTemplate = clone(snapshot.template);
+    const predecessorRevision = 'assistant-web-p-11-1-abcdef12';
+    context.currentBinding = {
+      proof,
+      serviceSha256: digest('fresh service'),
+      revisionSha256: digest('original immutable revision'),
+      reviewedEvidenceSha256: digest('predecessor review'),
+      preclosed: true,
+      reclosed: {
+        predecessorRevision,
+        predecessorRevisionSha256: digest('failed immutable revision'),
+        originalTemplate,
+      },
+    };
+    snapshot.admissionDisabled = true;
+    snapshot.latestCreated = snapshot.latestReady = predecessorRevision;
+    snapshot.template = { ...snapshot.template, revision: predecessorRevision, timeout: '30s' };
+    snapshot.desired = snapshot.desired.map((entry) => ({ ...entry, tag: '' }));
+    snapshot.observed = clone(snapshot.desired);
+    snapshot.tagUris = {};
+    snapshot.urls = [snapshot.rootUriSha256];
+
+    const captured = captureLifecycle(context, snapshot);
+    expect(captured.snapshot.template.timeout).toBe('30s');
+    expect(captured.snapshot.latestReady).toBe(predecessorRevision);
+    const planned = planLifecycleAction(captured, 'createP');
+    expect(planned.request.body.template).toEqual(creationTemplate(originalTemplate, context, 'P'));
+    expect((planned.request.body.template as Record<string, unknown>).timeout).toBe('300s');
+    expect(planned.expectedTraffic.every((row) => row.revision !== predecessorRevision)).toBe(true);
+
+    const unproved = clone(context);
+    unproved.currentBinding!.reclosed!.originalTemplate.timeout = '90s';
+    expect(() => captureLifecycle(unproved, snapshot)).toThrow();
+    const open = clone(snapshot);
+    delete open.admissionDisabled;
+    expect(() => captureLifecycle(context, open)).toThrow();
+  });
+
   it('preserves every unrelated template field and private secret reference', () => {
     const s = fixture(),
       t = creationTemplate(s.snapshot.template, s.context, 'P');

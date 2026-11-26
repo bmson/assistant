@@ -56,7 +56,11 @@ export async function runEstimatedCostReleasePreflight(mode?: string) {
   const read = estimatedCostMetadataRead(token, Date.now() + 180000);
   const resolveImage = createImageResolutionReader(token);
   for (const role of ['web', 'agent'] as const) await resolveImage(current.services[role].image);
-  const metadataSha256 = await verifyEstimatedCostReleaseMetadata(profile, current, read);
+  const { verifyHostedReclosedBaseline } = await import('./owner-release-reclosed-hosted.js');
+  const reclosed = await verifyHostedReclosedBaseline(current);
+  if (reclosed && profile.mode !== 'compatible-off')
+    throw new Error('Compatible OFF profile required');
+  const metadataSha256 = await verifyEstimatedCostReleaseMetadata(profile, current, read, reclosed);
   if (profile.mode === 'compatible-off') {
     if (env.ESTIMATED_COST_DRAIN_PACKET_JSON) throw new Error('Unexpected activation evidence');
     recordVerifiedEstimatedCostReleaseProfile(profile, metadataSha256, undefined);

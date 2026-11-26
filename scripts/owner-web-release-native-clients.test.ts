@@ -30,6 +30,7 @@ import {
 } from './owner-web-release-lifecycle-model.js';
 import {
   initializePairedWebLifecycle,
+  reclosedWebCreationBinding,
   runPairedWebLifecyclePhase,
 } from './owner-web-release-native-controller.js';
 import { projectNativeWebSnapshot } from './owner-web-release-native-proof.js';
@@ -273,6 +274,60 @@ function fixture() {
     pin,
   };
 }
+function reclosedFixture() {
+  const f = fixture();
+  const original = f.native[f.context.canonical]!;
+  const proof = f.state().snapshot.revisions[f.context.canonical]!;
+  const predecessorRevision = 'assistant-web-p-44632388669-1-bc74fbf7';
+  const dormantTemplate = {
+    ...f.service.template,
+    revision: predecessorRevision,
+    timeout: '31s',
+  };
+  f.native[predecessorRevision] = {
+    ...copy(original),
+    timeout: '31s',
+    name: `${WEB_SERVICE}/revisions/${predecessorRevision}`,
+    uid: 'unroutable-predecessor',
+  };
+  f.service.template = dormantTemplate;
+  f.service.latestReadyRevision = f.service.latestCreatedRevision = predecessorRevision;
+  f.service.scaling = { scalingMode: 'MANUAL', manualInstanceCount: 0 };
+  f.service.traffic = [
+    {
+      type: 'TRAFFIC_TARGET_ALLOCATION_TYPE_REVISION',
+      revision: f.context.canonical,
+      percent: 100,
+    },
+  ];
+  f.service.trafficStatuses = copy(f.service.traffic);
+  f.service.urls = [f.service.uri];
+  const binding = {
+    service: WEB_SERVICE,
+    uid: f.service.uid,
+    revision: f.context.canonical,
+    image: proof.image,
+    proof,
+    automaticScaling: { scalingMode: 'AUTOMATIC' },
+    serviceSha256: bootstrapDigest(f.service),
+    revisionSha256: bootstrapDigest(original),
+  } as Parameters<typeof reclosedWebCreationBinding>[0];
+  f.context.currentBinding = {
+    proof,
+    serviceSha256: binding.serviceSha256,
+    revisionSha256: binding.revisionSha256,
+    reviewedEvidenceSha256: bootstrapDigest('qualified held pair'),
+    preclosed: true,
+    reclosed: reclosedWebCreationBinding(
+      binding,
+      original,
+      predecessorRevision,
+      bootstrapDigest(f.native[predecessorRevision]),
+    ),
+  };
+  return { f, predecessorRevision };
+}
+
 afterEach(() => vi.useRealTimers());
 describe('unwired fixed native fixture clients', () => {
   it('refuses an expired spending profile before forward I/O while allowing canonical recovery', async () => {
@@ -349,6 +404,52 @@ describe('unwired fixed native fixture clients', () => {
     expect(hold).toHaveBeenCalledOnce();
     expect(after.phase).toBe('createdP');
   });
+
+  it('reads the dormant predecessor before one CAS and stages from the proved original', async () => {
+    const { f, predecessorRevision } = reclosedFixture();
+    const initial = initializePairedWebLifecycle(f.context, f.service, f.native, {
+      initialize: (state) => state.receipt,
+      readCurrent: () => {
+        throw new Error('No initialized fixture receipt');
+      },
+      recordIntent: () => {},
+      recordCheckpoint: () => {},
+    });
+    expect(initial.snapshot.latestReady).toBe(predecessorRevision);
+    expect(initial.snapshot.template.timeout).toBe('31s');
+    expect(Object.keys(initial.snapshot.revisions)).toEqual([f.context.canonical]);
+
+    const result = await nativeWebCreationFixtureClient(f.deps).execute(initial, 'createP', stamp);
+    expect(result.phase).toBe('createdP');
+    const patch = f.requests.findIndex((request) => request.method === 'PATCH');
+    expect(
+      f.requests
+        .slice(0, patch)
+        .some((request) => request.url.endsWith(`/revisions/${predecessorRevision}`)),
+    ).toBe(true);
+    const body = JSON.parse(f.requests[patch]!.body!);
+    expect(body.etag).toBe('etag-1');
+    expect(body.template.timeout).toBe('300s');
+    expect(body.template.revision).toBe(releaseIdentity(initial.context, 'P').revision);
+    expect(
+      body.traffic.every((row: { revision: string }) => row.revision !== predecessorRevision),
+    ).toBe(true);
+    expect(f.writes()).toBe(1);
+  });
+
+  it.each(['predecessor revision', 'service template'] as const)(
+    'refuses a reclosed snapshot with a changed %s before a write',
+    async (field) => {
+      const { f, predecessorRevision } = reclosedFixture();
+      const initial = f.state();
+      if (field === 'predecessor revision') f.native[predecessorRevision]!.uid = 'substituted';
+      else f.service.template.timeout = '60s';
+      await expect(
+        nativeWebCreationFixtureClient(f.deps).execute(initial, 'createP', stamp),
+      ).rejects.toBeInstanceOf(NativeReleaseHold);
+      expect(f.writes()).toBe(0);
+    },
+  );
 
   it('refuses to initialize from unsupported starting aliases', () => {
     const f = fixture(),
@@ -1477,6 +1578,122 @@ describe('reviewed zero-tag disabled capture adapter', () => {
     expect(state.phase).toBe('attachedP');
     expect(f.writes()).toBe(writes);
   });
+  it('keeps exact status-only aliases through paused promotion, automatic scaling, and resume', async () => {
+    const f = reviewed();
+    const serviceEndpoints = ['https://assistant-web-83709630368.us-west1.run.app', f.service.uri];
+    f.service.urls = [...serviceEndpoints];
+    f.setInitialReply((op) => {
+      f.service.urls = [...serviceEndpoints];
+      f.service.trafficStatuses.reverse();
+      return reply(op);
+    });
+    const creation = nativeWebCreationFixtureClient(f.deps);
+    const traffic = nativeWebTrafficFixtureClient(f.deps);
+    const p = releaseIdentity(f.context, 'P');
+    const r = releaseIdentity(f.context, 'R');
+
+    let state = await creation.execute(f.state(), 'createP', stamp);
+    expect(state.snapshot.tagUris[p.tag]).toBeDefined();
+    expect(f.service.urls).toEqual(serviceEndpoints);
+    expect(f.writes()).toBe(1);
+    f.service.traffic.reverse();
+    f.service.trafficStatuses.reverse();
+    f.service.urls.reverse();
+    state = await traffic.execute(state, 'attachP', stamp);
+    expect(state.phase).toBe('attachedP');
+    expect(f.writes()).toBe(1);
+
+    state = await nativeWebTrafficFixtureClient(f.deps).execute(state, 'promoteP', stamp);
+    expect(state.snapshot.desired).toMatchObject([{ ...p, percent: 100 }]);
+    expect(state.snapshot.admissionDisabled).toBe(true);
+    expect(f.writes()).toBe(2);
+    // The scaling-only observation may now list the tag in both native fields.
+    f.service.scaling = { scalingMode: 'AUTOMATIC' };
+    f.service.urls.push(f.service.trafficStatuses[0]!.uri);
+    f.service.etag = 'confirmed-automatic-scaling';
+    f.service.generation = String(BigInt(f.service.generation) + 1n);
+    f.service.observedGeneration = f.service.generation;
+    const automatic = projectNativeWebSnapshot(f.service, f.native, f.context);
+    state = scalingCheckpoint(state, automatic, automatic.stableConfigSha256);
+    expect(state.snapshot.admissionDisabled).toBeUndefined();
+    state = acceptPreclosedBootstrap(state, automatic);
+    state = markAgentAdmissionPossible(state, state.snapshot);
+    state = bindAgentSuccessorReceipt(state, 'f'.repeat(64));
+    state = acceptAgentReady(state, {
+      beforeReceipt: state.receipt,
+      agentProofSha256: 'f'.repeat(64),
+      stableEtag: state.snapshot.etag,
+      stableGeneration: state.snapshot.generation,
+    });
+
+    state = await nativeWebCreationFixtureClient(f.deps).execute(state, 'createR', stamp);
+    expect(state.snapshot.tagUris[r.tag]).toBeDefined();
+    expect(state.snapshot.revisions[r.revision]?.paused).toBe(false);
+    state = await nativeWebTrafficFixtureClient(f.deps).execute(state, 'attachR', stamp);
+    expect(state.phase).toBe('attachedR');
+    expect(f.writes()).toBe(3);
+    state = await nativeWebTrafficFixtureClient(f.deps).execute(state, 'promoteR', stamp);
+    state = await nativeWebTrafficFixtureClient(f.deps).execute(state, 'closeP', stamp);
+    expect(state.phase).toBe('complete');
+    expect(state.snapshot.tagUris).toEqual({ [r.tag]: expect.any(String) });
+    expect(state.retiredTags).toContain(p.tag);
+    expect(f.writes()).toBe(5);
+  });
+
+  it.each([
+    'duplicate endpoint',
+    'duplicate tag status',
+    'unknown endpoint',
+    'incorrect status URI',
+    'missing status URI',
+    'missing root',
+    'tombstoned alias',
+    'wrong revision',
+  ])('holds a provider effect with %s after createP', async (defect) => {
+    const f = reviewed();
+    const p = releaseIdentity(f.context, 'P');
+    f.setInitialReply((op) => {
+      const observed = f.service.trafficStatuses.find((row: { tag: string }) => row.tag === p.tag)!;
+      f.service.urls = [f.service.uri];
+      switch (defect) {
+        case 'duplicate endpoint':
+          f.service.urls.push(f.service.uri);
+          break;
+        case 'duplicate tag status':
+          f.service.trafficStatuses.push(copy(observed));
+          break;
+        case 'unknown endpoint':
+          f.service.urls.push('https://assistant-web-unknown-uw.a.run.app');
+          break;
+        case 'incorrect status URI':
+          observed.uri = f.service.uri;
+          break;
+        case 'missing status URI':
+          delete observed.uri;
+          break;
+        case 'missing root':
+          f.service.urls = ['https://assistant-web-83709630368.us-west1.run.app'];
+          break;
+        case 'tombstoned alias':
+          f.service.urls.push(
+            `https://${f.context.retiredTags[0]}---assistant-web-3gimfiaifa-uw.a.run.app`,
+          );
+          break;
+        case 'wrong revision':
+          observed.revision = f.context.canonical;
+          f.service.traffic.find((row: { tag: string }) => row.tag === p.tag)!.revision =
+            f.context.canonical;
+          break;
+      }
+      return reply(op);
+    });
+
+    await expect(
+      nativeWebCreationFixtureClient(f.deps).execute(f.state(), 'createP', stamp),
+    ).rejects.toMatchObject({ mutationState: 'may_have_been_attempted' });
+    expect(f.writes()).toBe(1);
+  });
+
   it('reconciles unknown combined creation by observing the exact healthy named revision, without another PATCH or invented LRO', async () => {
     const f = reviewed();
     f.setInitialReply(() => {

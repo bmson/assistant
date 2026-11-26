@@ -105,6 +105,14 @@ export type BootstrapReceipt = {
   recoveryReceiptSha256: string;
   services: { web: CurrentBinding; agent: CurrentBinding };
 };
+/** Verified evidence for a failed release whose paused template is still latest. */
+export type ReclosedRole = {
+  predecessorRevision: string;
+  predecessorRevisionSha256: string;
+  originalTemplate: Obj;
+  originalRevision: Obj;
+};
+export type ReclosedPair = Record<'agent' | 'web', ReclosedRole>;
 export function reviewedBootstrap(raw: unknown, digest: string, source: string): BootstrapReceipt {
   const r = object(raw);
   requireProof(
@@ -186,6 +194,7 @@ export function verifyCurrentService(
   binding: CurrentBinding,
   service: unknown,
   mustBeDisabled = true,
+  reclosed?: ReclosedRole,
 ) {
   const s = object(service);
   requireProof(
@@ -209,11 +218,16 @@ export function verifyCurrentService(
     terminal.state === 'CONDITION_SUCCEEDED' ||
       (mustBeDisabled && retiredCurrentCondition(terminal)),
   );
+  const latest = reclosed?.predecessorRevision ?? binding.revision;
+  if (reclosed)
+    requireProof(
+      mustBeDisabled &&
+        bootstrapDigest(reclosed.originalRevision) === binding.revisionSha256 &&
+        [latest, `${binding.service}/revisions/${latest}`].includes(String(s.latestReadyRevision)),
+    );
   requireProof(
     s.reconciling !== true &&
-      [binding.revision, `${binding.service}/revisions/${binding.revision}`].includes(
-        String(s.latestCreatedRevision),
-      ),
+      [latest, `${binding.service}/revisions/${latest}`].includes(String(s.latestCreatedRevision)),
   );
 }
 export function retiredCurrentCondition(c: Obj) {
@@ -236,8 +250,9 @@ export function verifyCurrentSnapshot(
   service: unknown,
   revision: unknown,
   mustBeDisabled = true,
+  reclosed?: ReclosedRole,
 ) {
-  verifyCurrentService(binding, service, mustBeDisabled);
+  verifyCurrentService(binding, service, mustBeDisabled, reclosed);
   const r = object(revision);
   requireProof(
     bootstrapDigest(r) === binding.revisionSha256 &&

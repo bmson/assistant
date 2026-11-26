@@ -1,6 +1,9 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
-import { observeArchivedRuntimePair } from './owner-archived-runtime-native.js';
+import {
+  observeArchivedRuntimePair,
+  RECLOSED_ARCHIVE_RUN_ID,
+} from './owner-archived-runtime-native.js';
 import { bootstrapDigest, RUN_ROOT, SERVICE_ROOT } from './owner-release-current-snapshot.js';
 import { verifyRevisionImage } from './owner-release-image-resolution.js';
 
@@ -94,7 +97,108 @@ function fixture() {
   };
 }
 
+function reclosedFixture() {
+  const f = fixture();
+  const binding = f.binding();
+  const names = { agent: '', web: '' };
+  for (const role of ['agent', 'web'] as const) {
+    const { service, native } = f[role];
+    const paused = `assistant-${role}-p-${RECLOSED_ARCHIVE_RUN_ID}-1-bc74fbf7`;
+    const name = `${service.name}/revisions/${paused}`;
+    service.latestCreatedRevision = name;
+    service.latestReadyRevision = name;
+    const [container] = service.template.containers;
+    if (!container) throw new Error('Expected fixture container');
+    service.template = {
+      ...service.template,
+      revision: paused,
+      containers: [{ ...container, image: 'synthetic-reviewed-api3' }],
+    };
+    f.urls.set(RUN_ROOT + name, { ...native, name, uid: 'previous-paused-uid' });
+    names[role] = paused;
+  }
+  const verify = vi.fn(async () => {});
+  return {
+    ...f,
+    optIn: { runId: RECLOSED_ARCHIVE_RUN_ID, verify },
+    binding,
+    names,
+    verify,
+  };
+}
+
 describe('explicit archived original native pair observation', () => {
+  it('binds the original routes plus both fixed paused predecessor revisions to fresh Automatic service evidence', async () => {
+    const f = reclosedFixture();
+    await expect(observeArchivedRuntimePair(f.binding, f.roles, f.read)).rejects.toThrow(failure);
+    f.read.mockClear();
+    await expect(
+      observeArchivedRuntimePair(f.binding, f.roles, f.read, f.optIn),
+    ).resolves.toMatchObject({
+      status: 'observed_archived_original_pair',
+      reclosedPredecessorRunId: RECLOSED_ARCHIVE_RUN_ID,
+      liveServiceSha256: {
+        agent: bootstrapDigest(f.agent.service),
+        web: bootstrapDigest(f.web.service),
+      },
+      routing: 'canonical_only',
+      mutationAuthorized: false,
+    });
+    expect(f.verify).toHaveBeenCalledExactlyOnceWith({
+      agent: {
+        service: f.agent.service,
+        revisions: {
+          [f.agent.revision]: f.agent.native,
+          [f.names.agent]: expect.objectContaining({ name: f.agent.service.latestCreatedRevision }),
+        },
+      },
+      web: {
+        service: f.web.service,
+        revisions: {
+          [f.web.revision]: f.web.native,
+          [f.names.web]: expect.objectContaining({ name: f.web.service.latestCreatedRevision }),
+        },
+      },
+    });
+    expect(f.read).toHaveBeenCalledTimes(8);
+  });
+
+  it('rejects an unpinned run before reading and keeps original UIDs and routes mandatory', async () => {
+    const f = reclosedFixture();
+    await expect(
+      observeArchivedRuntimePair(f.binding, f.roles, f.read, { ...f.optIn, runId: '44632388670' }),
+    ).rejects.toThrow(failure);
+    expect(f.read).not.toHaveBeenCalled();
+    const uid = f.web.native.uid;
+    f.web.native.uid = f.agent.native.uid;
+    await expect(observeArchivedRuntimePair(f.binding, f.roles, f.read, f.optIn)).rejects.toThrow(
+      failure,
+    );
+    f.web.native.uid = uid;
+    f.web.service.trafficStatuses = f.web.service.trafficStatuses.map((row) => ({
+      ...row,
+      tag: 'candidate-44632388669-1',
+    }));
+    await expect(observeArchivedRuntimePair(f.binding, f.roles, f.read, f.optIn)).rejects.toThrow(
+      failure,
+    );
+    expect(f.verify).not.toHaveBeenCalled();
+  });
+
+  it('rejects the reclosed baseline when its pinned proof fails or fresh services drift', async () => {
+    const f = reclosedFixture();
+    f.verify.mockRejectedValueOnce(new Error('Predecessor effect unproven'));
+    await expect(observeArchivedRuntimePair(f.binding, f.roles, f.read, f.optIn)).rejects.toThrow(
+      failure,
+    );
+    f.verify.mockImplementation(async () => {
+      f.web.service.observedGeneration = f.web.service.generation = '3';
+    });
+    await expect(observeArchivedRuntimePair(f.binding, f.roles, f.read, f.optIn)).rejects.toThrow(
+      failure,
+    );
+  });
+
   it('uses six fixed GET targets, returns a minimal pair result, and leaves normal image validation untouched', async () => {
     const f = fixture();
     await expect(observeArchivedRuntimePair(f.binding(), f.roles, f.read)).resolves.toEqual({

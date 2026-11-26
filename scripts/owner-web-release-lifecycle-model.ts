@@ -74,6 +74,11 @@ export type Context = {
     revisionSha256: string;
     reviewedEvidenceSha256: string;
     preclosed: boolean;
+    reclosed?: {
+      predecessorRevision: string;
+      predecessorRevisionSha256: string;
+      originalTemplate: Obj;
+    };
   };
 };
 export type Phase =
@@ -155,6 +160,8 @@ function rows(v: Row[]) {
   assert(v.filter((r) => r.percent === 100).length === 1);
   return [...v].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
 }
+
+export { rows as normalizedTrafficRows };
 export function releaseIdentity(c: Context, role: 'P' | 'R') {
   return {
     revision: `assistant-web-${role.toLowerCase()}-${c.runId}-${c.attempt}-${c.source.slice(0, 8)}`,
@@ -243,6 +250,18 @@ function context(c: Context) {
         c.currentBinding.proof.image,
       ),
     );
+    const reclosed = c.currentBinding.reclosed;
+    if (reclosed) {
+      hash(reclosed.predecessorRevisionSha256);
+      assert(
+        c.currentBinding.preclosed &&
+          /^assistant-web-p-[1-9][0-9]{0,19}-1-[0-9a-f]{8}$/.test(reclosed.predecessorRevision) &&
+          reclosed.predecessorRevision !== c.canonical &&
+          reclosed.predecessorRevision !== releaseIdentity(c, 'P').revision &&
+          obj(reclosed.originalTemplate).revision === c.canonical &&
+          digest(reclosed.originalTemplate) === c.currentBinding.proof.templateSha256,
+      );
+    }
   }
 
   revision(c.canonical);
@@ -339,6 +358,14 @@ export function captureLifecycle(c: Context, s: Snapshot): State {
       !Object.hasOwn(s.revisions, releaseIdentity(c, 'R').revision),
   );
   assert(s.desired.every((r) => r.revision === c.canonical));
+  if (c.currentBinding?.reclosed)
+    assert(
+      s.admissionDisabled &&
+        s.latestReady === c.currentBinding.reclosed.predecessorRevision &&
+        s.desired.length === 1 &&
+        !s.desired[0]?.tag &&
+        equal(s.revisions[c.canonical], c.currentBinding.proof),
+    );
   const state = {
     context: clone(c),
     phase: 'captured' as const,
@@ -404,7 +431,9 @@ export function planLifecycleAction(s: State, mode: Mode): Plan {
     const role = mode === 'createP' ? 'P' : 'R',
       id = releaseIdentity(c, role);
     assert(!b.revisions[id.revision] && !traffic.some((t) => t.tag === id.tag));
-    template = creationTemplate(b.template, c, role);
+    const originalTemplate =
+      mode === 'createP' ? c.currentBinding?.reclosed?.originalTemplate : undefined;
+    template = creationTemplate(originalTemplate ?? b.template, c, role);
     if (c.currentBinding) traffic.push(row(id.revision, id.tag, 0));
   } else if (mode === 'attachP' || mode === 'attachR') {
     const id = mode === 'attachP' ? p : r;

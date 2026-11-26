@@ -4,7 +4,11 @@ import {
   validateEstimatedCostReleaseProfile,
 } from '../infra/gcp/estimated-cost-release-config.mjs';
 import { googleCalendarReleaseCallback } from '../infra/gcp/google-calendar-release-config.mjs';
-import { createImageResolutionReader } from './owner-release-image-resolution.js';
+import type { CurrentBinding } from './owner-release-current-snapshot.js';
+import {
+  createImageResolutionReader,
+  revisionWithRequestedImage,
+} from './owner-release-image-resolution.js';
 import { matchesNativeServiceDigest } from './owner-release-native-service-defaults.js';
 import { preloadArchivedOriginalForProtectedRelease } from './owner-restore-target-verify.js';
 /** Fixed BASIC5 paired web lifecycle controller; caller supplies protected transport and operator hold verifier. */
@@ -18,7 +22,7 @@ import {
   type Snapshot,
   type State,
 } from './owner-web-release-lifecycle-model.js';
-import { projectNativeWebSnapshot } from './owner-web-release-native-proof.js';
+import { projectNativeWebSnapshot, TEMPLATE_FIELDS } from './owner-web-release-native-proof.js';
 import type { FixtureDependencies } from './owner-web-release-native-session.js';
 import { nativeWebTrafficFixtureClient } from './owner-web-release-traffic-client.js';
 import { protectedWebTagCredential } from './owner-web-tag-cloud.js';
@@ -165,6 +169,33 @@ export function pairedWebContext(input: {
     // initial inventory; any remaining unsupported alias makes projection fail.
     retiredTags: [retired.tag],
   };
+}
+
+/** A reclosed service points at the failed paused template. Only the separately
+ * proved immutable canonical revision supplies the next creation baseline.
+ */
+export function reclosedWebCreationBinding(
+  binding: CurrentBinding,
+  rawOriginal: unknown,
+  predecessorRevision: string,
+  predecessorRevisionSha256: string,
+): NonNullable<NonNullable<Context['currentBinding']>['reclosed']> {
+  if (reconciliationDigest(rawOriginal) !== binding.revisionSha256)
+    throw new Error('Reviewed original web revision changed');
+  const original = revisionWithRequestedImage(rawOriginal, binding.image);
+  if (original.name !== `${binding.service}/revisions/${binding.revision}`)
+    throw new Error('Reviewed original web revision changed');
+  const originalTemplate = {
+    ...Object.fromEntries(
+      TEMPLATE_FIELDS.filter((key) => key !== 'revision' && original[key] !== undefined).map(
+        (key) => [key, original[key]],
+      ),
+    ),
+    revision: binding.revision,
+  };
+  if (reconciliationDigest(originalTemplate) !== binding.proof.templateSha256)
+    throw new Error('Reviewed original web creation template changed');
+  return { predecessorRevision, predecessorRevisionSha256, originalTemplate };
 }
 
 /** Initialize only from a fresh native read. Does not adopt a legacy capture receipt. */

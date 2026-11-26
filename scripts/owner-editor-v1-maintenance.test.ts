@@ -95,6 +95,47 @@ describe('protected V1 operator entrypoint and private packet envelope', () => {
     ).toThrow();
   });
 
+  it('stages only the fixed protected predecessor artifacts before either archive observer runs', () => {
+    const maintenance = readFileSync('.github/workflows/owner-editor-v1-maintenance.yml', 'utf8');
+    const deploy = readFileSync('.github/workflows/deploy.yml', 'utf8');
+    for (const [dir, id] of [
+      ['journal', '14581194317'],
+      ['manifest', '14581827749'],
+      ['handoff', '14582169166'],
+    ]) {
+      for (const workflow of [maintenance, deploy]) {
+        const step = workflow
+          .split(`name: Download fixed reclosed predecessor ${dir}`)[1]
+          ?.split('\n      - ')[0];
+        expect(step).toContain('run-id: "44632388669"');
+        expect(step).toContain(`artifact-ids: "${id}"`);
+        expect(step).toContain(`/owner-reclosed-predecessor/${dir}`);
+        expect(step).toContain("inputs.reclosed_predecessor_run_id == '44632388669'");
+        expect(step).toContain('repository: bmson/assistant');
+      }
+    }
+    expect(maintenance).toMatch(/if: inputs.mode == 'before-maintenance' && inputs.reclosed_/);
+    expect(deploy).toMatch(
+      /if: inputs.archive_maintenance_run_id != '' && inputs.archive_restore_proof != '' && inputs.reclosed_/,
+    );
+    expect(maintenance.indexOf('Download fixed reclosed predecessor handoff')).toBeLessThan(
+      maintenance.indexOf('Observe the original pair and recoverability before maintenance'),
+    );
+    expect(deploy.indexOf('Download fixed reclosed predecessor handoff')).toBeLessThan(
+      deploy.indexOf('Bind the maintained native pair and archive before any delivery mutation'),
+    );
+    for (const runId of ['44632388669', '44632388670', ' ']) {
+      expect(() =>
+        verifyOperatorSource(
+          { ...env, OWNER_RELEASE_RECLOSED_PREDECESSOR_RUN_ID: runId },
+          sha,
+          contract,
+          true,
+        ),
+      ).toThrow();
+    }
+  });
+
   it('round-trips an encrypted bounded packet without exposing target or epoch in the artifact', () => {
     const p = packet(),
       encrypted = encryptMaintenancePacket(p, keys.publicKey),

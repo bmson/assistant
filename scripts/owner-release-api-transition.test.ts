@@ -148,6 +148,35 @@ describe('protected drained Firestore API transition', () => {
     expect(pair.check).not.toThrow();
   });
 
+  it('reads the serving API 1 contract through a verified dormant template only on the exact closed pair', () => {
+    const { receipt, native } = scenario();
+    function stagePredecessor(role: 'agent' | 'web') {
+      const { binding, service, revision } = native[role];
+      const originalTemplate = structuredClone(service.template);
+      const predecessorRevision = `assistant-${role}-p-234-1-bbbbbbbb`;
+      service.template.revision = predecessorRevision;
+      const api = service.template.containers[0]?.env.find(
+        (e) => e.name === 'ASSISTANT_RELEASE_API_CONTRACT',
+      );
+      if (!api) throw new Error('Missing fixture API contract');
+      api.value = '3';
+      service.latestCreatedRevision = predecessorRevision;
+      Object.assign(service, { latestReadyRevision: predecessorRevision });
+      binding.serviceSha256 = bootstrapDigest(service);
+      return {
+        predecessorRevision,
+        predecessorRevisionSha256: 'e'.repeat(64),
+        originalTemplate,
+        originalRevision: revision,
+      };
+    }
+    const reclosed = { agent: stagePredecessor('agent'), web: stagePredecessor('web') };
+    expect(() => verifyDrainedApiTransition(receipt, native, scope)).toThrow();
+    expect(() => verifyDrainedApiTransition(receipt, native, scope, reclosed)).not.toThrow();
+    for (const row of native.agent.service.traffic) row.tag = 'candidate';
+    expect(() => verifyDrainedApiTransition(receipt, native, scope, reclosed)).toThrow();
+  });
+
   it.each([
     ['agent', 'ASSISTANT_RELEASE_API_CONTRACT', '3'],
     ['agent', 'ASSISTANT_RELEASE_WEB_API_MAX', '3'],
