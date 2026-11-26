@@ -1,26 +1,30 @@
 #!/usr/bin/env python3
-"""Bounded native control qualification after the ordinary iOS suite succeeds.
+"""Bounded synthetic iOS fixture checks after the ordinary iOS suite succeeds.
 
 The GitHub-hosted job owns the runner; this phase owns only its fixture bundles
 and subprocess groups. It never creates, boots, shuts down or deletes a device.
 """
 import sys
 
-if len(sys.argv) != 2 or sys.argv[1] not in {'run', 'cleanup'}:
-    raise SystemExit('Expected run or cleanup')
+if len(sys.argv) != 2 or sys.argv[1] not in {'run', 'cleanup', 'run-noticing', 'cleanup-noticing'}:
+    raise SystemExit('Expected run, cleanup, run-noticing or cleanup-noticing')
 
-if sys.argv[1] == 'run':
+noticing = sys.argv[1].endswith('-noticing')
+evidence_name = 'noticing-smoke' if noticing else 'native-controls'
+
+if sys.argv[1] in {'run', 'run-noticing'}:
     import os, sys, json, re, time, signal, selectors, subprocess, hashlib, plistlib
     from pathlib import Path
-    root = Path(os.environ['RUNNER_TEMP']) / 'native-controls-evidence'
+    root = Path(os.environ['RUNNER_TEMP']) / (evidence_name + '-evidence')
     root.mkdir(mode=0o700, exist_ok=False)
-    build = Path(os.environ['RUNNER_TEMP']) / 'Assistant-build'
+    build = Path(os.environ['RUNNER_TEMP']) / ('Assistant-noticing-build' if noticing else 'Assistant-build')
     env = {k:v for k,v in os.environ.items() if k in {'HOME','USER','LOGNAME','SHELL','TMPDIR','LANG','LC_ALL'}}
     env['PATH'] = '/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin'
     log_bytes = 0
-    elapsed = time.time() - float((Path(os.environ['RUNNER_TEMP'])/'native-controls-start').read_text())
-    if not 0 <= elapsed < 2100: raise RuntimeError('Job budget unavailable')
-    main_deadline = time.monotonic() + 2100 - elapsed
+    budget = 600 if noticing else 2100
+    elapsed = time.time() - float((Path(os.environ['RUNNER_TEMP'])/(evidence_name+'-start')).read_text())
+    if not 0 <= elapsed < budget: raise RuntimeError('Job budget unavailable')
+    main_deadline = time.monotonic() + budget - elapsed
     def save(name, value):
         (root / name).write_text(json.dumps(value, indent=2) + '\n')
     def observe_group(pid, timeout_seconds):
@@ -140,22 +144,23 @@ if sys.argv[1] == 'run':
             raise RuntimeError(name+' failed: '+str(record))
         return (root/(name+'.log')).read_text(errors='replace')
     try:
-        if os.environ['GITHUB_RUN_ATTEMPT'] != '1': raise RuntimeError('No rerun authority')
+        if not noticing and os.environ['GITHUB_RUN_ATTEMPT'] != '1': raise RuntimeError('No rerun authority')
         head = run('source-head', ['git','rev-parse','HEAD'], 10).strip()
         if head != os.environ['EXPECTED_HEAD']: raise RuntimeError('Checkout pin mismatch')
         paths = sorted(set(Path('apps/ios').rglob('*.swift')) | {Path('apps/ios/Assistant.xcodeproj/project.pbxproj'), Path('infra/ios-native-controls.py'), Path('infra/ios-detect-changes.sh'), Path('infra/ios-detect-changes.test.sh'), Path('.github/workflows/ios.yml'), Path('apps/ios/Assistant.xcodeproj/xcshareddata/xcschemes/AssistantUIFixtures.xcscheme')})
         pins = {str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
-        save('source.json', {'head':head,'pullRequestHead':os.environ['PR_HEAD'],'pins':pins,'qualificationVersion':3,'scope':'synthetic capability and 20-case accessibility matrix only'})
+        scope = 'synthetic Noticing status smoke only' if noticing else 'synthetic capability and 20-case accessibility matrix only'
+        save('source.json', {'head':head,'pullRequestHead':os.environ['PR_HEAD'],'pins':pins,'qualificationVersion':3,'scope':scope})
         if os.environ.get('RUNNER_ENVIRONMENT') != 'github-hosted': raise RuntimeError('Fixture ownership requires the disposable hosted job')
         udid = os.environ['DESTINATION_UDID']
         if not re.fullmatch(r'[A-Fa-f0-9]{8}(?:-[A-Fa-f0-9]{4}){3}-[A-Fa-f0-9]{12}',udid): raise RuntimeError('Invalid ordinary CI destination')
         save('lease.json', {'mode':'hosted-job-fixture','udid':udid,'createdByRun':os.environ['GITHUB_RUN_ID'],
-            'ownership':'Fixture targets are built/launched only by this phase on the disposable hosted job; ordinary app uses distinct bundle IDs'})
+            'ownership':'This phase owns fixture targets until its cleanup completes on the disposable hosted job; ordinary app uses distinct bundle IDs'})
         run('xcode-version', ['xcodebuild','-version'], 10)
         # The preceding ordinary app build/tests already qualified this destination.
         # Do not cold-boot, create, delete or inventory simulators here.
-        if main_deadline-time.monotonic()<1800: raise RuntimeError('Insufficient admitted build/test/cleanup reserve')
-        run('build', ['xcodebuild','-project','apps/ios/Assistant.xcodeproj','-scheme','AssistantUIFixtures','-configuration','Debug','-destination','id='+udid,'-derivedDataPath',str(build),'CODE_SIGNING_ALLOWED=NO','CODE_SIGNING_REQUIRED=NO','CODE_SIGN_IDENTITY=','build-for-testing'], 480)
+        if main_deadline-time.monotonic()<(540 if noticing else 1800): raise RuntimeError('Insufficient admitted build/test/cleanup reserve')
+        run('build', ['xcodebuild','-project','apps/ios/Assistant.xcodeproj','-scheme','AssistantUIFixtures','-configuration','Debug','-destination','id='+udid,'-derivedDataPath',str(build),'CODE_SIGNING_ALLOWED=NO','CODE_SIGNING_REQUIRED=NO','CODE_SIGN_IDENTITY=','build-for-testing'], 405 if noticing else 480)
         products = build / 'Build/Products'
         runs = list(products.glob('AssistantUIFixtures_*.xctestrun'))
         if len(runs) != 1: raise RuntimeError('Expected exactly one built xctestrun')
@@ -176,11 +181,16 @@ if sys.argv[1] == 'run':
             binaries[bundle] = {str(p.relative_to(folder)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(folder.rglob('*')) if p.is_file() and not p.is_symlink()}
         save('binary-pins.json', {'xctestrunSHA':hashlib.sha256(runs[0].read_bytes()).hexdigest(),'bundles':binaries})
         if any(hashlib.sha256(Path(p).read_bytes()).hexdigest()!=h for p,h in pins.items()): raise RuntimeError('Source drift')
-        result = root / 'capability.xcresult'
-        output = run('test', ['xcodebuild','test-without-building','-xctestrun',str(runs[0]),'-destination','id='+udid,'-destination-timeout','30','-collect-test-diagnostics','never','-parallel-testing-enabled','NO','-maximum-concurrent-test-simulator-destinations','1','-test-timeouts-enabled','YES','-default-test-execution-time-allowance','900','-maximum-test-execution-time-allowance','900','-only-testing:AssistantUITests/MobileControlsUITests','-resultBundlePath',str(result)], 1020)
+        methods = ('testNoticingShowsOverallHealthFromTheServer',) if noticing else (
+            'testNativeControlsCapability', 'testAccessibleControlsMatrix',
+        )
+        named_tests = ['AssistantUITests/MobileControlsUITests/'+method for method in methods]
+        result = root / ('Noticing.xcresult' if noticing else 'capability.xcresult')
+        allowance = '120' if noticing else '900'
+        output = run('test', ['xcodebuild','test-without-building','-xctestrun',str(runs[0]),'-destination','id='+udid,'-destination-timeout','30','-collect-test-diagnostics','never','-parallel-testing-enabled','NO','-maximum-concurrent-test-simulator-destinations','1','-test-timeouts-enabled','YES','-default-test-execution-time-allowance',allowance,'-maximum-test-execution-time-allowance',allowance,*['-only-testing:'+name for name in named_tests],'-resultBundlePath',str(result)], 150 if noticing else 1020)
         summary = json.loads(run('summary', ['xcrun','xcresulttool','get','test-results','summary','--path',str(result)], 10))
         tests = json.loads(run('named-tests', ['xcrun','xcresulttool','get','test-results','tests','--path',str(result)], 10))
-        named = re.search(r'MobileControlsUITests[^\n]{0,160}testNativeControlsCapability[^\n]{0,80}\bpassed\b', output, re.I)
+        named = re.search(r'MobileControlsUITests[^\n]{0,160}'+methods[0]+r'[^\n]{0,80}\bpassed\b', output, re.I)
         cases = []
         def visit(node, bundle=False):
             bundle = bundle or (node.get('nodeType')=='UI test bundle' and node.get('name','').removesuffix('.xctest')=='AssistantUITests')
@@ -188,17 +198,19 @@ if sys.argv[1] == 'run':
             for child in node.get('children',[]): visit(child,bundle)
         for node in tests.get('testNodes',[]): visit(node)
         identities = {node.get('nodeIdentifier','').removesuffix('()').removeprefix('AssistantUITests/') for node, _ in cases}
-        structured = len(cases)==2 and identities == {'MobileControlsUITests/testNativeControlsCapability','MobileControlsUITests/testAccessibleControlsMatrix'} and all(bundle and node.get('result')=='Passed' for node,bundle in cases)
-        if not structured or not named or [summary.get(k) for k in ['totalTestCount','passedTests','failedTests','skippedTests']] != [2,2,0,0]: raise RuntimeError('Missing both exact named PASS/zero-skip evidence')
-        save('outcome.json', {'result':'PASS','namedTests':['AssistantUITests/MobileControlsUITests/testNativeControlsCapability','AssistantUITests/MobileControlsUITests/testAccessibleControlsMatrix'],'summary':summary,'sourceHead':head,'pullRequestHead':os.environ['PR_HEAD'],'qualification':'synthetic capability and 20-case native simulator matrix; no physical-device, VoiceOver or persistence acceptance'})
+        count = len(methods)
+        structured = len(cases)==count and identities == {name.removeprefix('AssistantUITests/') for name in named_tests} and all(bundle and node.get('result')=='Passed' for node,bundle in cases)
+        if not structured or not named or [summary.get(k) for k in ['totalTestCount','passedTests','failedTests','skippedTests']] != [count,count,0,0]: raise RuntimeError('Missing exact named PASS/zero-skip evidence')
+        qualification = 'synthetic Noticing status smoke; no physical-device or live push acceptance' if noticing else 'synthetic capability and 20-case native simulator matrix; no physical-device, VoiceOver or persistence acceptance'
+        save('outcome.json', {'result':'PASS','namedTests':named_tests,'summary':summary,'sourceHead':head,'pullRequestHead':os.environ['PR_HEAD'],'qualification':qualification})
     except BaseException as error:
         save('failure.json', {'result':'HOLD','error':repr(error)})
         raise
 
-elif sys.argv[1] == 'cleanup':
+else:
     import os, json, subprocess, signal, time, hashlib
     from pathlib import Path
-    root = Path(os.environ['RUNNER_TEMP']) / 'native-controls-evidence'
+    root = Path(os.environ['RUNNER_TEMP']) / (evidence_name + '-evidence')
     root.mkdir(mode=0o700, exist_ok=True)
     errors = []; receipt = {'attempted':True,'commands':[]}
     deadline=time.monotonic()+150
@@ -297,7 +309,7 @@ elif sys.argv[1] == 'cleanup':
         total=sum(p.stat().st_size for p in root.rglob('*') if p.is_file());upload=root
         if total>128*1024*1024:
             errors.append('Total evidence exceeds128MiB including automatic XCTest attachments')
-            upload=Path(os.environ['RUNNER_TEMP'])/'native-controls-oversize';upload.mkdir(exist_ok=True)
+            upload=Path(os.environ['RUNNER_TEMP'])/(evidence_name+'-oversize');upload.mkdir(exist_ok=True)
             retained=[]; remaining=8*1024*1024
             # Preserve failure causes and canonical closure receipts even
             # when the raw result bundle exceeds the evidence bound.
