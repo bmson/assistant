@@ -44,7 +44,7 @@ import { detectPersonalReadRequest, type PersonalReadRequest } from './read-inte
 // memory, graph, and Drive reads as calendar/email lookups.
 // v17: explicit no-tool constraints take precedence over automatic source/watch routing.
 // v18: preserve balanced inline quoted literals in owner-request context as inert data segments.
-export const PLANNER_VERSION = 20;
+export const PLANNER_VERSION = 21;
 
 type PlannerBudgetDecision = Extract<BudgetDecision, { mode: 'park' | 'block' }>;
 
@@ -352,6 +352,20 @@ export async function planTask(
       trigger: task.trigger,
     });
   const latestOwnerRequest = ownerIntent.ownerAuthoredText;
+  if (
+    task.trust === 'owner' &&
+    task.type === 'chat_turn' &&
+    ownerIntent.authorizedScopes.includes('digest_manage') &&
+    !explicitlyDisallowsTools(latestOwnerRequest)
+  ) {
+    const plan: Plan = {
+      action: 'workflow',
+      reasoning: 'Resolve the owner digest change from the saved record.',
+      steps: ['Call digest.manage for the explicit owner request.'],
+      missingInfo: [],
+    };
+    return (await persistPlan(deps, task, plan, opts)) ? plan : null;
+  }
   const recurringDigest =
     task.trust === 'owner' &&
     task.type === 'chat_turn' &&

@@ -369,6 +369,8 @@ function requiredOwnerIntentScopes(
   if (flags.privateWrite === true) {
     if (toolName === 'digest.schedule') {
       required.add('digest_schedule');
+    } else if (toolName === 'digest.manage') {
+      required.add('digest_manage');
     } else if (toolName === 'watch.create' || toolName === 'watch.web') {
       required.add('watch_create');
     } else if (

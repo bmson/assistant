@@ -1,14 +1,23 @@
 import { createHash } from 'node:crypto';
 import {
+  recurringDigestChange,
   recurringDigestDays,
   recurringDigestLocalTime,
   recurringDigestTopic,
 } from '@assistant/core/workflow/owner-intent';
 import { listOwnerSchedules, nextRun } from '@assistant/core/workflow/schedules';
-import type { ScheduleRecord, ScheduleRepository } from '@assistant/persistence';
+import {
+  type DigestChange,
+  type DigestScheduleRepository,
+  digestLifecycle,
+  type ExecutionContextRepository,
+  type ExecutionEvidenceRepository,
+  type ScheduleRecord,
+} from '@assistant/persistence';
 import { z } from 'zod';
 import { register } from '../register.js';
 import type { ToolRegistry } from '../registry.js';
+import type { ToolContext } from '../types.js';
 
 const PREFIX = 'digest:';
 const clock = z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/);
@@ -35,7 +44,9 @@ const digest = z
   .strict();
 
 export interface RecurringDigestDeps {
-  schedules: ScheduleRepository;
+  schedules: DigestScheduleRepository;
+  executionContext: ExecutionContextRepository;
+  executionEvidence: ExecutionEvidenceRepository;
   getTimezone(agentId: string): Promise<string>;
 }
 
@@ -50,8 +61,86 @@ function readDigest(row: ScheduleRecord, timezone: string, currentChat: string) 
     cadence: template.digest.cadence,
     timezone,
     enabled: row.enabled,
+    lifecycle: digestLifecycle(row),
     nextRunAt: row.enabled ? (row.nextRunAt?.toISOString() ?? null) : null,
   };
+}
+
+const digestDestinationReceipt = z.object({
+  status: z.enum(['destination_conflict', 'moved']),
+  scheduleId: z.uuid(),
+  conversationId: z.uuid(),
+});
+
+async function ownerDigestTurn(
+  deps: RecurringDigestDeps,
+  ctx: ToolContext,
+  conversationId: string,
+) {
+  const { agentId, taskId } = ctx;
+  const task = await deps.executionContext.getTask(agentId, taskId);
+  const trigger = task?.trigger as {
+    source?: string;
+    payload?: { triggerMessageId?: string };
+  } | null;
+  const messageId = trigger?.payload?.triggerMessageId;
+  if (
+    task?.type !== 'chat_turn' ||
+    task.trust !== 'owner' ||
+    task.conversationId !== conversationId ||
+    trigger?.source !== 'chat' ||
+    !messageId
+  )
+    return null;
+  return messageId;
+}
+
+async function precedingDigestOffer(
+  deps: RecurringDigestDeps,
+  ctx: ToolContext,
+  conversationId: string,
+  messageId: string,
+) {
+  const { agentId } = ctx;
+  const history = await deps.executionContext.seedHistory({
+    agentId,
+    conversationId,
+    throughMessageId: messageId,
+    before: ctx.now(),
+    limit: 3,
+  });
+  const index = history.findIndex((message) => message.id === messageId);
+  const previous = history[index - 1];
+  if (previous?.role !== 'assistant' || !previous.taskId) return null;
+  const prior = await deps.executionContext.getTask(agentId, previous.taskId);
+  if (
+    !prior ||
+    prior.conversationId !== conversationId ||
+    prior.type !== 'chat_turn' ||
+    prior.trust !== 'owner' ||
+    prior.status !== 'done'
+  )
+    return null;
+  const receipts = await deps.executionEvidence.taskEvidence({ agentId, taskId: prior.id });
+  const offers = receipts.flatMap((row) => {
+    if (row.status !== 'succeeded') return [];
+    const result = digestDestinationReceipt.safeParse(row.result);
+    if (!result.success || !previous.text.includes(result.data.scheduleId)) return [];
+    const matches =
+      result.data.status === 'destination_conflict'
+        ? row.toolName === 'digest.schedule' && result.data.conversationId !== conversationId
+        : row.toolName === 'digest.manage' && result.data.conversationId === conversationId;
+    return matches ? [result.data] : [];
+  });
+  return offers.length === 1 ? (offers[0] ?? null) : null;
+}
+
+function matchDigestName(topic: string): string {
+  return topic
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim();
 }
 
 export function registerRecurringDigestTools(registry: ToolRegistry, deps: RecurringDigestDeps) {
@@ -127,9 +216,84 @@ export function registerRecurringDigestTools(registry: ToolRegistry, deps: Recur
         return {
           ...receipt,
           status:
-            requestedHere && !receipt.inCurrentChat
+            requestedHere && !receipt.inCurrentChat && receipt.enabled
               ? ('destination_conflict' as const)
               : ('saved' as const),
+        };
+      },
+    },
+    { ownerOnly: true, privateWrite: true },
+  );
+
+  register(
+    registry,
+    {
+      name: 'digest.manage',
+      description:
+        'Use for an owner asking to move the offered digest here, or cancel or delete a named recurring digest. The runtime binds the action and name to the current owner message, and binds a move to the previous destination offer in this chat. If multiple names match, ask the owner which one. Returns the actual stored result.',
+      inputSchema: z.object({}).strict(),
+      risk: 'autonomous',
+      acceptsUntrustedInput: false,
+      execute: async (_args, ctx) => {
+        const { agentId, conversationId, ownerIntent } = ctx;
+        if (
+          ctx.trust !== 'owner' ||
+          ctx.tainted ||
+          !conversationId ||
+          !ownerIntent?.authorizedScopes.includes('digest_manage')
+        ) {
+          throw new Error('A direct owner chat request is required to manage a digest');
+        }
+        const messageId = await ownerDigestTurn(deps, ctx, conversationId);
+        if (!messageId)
+          throw new Error('A direct owner chat request is required to manage a digest');
+        const request = recurringDigestChange(
+          ownerIntent.clarificationAnswer?.text ?? ownerIntent.ownerAuthoredText,
+        );
+        if (!request) return { status: 'not_found' as const };
+        const timezone = await deps.getTimezone(agentId);
+        const now = ctx.now();
+        let change: DigestChange;
+        if (request.action === 'move') {
+          const offer = await precedingDigestOffer(deps, ctx, conversationId, messageId);
+          if (!offer) return { status: 'move_requires_offer' as const };
+          change = {
+            action: 'move',
+            agentId,
+            now,
+            scheduleId: offer.scheduleId,
+            fromChat: offer.conversationId,
+            toChat: conversationId,
+          };
+        } else {
+          const name = matchDigestName(request.name);
+          const rows = (await listOwnerSchedules(deps.schedules, agentId))
+            .filter((row) => row.name.startsWith(PREFIX))
+            .map((row) => readDigest(row, timezone, conversationId));
+          const eligible = rows.filter(
+            (row) => row.lifecycle !== 'deleted' || request.action === 'delete',
+          );
+          const exact = eligible.filter((row) => matchDigestName(row.topic) === name);
+          const matches = exact.length
+            ? exact
+            : eligible.filter(
+                (row) => name && ` ${matchDigestName(row.topic)} `.includes(` ${name} `),
+              );
+          if (matches.length > 1) return { status: 'ambiguous' as const, matches };
+          const target = matches[0];
+          if (!target) return { status: 'not_found' as const };
+          change = { action: request.action, agentId, now, scheduleId: target.scheduleId };
+        }
+        const row = await deps.schedules.changeDigest(change);
+        if (!row) return { status: 'stale_or_unavailable' as const };
+        return {
+          ...readDigest(row, timezone, conversationId),
+          status:
+            change.action === 'move'
+              ? ('moved' as const)
+              : change.action === 'cancel'
+                ? ('cancelled' as const)
+                : ('deleted' as const),
         };
       },
     },
@@ -154,7 +318,7 @@ export function registerRecurringDigestTools(registry: ToolRegistry, deps: Recur
         const rows = await listOwnerSchedules(deps.schedules, ctx.agentId);
         return {
           digests: rows
-            .filter((row) => row.name.startsWith(PREFIX))
+            .filter((row) => row.name.startsWith(PREFIX) && digestLifecycle(row) !== 'deleted')
             .map((row) => readDigest(row, timezone, currentChat)),
         };
       },

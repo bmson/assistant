@@ -1004,6 +1004,8 @@ export function composeFirestoreAgent(config: Config): AgentDeps {
     conversations,
   });
   registerRecurringDigestTools(registry, {
+    executionContext: persistence.executionContext,
+    executionEvidence: persistence.executionEvidence,
     schedules: new FirestoreScheduleRepository(store),
     getTimezone: ownerTimezone,
   });
@@ -1174,6 +1176,8 @@ export function buildDeps(): AgentDeps {
     { oauth: agentMcpOAuth(config, () => createPostgresMcpOAuthRepository(db)) },
   );
   registerRecurringDigestTools(registry, {
+    executionContext: persistence.executionContext,
+    executionEvidence: persistence.executionEvidence,
     schedules: createPostgresScheduleRepository(db),
     getTimezone: async (agentId) => {
       const owner = await getAgent(db);

@@ -26,6 +26,7 @@ export type OwnerIntentScope =
   | 'personal_write'
   | 'watch_create'
   | 'digest_schedule'
+  | 'digest_manage'
   | 'private_write'
   | 'memory_write'
   | 'feedback_write';
@@ -514,6 +515,26 @@ export function recurringDigestTopic(intent: OwnerIntent): string | null {
   return topic;
 }
 
+/** Only a current affirmative owner command can authorize a digest change. */
+export function recurringDigestChange(
+  text: string,
+): { action: 'move' } | { action: 'cancel' | 'delete'; name: string } | null {
+  if (
+    /^\s*(?:yes[, ]+)?(?:please\s+)?move\s+(?:it|(?:the|that)\s+digest)\s+(?:right\s+)?here[.!]?\s*$/i.test(
+      text,
+    )
+  ) {
+    return { action: 'move' };
+  }
+  const named =
+    /^\s*(?:(?:could|can|would) you\s+)?(?:please\s+)?(cancel|delete)\s+(?:(?:the|my)\s+)?(.+?)\s+(?:recurring\s+)?digest[.!?]?\s*$/i.exec(
+      text,
+    );
+  const name = named?.[2]?.trim();
+  if (!name) return null;
+  return { action: named?.[1]?.toLowerCase() === 'delete' ? 'delete' : 'cancel', name };
+}
+
 function affirmativeAction(text: string, requestedAction: string): boolean {
   const pattern = new RegExp(
     `(?:^|[.!?;\\n]|\\band\\s+)\\s*(?:please\\s+)?(?:(?:(?:can|could|would)\\s+you\\s+(?:please\\s+)?)?${requestedAction})\\b|\\b(?:I want|I need|I'd like|I would like) you to\\s+${requestedAction}\\b|\\bgo ahead and\\s+${requestedAction}\\b`,
@@ -743,6 +764,7 @@ function scopesFor(text: string): OwnerIntentScope[] {
     )
   )
     scopes.add('personal_write');
+  if (recurringDigestChange(text)) scopes.add('digest_manage');
   const digestCadence =
     /\b(?:every\s+(?:day|morning|evening|week|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)|daily|weekly|each\s+(?:day|week|morning|evening|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)|on\s+(?:weekdays|Mondays|Tuesdays|Wednesdays|Thursdays|Fridays|Saturdays|Sundays))\b/i;
   const digestAction = String.raw`(?:summari[sz]e|(?:give|show|bring|prepare|write|make|create|schedule|set up|post)\b[^!?;\n]{0,100}\b(?:digest|summary|roundup|recap))`;

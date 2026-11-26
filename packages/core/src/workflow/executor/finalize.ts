@@ -793,11 +793,16 @@ const digestReceiptSchema = z.object({
   ]),
   enabled: z.boolean(),
   nextRunAt: z.iso.datetime().nullable(),
-  status: z.enum(['saved', 'destination_conflict']).optional(),
+  status: z.enum(['saved', 'destination_conflict', 'moved', 'cancelled', 'deleted']).optional(),
+  lifecycle: z.enum(['cancelled', 'deleted']).nullable().optional(),
 });
 
 function describeDigestReceipt(receipt: z.infer<typeof digestReceiptSchema>): string {
   const topic = receipt.topic.replace(/[`*_[\]<>]/g, '\\$&');
+  if (receipt.lifecycle) {
+    const action = receipt.lifecycle === 'deleted' ? 'Deleted' : 'Cancelled';
+    return `${action} the “${topic}” digest. It has no future runs. Schedule ID ${receipt.scheduleId}.`;
+  }
   const destination = receipt.inCurrentChat
     ? 'this chat'
     : `[the original chat](/chat/${receipt.conversationId})`;
@@ -820,6 +825,7 @@ function describeDigestReceipt(receipt: z.infer<typeof digestReceiptSchema>): st
       ? `Next run ${new Intl.DateTimeFormat('en-US', { dateStyle: 'medium', timeStyle: 'short', timeZone: receipt.timezone }).format(new Date(receipt.nextRunAt))}.`
       : 'The next run is pending.';
   const saved = `“${topic}” is set to post in ${destination} ${days} at ${receipt.localTime} (${receipt.timezone}). ${timing} Schedule ID ${receipt.scheduleId}.`;
+  if (receipt.status === 'moved') return `Moved the digest here. ${saved}`;
   return receipt.status === 'destination_conflict'
     ? `${saved} Do you want to keep that destination or move the digest here?`
     : saved;
@@ -827,9 +833,18 @@ function describeDigestReceipt(receipt: z.infer<typeof digestReceiptSchema>): st
 
 function digestReceiptText(rows: ExecutionEvidenceRecord[], draft: string): string | undefined {
   const results = rows.filter((row) => row.status === 'succeeded');
-  const schedules = results.filter((row) => row.toolName === 'digest.schedule');
+  const schedules = results.filter(
+    (row) => row.toolName === 'digest.schedule' || row.toolName === 'digest.manage',
+  );
   // Preserve the other parts of compound replies and their saved IDs.
-  if (rows.some((row) => row.toolName !== 'digest.schedule' && row.toolName !== 'digest.list')) {
+  if (
+    rows.some(
+      (row) =>
+        row.toolName !== 'digest.schedule' &&
+        row.toolName !== 'digest.list' &&
+        row.toolName !== 'digest.manage',
+    )
+  ) {
     const receipts = new Map<string, string>();
     for (const row of schedules) {
       const receipt = digestReceiptSchema.safeParse(row.result);
@@ -845,6 +860,24 @@ function digestReceiptText(rows: ExecutionEvidenceRecord[], draft: string): stri
   if (schedule) {
     const receipt = digestReceiptSchema.safeParse(schedule.result);
     if (receipt.success) return describeDigestReceipt(receipt.data);
+    const unresolved = z
+      .object({
+        status: z.enum(['ambiguous', 'move_requires_offer', 'not_found', 'stale_or_unavailable']),
+        matches: z.array(digestReceiptSchema).optional(),
+      })
+      .safeParse(schedule.result);
+    if (unresolved.success) {
+      switch (unresolved.data.status) {
+        case 'ambiguous':
+          return `Which digest do you mean?\n\n${unresolved.data.matches?.map(describeDigestReceipt).join('\n\n') ?? ''}`;
+        case 'move_requires_offer':
+          return 'To move a digest, first ask for that digest here so I can show you its current destination.';
+        case 'not_found':
+          return 'I couldn’t find a digest with that name in your schedules.';
+        case 'stale_or_unavailable':
+          return 'The digest changed before I could update it. Check your saved digests and try again.';
+      }
+    }
     const rejected = z
       .object({ status: z.enum(['topic_required', 'topic_mismatch']) })
       .safeParse(schedule.result);

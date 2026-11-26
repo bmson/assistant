@@ -5,11 +5,13 @@ import { loadConfig } from '@assistant/config';
 import { executeTask, type ModelRouter } from '@assistant/core';
 import { runScheduleBatch } from '@assistant/core/workflow/schedules';
 import {
+  agents,
   createDb,
   createPostgresApplicationChatPersistence,
   createPostgresExecutionPersistence,
   createPostgresScheduleRepository,
   type Db,
+  schedules as postgresSchedules,
 } from '@assistant/db';
 import { assertAllocatedTestTarget } from '@assistant/db/test-target';
 import {
@@ -19,6 +21,7 @@ import {
 } from '@assistant/firestore';
 import { ToolDispatcher, ToolRegistry } from '@assistant/tools';
 import { registerPortableGoalTools, registerRecurringDigestTools } from '@assistant/tools/builtin';
+import { eq } from 'drizzle-orm';
 import { expect, it } from 'vitest';
 import { z } from 'zod';
 import {
@@ -135,7 +138,7 @@ function scriptedRouter(call?: ToolCall, beforeRecovery?: () => Promise<void>) {
   } as unknown as ModelRouter;
 }
 
-it('routes recurring digests through owner chat, persists them once and runs two slots', async () => {
+it('moves, cancels, and deletes recurring digests through owner chat and verifies delivery', async () => {
   const firestore = process.env.FIRESTORE_EMULATOR_HOST ? emulatorStore() : undefined;
   const pg = firestore ? undefined : createDb(postgresUrl);
   const db =
@@ -189,7 +192,12 @@ it('routes recurring digests through owner chat, persists them once and runs two
     });
 
     const registry = new ToolRegistry();
-    registerRecurringDigestTools(registry, { schedules, getTimezone: async () => timezone });
+    registerRecurringDigestTools(registry, {
+      schedules,
+      getTimezone: async () => timezone,
+      executionContext: persistence.executionContext,
+      executionEvidence: persistence.executionEvidence,
+    });
     let goalWrites = 0;
     registerPortableGoalTools(registry, {
       missions: {
@@ -220,6 +228,7 @@ it('routes recurring digests through owner chat, persists them once and runs two
       replay = false,
       replyTo?: string,
       beforeRecovery?: () => Promise<void>,
+      afterAdmission?: () => Promise<() => Promise<void>>,
     ) => {
       const router = scriptedRouter(call, beforeRecovery);
       const conversationId = replyTo ?? (await chat.createConversation(agentId)).id;
@@ -252,8 +261,21 @@ it('routes recurring digests through owner chat, persists them once and runs two
         expect(retryTaskId).toBe(taskId);
         await retry.text();
       }
-      const outcome = await executeTask({ db, persistence, router, dispatcher }, taskId);
+      const verifyAndRestore = await afterAdmission?.();
+      const outcome = await executeTask({ db, persistence, router, dispatcher }, taskId).finally(
+        () => verifyAndRestore?.(),
+      );
       const ledger = await persistence.executionEvidence.taskEvidence({ agentId, taskId });
+      let completedRetryTaskId: string | null = null;
+      if (replay) {
+        const retry = await admit();
+        completedRetryTaskId = retry.headers.get('x-async-task');
+        expect(completedRetryTaskId).toBe(taskId);
+        await retry.text();
+        expect(await persistence.executionEvidence.taskEvidence({ agentId, taskId })).toEqual(
+          ledger,
+        );
+      }
       const update = await getChatUpdates(chat, { conversationId, taskId });
       const history = await chat.listMessages(agentId, conversationId, { limit: 50 });
       const replyIds = new Set(
@@ -271,6 +293,7 @@ it('routes recurring digests through owner chat, persists them once and runs two
         requestText,
         taskId,
         retryTaskId,
+        completedRetryTaskId,
         conversationId,
         outcome,
         ledger,
@@ -283,6 +306,8 @@ it('routes recurring digests through owner chat, persists them once and runs two
       (await schedules.listPage(agentId, { limit: 200 })).items.filter((row) =>
         row.name.startsWith('digest:'),
       );
+    const manage = { name: 'digest.manage', input: {} };
+    const digestList = { name: 'digest.list', input: {} };
     const duplicateRequest = { name: 'digest.schedule', input: library };
     const ambiguous = await turn('Please give me a weekly digest of new library events at 9.');
     expect(ambiguous.ledger).toEqual([]);
@@ -428,6 +453,37 @@ it('routes recurring digests through owner chat, persists them once and runs two
     expect(goal.outcome.outcome).toBe('parked');
     expect(await read()).toEqual(stored);
 
+    const unavailable = await turn('Move it here.', manage);
+    expect(unavailable.ledger[0]?.result).toMatchObject({ status: 'move_requires_offer' });
+    expect(await read()).toEqual(stored);
+    const moved = await turn('Move it here.', manage, true, conflict.conversationId);
+    expect(moved.ledger).toHaveLength(1);
+    expect(moved.ledger[0]?.result).toMatchObject({
+      status: 'moved',
+      scheduleId: libraryRow.id,
+      conversationId: conflict.conversationId,
+      nextRunAt: libraryRow.nextRunAt.toISOString(),
+    });
+    expect(moved.published).toContain('Moved the digest here');
+    expect(moved.replyCount).toBe(1);
+    const movedRow = await schedules.getByName(agentId, libraryRow.name);
+    expect(movedRow).toMatchObject({
+      id: libraryRow.id,
+      cron: libraryRow.cron,
+      nextRunAt: libraryRow.nextRunAt,
+      taskTemplate: { conversationId: conflict.conversationId },
+    });
+    const moveReplay = await turn('Move it here.', manage, false, conflict.conversationId);
+    expect(moveReplay.ledger[0]?.result).toMatchObject({
+      status: 'moved',
+      scheduleId: libraryRow.id,
+      conversationId: conflict.conversationId,
+    });
+    expect(await schedules.getByName(agentId, libraryRow.name)).toEqual(movedRow);
+    const afterMove = await turn('Which recurring digests are scheduled?', digestList);
+    expect(afterMove.published).toContain(`/chat/${conflict.conversationId}`);
+    expect(afterMove.published).not.toContain(`/chat/${first.conversationId}`);
+
     // Restrict the sweeps to this fixture while using the real adapter for commits.
     const libraryOnly = {
       ...schedules,
@@ -436,6 +492,15 @@ it('routes recurring digests through owner chat, persists them once and runs two
         (await schedules.listDue(now, 200)).filter((row) => row.id === libraryRow.id),
       commitOccurrence: schedules.commitOccurrence.bind(schedules),
     };
+    const staleTick = await runScheduleBatch(
+      {
+        ...libraryOnly,
+        listDue: async () => [libraryRow],
+      },
+      timezone,
+      { now: libraryRow.nextRunAt },
+    );
+    expect(staleTick).toEqual([]);
     const occurrences = [];
     const events = ['Book swap on Saturday', 'Story hour on Sunday'];
     let fixtureEvent = '';
@@ -460,7 +525,7 @@ it('routes recurring digests through owner chat, persists them once and runs two
       const task = await persistence.tasks.getTask(taskId);
       expect(task).toMatchObject({
         agentId,
-        conversationId: first.conversationId,
+        conversationId: conflict.conversationId,
         trust: 'assistant',
         externalEventId: `schedule:${libraryRow.id}:${row.nextRunAt.toISOString()}`,
       });
@@ -469,13 +534,13 @@ it('routes recurring digests through owner chat, persists them once and runs two
         taskId,
       );
       expect(outcome).toMatchObject({ outcome: 'done' });
-      const saved = await chat.listMessages(agentId, first.conversationId, { limit: 50 });
+      const saved = await chat.listMessages(agentId, conflict.conversationId, { limit: 50 });
       expect(
         saved?.messages.filter(
           (message) => message.taskId === taskId && message.text === scheduledReply,
         ),
       ).toHaveLength(1);
-      const other = await chat.listMessages(agentId, paraphrase.conversationId, { limit: 50 });
+      const other = await chat.listMessages(agentId, first.conversationId, { limit: 50 });
       expect(other?.messages.some((message) => message.taskId === taskId)).toBe(false);
       const ledger = await persistence.executionEvidence.taskEvidence({ agentId, taskId });
       expect(ledger).toHaveLength(1);
@@ -486,12 +551,158 @@ it('routes recurring digests through owner chat, persists them once and runs two
       });
       occurrences.push({
         taskId,
+        conversationId: task?.conversationId,
+        posted: saved?.messages.find((message) => message.taskId === taskId)?.text,
         slot: row.nextRunAt,
         eventId: task?.externalEventId,
         outcome,
         ledger,
       });
     }
+    const otherLibrary = await turn('Every Friday at 10 a.m., summarize library hours for me.', {
+      name: 'digest.schedule',
+      input: { ...library, topic: 'library hours', localTime: '10:00' },
+    });
+    expect(otherLibrary.outcome.outcome).toBe('done');
+    const beforeCancel = await read();
+    const ambiguousCancel = await turn('Cancel the library digest.', manage);
+    const ambiguousDelete = await turn('Delete the library digest.', manage);
+    for (const attempt of [ambiguousCancel, ambiguousDelete]) {
+      expect(attempt.ledger[0]?.result).toMatchObject({ status: 'ambiguous' });
+      expect(attempt.published).toContain('Which digest do you mean?');
+    }
+    expect(await read()).toEqual(beforeCancel);
+
+    // Admit through the real single-owner entry point, then introduce an
+    // inconsistent foreign record to exercise the worker's ownership checks.
+    const foreignAttempts = [];
+    for (const action of ['cancel', 'delete'] as const) {
+      const differentOwner = randomUUID();
+      const foreignName = `digest:foreign-${action}`;
+      let foreignId: string | undefined;
+      const seedForeign = async () => {
+        if (firestore) {
+          await firestore.doc('agents', differentOwner).set({
+            id: differentOwner,
+            name: 'Synthetic other owner',
+            email: 'other@example.test',
+            timezone,
+            createdAt: fixedClock(),
+            updatedAt: fixedClock(),
+          });
+        } else {
+          await db.insert(agents).values({
+            id: differentOwner,
+            name: 'Synthetic other owner',
+            email: 'other@example.test',
+            workspacePrefix: 'synthetic-other',
+            timezone,
+          });
+        }
+        const foreign = await schedules.ensure({
+          agentId: differentOwner,
+          name: foreignName,
+          cron: '0 9 * * 5',
+          enabled: true,
+          nextRunAt: libraryRow.nextRunAt,
+          taskTemplate: {
+            conversationId: randomUUID(),
+            digest: { ...library, topic: 'botanical garden' },
+          },
+        });
+        foreignId = foreign.id;
+        return async () => {
+          expect(
+            await schedules.changeDigest({
+              action,
+              agentId,
+              scheduleId: foreign.id,
+              now: fixedClock(),
+            }),
+          ).toBeNull();
+          expect(await schedules.getByName(differentOwner, foreignName)).toEqual(foreign);
+          if (firestore) {
+            await firestore.doc('schedules', foreign.id).delete();
+            await firestore.doc('agents', differentOwner).delete();
+          } else {
+            await db.delete(postgresSchedules).where(eq(postgresSchedules.id, foreign.id));
+            await db.delete(agents).where(eq(agents.id, differentOwner));
+          }
+        };
+      };
+      const verb = action === 'cancel' ? 'Cancel' : 'Delete';
+      const attempt = await turn(
+        `${verb} the botanical garden digest.`,
+        manage,
+        false,
+        undefined,
+        undefined,
+        seedForeign,
+      );
+      if (!foreignId) throw new Error('Expected the foreign schedule fixture');
+      expect(attempt.ledger[0]?.result).toEqual({ status: 'not_found' });
+      expect(attempt.published).not.toContain(foreignId);
+      foreignAttempts.push({ attempt, foreignId, differentOwner });
+    }
+
+    const preCancel = await schedules.getByName(agentId, libraryRow.name);
+    if (!preCancel?.nextRunAt) throw new Error('Expected a future run before cancellation');
+    const cancelled = await turn('Cancel the new library events digest.', manage, true);
+    expect(cancelled.ledger[0]?.result).toMatchObject({
+      status: 'cancelled',
+      scheduleId: libraryRow.id,
+      enabled: false,
+      nextRunAt: null,
+    });
+    expect(cancelled.published).toContain('Cancelled the');
+    expect(cancelled.replyCount).toBe(1);
+    const cancelledRow = await schedules.getByName(agentId, libraryRow.name);
+    expect(cancelledRow).toMatchObject({
+      id: libraryRow.id,
+      enabled: false,
+      nextRunAt: null,
+      taskTemplate: { digestLifecycle: 'cancelled' },
+    });
+    const afterCancel = await turn('Which recurring digests are scheduled?', digestList);
+    expect(afterCancel.published).toContain('Cancelled the');
+    expect(afterCancel.published).toContain(libraryRow.id);
+    const cancelledTick = await runScheduleBatch(libraryOnly, timezone, {
+      now: preCancel.nextRunAt,
+    });
+    expect(cancelledTick).toEqual([]);
+
+    const deleted = await turn('Delete the new library events digest.', manage, true);
+    expect(deleted.ledger[0]?.result).toMatchObject({
+      status: 'deleted',
+      scheduleId: libraryRow.id,
+      enabled: false,
+      nextRunAt: null,
+    });
+    expect(deleted.published).toContain('Deleted the');
+    expect(deleted.replyCount).toBe(1);
+    const deletedRow = await schedules.getByName(agentId, libraryRow.name);
+    expect(deletedRow).toMatchObject({
+      id: libraryRow.id,
+      enabled: false,
+      nextRunAt: null,
+      taskTemplate: { digestLifecycle: 'deleted' },
+    });
+    const afterDelete = await turn('Which recurring digests are scheduled?', digestList);
+    expect(afterDelete.published).not.toContain(libraryRow.id);
+    expect(afterDelete.published).toContain('library hours');
+    expect(afterDelete.published).toContain('Museum exhibits');
+    const deletedTick = await runScheduleBatch(libraryOnly, timezone, { now: preCancel.nextRunAt });
+    expect(deletedTick).toEqual([]);
+    const deletedStaleTick = await runScheduleBatch(
+      {
+        ...libraryOnly,
+        listDue: async () => [preCancel],
+      },
+      timezone,
+      { now: preCancel.nextRunAt },
+    );
+    expect(deletedStaleTick).toEqual([]);
+    expect(await schedules.setOwnerEnabled(agentId, libraryRow.id, true)).toBe(false);
     console.log(
       'F2_DIGEST_EVIDENCE',
       JSON.stringify({
@@ -508,7 +719,26 @@ it('routes recurring digests through owner chat, persists them once and runs two
         denied,
         goal,
         stored,
+        unavailable,
+        moved,
+        movedRow,
+        moveReplay,
+        afterMove,
+        staleTick,
         occurrences,
+        otherLibrary,
+        ambiguousCancel,
+        ambiguousDelete,
+        foreignAttempts,
+        cancelled,
+        cancelledRow,
+        afterCancel,
+        cancelledTick,
+        deleted,
+        deletedRow,
+        afterDelete,
+        deletedTick,
+        deletedStaleTick,
       }),
     );
   } finally {

@@ -674,6 +674,14 @@ function supports(
             name === 'applications.watch_confirmation',
         ) ||
         usable.some((item) => {
+          if (item.toolName === 'digest.manage') {
+            const result = record(item.result);
+            return (
+              result?.status === 'moved' ||
+              result?.status === 'cancelled' ||
+              result?.status === 'deleted'
+            );
+          }
           if (item.toolName === 'digest.schedule') {
             const result = record(item.result);
             return (
@@ -1042,6 +1050,7 @@ function toolKind(name: string): ActionKind | undefined {
     name === 'mission.update' ||
     name === 'task.schedule' ||
     name === 'digest.schedule' ||
+    name === 'digest.manage' ||
     name === 'applications.watch_confirmation' ||
     name === 'watch.create' ||
     name === 'watch.web'
