@@ -86,7 +86,7 @@ There is no news source. `web.search` is registered as `autonomous` (`packages/t
 
 ### 4.2 Daily briefing (`packages/core/src/workflow/briefing.ts`)
 
-- A wake or cron occurrence can publish on its intended owner-local date. If the worker resumes on a later day, it records the unpublished occurrence as aborted. A previously committed briefing remains available through its original receipt.
+- A wake or cron occurrence can publish on its intended owner-local date. If the worker resumes on a later day, it records the unpublished occurrence as aborted. A previously committed briefing remains available through its original receipt. When the scheduler itself misses a day, the next sweep advances to the current day’s slot without consuming that day’s early wake.
 
 - **Composition.** Deterministic, with no tools (`:97`): agenda, coverage, overlaps, weather (from the ambient snapshot), needs-you, mail worth reading, "coming up" (dates extracted from mail), goals that moved.
 - **Life context** (since #910). `briefingLifeContext` (`packages/core/src/proactive/life-context.ts`, called at `briefing.ts:1091`) adds up to six upcoming occasions and up to five open commitments. Occasions must be owner-confirmed or owner-sourced and inside their lead window (capped at 30 days). Commitments are due within 7 days, or undated and stale.

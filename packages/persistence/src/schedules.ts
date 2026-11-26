@@ -1,3 +1,4 @@
+import { DAILY_BRIEFING } from './briefing.js';
 import type { GoalSessionState } from './goals.js';
 import type { Records } from './records.js';
 import { reminderScheduleTemplate } from './reminders.js';
@@ -23,7 +24,7 @@ export interface ScheduleOccurrence {
   goalGuard?: GoalOccurrenceGuard;
   now: Date;
   /** Early wake briefs must supply an unchanged snapshot just like ordinary firings. */
-  mode: 'due' | 'early';
+  mode: 'due' | 'early' | 'rebase-missed-briefing';
   nextRunAt: Date | null;
   enabled: boolean;
   /** Null advances a skipped/disabled job without creating work. */
@@ -85,6 +86,25 @@ export function validateScheduleCreate(input: ScheduleCreateInput): void {
 export function occurrenceIsCurrent(current: ScheduleRecord, input: ScheduleOccurrence): boolean {
   scheduleTime(input.now);
   if (input.nextRunAt !== null) scheduleTime(input.nextRunAt);
+  if (input.mode === 'rebase-missed-briefing') {
+    const job = (current.taskTemplate as { job?: unknown } | null)?.job;
+    if (
+      current.name !== DAILY_BRIEFING ||
+      job !== 'briefing.compose' ||
+      input.task ||
+      input.goalGuard ||
+      !input.enabled ||
+      !input.nextRunAt
+    )
+      throw new Error('Only an unfired daily briefing can advance its missed slot');
+    return (
+      scheduleMatches(current, input.expected) &&
+      scheduleCanRun(current) &&
+      current.nextRunAt !== null &&
+      current.nextRunAt <= input.now &&
+      input.nextRunAt > current.nextRunAt
+    );
+  }
   if (input.enabled && (!input.nextRunAt || input.nextRunAt <= input.now))
     throw new Error('Schedule must advance past this firing');
   if (!input.enabled && input.nextRunAt !== null)

@@ -534,8 +534,51 @@ describe.each([
             },
           );
         }
+        // The scheduler itself missed yesterday. Recover today's slot whether the
+        // first sweep is before or after the scheduled briefing time.
+        for (const { day, minute, mode } of [
+          { day: 12, minute: 45, mode: 'cron' },
+          { day: 14, minute: 30, mode: 'wake' },
+        ]) {
+          vi.setSystemTime(time(day, minute));
+          provider = { date: localDate(day), temperature: 4 };
+          await fixture.restart();
+          await fixture.news();
+          const due = (await fixture.tick()).filter(({ schedule }) => schedule === DAILY_BRIEFING);
+          expect(due).toHaveLength(mode === 'wake' ? 0 : 1);
+          if (mode === 'wake') {
+            await fixture.drain();
+            vi.setSystemTime(time(day, 40));
+            expect((await fixture.foreground()).wakeBriefFired).toBe(true);
+            vi.setSystemTime(time(day, 45));
+            expect(
+              (await fixture.tick()).filter(({ schedule }) => schedule === DAILY_BRIEFING),
+            ).toHaveLength(0);
+          }
+          await fixture.drain();
+          const current = occurrences(await fixture.taskRows()).find(({ externalEventId }) =>
+            externalEventId?.includes(localDate(day)),
+          );
+          if (!current) throw new Error('Missing current briefing after missed scheduler tick');
+          const published = await fixture.read(current.id);
+          if (!published) throw new Error('Missing saved recovered briefing');
+          const reading = weather(published.parts);
+          expect(reading.date).toContain(`Dec ${day}`);
+          if (mode === 'wake') expect(reading.forecasts).toMatchObject([{ temperature: '4°C' }]);
+          expect(await fixture.completion()).toMatchObject({
+            taskId: current.id,
+            outcome: { kind: 'delivered', messageId: published.id },
+          });
+          observations.push({
+            day: localDate(day),
+            mode,
+            taskId: current.id,
+            messageId: published.id,
+            ...reading,
+          });
+        }
         const all = occurrences(await fixture.taskRows());
-        expect(all).toHaveLength(10);
+        expect(all).toHaveLength(12);
         const first = all.find((task) => task.externalEventId?.includes(localDate(1)));
         if (!first) throw new Error('Missing original briefing');
         // The date guard does not discard a receipt committed on the intended day.
