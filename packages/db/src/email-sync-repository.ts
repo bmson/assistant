@@ -25,6 +25,9 @@ import {
   isValidEmailContentProvenanceSnapshot,
   isValidEmailObserverPreparedResult,
   notificationDashboardMessageId,
+  parseSignal,
+  planDeliveryAdmission,
+  prepareDeliverySignal,
   safeEmailObserverErrorCode,
   sameEmailObserverPreparedResult,
 } from '@assistant/persistence';
@@ -48,6 +51,7 @@ import {
   gmailSyncState,
   messages,
   notificationOutbox,
+  signals,
   suggestions,
   tasks,
 } from './schema.js';
@@ -2258,6 +2262,7 @@ export function createPostgresEmailSyncRepository(
         const [existingMessage] = await txDb
           .select({
             id: messages.id,
+            text: messages.text,
             conversationId: messages.conversationId,
             owner: conversations.agentId,
           })
@@ -2283,6 +2288,7 @@ export function createPostgresEmailSyncRepository(
           throw new Error('Email source exists in both canonical body stores');
         let messageId: string | null = null;
         let sourceId: string;
+        let sourceText: string;
         const sourceKind = input.source.kind;
         if (sourceKind === 'message') {
           if (existingAutomated)
@@ -2303,7 +2309,9 @@ export function createPostgresEmailSyncRepository(
             )
               throw new Error('Email source cannot move between owners or conversations');
             messageId = existingMessage.id;
+            sourceText = existingMessage.text;
           } else {
+            sourceText = input.source.message.text ?? '';
             const [created] = await txDb
               .insert(messages)
               .values({
@@ -2326,6 +2334,7 @@ export function createPostgresEmailSyncRepository(
               const [winner] = await txDb
                 .select({
                   id: messages.id,
+                  text: messages.text,
                   conversationId: messages.conversationId,
                   owner: conversations.agentId,
                 })
@@ -2342,11 +2351,13 @@ export function createPostgresEmailSyncRepository(
                   'Concurrent email message admission has a mismatched owner or conversation',
                 );
               messageId = winner.id;
+              sourceText = winner.text;
             }
           }
           sourceId = messageId;
         } else {
           if (existingMessage) throw new Error('Email source already exists as a visible message');
+          sourceText = input.source.body;
           const id = emailObserverSourceId(input.agentId, channelMessageId);
           if (existingAutomated) {
             if (
@@ -2371,6 +2382,32 @@ export function createPostgresEmailSyncRepository(
               })
               .returning({ id: emailObserverSources.id });
             sourceId = created!.id;
+          }
+        }
+        const delivery = prepareDeliverySignal(ingest, sourceText, sourceId);
+        if (delivery) {
+          const history = await txDb
+            .select({ record: signals.record })
+            .from(signals)
+            .where(
+              and(
+                eq(signals.agentId, input.agentId),
+                eq(signals.kind, 'delivery'),
+                sql`${signals.record}->>'shipmentIdentity' = ${delivery.shipmentIdentity}`,
+              ),
+            );
+          const change = planDeliveryAdmission(
+            delivery,
+            history.map(({ record }) => parseSignal(record)),
+          );
+          if (change) {
+            await txDb.insert(signals).values({ ...change.next, record: change.next });
+            if (change.close) {
+              await txDb
+                .update(signals)
+                .set({ record: change.close })
+                .where(and(eq(signals.agentId, input.agentId), eq(signals.id, change.close.id)));
+            }
           }
         }
         const observerIds: string[] = [];

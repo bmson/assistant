@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto';
-import { z } from 'zod';
 import { ExactTimestamp, parseExactTimestamp } from './exact-timestamp.js';
 import {
   parseGoogleCalendarConnection,
@@ -15,33 +14,11 @@ import {
 import { parseOwnerCorrection } from './owner-memory-correction.js';
 import { parseContactIdentityAuthority } from './profile-contact-identity.js';
 import { savedPlaceRecord } from './saved-places.js';
+import { isDeliveryReplacement, parseSignal } from './signals.js';
 import { toolCallReceiptKeyId } from './tool-call-receipts.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const FINGERPRINT = /^[a-f0-9]{64}$/;
-
-const signalId = z.string().regex(FINGERPRINT);
-const signalInstant = z.string().datetime({ precision: 3 });
-const portableSignalFields = z
-  .object({
-    version: z.literal(1),
-    id: signalId,
-    agentId: z.string().uuid(),
-    subjectPersonIds: z.array(z.string().refine((id) => Boolean(id.trim()))).min(1),
-    sourceRefs: z.tuple([z.object({ kind: z.literal('email'), id: z.string().min(1) }).strict()]),
-    billIdentity: signalId,
-    amountMinor: z.number().int().nonnegative(),
-    currency: z.literal('USD'),
-    at: signalInstant,
-    validFrom: signalInstant,
-    validTo: signalInstant.nullable(),
-    supersededBy: signalId.nullable(),
-  })
-  .strict();
-const portableSignalSchema = z.discriminatedUnion('kind', [
-  portableSignalFields.extend({ kind: z.literal('bill'), dueDate: z.iso.date() }),
-  portableSignalFields.extend({ kind: z.literal('payment'), dueDate: z.null() }),
-]);
 
 function decodedData(record: MigrationRecord): Record<string, unknown> {
   return Object.fromEntries(
@@ -51,22 +28,15 @@ function decodedData(record: MigrationRecord): Record<string, unknown> {
 /** SQL keeps query fields alongside the canonical JSON. Firestore uses the JSON itself. */
 export function portableSignal(record: MigrationRecord) {
   const data = decodedData(record);
-  const signal = portableSignalSchema.parse(data.record);
-  const expectedId = createHash('sha256')
-    .update(JSON.stringify([signal.agentId, signal.kind, signal.billIdentity]))
-    .digest('hex');
+  const signal = parseSignal(data.record);
   if (
+    !UUID.test(signal.agentId) ||
     signal.id !== record.id ||
     signal.id !== data.id ||
-    signal.id !== expectedId ||
     signal.agentId !== data.agentId ||
     signal.kind !== data.kind ||
     signal.at !== data.at ||
-    JSON.stringify(signal.subjectPersonIds) !== JSON.stringify(data.subjectPersonIds) ||
-    JSON.stringify(signal.subjectPersonIds) !==
-      JSON.stringify([...new Set(signal.subjectPersonIds)].sort()) ||
-    (signal.validTo === null) !== (signal.supersededBy === null) ||
-    (signal.kind === 'payment' && signal.supersededBy !== null)
+    JSON.stringify(signal.subjectPersonIds) !== JSON.stringify(data.subjectPersonIds)
   )
     throw new Error('Invalid signal migration identity or projection');
   return signal;
@@ -1133,17 +1103,24 @@ export function validateMigrationReferences(
       const signal = portableSignal(record);
       if (signal.supersededBy) {
         const target = linked('signals', signal.supersededBy);
-        const payment = target && portableSignal(target);
-        if (
-          payment?.kind !== 'payment' ||
-          payment.agentId !== signal.agentId ||
-          payment.billIdentity !== signal.billIdentity ||
-          payment.amountMinor !== signal.amountMinor ||
-          payment.validFrom !== signal.validTo ||
-          payment.validFrom <= signal.validFrom ||
-          JSON.stringify(payment.subjectPersonIds) !== JSON.stringify(signal.subjectPersonIds)
-        )
-          throw new Error('Invalid signal migration supersession');
+        const next = target && portableSignal(target);
+        const valid =
+          next?.validFrom === signal.validTo &&
+          (signal.kind === 'delivery'
+            ? next?.kind === 'delivery' && isDeliveryReplacement(signal, next)
+            : next?.kind === 'payment' &&
+              next.agentId === signal.agentId &&
+              next.billIdentity === signal.billIdentity &&
+              next.amountMinor === signal.amountMinor &&
+              next.validFrom > signal.validFrom &&
+              JSON.stringify(next.subjectPersonIds) === JSON.stringify(signal.subjectPersonIds));
+        if (!valid) throw new Error('Invalid signal migration supersession');
+      }
+      if (signal.kind === 'delivery' && signal.replaces !== null) {
+        const predecessor = linked('signals', signal.replaces);
+        const prior = predecessor && portableSignal(predecessor);
+        if (prior?.kind !== 'delivery' || prior.supersededBy !== signal.id)
+          throw new Error('Invalid delivery migration predecessor');
       }
     }
     if (record.table === 'contacts') parseContactIdentityAuthority(record.data.identityAuthority);

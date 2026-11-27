@@ -1,4 +1,5 @@
 import {
+  parseSignal,
   planSignalWrite,
   prepareBillSignal,
   type Records,
@@ -16,9 +17,8 @@ import {
 import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from './store.js';
 
 function readSignal(snapshot: DocumentSnapshot, agentId: string): Signal | null {
-  if (!snapshot.exists) return null;
-  const record = decodeRecord<Signal>(snapshot.data());
-  if (record.agentId !== agentId) return null;
+  if (!snapshot.exists || snapshot.get('agentId') !== agentId) return null;
+  const record = parseSignal(decodeRecord(snapshot.data()));
   if (documentKey(record.id) !== snapshot.id) throw new Error('Signal identity mismatch');
   return record;
 }

@@ -113,7 +113,7 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | D6  | Occasions and gifts                                                    | 3     | M    | C5, D1     | open                                                          |
 | D7  | Money: bills, renewals, unusual charges                                | 3     | M    | C2, C3     | in progress (owner-local bill timing and payment evidence)    |
 | D8  | School: early dismissal, closures, breaks, forms                       | 3     | M    | C6, C7     | open                                                          |
-| D9  | Home and car: deliveries, maintenance                                  | 3     | S    | C2         | open                                                          |
+| D9  | Home and car: deliveries, maintenance                                  | 3     | S    | C2         | delivery admission in review                                  |
 | D10 | Weekly reconnect suggestions                                           | 4     | S    | C8         | open                                                          |
 | D11 | Personal news digest                                                   | 4     | M    | B7         | open                                                          |
 | D12 | Sleep-aware delivery                                                   | 4     | M    | B8         | open                                                          |
@@ -135,7 +135,7 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | F5  | Follow-up context and spoken register                                  | 5     | M    | A15        | open                                                          |
 | F6  | Model evaluation for proactive jobs                                    | 4     | M    | H1         | open                                                          |
 | F7  | Relative dates in every calendar and mail path                         | 2     | S    | —          | in review (spelled day and week intervals)                    |
-| G1  | Sensitive-topic filter                                                 | 4     | M    | —          | booking lookup and routine briefing privacy implemented             |
+| G1  | Sensitive-topic filter                                                 | 4     | M    | —          | booking lookup and routine briefing privacy implemented       |
 | G2  | Health data minimization                                               | 4     | M    | —          | open                                                          |
 | G3  | Permissions live in policy, not memory                                 | 5     | S    | —          | open                                                          |
 | G4  | Household consent and visibility                                       | 5     | S    | B2         | open                                                          |

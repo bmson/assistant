@@ -1,9 +1,13 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
+  type DeliverySignal,
+  deliveryDayKey,
+  deliverySignalId,
   INSTALLATION_RUNTIME_EXCLUSIONS_V2,
   idempotencyIdentityDigest,
   MIGRATION_TABLES,
   modelToolCallIdentityDigest,
+  portableSignal,
   toolCallReceiptKeyId,
 } from '@assistant/persistence';
 import postgres from 'postgres';
@@ -215,6 +219,27 @@ describe.skipIf(!enabled)('PostgreSQL workspace migration export', () => {
       await client`insert into memory_embedding_refreshes (id, agent_id, memory_id, source_hash, target_space_key, target_dimensions, status, prepared_vector) values (${ids.refreshReceipt}, ${owner.id}, ${ids.memory}, ${`a`.repeat(64)}, ${`b`.repeat(64)}, 1536, 'prepared', ${preparedVector}::vector)`;
       await client`insert into occasion_import_lineage (source, occasion_id) values (${ids.importSource}, ${ids.occasion})`;
       await client`insert into execution_job_callback_receipts (idempotency_key, task_id, token_hash, payload_digest, queue_generation) values (${ids.callbackReceipt}, ${ids.task}, repeat('a', 64), repeat('b', 64), 2)`;
+      const delivery: DeliverySignal = {
+        version: 1,
+        id: '',
+        agentId: owner.id,
+        kind: 'delivery',
+        subjectPersonIds: [owner.id],
+        shipmentIdentity: '2'.repeat(64),
+        previousDeliveryDate: '2026-11-21',
+        deliveryDate: '2026-11-22',
+        carrier: 'Synthetic Carrier',
+        signatureRequired: false,
+        at: deliveryDayKey('2026-11-22'),
+        validFrom: '2026-11-19T12:00:00.000Z',
+        validTo: null,
+        supersededBy: null,
+        replaces: null,
+        sourceRefs: [{ kind: 'email', id: ids.message }],
+      };
+      delivery.id = deliverySignalId(delivery);
+      await client`insert into signals (id, agent_id, kind, at, subject_person_ids, record)
+        values (${delivery.id}, ${owner.id}, 'delivery', ${delivery.at}, ARRAY[${owner.id}::text], ${JSON.stringify(delivery)}::jsonb)`;
       const complete = await exportWorkspaceSnapshot({
         databaseUrl: isolatedUrl,
         agentId: owner.id,
@@ -230,6 +255,9 @@ describe.skipIf(!enabled)('PostgreSQL workspace migration export', () => {
           revision: '1',
         },
       });
+      const exportedDelivery = complete.records.find(({ id }) => id === delivery.id);
+      if (!exportedDelivery) throw new Error('Missing exported delivery signal');
+      expect(portableSignal(exportedDelivery)).toEqual(delivery);
       await client`insert into estimated_cost_baselines (installation_id, owner_id, digest, rows) values ('test', ${owner.id}, 'digest', '[]'::jsonb)`;
       await expect(
         exportWorkspaceSnapshot({

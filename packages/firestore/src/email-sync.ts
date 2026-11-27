@@ -36,6 +36,9 @@ import {
   isValidEmailContentProvenanceSnapshot,
   isValidEmailObserverPreparedResult,
   notificationDashboardMessageId,
+  parseSignal,
+  planDeliveryAdmission,
+  prepareDeliverySignal,
   safeEmailObserverErrorCode,
   sameEmailObserverPreparedResult,
   securityIncidentId,
@@ -1529,7 +1532,8 @@ export class FirestoreEmailSyncRepository implements EmailSyncRepository {
       if (channel.exists && automated.exists)
         throw new Error('Email source exists in both canonical body stores');
       let messageId: string | null = null;
-      let sourceId: string;
+      let canonicalText =
+        input.source.kind === 'message' ? (input.source.message.text ?? '') : input.source.body;
       let sourceKind: 'message' | 'automated_source';
       let conversationRef: FirebaseFirestore.DocumentReference | null = null;
       let conversationSnapshot: FirebaseFirestore.DocumentSnapshot | null = null;
@@ -1555,6 +1559,8 @@ export class FirestoreEmailSyncRepository implements EmailSyncRepository {
           )
             throw new Error('Existing email source message is missing or mismatched');
           messageId = existingId;
+          const text = existingMessage.get('text');
+          canonicalText = typeof text === 'string' ? text : '';
         }
       } else {
         if (channel.exists) throw new Error('Email source already exists as a visible message');
@@ -1577,10 +1583,41 @@ export class FirestoreEmailSyncRepository implements EmailSyncRepository {
       const existingWork = workRefs.length ? await tx.getAll(...workRefs) : [];
       if (existingWork.some((row) => row.exists))
         throw new Error('Email observer work existed before its atomic admission');
+      const sourceId =
+        sourceKind === 'message'
+          ? (messageId ?? randomUUID())
+          : emailObserverSourceId(input.agentId, channelMessageId);
+      const delivery = prepareDeliverySignal(stored, canonicalText, sourceId);
+      if (delivery) {
+        const history = await tx.get(
+          this.store
+            .collection('signals')
+            .where('shipmentIdentity', '==', delivery.shipmentIdentity),
+        );
+        const change = planDeliveryAdmission(
+          delivery,
+          history.docs.map((doc) => {
+            const signal = parseSignal(decodeRecord(doc.data()));
+            if (documentKey(signal.id) !== doc.id) throw new Error('Signal identity mismatch');
+            return signal;
+          }),
+        );
+        if (change) {
+          tx.create(this.store.doc('signals', change.next.id), encodeRecord(change.next));
+          if (change.close)
+            tx.update(
+              this.store.doc('signals', change.close.id),
+              encodeRecord({
+                validTo: change.close.validTo,
+                supersededBy: change.close.supersededBy,
+              }),
+            );
+        }
+      }
       const now = this.store.now();
       if (input.source.kind === 'message') {
         if (!messageId) {
-          messageId = randomUUID();
+          messageId = sourceId;
           const messageRef = this.store.doc('messages', messageId);
           tx.create(
             messageRef,
@@ -1607,9 +1644,8 @@ export class FirestoreEmailSyncRepository implements EmailSyncRepository {
           );
           tx.update(conversationRef!, encodeRecord({ updatedAt: now }));
         }
-        sourceId = messageId;
       } else {
-        const automatedId = emailObserverSourceId(input.agentId, channelMessageId);
+        const automatedId = sourceId;
         if (!automated.exists) {
           const sourceRow: Records['emailObserverSources'] = {
             id: automatedId,
@@ -1623,7 +1659,6 @@ export class FirestoreEmailSyncRepository implements EmailSyncRepository {
           };
           tx.create(automatedRef, encodeRecord(sourceRow));
         }
-        sourceId = automatedId;
       }
       const updatedIngest: Records['emailIngest'] = {
         ...stored,
