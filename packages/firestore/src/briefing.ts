@@ -6,13 +6,16 @@ import type {
 } from '@assistant/persistence';
 import {
   admittedBillEmailEvidence,
+  briefingDeliveryFromSource,
+  deliveryMorning,
   emailIngestReadable,
   practiceChangeFromMail,
 } from '@assistant/persistence';
-import type { QueryDocumentSnapshot } from '@google-cloud/firestore';
+import type { QueryDocumentSnapshot, Transaction } from '@google-cloud/firestore';
 import { readFirestoreEmailBillStatus } from './bill-email-evidence.js';
 import { FirestoreOccasionToolRepository } from './occasion-tools.js';
 import { FirestoreOwnerContextRepository } from './owner-context.js';
+import { createFirestoreSignalRepository } from './signals.js';
 import { decodeRecord, documentKey, type InstallationStore } from './store.js';
 
 const PAGE = 200;
@@ -36,11 +39,73 @@ function owned<T extends { id: string; agentId: string }>(
     : null;
 }
 
+/** Use the same ownership and body checks at discovery and inside publication. */
+export async function readFirestoreDeliveryText(
+  store: InstallationStore,
+  agentId: string,
+  ingest: Records['emailIngest'],
+  tx?: Transaction,
+): Promise<string | null> {
+  const { admittedSourceId: sourceId, admittedSourceKind: sourceKind } = ingest;
+  if (
+    ingest.agentId !== agentId ||
+    !sourceId ||
+    (sourceKind !== 'message' && sourceKind !== 'automated_source')
+  )
+    return null;
+  const sourceRef = store.doc(
+    sourceKind === 'message' ? 'messages' : 'emailObserverSources',
+    sourceId,
+  );
+  const source = await (tx ? tx.get(sourceRef) : sourceRef.get());
+  if (!source.exists || source.get('channelMessageId') !== ingest.channelMessageId) return null;
+  if (sourceKind === 'automated_source') {
+    const body = source.get('body');
+    return source.get('agentId') === agentId && typeof body === 'string' ? body : null;
+  }
+  const conversationId = source.get('conversationId');
+  const text = source.get('text');
+  if (typeof conversationId !== 'string' || typeof text !== 'string') return null;
+  const conversationRef = store.doc('conversations', conversationId);
+  const conversation = await (tx ? tx.get(conversationRef) : conversationRef.get());
+  return conversation.get('agentId') === agentId ? text : null;
+}
+
 /** The daily briefing's reads on Firestore: the same inputs as the PostgreSQL job. */
 export class FirestoreBriefingRepository implements BriefingRepository {
   readonly kind = 'briefing-repository' as const;
 
   constructor(readonly store: InstallationStore) {}
+
+  async deliveries(agentId: string, now: Date, timeZone: string) {
+    const morning = deliveryMorning(now, timeZone);
+    if (!morning) return [];
+    const signals = await createFirestoreSignalRepository(this.store).list({
+      agentId,
+      kind: 'delivery',
+      from: morning.from,
+      to: morning.to,
+      asOf: now,
+    });
+    const deliveries = await Promise.all(
+      signals.map(async (signal) => {
+        const rows = await this.store
+          .collection('emailIngest')
+          .where('agentId', '==', agentId)
+          .where('admittedSourceId', '==', signal.sourceRefs[0].id)
+          .limit(2)
+          .get();
+        const doc = rows.docs[0];
+        const row = rows.size === 1 && doc ? owned<Records['emailIngest']>(doc, agentId) : null;
+        if (!row) return null;
+        const text = await readFirestoreDeliveryText(this.store, agentId, row);
+        return text === null
+          ? null
+          : briefingDeliveryFromSource(signal, row, text, agentId, morning.date, now);
+      }),
+    );
+    return deliveries.filter((delivery) => delivery !== null);
+  }
 
   async inputs(
     agentId: string,

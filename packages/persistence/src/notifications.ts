@@ -1,3 +1,4 @@
+import type { BriefingDelivery } from './briefing-delivery.js';
 /**
  * The owner's Notifications chat: where background work without a chat of its
  * own reports. It is created on first use, and concurrent first uses converge
@@ -52,6 +53,7 @@ export interface OwnerNoticeDecisionFenceInput {
   suggestionSourceRefs: readonly string[];
   /** Missing rows are stale only for sources known to have an existing card. */
   requiredSuggestionSourceRefs: readonly string[];
+  deliveries?: readonly BriefingDelivery[];
   securityIncidents: readonly { incidentId: string; revision: number }[];
 }
 
@@ -60,5 +62,6 @@ export type OwnerNoticeDecisionFenceResult =
   | {
       status: 'stale';
       inactiveSuggestionSourceRefs: string[];
+      inactiveDeliveryKeys?: string[];
       inactiveSecurityIncidents: Array<{ incidentId: string; revision: number }>;
     };

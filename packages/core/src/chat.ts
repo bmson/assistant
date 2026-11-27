@@ -10,12 +10,16 @@ import {
   createPostgresMessageRepository,
   createPostgresNotificationsConversationRepository,
   type Db,
+  emailIngest,
+  emailObserverSources,
   lockPostgresPrivacyObservationFence,
   messages,
   postgresPrivacyObservationFence,
+  proactiveMoments,
   readPostgresSavedBriefing,
   securityIncidentAttention,
   securityIncidents,
+  signals,
   suggestions,
   tasks,
   toolCalls,
@@ -28,7 +32,12 @@ import type {
   OwnerNoticeDecisionFenceResult,
   OwnerNoticeRepository,
 } from '@assistant/persistence';
-import { briefingMessageKey } from '@assistant/persistence';
+import {
+  briefingDeliveryFromSource,
+  briefingMessageKey,
+  parseSignal,
+  sameBriefingDelivery,
+} from '@assistant/persistence';
 import {
   and,
   asc,
@@ -800,6 +809,78 @@ export async function postOwnerNoticeWithDecisionFence(
           inactiveSecurityIncidents.push(expected);
       }
     }
+    // The owner lock above serializes these checks with mail admission and other briefings.
+    const inactiveDeliveryKeys: string[] = [];
+    for (const delivery of input.deliveries ?? []) {
+      const [[signal], [source], [alreadyDelivered]] = await Promise.all([
+        tx
+          .select({ record: signals.record })
+          .from(signals)
+          .where(and(eq(signals.agentId, input.agentId), eq(signals.id, delivery.signalId))),
+        tx
+          .select()
+          .from(emailIngest)
+          .where(
+            and(eq(emailIngest.agentId, input.agentId), eq(emailIngest.id, delivery.ingestId)),
+          ),
+        tx
+          .select({ id: proactiveMoments.id })
+          .from(proactiveMoments)
+          .where(
+            and(
+              eq(proactiveMoments.agentId, input.agentId),
+              eq(proactiveMoments.momentKey, delivery.momentKey),
+            ),
+          ),
+      ]);
+      const currentSignal = signal ? parseSignal(signal.record) : null;
+      if (alreadyDelivered || !currentSignal || !source) {
+        inactiveDeliveryKeys.push(delivery.momentKey);
+        continue;
+      }
+      const sourceId = currentSignal.sourceRefs[0].id;
+      // A withdrawn canonical message must not publish from residual ingest metadata.
+      const [canonical] =
+        source.admittedSourceKind === 'message'
+          ? await tx
+              .select({ text: messages.text })
+              .from(messages)
+              .innerJoin(conversations, eq(messages.conversationId, conversations.id))
+              .where(
+                and(
+                  eq(messages.id, sourceId),
+                  eq(messages.channelMessageId, source.channelMessageId),
+                  eq(conversations.agentId, input.agentId),
+                ),
+              )
+              .for('share')
+          : await tx
+              .select({ text: emailObserverSources.body })
+              .from(emailObserverSources)
+              .where(
+                and(
+                  eq(emailObserverSources.id, sourceId),
+                  eq(emailObserverSources.agentId, input.agentId),
+                  eq(emailObserverSources.channelMessageId, source.channelMessageId),
+                ),
+              )
+              .for('share');
+      if (
+        !canonical ||
+        !sameBriefingDelivery(
+          briefingDeliveryFromSource(
+            currentSignal,
+            source,
+            canonical.text,
+            input.agentId,
+            delivery.deliveryDate,
+            input.now,
+          ),
+          delivery,
+        )
+      )
+        inactiveDeliveryKeys.push(delivery.momentKey);
+    }
     const publicationNow = new Date();
     for (const row of pendingSuggestionWindows) {
       if (
@@ -808,11 +889,16 @@ export async function postOwnerNoticeWithDecisionFence(
       )
         inactiveSuggestionSourceRefs.push(row.sourceRef);
     }
-    if (inactiveSuggestionSourceRefs.length || inactiveSecurityIncidents.length)
+    if (
+      inactiveSuggestionSourceRefs.length ||
+      inactiveSecurityIncidents.length ||
+      inactiveDeliveryKeys.length
+    )
       return {
         status: 'stale',
         inactiveSuggestionSourceRefs,
         inactiveSecurityIncidents,
+        ...(inactiveDeliveryKeys.length ? { inactiveDeliveryKeys } : {}),
       } as const;
 
     const txDb = tx as unknown as Db;
@@ -845,6 +931,18 @@ export async function postOwnerNoticeWithDecisionFence(
         )
         .returning({ id: securityIncidentAttention.id });
       if (!accepted.length) throw new Error('Claimed briefing attention receipt changed');
+    }
+    if (input.deliveries?.length) {
+      await tx.insert(proactiveMoments).values(
+        input.deliveries.map(({ momentKey }) => ({
+          agentId: input.agentId,
+          kind: 'delivery-today',
+          momentKey,
+          summary: 'Delivery expected today',
+          pinged: false,
+          deliveredAt: input.now,
+        })),
+      );
     }
     if (!message) throw new Error('Briefing publication could not be verified');
     return { status: 'posted', conversationId, messageId: message.id } as const;

@@ -1,20 +1,28 @@
 import { randomUUID } from 'node:crypto';
 import { loadConfig } from '@assistant/config';
 import { runBriefing } from '@assistant/core';
+import { runScheduleBatch } from '@assistant/core/workflow/schedules';
 import {
   agents,
   conversations,
   createPostgresEmailSyncRepository,
   createPostgresExecutionPersistence,
+  createPostgresScheduleRepository,
+  createPostgresSignalRepository,
   type Db,
   emailIngest,
   messages,
   proactiveMoments,
 } from '@assistant/db';
-import { createFirestoreExecutionPersistence } from '@assistant/firestore';
+import {
+  createFirestoreExecutionPersistence,
+  createFirestoreSignalRepository,
+  FirestoreScheduleRepository,
+} from '@assistant/firestore';
 import {
   admittedBillEmailEvidence,
   type BriefingRunOutcome,
+  DAILY_BRIEFING,
   type ExecutionPersistence,
   emailIngestReadable,
   notificationLeg,
@@ -1054,23 +1062,56 @@ describe('frozen proactive replay', () => {
             latestMessageId: updatedMail.providerMessageId,
             latestReceivedAt: replacementReceivedAt,
           });
-          const sweepDeliveryMorning = (tick: string, sourceMomentKey: string | null) =>
-            observe(deliveryId, tick, replacementReceivedAt, sourceMomentKey, () =>
-              runBriefing(
-                {
-                  db,
-                  ...(driver === 'firestore' ? { persistence } : {}),
-                  router: {
-                    object: async () => ({
-                      ok: true,
-                      object: { lead: "Here's your morning update." },
-                    }),
-                  } as unknown as Parameters<typeof runBriefing>[0]['router'],
-                  notifyOwner,
-                },
-                { agentId, now: clock },
-              ),
+          const deliverySignals = store
+            ? createFirestoreSignalRepository(store)
+            : createPostgresSignalRepository(db);
+          const readActiveDelivery = async (asOf: Date) => {
+            const rows = await deliverySignals.list({ agentId, kind: 'delivery', asOf });
+            expect(rows).toHaveLength(1);
+            const signal = rows[0];
+            if (signal?.kind !== 'delivery') throw new Error('Expected one active delivery');
+            return signal;
+          };
+          const initialSignal = await readActiveDelivery(originalMail.providerReceivedAt);
+          const revisedSignal = await readActiveDelivery(replacementReceivedAt);
+          expect(initialSignal).toMatchObject({
+            deliveryDate: deliveryMail.original.date,
+            carrier: null,
+            sourceRefs: [{ kind: 'email', id: originalMail.admittedSourceId }],
+          });
+          expect(revisedSignal).toMatchObject({
+            deliveryDate: deliveryMail.replacement.date,
+            carrier: null,
+            replaces: initialSignal.id,
+            sourceRefs: [{ kind: 'email', id: updatedMail.admittedSourceId }],
+          });
+          expect(await deliverySignals.get(agentId, initialSignal.id)).toMatchObject({
+            supersededBy: revisedSignal.id,
+            validTo: replacementReceivedAt.toISOString(),
+          });
+
+          const deliveryBriefing = (options: { taskId?: string; trigger?: unknown } = {}) =>
+            runBriefing(
+              {
+                db,
+                ...(driver === 'firestore' ? { persistence } : {}),
+                router: forbidden('delivery-only briefing model calls'),
+                notifyOwner,
+              },
+              { agentId, now: clock, ...options },
             );
+          const sweepDeliveryMorning = (tick: string, sourceMomentKey: string | null) =>
+            observe(deliveryId, tick, replacementReceivedAt, sourceMomentKey, async () => {
+              if (!sourceMomentKey) return deliveryBriefing();
+              const reports = await Promise.all([deliveryBriefing(), deliveryBriefing()]);
+              const winner = reports.find(({ outcome }) => outcome?.kind === 'delivered');
+              expect(reports.map(({ outcome }) => outcome?.kind).sort()).toEqual([
+                'delivered',
+                'quiet',
+              ]);
+              if (!winner) throw new Error('No briefing published the delivery');
+              return winner;
+            });
           clock = new Date(deliveryMail.original.sweepAt);
           const originalSweepAt = clock.toISOString();
           const originalSweep = await sweepDeliveryMorning('original delivery date morning', null);
@@ -1091,8 +1132,8 @@ describe('frozen proactive replay', () => {
           expect(ownerLocalTime.format(new Date(revisedSweepAt))).toBe(
             `${deliveryMail.replacement.date} 08:05`,
           );
-          for (const sweep of [originalSweep, revisedSweep])
-            expect(['quiet', 'delivered']).toContain(sweep.outcome?.kind);
+          expect(originalSweep.outcome).toEqual({ kind: 'quiet' });
+          expect(revisedSweep.outcome).toMatchObject({ kind: 'delivered' });
           const deliveryFacts = {
             originalReceivedAt: originalMail.providerReceivedAt.toISOString(),
             replacementReceivedAt: replacementReceivedAt.toISOString(),
@@ -1107,10 +1148,102 @@ describe('frozen proactive replay', () => {
           };
           expect(deliveryFacts).toEqual(replayCases.delivery.facts);
           evidence[deliveryId] = deliveryFacts;
+          const deliveryMoments = async () =>
+            (await readLedger()).filter(({ kind }) => kind === 'delivery-today');
+          const [revisedMoment] = await deliveryMoments();
+          expect(revisedMoment).toMatchObject({
+            momentKey: `delivery-today:${updatedMail.channelMessageId}`,
+            deliveredAt: new Date(revisedSweepAt),
+            pinged: false,
+          });
+          const noticesAfterRevisedDate = await countOwnerNotices();
+          const pushesAfterRevisedDate = notifyOwner.mock.calls.length;
+          expect((await deliveryBriefing()).outcome).toEqual({ kind: 'quiet' });
+          expect(await deliveryMoments()).toEqual([revisedMoment]);
+
+          // Keep these additional product controls outside the frozen S08 score.
+          const reschedule = (from: string, to: string, receivedAt: string) =>
+            admitDeliveryMail({
+              ...deliveryMail.replacement,
+              date: to,
+              receivedAt,
+              body: deliveryMail.replacement.body
+                .replace(`moved from ${deliveryMail.original.date}`, `moved from ${from}`)
+                .replace(`date is ${deliveryMail.replacement.date}`, `date is ${to}`),
+            });
+          await reschedule(deliveryMail.replacement.date, '2026-12-11', '2026-12-10T16:06:00.000Z');
+          await reschedule('2026-12-11', '2026-12-12', '2026-12-10T16:07:00.000Z');
+          clock = new Date('2026-12-11T16:05:00.000Z');
+          expect((await deliveryBriefing()).outcome).toEqual({ kind: 'quiet' });
+          expect(await countOwnerNotices()).toBe(noticesAfterRevisedDate);
+
+          clock = new Date('2026-12-12T15:45:00.000Z');
+          expect(ownerLocalTime.format(clock)).toBe('2026-12-12 07:45');
+          const scheduler = store
+            ? new FirestoreScheduleRepository(store)
+            : createPostgresScheduleRepository(db);
+          await scheduler.ensure({
+            agentId,
+            name: DAILY_BRIEFING,
+            enabled: true,
+            cron: '45 7 * * *',
+            nextRunAt: clock,
+            taskTemplate: { type: 'scheduled', job: 'briefing.compose' },
+          });
+          const [occurrence] = await runScheduleBatch(scheduler, owner.timezone, { now: clock });
+          if (!occurrence) throw new Error('The default 07:45 briefing was not scheduled');
+          const scheduledTask = await persistence.tasks.getTask(occurrence.taskId);
+          if (!scheduledTask) throw new Error('Missing scheduled briefing task');
+          const invocation = { taskId: scheduledTask.id, trigger: scheduledTask.trigger };
+          const scheduledBriefing = await deliveryBriefing(invocation);
+          expect(scheduledBriefing.outcome).toMatchObject({ kind: 'delivered' });
+          expect((await deliveryBriefing(invocation)).outcome).toEqual(scheduledBriefing.outcome);
+          expect(await countOwnerNotices()).toBe(noticesAfterRevisedDate + 1);
+          expect(await deliveryMoments()).toHaveLength(2);
+
+          const withdrawn = await reschedule(
+            '2026-12-12',
+            '2026-12-13',
+            '2026-12-12T15:46:00.000Z',
+          );
+          const sourceId = withdrawn.admittedSourceId;
+          if (!sourceId) throw new Error('Missing withdrawal source');
+          clock = new Date('2026-12-13T16:05:00.000Z');
+          expect((await readActiveDelivery(clock)).sourceRefs[0].id).toBe(sourceId);
+          // The source disappears after discovery but before the publication transaction.
+          let withdrawal: { mockRestore(): void };
+          if (store) {
+            const firestore = store;
+            const notices = persistence.ownerNotices;
+            if (!notices?.postWithDecisionFence) throw new Error('Missing notice fence');
+            const post = notices.postWithDecisionFence.bind(notices);
+            withdrawal = vi
+              .spyOn(notices, 'postWithDecisionFence')
+              .mockImplementationOnce(async (input) => {
+                expect(input.deliveries).toHaveLength(1);
+                await firestore.doc('messages', sourceId).delete();
+                return post(input);
+              });
+          } else {
+            const transact = db.transaction.bind(db);
+            const withdrawThenPublish: typeof db.transaction = async (work, config) => {
+              await db.delete(messages).where(eq(messages.id, sourceId));
+              return transact(work, config);
+            };
+            withdrawal = vi.spyOn(db, 'transaction').mockImplementationOnce(withdrawThenPublish);
+          }
+          try {
+            expect((await deliveryBriefing()).outcome).toEqual({ kind: 'quiet' });
+            expect(withdrawal).toHaveBeenCalledTimes(1);
+          } finally {
+            withdrawal.mockRestore();
+          }
+          expect(await countOwnerNotices()).toBe(noticesAfterRevisedDate + 1);
+          expect(await deliveryMoments()).toHaveLength(2);
+          expect(notifyOwner).toHaveBeenCalledTimes(pushesAfterRevisedDate);
+
           const scored = scores();
-          expect(
-            scored.filter(({ passed, id }) => !passed && id !== billLeadCase && id !== deliveryId),
-          ).toEqual([]);
+          expect(scored.filter(({ passed, id }) => !passed && id !== billLeadCase)).toEqual([]);
           expect(scoreReplayKinds(scored.filter(({ id }) => id === cancellationId))).toMatchObject([
             {
               kind: 'calendar-cancelled',

@@ -1,5 +1,8 @@
+import type { BriefingDelivery } from './briefing-delivery.js';
 import type { OccasionToolRow } from './builtin-tools.js';
 import type { Records } from './records.js';
+
+export * from './briefing-delivery.js';
 
 export type BriefingBookingOccurrence = Pick<
   Records['emailBookingOccurrences'],
@@ -46,6 +49,7 @@ export interface BriefingInputs {
 /** The `briefing.compose` job's reads. Composing and posting stay in core. */
 export interface BriefingRepository {
   readonly kind: 'briefing-repository';
+  deliveries(agentId: string, now: Date, timeZone: string): Promise<BriefingDelivery[]>;
   inputs(
     agentId: string,
     window: {
