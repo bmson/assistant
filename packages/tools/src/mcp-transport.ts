@@ -30,7 +30,11 @@ export async function readMcpRpcResponse(
   response: Response,
   id: unknown,
   signal: AbortSignal,
-  options: { maxBytes?: number; onNotification?: (value: Record<string, unknown>) => void } = {},
+  options: {
+    maxBytes?: number;
+    onNotification?: (value: Record<string, unknown>) => void;
+    onBytesRead?: (count: number) => void;
+  } = {},
 ): Promise<McpRpcResponse> {
   const maxBytes = options.maxBytes ?? 300_000;
   if (Number(response.headers.get('content-length') ?? 0) > maxBytes)
@@ -76,6 +80,7 @@ export async function readMcpRpcResponse(
       const { done, value } = await Promise.race([reader.read(), abort]);
       if (value) {
         bytes += value.byteLength;
+        options.onBytesRead?.(value.byteLength);
         if (bytes > maxBytes) throw new Error('MCP response is too large.');
         buffer += decoder.decode(value, { stream: true });
       }
