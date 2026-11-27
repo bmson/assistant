@@ -31,7 +31,9 @@ import {
   createPostgresExecutionPersistence,
   createPostgresMcpOAuthRepository,
   createPostgresModelConnectionRepository,
+  createPostgresOccasionCorrectionRepository,
   createPostgresOccasionToolReadRepository,
+  createPostgresScheduleRepository,
   createPostgresSelfRepairRepository,
   type Db,
   tasks,
@@ -55,6 +57,7 @@ import {
   FirestoreModelConnectionRepository,
   FirestoreOccasionToolRepository,
   FirestoreOwnerNoticeRepository,
+  FirestoreProfileOccasionCommandRepository,
   FirestoreReminderRepository,
   FirestoreScheduleRepository,
   FirestoreSituationToolRepository,
@@ -111,11 +114,13 @@ import {
   registerPortableGoalTools,
   registerPortableGraphSnapshotTool,
   registerPortableMemoryTools,
+  registerPortableOccasionCorrectionTool,
   registerPortableOccasionTools,
   registerPortableOwnerNotifyTool,
   registerPortableReadResultTool,
   registerPortableTaskTools,
   registerPortableWebWorkspaceTools,
+  registerRecurringDigestTools,
   registerSelfRepairTools,
   registerSituationTools,
   registerSportsTools,
@@ -988,6 +993,10 @@ export function composeFirestoreAgent(config: Config): AgentDeps {
   if (persistence.selfRepair) registerSelfRepairTools(registry, persistence.selfRepair);
   const occasions = new FirestoreOccasionToolRepository(store, config.FIRESTORE_AGENT_ID);
   registerPortableOccasionTools(registry, occasions);
+  registerPortableOccasionCorrectionTool(
+    registry,
+    new FirestoreProfileOccasionCommandRepository(store, config.FIRESTORE_AGENT_ID),
+  );
   registerPortableBirthdayOccasionTool(registry, occasions);
   registerPortableContactLookupTool(
     registry,
@@ -1000,6 +1009,12 @@ export function composeFirestoreAgent(config: Config): AgentDeps {
       embeddingSpaceKey: embeddingSpaceIdentityKey(embeddingSpace),
     }),
     conversations,
+  });
+  registerRecurringDigestTools(registry, {
+    executionContext: persistence.executionContext,
+    executionEvidence: persistence.executionEvidence,
+    schedules: new FirestoreScheduleRepository(store),
+    getTimezone: ownerTimezone,
   });
   registerSituationTools(
     registry,
@@ -1167,6 +1182,17 @@ export function buildDeps(): AgentDeps {
     undefined,
     { oauth: agentMcpOAuth(config, () => createPostgresMcpOAuthRepository(db)) },
   );
+  registerRecurringDigestTools(registry, {
+    executionContext: persistence.executionContext,
+    executionEvidence: persistence.executionEvidence,
+    schedules: createPostgresScheduleRepository(db),
+    getTimezone: async (agentId) => {
+      const owner = await getAgent(db);
+      if (owner.id !== agentId) throw new Error('Digest schedule owner mismatch');
+      return owner.timezone;
+    },
+  });
+  registerPortableOccasionCorrectionTool(registry, createPostgresOccasionCorrectionRepository(db));
   registerConfiguredGitHubAppTools(registry, config, () => assertPostgresInstallationOwner(db));
   registerAuditTools(registry, createPostgresAuditInvestigationRepository(db));
   registerSelfRepairTools(registry, createPostgresSelfRepairRepository(db));

@@ -17,6 +17,8 @@ export const OwnerIntentScopeSchema = z.enum([
   'workspace_write',
   'personal_write',
   'watch_create',
+  'digest_schedule',
+  'digest_manage',
   'private_write',
   'memory_write',
   'feedback_write',
@@ -318,6 +320,7 @@ const RecallSourceSchema = z.object({
 });
 
 export const TaskStateSchema = z.object({
+  activityDiagnostics: z.array(z.object({ id: z.string(), text: z.string() })).optional(),
   /** Keep the original grant identity across every executor checkpoint. */
   estimatedCostApproval: z
     .object({

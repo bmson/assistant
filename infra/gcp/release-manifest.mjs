@@ -41,16 +41,41 @@ export function createManifest({
   };
 }
 
+function validRange(range) {
+  return (
+    Number.isSafeInteger(range?.min) &&
+    Number.isSafeInteger(range?.max) &&
+    range.min >= 0 &&
+    range.min <= range.max
+  );
+}
+
 export function validateManifest(
   manifest,
   { liveAgentApi, liveAgentSchemaMin, liveAgentSchemaMax } = {},
 ) {
-  if (manifest?.format !== 1 || !Array.isArray(manifest.selected))
+  if (
+    manifest?.format !== 1 ||
+    !Array.isArray(manifest.selected) ||
+    !manifest.selected.length ||
+    !['postgres', 'firestore'].includes(manifest.storageDriver) ||
+    !Number.isSafeInteger(manifest.schemaVersion) ||
+    manifest.schemaVersion < 0
+  )
     throw new Error('unsupported release manifest');
   for (const name of manifest.selected) {
     const component = manifest.components?.[name];
     if (!component || !/^sha256:[a-f0-9]{64}$/.test(component.digest ?? ''))
       throw new Error(`component ${name} lacks an immutable digest`);
+    if (!validRange(component.schema))
+      throw new Error(`${name} lacks a declared ${manifest.storageDriver} schema range`);
+    if (
+      (name === 'agent' || name === 'web') &&
+      (!Number.isSafeInteger(component.apiContract) ||
+        component.apiContract < 1 ||
+        !validRange(component.peerApi))
+    )
+      throw new Error(`${name} lacks a declared service API contract or peer range`);
     if (
       manifest.schemaVersion < component.schema.min ||
       manifest.schemaVersion > component.schema.max

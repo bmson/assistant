@@ -34,6 +34,7 @@ import {
 import { getQueueNotifier } from '@assistant/core/queue';
 import { isSituationRequest } from '@assistant/core/situations-schema';
 import { buildAutonomyGrant } from '@assistant/core/workflow/autonomy';
+import { bookingDisclosureForRead } from '@assistant/core/workflow/booking-disclosure';
 import {
   CONVERSATION_REASONING_DIRECTIVE,
   explicitlyOptsOutOfRecall,
@@ -1333,6 +1334,9 @@ export async function handleChatTurn(
   } else if (
     autonomousRequested ||
     forceRequested ||
+    (conversationalIntent.separation !== 'unknown' &&
+      bookingDisclosureForRead(conversationalIntent.ownerAuthoredText, activeReadIntent) !==
+        undefined) ||
     isSituationRequest(userText) ||
     looksLikeActionRequest(
       userText,
@@ -1340,8 +1344,9 @@ export async function handleChatTurn(
       modelHistory.slice(0, -1).filter((message) => !noticeRows.has(message.id)),
     )
   ) {
-    // A free-range request must run through the executor (which honors the grant
-    // and its floor) — never the tool-less streaming path.
+    // Booking reads use the executor's request-scoped disclosure before any
+    // model sees prior context. Free-range requests also need the executor,
+    // which honors their grant and its floor.
     needsAction = true;
     ruledOnAction = true;
   } else {

@@ -5,6 +5,22 @@ export type GoogleCalendarOAuthConfig = {
   clientSecret: string;
   callbackUrl: string;
 };
+export function googleHouseholdExtendedPurposesReady(
+  config: Pick<
+    Config,
+    | 'GOOGLE_HOUSEHOLD_EXTENDED_PURPOSES_ENABLED'
+    | 'GOOGLE_HOUSEHOLD_EXTENDED_PURPOSES_COMPATIBILITY_CONFIRMED'
+  >,
+  mode = process.env.NODE_ENV,
+): boolean {
+  return (
+    config.GOOGLE_HOUSEHOLD_EXTENDED_PURPOSES_ENABLED &&
+    (mode === 'development' ||
+      mode === 'test' ||
+      (mode === 'production' && config.GOOGLE_HOUSEHOLD_EXTENDED_PURPOSES_COMPATIBILITY_CONFIRMED))
+  );
+}
+
 export function googleCalendarOAuthConfig(
   config: Pick<
     Config,

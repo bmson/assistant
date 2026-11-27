@@ -1,3 +1,4 @@
+import { DAILY_BRIEFING } from './briefing.js';
 import type { GoalSessionState } from './goals.js';
 import type { Records } from './records.js';
 import { reminderScheduleTemplate } from './reminders.js';
@@ -23,7 +24,7 @@ export interface ScheduleOccurrence {
   goalGuard?: GoalOccurrenceGuard;
   now: Date;
   /** Early wake briefs must supply an unchanged snapshot just like ordinary firings. */
-  mode: 'due' | 'early';
+  mode: 'due' | 'early' | 'rebase-missed-briefing';
   nextRunAt: Date | null;
   enabled: boolean;
   /** Null advances a skipped/disabled job without creating work. */
@@ -54,6 +55,57 @@ export interface ScheduleRepository {
   commitOccurrence(input: ScheduleOccurrence): Promise<ScheduleCommitResult | null>;
 }
 
+export type DigestChange = {
+  agentId: string;
+  scheduleId: string;
+  now: Date;
+} & ({ action: 'move'; fromChat: string; toChat: string } | { action: 'cancel' | 'delete' });
+
+export interface DigestScheduleRepository extends ScheduleRepository {
+  changeDigest(input: DigestChange): Promise<ScheduleRecord | null>;
+}
+
+export function digestLifecycle(row: ScheduleRecord): 'cancelled' | 'deleted' | null {
+  if (!row.name.startsWith('digest:')) return null;
+  const status = (row.taskTemplate as { digestLifecycle?: unknown } | null)?.digestLifecycle;
+  return status === 'cancelled' || status === 'deleted' ? status : null;
+}
+
+/** Apply an owner-scoped digest change to the snapshot read under the adapter's schedule lock. */
+export function digestSchedulePatch(
+  row: ScheduleRecord,
+  input: DigestChange,
+): Partial<Pick<ScheduleRecord, 'taskTemplate' | 'enabled' | 'nextRunAt' | 'updatedAt'>> | null {
+  if (
+    row.agentId !== input.agentId ||
+    row.id !== input.scheduleId ||
+    !row.name.startsWith('digest:') ||
+    !row.taskTemplate ||
+    typeof row.taskTemplate !== 'object'
+  )
+    return null;
+  const template = row.taskTemplate as Record<string, unknown>;
+  if (!template.digest || typeof template.conversationId !== 'string') return null;
+  const lifecycle = digestLifecycle(row);
+  if (input.action === 'move') {
+    if (lifecycle || !row.enabled) return null;
+    if (template.conversationId === input.toChat) return {};
+    if (template.conversationId !== input.fromChat) return null;
+    return { taskTemplate: { ...template, conversationId: input.toChat }, updatedAt: input.now };
+  }
+  if (lifecycle === 'deleted') return input.action === 'delete' ? {} : null;
+  if (lifecycle === 'cancelled' && input.action === 'cancel') return {};
+  return {
+    enabled: false,
+    nextRunAt: null,
+    taskTemplate: {
+      ...template,
+      digestLifecycle: input.action === 'cancel' ? 'cancelled' : 'deleted',
+    },
+    updatedAt: input.now,
+  };
+}
+
 export function scheduleBatch(limit = 100): number {
   if (!Number.isInteger(limit) || limit < 1 || limit > 200)
     throw new Error('Invalid schedule batch');
@@ -76,7 +128,12 @@ export function scheduleMatches(current: ScheduleRecord, expected: ScheduleRecor
 }
 export function scheduleCanRun(row: ScheduleRecord): boolean {
   const template = reminderScheduleTemplate(row.taskTemplate);
-  return row.enabled && !template.reminderCancelledAt && !template.reminderDeliveredAt;
+  return (
+    row.enabled &&
+    !digestLifecycle(row) &&
+    !template.reminderCancelledAt &&
+    !template.reminderDeliveredAt
+  );
 }
 export function validateScheduleCreate(input: ScheduleCreateInput): void {
   if (!input.agentId || !input.name || !input.cron) throw new Error('Invalid schedule creation');
@@ -85,6 +142,25 @@ export function validateScheduleCreate(input: ScheduleCreateInput): void {
 export function occurrenceIsCurrent(current: ScheduleRecord, input: ScheduleOccurrence): boolean {
   scheduleTime(input.now);
   if (input.nextRunAt !== null) scheduleTime(input.nextRunAt);
+  if (input.mode === 'rebase-missed-briefing') {
+    const job = (current.taskTemplate as { job?: unknown } | null)?.job;
+    if (
+      current.name !== DAILY_BRIEFING ||
+      job !== 'briefing.compose' ||
+      input.task ||
+      input.goalGuard ||
+      !input.enabled ||
+      !input.nextRunAt
+    )
+      throw new Error('Only an unfired daily briefing can advance its missed slot');
+    return (
+      scheduleMatches(current, input.expected) &&
+      scheduleCanRun(current) &&
+      current.nextRunAt !== null &&
+      current.nextRunAt <= input.now &&
+      input.nextRunAt > current.nextRunAt
+    );
+  }
   if (input.enabled && (!input.nextRunAt || input.nextRunAt <= input.now))
     throw new Error('Schedule must advance past this firing');
   if (!input.enabled && input.nextRunAt !== null)

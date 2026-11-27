@@ -1,6 +1,7 @@
 import type { BriefingRunOutcome } from './briefing.js';
 import type { TaskLease, TaskLeaseRepository } from './contracts.js';
 import type { Records } from './records.js';
+import type { TaskActivityDiagnostic } from './task-activity.js';
 import type { TaskCreateInput, TaskCreateResult } from './task-creation.js';
 
 /** Input for the owner-scoped future-self task command. */
@@ -31,6 +32,14 @@ export interface TaskWake {
   id: string;
   queueGeneration: number;
 }
+export interface AppendActivityDiagnosticInput {
+  agentId: string;
+  taskId: string;
+  diagnostic: TaskActivityDiagnostic;
+  /** Use the current lease for a producer write, when called through the executor. */
+  leaseToken?: string;
+}
+
 export interface TaskRepository extends TaskLeaseRepository {
   /** Installation-scoped task lookup used before choosing an execution route. */
   getTask(taskId: string): Promise<Records['tasks'] | null>;
@@ -55,6 +64,7 @@ export interface TaskRepository extends TaskLeaseRepository {
   parkForBudget(task: TaskLease, state: Record<string, unknown>, resumeAt: Date): Promise<boolean>;
   sleepTask(task: TaskLease, state: Record<string, unknown>, runAfter: Date): Promise<boolean>;
   completeTask(task: TaskLease | string, outcome: TaskOutcome): Promise<boolean>;
+  appendActivityDiagnostic(input: AppendActivityDiagnosticInput): Promise<boolean>;
   recordAbortedBriefing?(task: TaskLease): Promise<void>;
   markTaskNeedsAttention(task: TaskLease, progress: string): Promise<boolean>;
   parkForEvent(task: TaskLease): Promise<boolean>;

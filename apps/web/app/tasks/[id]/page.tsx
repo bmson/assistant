@@ -6,40 +6,14 @@ import type { ReactNode } from 'react';
 import { requireOwner } from '@/auth';
 import { formatDateTime, formatUsd, relativeTime } from '@/lib/format';
 import { getTaskActivityDetail } from '@/lib/task-activity';
-import {
-  BackLink,
-  Badge,
-  btnSm,
-  cardShellClass,
-  InfoGrid,
-  InfoItem,
-  inputClass,
-  PageShell,
-} from '@/lib/ui';
-import { ConfirmButton, SubmitButton } from '@/lib/ui-client';
-import {
-  actionLabel,
-  displayTaskStatus,
-  hasReviewableApproval,
-  StatusChip,
-  taskTypeLabel,
-  trustLabel,
-} from '@/lib/views';
-import {
-  archiveTask,
-  cancelTask,
-  raiseTaskBudgetAndRetry,
-  restoreTask,
-  retryTask,
-  revokeAutonomyGrant,
-} from '../actions';
+import { BackLink, Badge, cardShellClass, InfoGrid, InfoItem, PageShell } from '@/lib/ui';
+import { actionLabel, displayTaskStatus, StatusChip, taskTypeLabel, trustLabel } from '@/lib/views';
 import { ChecklistCorrectionEntry } from './checklist-correction-entry';
 
 export const dynamic = 'force-dynamic';
 export const metadata = { title: 'Activity detail' };
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const TERMINAL_TASK_STATUSES = new Set(['done', 'failed', 'cancelled']);
 
 type TimelineKind = 'tool' | 'model' | 'approval' | 'message';
 
@@ -114,7 +88,6 @@ export default async function TaskDetailPage({
     hasMoreTimeline,
     nextTimelineCursor,
     activeGrant,
-    hasPendingApproval,
     stuckWaiting,
   } = detail;
   // Downloadable artifacts this task produced (charts, exports, saved pages).
@@ -208,13 +181,6 @@ export default async function TaskDetailPage({
   ].sort((a, b) => a.at.getTime() - b.at.getTime());
   const completedActions = actions.filter((action) => action.completed);
   const incompleteActions = actions.filter((action) => !action.completed);
-  const taskBudget = Number(task.budgetUsdLimit);
-  const suggestedBudget = Math.ceil(Math.max(taskBudget * 2, Number(task.spentUsd) + 0.25) * 4) / 4;
-  const stoppedForTaskBudget =
-    !task.archivedAt &&
-    task.status === 'needs_attention' &&
-    task.progress.startsWith('budget: task budget');
-  const terminal = TERMINAL_TASK_STATUSES.has(task.status);
   const correctableLookups =
     !task.archivedAt &&
     task.status === 'needs_attention' &&
@@ -234,7 +200,7 @@ export default async function TaskDetailPage({
   return (
     <PageShell size="reading">
       <BackLink href="/tasks">Activity</BackLink>
-      <header className="grid min-w-0 gap-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start">
+      <header className="min-w-0">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <h1 className="font-display text-2xl font-semibold tracking-[-0.035em]">
@@ -253,82 +219,13 @@ export default async function TaskDetailPage({
             </p>
           ) : null}
         </div>
-        <div className="flex flex-wrap items-center gap-2 sm:justify-end">
-          {activeGrant && !terminal ? (
-            <form action={revokeAutonomyGrant.bind(null, task.id)}>
-              <SubmitButton pendingLabel="Revoking…">Revoke free-range</SubmitButton>
-            </form>
-          ) : null}
-          {hasReviewableApproval(task.status, stuckWaiting) ? (
-            <Link href="/approvals" className={btnSm.outline}>
-              Review approval
-            </Link>
-          ) : null}
-          {!task.archivedAt &&
-          ((task.status === 'needs_attention' && !stoppedForTaskBudget) || stuckWaiting) ? (
-            <form action={retryTask.bind(null, task.id)}>
-              <SubmitButton variant="primary" pendingLabel="Retrying…">
-                Retry
-              </SubmitButton>
-            </form>
-          ) : null}
-          {/* Any unfinished task can be called off. Restricting this to
-              needs_attention left tasks parked on a vanished approval with no
-              reachable action at all. */}
-          {!terminal ? (
-            <form action={cancelTask.bind(null, task.id)}>
-              {/* Same words and the same ask-twice as the chat's spending card,
-                  which calls off a task through this very action. */}
-              <ConfirmButton pendingLabel="Stopping…" confirmLabel="Stop task?">
-                Stop task
-              </ConfirmButton>
-            </form>
-          ) : null}
-          {task.archivedAt ? (
-            <form action={restoreTask.bind(null, task.id)}>
-              <SubmitButton pendingLabel="Restoring…">Restore to Activity</SubmitButton>
-            </form>
-          ) : terminal || (task.status === 'needs_attention' && !hasPendingApproval) ? (
-            <form action={archiveTask.bind(null, task.id)}>
-              <SubmitButton pendingLabel="Archiving…">Archive</SubmitButton>
-            </form>
-          ) : null}
-        </div>
       </header>
 
       {stuckWaiting ? (
         <p className="mt-5 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/20 dark:text-amber-200">
           This was parked for an approval that no longer exists — it was resolved, it expired, or it
-          was never recorded. Nothing will arrive to release it, so it does not appear on the
-          Approvals page. Retry to run it again, or cancel it.
+          was never recorded. You can retry or stop the task in the iPhone app.
         </p>
-      ) : null}
-
-      {stoppedForTaskBudget ? (
-        <form
-          action={raiseTaskBudgetAndRetry.bind(null, task.id)}
-          className="mt-5 flex flex-wrap items-end gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4 dark:border-amber-900/60 dark:bg-amber-950/20"
-        >
-          <label className="flex flex-col gap-1 text-xs font-medium text-amber-900 dark:text-amber-200">
-            New task budget (USD)
-            <input
-              type="number"
-              name="budgetUsdLimit"
-              step="0.01"
-              min={(taskBudget + 0.01).toFixed(2)}
-              max="10000"
-              defaultValue={suggestedBudget.toFixed(2)}
-              required
-              className={`${inputClass} w-32`}
-            />
-          </label>
-          <SubmitButton variant="primary" pendingLabel="Raising budget…">
-            Raise budget and retry
-          </SubmitButton>
-          <p className="w-full text-xs text-amber-800 dark:text-amber-300">
-            The task resumes from its saved checkpoint; completed actions are not repeated.
-          </p>
-        </form>
       ) : null}
 
       <ChecklistCorrectionEntry
@@ -366,6 +263,19 @@ export default async function TaskDetailPage({
           </InfoItem>
         ) : null}
       </InfoGrid>
+
+      {task.diagnostics?.length ? (
+        <section aria-label="Diagnostics" className="mt-6 space-y-3">
+          <h2 className="text-sm font-semibold">Diagnostics</h2>
+          <ul className="space-y-3">
+            {task.diagnostics.map(({ id, text }) => (
+              <li key={id} className="whitespace-pre-wrap break-words text-sm">
+                {text}
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
 
       <section className={`${cardShellClass} mt-5 p-5`}>
         <h2 className="text-sm font-semibold">What actually happened</h2>

@@ -17,6 +17,7 @@ import {
 import { erasePostgresPhoneCalendarSharing } from './phone-calendar-compatibility.js';
 import {
   agents,
+  ambientSnapshots,
   conversations,
   documentChunks,
   documents,
@@ -25,6 +26,7 @@ import {
   emailObserverSources,
   emailObserverWork,
   files,
+  householdHandoffs,
   importSources,
   knowledgeGraphAssertionEvidence,
   knowledgeGraphAssertions,
@@ -40,6 +42,7 @@ import {
   occasions,
   ownerCard,
   recallSurfaces,
+  savedPlaces,
   securityIncidentAttention,
   securityIncidentSources,
   securityIncidents,
@@ -288,6 +291,12 @@ async function ensureActiveErasure(db: Db, agentId: string): Promise<void> {
       parseActiveErasure(current.cursor);
       return;
     }
+    await tx.update(agents).set({ homeWeather: null }).where(eq(agents.id, agentId));
+    await tx.delete(householdHandoffs).where(eq(householdHandoffs.agentId, agentId));
+    await tx.delete(savedPlaces).where(eq(savedPlaces.agentId, agentId));
+    await tx
+      .delete(ambientSnapshots)
+      .where(and(eq(ambientSnapshots.agentId, agentId), sql`${ambientSnapshots.sources} ? 'home'`));
     const state: ActivePrivacyErasure = {
       version: 1,
       generation: randomUUID(),

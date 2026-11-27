@@ -89,10 +89,13 @@ export interface ToolContextLike {
   taskId: string;
   agentId: string;
   conversationId?: string;
+  /** Text from the persisted admission of a direct owner dashboard chat turn. */
+  directOwnerChatText?: string;
   trust: Trust;
   tainted: boolean;
   /** Typed provenance and directly authored scope for this task's latest owner turn. */
   ownerIntent?: OwnerIntent;
+  directOwnerMemorySource?: { id: string; text: string };
   /** One executor-bound public research call for a source-grounded compound trip. */
   authorizedCompoundTripPublicRead?:
     | { taskId: string; toolName: 'web.search'; query: string }

@@ -101,6 +101,7 @@ interface CalendarEntry {
   id: string;
   name: string;
   primary: boolean;
+  dataOwner?: string;
   accessRole: string;
   timeZone?: string;
   purpose?: CalendarPurpose;
@@ -125,7 +126,7 @@ interface RawEvent {
     entryPoints?: Array<{ entryPointType?: string; uri?: string; label?: string }>;
   };
   start?: { dateTime?: string; date?: string; timeZone?: string };
-  end?: { dateTime?: string; date?: string };
+  end?: { dateTime?: string; date?: string; timeZone?: string };
   attendees?: Array<{
     email: string;
     displayName?: string;
@@ -311,9 +312,10 @@ interface CalendarRoster {
 async function fetchCalendarPage(
   client: GoogleClient,
   pageToken?: string,
+  minAccessRole = 'reader',
 ): Promise<CalendarRoster> {
   const params = new URLSearchParams({
-    minAccessRole: 'reader',
+    minAccessRole,
     maxResults: '250',
     showDeleted: 'false',
   });
@@ -324,6 +326,7 @@ async function fetchCalendarPage(
       summary?: string;
       summaryOverride?: string;
       primary?: boolean;
+      dataOwner?: string;
       accessRole?: string;
       timeZone?: string;
       deleted?: boolean;
@@ -337,11 +340,116 @@ async function fetchCalendarPage(
         id: c.id,
         name: c.summaryOverride || c.summary || c.id,
         primary: c.primary === true,
-        accessRole: c.accessRole ?? 'reader',
+        ...(typeof c.dataOwner === 'string' ? { dataOwner: c.dataOwner } : {}),
+        accessRole: c.accessRole ?? (minAccessRole === 'reader' ? 'reader' : 'unknown'),
         ...(c.timeZone ? { timeZone: c.timeZone } : {}),
       })),
     ...(res.nextPageToken ? { nextPageToken: res.nextPageToken } : {}),
   };
+}
+
+/** Include free/busy-only calendars in setup without changing the normal read roster. */
+export async function fetchHouseholdCalendarRoster(client: GoogleClient) {
+  const { calendars, nextPageToken } = await fetchCalendarPage(client, undefined, 'freeBusyReader');
+  const visible = calendars.filter(({ id }) => id.length <= 512);
+  const distinct = new Map(visible.map((entry) => [entry.id, entry]));
+  return {
+    calendars: [...distinct.values()].slice(0, 50),
+    complete: !nextPageToken && distinct.size === calendars.length && distinct.size <= 50,
+  };
+}
+
+export async function fetchHouseholdCalendarDetails(
+  client: GoogleClient,
+  calendar: Pick<CalendarEntry, 'id' | 'name' | 'accessRole' | 'timeZone'>,
+  window: { timeMin: string; timeMax: string },
+) {
+  const params = new URLSearchParams({
+    ...window,
+    singleEvents: 'true',
+    orderBy: 'startTime',
+    maxResults: '100',
+    fields: 'nextPageToken,items(id,summary,start,end,status)',
+  });
+  const page = await client.api<{ items?: RawEvent[]; nextPageToken?: string }>(
+    `${CAL}/calendars/${encodeURIComponent(calendar.id)}/events?${params}`,
+  );
+  const events = (page.items ?? []).filter(({ status }) => status !== 'cancelled');
+  const rows = events.flatMap((raw) => {
+    const event = normalizeEvent(raw, { ...calendar, primary: false });
+    const start = dateFor(raw.start, event.start, event.startTimeZone);
+    const end = dateFor(raw.end, event.end, raw.end?.timeZone ?? event.startTimeZone);
+    if (!raw.id || !start || !end || start >= end) return [];
+    return [
+      {
+        id: JSON.stringify([calendar.id, raw.id]),
+        title: raw.summary?.trim() || 'Untitled event',
+        calendar: calendar.name,
+        start,
+        end,
+        allDay: event.allDay,
+      },
+    ];
+  });
+  return { rows, complete: !page.nextPageToken && rows.length === events.length };
+}
+
+function dateFor(raw: RawEvent['start'], value: string, timeZone?: string) {
+  const ms = startedAt({
+    start: raw?.date && !raw.dateTime ? `${raw.date}T00:00:00` : value,
+    startTimeZone: timeZone,
+  });
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
+}
+
+export async function fetchHouseholdCalendarBusy(
+  client: GoogleClient,
+  calendars: Array<Pick<CalendarEntry, 'id' | 'name'>>,
+  window: { timeMin: string; timeMax: string },
+) {
+  const response = await client.api<{
+    calendars?: Record<
+      string,
+      { busy?: Array<{ start: string; end: string }>; errors?: unknown[] }
+    >;
+  }>(`${CAL}/freeBusy`, {
+    method: 'POST',
+    body: JSON.stringify({ ...window, items: calendars.map(({ id }) => ({ id })) }),
+  });
+  let complete = true;
+  const rows = calendars.flatMap(({ id, name }) => {
+    const result = response.calendars?.[id];
+    if (
+      !Array.isArray(result?.busy) ||
+      (result.errors !== undefined && (!Array.isArray(result.errors) || result.errors.length > 0))
+    ) {
+      complete = false;
+      return [];
+    }
+    return result.busy.flatMap((slot) => {
+      if (!slot || typeof slot.start !== 'string' || typeof slot.end !== 'string') {
+        complete = false;
+        return [];
+      }
+      const start = startedAt({ start: slot.start });
+      const end = startedAt({ start: slot.end });
+      if (!Number.isFinite(start) || !Number.isFinite(end) || start >= end) {
+        complete = false;
+        return [];
+      }
+      return [
+        {
+          id: JSON.stringify([id, start, end]),
+          title: 'Busy',
+          calendar: name,
+          start: new Date(start).toISOString(),
+          end: new Date(end).toISOString(),
+          allDay: false,
+        },
+      ];
+    });
+  });
+  return { rows, complete };
 }
 
 async function fetchCalendars(client: GoogleClient): Promise<CalendarRoster> {

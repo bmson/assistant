@@ -1,6 +1,11 @@
-import type { OwnerContextRepository } from '@assistant/persistence';
+import {
+  type HomeWeatherRepository,
+  type OwnerContextRepository,
+  readHomeWeatherSettings,
+} from '@assistant/persistence';
 import { and, desc, eq, gte, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
+import { lockPostgresPrivacyObservationFence } from './privacy-erasure-repository.js';
 import {
   agents,
   ambientSnapshots,
@@ -105,9 +110,37 @@ export async function listEligibleOwnerCommitments(
   return rows.map(({ commitment }) => commitment);
 }
 
+export async function readPostgresHomeWeather(db: Pick<Db, 'select'>, agentId: string) {
+  const [row] = await db
+    .select({ value: agents.homeWeather })
+    .from(agents)
+    .where(eq(agents.id, agentId));
+  return readHomeWeatherSettings(row?.value);
+}
+
+export function createPostgresHomeWeatherRepository(db: Db): HomeWeatherRepository {
+  return {
+    getHomeWeather: (agentId) => readPostgresHomeWeather(db, agentId),
+    async setHomeWeather(agentId, value) {
+      return db.transaction(async (tx) => {
+        const owners = await tx.select({ id: agents.id }).from(agents).limit(2);
+        if (owners.length !== 1 || owners[0]?.id !== agentId) return false;
+        await lockPostgresPrivacyObservationFence(tx, agentId);
+        const rows = await tx
+          .update(agents)
+          .set({ homeWeather: value })
+          .where(eq(agents.id, agentId))
+          .returning({ id: agents.id });
+        return rows.length === 1;
+      });
+    },
+  };
+}
+
 export function createPostgresOwnerContextRepository(db: Db): OwnerContextRepository {
   return {
     kind: 'owner-context-repository',
+    getHomeWeather: createPostgresHomeWeatherRepository(db).getHomeWeather,
 
     async getOwnerCard(agentId) {
       // `owner_card` predates agent scoping. It is safe only for the sole agent in

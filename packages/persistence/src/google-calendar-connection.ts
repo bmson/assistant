@@ -18,6 +18,31 @@ export const googleCalendarFlowOutcome = z.enum([
 export type GoogleCalendarFlowOutcome = z.infer<typeof googleCalendarFlowOutcome>;
 const instant = z.string().datetime({ offset: true });
 const account = z.object({ subject: z.string().min(1), email: z.string().email() }).strict();
+export const householdCalendarPurpose = z.enum([
+  'household',
+  'work_free_busy',
+  'ignore',
+  'school',
+  'activity',
+  'holidays',
+]);
+function calendarChoices<T extends z.ZodType<string>>(purpose: T) {
+  return z
+    .array(z.object({ id: z.string().min(1).max(512), purpose }).strict())
+    .max(50)
+    .refine((choices) => new Set(choices.map(({ id }) => id)).size === choices.length);
+}
+
+export const householdCalendarChoices = calendarChoices(householdCalendarPurpose);
+// Older readers preserve a newer purpose without admitting it through their write schema.
+const storedCalendarChoices = calendarChoices(z.string().regex(/^[a-z][a-z0-9_]{0,63}$/));
+export const householdCalendarSettings = z
+  .object({ revision: z.string().uuid(), choices: householdCalendarChoices })
+  .strict();
+const readableHouseholdCalendarSettings = householdCalendarSettings.extend({
+  choices: storedCalendarChoices,
+});
+export type HouseholdCalendarSettings = z.infer<typeof readableHouseholdCalendarSettings>;
 export const googleCalendarConnectionSchema = z
   .object({
     version: z.union([z.literal(1), z.literal(2)]),
@@ -59,7 +84,18 @@ export const googleCalendarConnectionSchema = z
         message: 'Calendar event-write credentials require connection contract version 2',
       });
   });
-export type GoogleCalendarConnectionState = z.infer<typeof googleCalendarConnectionSchema>;
+export type GoogleCalendarConnectionState = z.infer<typeof googleCalendarConnectionSchema> & {
+  household?: HouseholdCalendarSettings;
+};
+export const storedHouseholdCalendarSettings = readableHouseholdCalendarSettings.extend({
+  connectionId: z.string().uuid(),
+});
+export function readHouseholdCalendarSettings(value: unknown, connectionId?: string) {
+  if (value == null || !connectionId) return undefined;
+  const { connectionId: savedConnectionId, ...settings } =
+    storedHouseholdCalendarSettings.parse(value);
+  return savedConnectionId === connectionId ? settings : undefined;
+}
 export type GoogleCalendarPendingFlow = NonNullable<GoogleCalendarConnectionState['flow']>;
 export type GoogleCalendarCredential = NonNullable<GoogleCalendarConnectionState['connection']>;
 export interface GoogleCalendarConnectionStorage {
@@ -80,6 +116,12 @@ export type GoogleCalendarRefreshClaim =
   | { kind: 'disconnected' };
 export interface GoogleCalendarConnectionRepository {
   get(ownerId: string): Promise<GoogleCalendarConnectionState | null>;
+  saveHousehold(
+    ownerId: string,
+    connectionId: string,
+    expectedRevision: string | null,
+    settings: HouseholdCalendarSettings,
+  ): Promise<boolean>;
   begin(
     ownerId: string,
     flow: GoogleCalendarPendingFlow,
@@ -141,6 +183,20 @@ export function createGoogleCalendarConnectionRepository(
 ): GoogleCalendarConnectionRepository {
   return {
     get: (ownerId) => storage.read(ownerId),
+    saveHousehold: (ownerId, connectionId, expectedRevision, settings) =>
+      storage.update(ownerId, (s) => {
+        if (
+          s.connection?.id !== connectionId ||
+          s.connection.status !== 'connected' ||
+          (s.household?.revision ?? null) !== expectedRevision ||
+          (s.household && !householdCalendarChoices.safeParse(s.household.choices).success)
+        )
+          return { state: s, result: false };
+        return {
+          state: { ...s, household: householdCalendarSettings.parse(settings) },
+          result: true,
+        };
+      }),
     begin: (ownerId, flow, expectedConnectionId) =>
       storage.update(ownerId, (s) => {
         if (
@@ -209,7 +265,7 @@ export function createGoogleCalendarConnectionRepository(
         };
       }),
     disconnect: (ownerId) =>
-      storage.update(ownerId, (s) => ({
+      storage.update(ownerId, ({ household: _household, ...s }) => ({
         state: {
           ...s,
           revision: s.revision + 1,

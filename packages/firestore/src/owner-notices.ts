@@ -359,6 +359,7 @@ export class FirestoreOwnerNoticeRepository implements NotificationsConversation
     taskId?: string;
     sourceConversationId?: string | null;
     extraParts?: readonly unknown[];
+    destination?: 'primary' | 'notifications';
   }): Promise<{ conversationId: string } | null> {
     const fence = await readPrivacyErasureFence(this.store, this.agentId);
     return this.store.db.runTransaction(async (tx) => {
@@ -380,8 +381,7 @@ export class FirestoreOwnerNoticeRepository implements NotificationsConversation
         if (!task.exists || task.get('id') !== input.taskId || task.get('agentId') !== this.agentId)
           throw new Error('Owner notice task is outside the configured installation');
       }
-      const primary = await this.primary(tx);
-      if (primary && input.sourceConversationId === primary.id) return null;
+      const primary = input.destination === 'notifications' ? null : await this.primary(tx);
       const destination = primary ? { row: primary, created: false } : await this.notifications(tx);
       if (input.sourceConversationId === destination.row.id) return null;
       const now = this.store.now();
@@ -780,7 +780,7 @@ export class FirestoreOwnerNoticeRepository implements NotificationsConversation
   }
 }
 
-/** Background producers' notices through the owner-notice sink: primary chat, else Notifications. */
+/** Background producers' notices default to primary chat with a Notifications fallback. */
 export function firestoreOwnerNotices(
   notices: FirestoreOwnerNoticeRepository,
 ): OwnerNoticeRepository {
@@ -798,12 +798,14 @@ export function firestoreOwnerNotices(
         text: input.text,
         ...(input.taskId ? { taskId: input.taskId } : {}),
         ...(input.extraParts ? { extraParts: input.extraParts } : {}),
+        ...(input.destination ? { destination: input.destination } : {}),
       });
       // Only a notice mirrored from its own conversation is skipped, and a
       // producer's notice has no source conversation.
       if (!posted) throw new Error('Owner notice was not posted');
       return posted;
     },
+    readBriefingPublication: (agentId, taskId) => notices.readBriefingPublication(agentId, taskId),
     async postWithDecisionFence(input) {
       if (input.agentId !== notices.agentId)
         throw new Error('Owner notice is outside the configured owner');

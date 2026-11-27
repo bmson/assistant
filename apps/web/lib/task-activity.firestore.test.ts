@@ -181,17 +181,25 @@ describe.skipIf(!emulator)('web task Activity in Firestore mode with PostgreSQL 
     expect(seen.size).toBe(121);
   });
 
-  it('allows only the Activity pages and Server Action methods through the Firestore proxy', async () => {
+  it('forwards reads of the Activity list and UUID detail pages and rejects writes', async () => {
     const { proxy } = await import('../proxy.js');
-    const status = (path: string, method = 'GET') =>
-      proxy(new NextRequest(`http://localhost${path}`, { method })).status;
-    expect(status('/tasks')).toBe(307);
-    expect(status('/tasks', 'POST')).toBe(410);
-    expect(status(`/tasks/${taskId}`)).toBe(307);
-    expect(status(`/tasks/${taskId}`, 'POST')).toBe(410);
-    expect(status(`/tasks/${taskId}`, 'DELETE')).toBe(410);
-    expect(status('/tasks/not-a-uuid')).toBe(307);
-    expect(status(`/tasks/${taskId}/nested`)).toBe(307);
+    const request = (path: string, method = 'GET') =>
+      proxy(new NextRequest(`http://localhost${path}`, { method }));
+    for (const path of ['/tasks', `/tasks/${taskId}`]) {
+      for (const method of ['GET', 'HEAD']) {
+        const response = request(path, method);
+        expect(response.status).toBe(200);
+        expect(response.headers.get('x-middleware-next')).toBe('1');
+      }
+      for (const method of ['POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']) {
+        expect(request(path, method).status).toBe(410);
+      }
+    }
+    for (const path of ['/tasks/not-a-uuid', `/tasks/${taskId}/nested`]) {
+      const response = request(path);
+      expect(response.status).toBe(307);
+      expect(response.headers.get('location')).toBe('http://localhost/settings');
+    }
   });
 
   it('archives, lists, restores, and bulk-archives through the owner activity commands', async () => {

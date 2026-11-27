@@ -600,7 +600,7 @@ describe('memory extraction (integration)', () => {
     }
   });
 
-  it('persists a valid occasion-only output', async (ctx) => {
+  it('blocks an otherwise supported occasion from creating a global person on a multi-owner installation', async (ctx) => {
     if (!dbUp) return ctx.skip();
     const [conversation] = await db
       .insert(conversations)
@@ -629,16 +629,12 @@ describe('memory extraction (integration)', () => {
     ]);
 
     const result = await runMemoryExtraction({ db, router: fakeRouter }, { agentId, since });
-    expect(result).toMatchObject({ saved: 0, occasionsSaved: 1, occasionsRejected: 0 });
+    expect(result).toMatchObject({ saved: 0, occasionsSaved: 0, contactsCreated: 0 });
     const [person] = await db.select().from(contacts).where(eq(contacts.name, OCCASION_PERSON));
-    const saved = await db
-      .select()
-      .from(occasions)
-      .where(eq(occasions.contactId, person?.id ?? ''));
-    expect(saved).toEqual([expect.objectContaining({ month: 2, day: 14 })]);
+    expect(person).toBeUndefined();
   });
 
-  it('attributes facts to entities, auto-creates unknown contacts, respects tombstones, dedupes', async (ctx) => {
+  it('retains facts without sharing inferred People across agents and respects tombstones and duplicates', async (ctx) => {
     if (!dbUp) return ctx.skip();
 
     const first = await runMemoryExtraction({ db, router: fakeRouter }, { agentId });
@@ -656,34 +652,15 @@ describe('memory extraction (integration)', () => {
     expect(ownerFact?.domain).toBe('preferences');
     expect(ownerFact?.quarantined).toBe(false);
 
-    // person fact auto-created a trust:'unknown' contact with the relationship
     const [personContact] = await db
       .select()
       .from(contacts)
       .where(eq(contacts.name, 'Solveig Extractsdottir'));
-    expect(personContact?.trust).toBe('unknown');
-    expect(personContact?.relationship).toBe('friend');
+    expect(personContact).toBeUndefined();
     const [personFact] = await db.select().from(memories).where(eq(memories.content, FACT_PERSON));
-    expect(personFact?.subjectContactId).toBe(personContact?.id);
+    expect(personFact?.subjectContactId).toBeNull();
+    expect(first.occasionsSaved).toBe(0);
 
-    // Phase 17: the birthday mentioned in the conversation became an occasion
-    // linked to Solveig, non-quarantined (owner-trust conversation).
-    expect(first.occasionsSaved).toBeGreaterThanOrEqual(1);
-    const [birthday] = await db
-      .select()
-      .from(occasions)
-      .where(eq(occasions.contactId, personContact?.id ?? ''));
-    expect(birthday?.kind).toBe('birthday');
-    expect(birthday?.month).toBe(9);
-    expect(birthday?.day).toBe(12);
-    expect(birthday?.quarantined).toBe(false);
-
-    // the tombstoned fact must not exist
-    const forgotten = await db.select().from(memories).where(eq(memories.content, FACT_FORGOTTEN));
-    expect(forgotten).toHaveLength(0);
-
-    // second run: everything already stored → duplicates, nothing new (the
-    // occasion dedupes on its unique date, so nothing new there either).
     const second = await runMemoryExtraction({ db, router: fakeRouter }, { agentId });
     expect(second.saved).toBe(0);
     expect(second.duplicates).toBeGreaterThanOrEqual(2);

@@ -29,6 +29,7 @@ import {
   type DocumentReadIntent,
   documentReadDispatchFailure,
 } from '../artifact-intent.js';
+import { bookingDisclosureForRead, bookingModelWindow } from '../booking-disclosure.js';
 import type {
   ChecklistCancellationResumeProjection,
   ChecklistCorrectionResumeProjection,
@@ -193,11 +194,28 @@ export async function preparePlanningRecall(rc: RunContext): Promise<boolean> {
     });
   const text = intent.ownerAuthoredText;
   const ownerWindow = ownerAuthoredWindow(window, intent);
+  const read =
+    rc.resolvedReadIntent?.kind === 'personal'
+      ? rc.resolvedReadIntent.personal
+      : detectPersonalReadRequest(ownerWindow);
+  const disclosure =
+    task.type === 'chat_turn' && task.trust === 'owner' && intent.separation !== 'unknown'
+      ? bookingDisclosureForRead(text, rc.resolvedReadIntent, read)
+      : undefined;
   const noRead = explicitlyOptsOutOfRecall(text);
-  const privateRead = task.trust === 'owner' && detectPersonalReadRequest(ownerWindow) !== null;
+  const privateRead = task.trust === 'owner' && read !== null;
   const localTransformation =
     intent.authorizedScopes.length === 0 &&
     isSelfContainedTextTransformation(text, intent.externalText);
+  // A fresh booking lookup has a current source and no need to disclose
+  // unrelated historical records in its private model context.
+  if (disclosure) {
+    state.plannerState = { ...state.plannerState, planningRecall: { status: 'not_applicable' } };
+    state.contextWindow = compact(window) as unknown as TaskState['contextWindow'];
+    return deps.persistence?.tasks
+      ? checkpointTask(deps.persistence.tasks, task, state, { preserveFailureCounters: true })
+      : true;
+  }
   const recallMode = resolveRecallMode({
     resolvedReadIntent: rc.resolvedReadIntent ?? { kind: 'none' },
     ownerIntent: intent,
@@ -244,7 +262,13 @@ export async function preparePlanningRecall(rc: RunContext): Promise<boolean> {
         .filter((_, index) => index !== window.findLastIndex((message) => message.role === 'user'))
         .flatMap((message) =>
           typeof message.content === 'string'
-            ? [{ role: message.role, text: message.content, representation: 'rendered' as const }]
+            ? [
+                {
+                  role: message.role,
+                  text: message.content,
+                  representation: 'rendered' as const,
+                },
+              ]
             : [],
         ),
       graphEnabled,
@@ -1339,6 +1363,20 @@ function latestOwnerRequestText(window: ModelMessage[]): string {
 
 export async function runPlanPhase(rc: RunContext): Promise<ExecuteResult | { plan: Plan | null }> {
   const { deps, db, router, task, agent, state, window, dispatcher, artifactIntent } = rc;
+  const ownerText = rc.ctx.ownerIntent?.ownerAuthoredText ?? '';
+  const modelWindow = () =>
+    task.type === 'chat_turn' &&
+    task.trust === 'owner' &&
+    rc.ctx.ownerIntent?.separation !== 'unknown' &&
+    bookingDisclosureForRead(
+      ownerText,
+      rc.resolvedReadIntent,
+      rc.ctx.ownerIntent && rc.resolvedReadIntent?.kind !== 'personal'
+        ? detectPersonalReadRequest(ownerAuthoredWindow(window, rc.ctx.ownerIntent))
+        : undefined,
+    )
+      ? bookingModelWindow(window, ownerText)
+      : window;
   const lease = task;
   if (isMissionSessionTask(task) && !missionSessionInstruction(task)) {
     const text = `Mission session ${missionSessionId(task)} has no saved instruction, so I stopped before doing work. Review the mission and wake it again with a clear next step.`;
@@ -1358,7 +1396,7 @@ export async function runPlanPhase(rc: RunContext): Promise<ExecuteResult | { pl
   let plan = task.plan ? PlanSchema.parse(task.plan) : null;
   if (!plan && !artifactIntent) {
     try {
-      plan = await planTask({ db, router }, task, agent, window, {
+      plan = await planTask({ db, router }, task, agent, modelWindow(), {
         tainted: state.untrustedContext === true,
         ownerIntent: rc.ctx.ownerIntent,
         repository: deps.persistence?.tasks,
@@ -1549,7 +1587,7 @@ export async function runPlanPhase(rc: RunContext): Promise<ExecuteResult | { pl
         if (retryStillAllowed && currentIntent) {
           let replanned: Plan | null = null;
           try {
-            replanned = await planTask({ db, router }, task, agent, window, {
+            replanned = await planTask({ db, router }, task, agent, modelWindow(), {
               tainted: state.untrustedContext,
               ownerIntent: currentIntent,
               repository: deps.persistence?.tasks,

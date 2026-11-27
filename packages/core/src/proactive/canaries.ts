@@ -8,7 +8,13 @@ import {
   phoneCalendarSourceCoverage,
   readProactiveSmsQuota,
 } from '@assistant/persistence';
-import { AMBIENT_TTL_MINUTES } from '../memory/ambient.js';
+import {
+  AMBIENT_TTL_MINUTES,
+  type AmbientWeatherSources,
+  ambientWeatherOnLocalDate,
+  getEnabledHomeWeather,
+  matchesAmbientSource,
+} from '../memory/ambient.js';
 import { latestLocation } from '../memory/location.js';
 
 const DAY_MS = 24 * 60 * 60_000;
@@ -131,19 +137,20 @@ export async function assessProactiveCanaries(
         repo.context.getAmbientSnapshot(owner),
         latestLocation(repo.context, owner, config.LOCATION_RETENTION_DAYS, undefined, now),
       ]);
-      if (!ping && !snapshot) return { state: 'not_configured' };
-      const sources = snapshot?.sources as
-        | { location?: { capturedAt?: string }; weather?: { fetchedAt?: string } | null }
-        | undefined;
+      const home = ping ? null : await getEnabledHomeWeather(repo.context, owner);
+      const sources = snapshot?.sources as AmbientWeatherSources | undefined;
+      if (!ping && !home && (!snapshot || sources?.home)) return { state: 'not_configured' };
       if (!snapshot) return { state: 'unavailable' };
-      if (!ping || sources?.location?.capturedAt !== ping.capturedAt.toISOString())
-        return { state: 'expired' };
+      if (!matchesAmbientSource(sources, ping, home)) return { state: 'expired' };
       if (
-        !sources.weather?.fetchedAt ||
+        !sources?.weather?.fetchedAt ||
         (snapshot.flags as { has_weather?: boolean } | null)?.has_weather !== true
       )
         return { state: 'unavailable' };
-      return freshness(sources.weather.fetchedAt, now, AMBIENT_TTL_MINUTES * 60_000);
+      const status = freshness(sources.weather.fetchedAt, now, AMBIENT_TTL_MINUTES * 60_000);
+      return status.state === 'fresh' && !ambientWeatherOnLocalDate(sources, now)
+        ? { ...status, state: 'expired' }
+        : status;
     }),
     checked(async (): Promise<Canary & { attempts?: number; limit?: number }> => {
       if (!isModuleEnabled(config, 'sms')) return { state: 'disabled' };
@@ -173,6 +180,9 @@ export async function assessProactiveCanaries(
 
 export type ProactiveCanaries = Awaited<ReturnType<typeof assessProactiveCanaries>>;
 
+export const GOOGLE_CALENDAR_RECONNECT_NOTICE =
+  'Google Calendar access expired. Reconnect in Google Calendar settings.';
+
 export function proactiveCanaryProblems(canaries: ProactiveCanaries) {
   const names = {
     pulse: 'Pulse',
@@ -185,6 +195,8 @@ export function proactiveCanaryProblems(canaries: ProactiveCanaries) {
     const state = canaries[key].state;
     if (key === 'pulse' && state === 'missing')
       return [{ key, detail: 'Pulse schedule is missing.' }];
+    if (key === 'googleCalendar' && state === 'expired')
+      return [{ key, detail: GOOGLE_CALENDAR_RECONNECT_NOTICE }];
     return ['expired', 'overdue', 'unavailable', 'incomplete'].includes(state)
       ? [{ key, detail: `${names[key]}: ${state}.` }]
       : [];

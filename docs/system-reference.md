@@ -196,6 +196,8 @@ Bounded retries and exponential backoff prevent an ordinary failure from churnin
 
 A goal holds the outcome and automation settings. A schedule launches bounded mission work. Mission context and updates preserve continuity across sessions. A work chat is the natural detailed log; selected mirrored updates go to Notifications. A deadline shapes work without keeping a model invocation open until that deadline.
 
+Owner chat can save a daily or weekly digest with a topic and local clock time. It uses the configured owner time zone and publishes each run in the chat where the schedule was first saved. Equivalent topic and timing settings reuse the same schedule. The confirmation and a fresh digest list show the saved schedule ID, delivery chat and next run. An explicit request to use a different chat surfaces the existing destination. Confirming “Move it here” in that chat updates the same schedule for the next uncommitted run. Cancelling a named digest stops future runs and keeps it visible as cancelled. Deleting it removes it from the digest list and retains a disabled record so retries cannot recreate it. Starting an explicitly requested long-term goal still uses goal approval.
+
 Sources: [task schema](../packages/db/src/schema.ts), [state transitions](../packages/core/src/workflow/machine.ts), [dispatch](../packages/core/src/workflow/dispatch.ts), [queue](../packages/core/src/queue.ts), [missions](../packages/core/src/workflow/missions.ts), [schedules](../packages/core/src/workflow/schedules.ts), [Firestore sweep](../apps/agent/src/firestore-sweep.ts).
 
 ## Tool execution and permission
@@ -248,6 +250,8 @@ On eligible turns, automatic recall embeds the query and prefers qualifying segm
 ### Durable learning and correction
 
 Extraction proposes useful information from permitted sources. Saved memories carry origin trust and can be quarantined. Consolidation resolves duplication and contradictions, assigns domains, and rebuilds the profile. Owner confirmation has precedence in conflict handling. Experience memories can expire; current personal knowledge and superseded historical facts have different use conditions.
+
+Chat saves and nightly chat extraction retain useful facts independently of People attribution. Adding a new person requires positive evidence that the named subject is a person, such as a stated family relationship, human role, or biographical detail. A unique confirmed name or alias can ground a reference to an existing person. A direct owner assertion can identify an alias across linked clauses when a stored email or phone corroborates it. Shared identifiers, contradictory identity evidence, and aliases held by another person block identity changes. Confirmed people keep their IDs and family links. Reconciliation defers entries with separately reviewed or linked data that the save cannot safely move.
 
 Corrections can immediately supersede contradicted facts and invalidate the compiled card. Supported portable commands embed before their transaction and compare source content so a concurrent edit does not silently overwrite newer information. A failed profile rebuild must not retain a fact retired by the same supported correction path.
 

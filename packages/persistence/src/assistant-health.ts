@@ -52,6 +52,4 @@ export interface AssistantHealthRepository {
     renotifyBefore: Date;
   }): Promise<AssistantHealthSignal[]>;
   release(input: { agentId: string; kinds: readonly string[]; claimedAt: Date }): Promise<void>;
-  /** Durable owner message in the Notifications conversation. */
-  notify(input: { agentId: string; text: string; taskId?: string }): Promise<void>;
 }

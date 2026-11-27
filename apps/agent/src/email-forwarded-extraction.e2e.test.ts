@@ -3,17 +3,19 @@ import { type ExecutorDeps, executeTask } from '@assistant/core';
 import {
   agents,
   assertPostgresInstallationOwner,
-  conversations,
   createPostgresEmailSyncRepository,
   createPostgresExecutionPersistence,
   type Db,
   emailIngest,
   memories,
-  messages,
 } from '@assistant/db';
 import { createFirestoreExecutionPersistence } from '@assistant/firestore';
 import { type EmailSyncDeps, processMessage } from '@assistant/modules';
-import { type ExecutionPersistence, embeddingSpaceIdentityKey } from '@assistant/persistence';
+import {
+  type ExecutionPersistence,
+  embeddingSpaceIdentityKey,
+  taskActivityDiagnostics,
+} from '@assistant/persistence';
 import { and, eq } from 'drizzle-orm';
 import { expect, it, vi } from 'vitest';
 import {
@@ -171,15 +173,33 @@ for (const driver of ['postgres', 'firestore'] as const) {
                   .from(emailIngest)
                   .where(eq(emailIngest.channelMessageId, channelMessageId))
               )[0];
-        const monitor = (now: Date) =>
-          runAssistantHealthMonitor(
+        const diagnosticTaskIds: string[] = [];
+        const monitor = async (now: Date) => {
+          const { task } = await persistence.tasks.createTask({
+            agentId,
+            type: 'scheduled',
+            trust: 'assistant',
+            trigger: { source: 'schedule', payload: { job: 'health.monitor' } },
+          });
+          diagnosticTaskIds.push(task.id);
+          return runAssistantHealthMonitor(
             {
               db,
               health: persistence.assistantHealth,
               graphSync: persistence.graphSync,
+              saveDiagnostic: async (id, text) => {
+                expect(
+                  await persistence.tasks.appendActivityDiagnostic({
+                    agentId,
+                    taskId: task.id,
+                    diagnostic: { id, text },
+                  }),
+                ).toBe(true);
+              },
             },
             { agentId, now },
           );
+        };
         expect(await monitor(new Date())).toMatchObject({ signals: [], notified: false });
         expect(await processMessage(emailDeps, agentId, agentEmail, new Map(), id)).toBe('skipped');
         expect(await readIngest()).toMatchObject({
@@ -317,9 +337,11 @@ for (const driver of ['postgres', 'firestore'] as const) {
         expect(object).toHaveBeenCalledTimes(2);
 
         const warning = 'Mail processing has waited over six hours: 1 in scoring.';
-        expect(await runScheduled('health.monitor')).toMatchObject({
+        const scheduledHealth = await runScheduled('health.monitor');
+        diagnosticTaskIds.push(scheduledHealth.taskId);
+        expect(scheduledHealth).toMatchObject({
           outcome: 'done',
-          detail: expect.stringMatching(/^health monitor: notified owner about [1-9]\d* signal/),
+          detail: expect.stringMatching(/^health monitor: recorded [1-9]\d* signal/),
         });
         expect(await monitor(new Date(now.getTime() + HOUR))).toMatchObject({
           signals: [warning],
@@ -348,29 +370,12 @@ for (const driver of ['postgres', 'firestore'] as const) {
           signals: [nextDayBacklog],
           notified: true,
         });
-        let notices: string[];
-        if (store) {
-          const conv = await store
-            .collection('conversations')
-            .where('agentId', '==', agentId)
-            .where('title', '==', 'Notifications')
-            .get();
-          const conversationId = conv.docs[0]?.get('id');
-          expect(conversationId).toBeTypeOf('string');
-          notices = (
-            await store.collection('messages').where('conversationId', '==', conversationId).get()
-          ).docs.map((doc) => String(doc.get('text')));
-        } else {
-          notices = (
-            await db
-              .select({ text: messages.text })
-              .from(messages)
-              .innerJoin(conversations, eq(messages.conversationId, conversations.id))
-              .where(
-                and(eq(conversations.agentId, agentId), eq(conversations.title, 'Notifications')),
-              )
-          ).map(({ text }) => text);
-        }
+        const diagnosticTasks = await Promise.all(
+          diagnosticTaskIds.map((id) => persistence.tasks.getTask(id)),
+        );
+        const notices = diagnosticTasks.flatMap((task) =>
+          taskActivityDiagnostics(task?.state).map(({ text }) => text),
+        );
         expect(notices.filter((text) => text.includes('Mail processing has waited'))).toHaveLength(
           2,
         );

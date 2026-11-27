@@ -23,7 +23,6 @@ import { z } from 'zod';
 import { BudgetReservationError, nextDailyReset, nextMonthlyReset } from '../cost.js';
 import { isUnparseableObjectError, type ModelRouter } from '../model-router/router.js';
 import { withSpan } from '../otel.js';
-import { notifyOwnerInNotifications } from './anomaly.js';
 
 /**
  * Dreaming (Phase 20 — offline cognition). A nightly, budget-capped, INTERNAL-ONLY
@@ -33,7 +32,7 @@ import { notifyOwnerInNotifications } from './anomaly.js';
  * them as LOW-CONFIDENCE QUARANTINED memories (owner confirms/rejects on Profile),
  * and anticipates likely-tomorrow needs (ProAct-style — arxiv 2605.25971). Owner-
  * facing observations land in `dream_notes` (surfaced in the morning brief, kept 7
- * days) and a consolidated "while you slept" note goes to Notifications.
+ * days) and a consolidated "while you slept" note is recorded in Activity.
  *
  * The full ProAct pre-fetch-and-cache loop (serve a future tool call from a
  * pre-staged cache entry) is a follow-up; v1 pre-stages ANSWERS for the owner
@@ -91,15 +90,13 @@ export async function runDream(
   deps: {
     db: Db;
     router: ModelRouter;
+    saveDiagnostic?: (id: string, text: string) => Promise<void>;
     heartbeat?: () => Promise<void>;
     /**
      * The portable reads, notes and hypothesis writer; without them the dream
      * uses PostgreSQL. Hypotheses need the task lease on this path.
      */
-    persistence?: Pick<
-      ExecutionPersistence,
-      'dream' | 'memoryExtraction' | 'notifications' | 'messages'
-    >;
+    persistence?: Pick<ExecutionPersistence, 'dream' | 'memoryExtraction'>;
   },
   opts: { agentId?: string; taskId?: string; now?: Date; lease?: () => CodeJobLease } = {},
 ): Promise<DreamResult> {
@@ -261,26 +258,15 @@ export async function runDream(
     ]);
 
     // A single consolidated "while you slept" note, only if there's something to say.
-    if (dream.footnotes.length > 0) {
+    if (dream.footnotes.length > 0 && deps.saveDiagnostic) {
       const body = `🌙 While you slept, I reflected on today:\n${dream.footnotes.map((f) => `• ${f}`).join('\n')}${
         hypothesesSaved > 0
           ? `\n\n${hypothesesSaved} pattern${hypothesesSaved === 1 ? '' : 's'} I noticed are waiting for you to confirm or dismiss on the What I remember page.`
           : ''
       }`;
-      const notify = portable
-        ? async () => {
-            const conversationId = await portable.notifications.getOrCreate(agentId);
-            await portable.messages.append({
-              conversationId,
-              ...(opts.taskId ? { taskId: opts.taskId } : {}),
-              role: 'assistant',
-              origin: 'assistant',
-              parts: [{ type: 'text', text: body }],
-              text: body,
-            });
-          }
-        : () => notifyOwnerInNotifications(db, agentId, body, opts.taskId);
-      await notify().catch((err) => console.error('dream: owner notify failed', err));
+      await deps.saveDiagnostic('overnight-reflection', body).catch((error) => {
+        console.error('dream: Activity diagnostic write failed', error);
+      });
     }
 
     return {

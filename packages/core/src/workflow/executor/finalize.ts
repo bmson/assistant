@@ -52,6 +52,16 @@ import {
   requestedPrivateArtifactIntent,
 } from '../artifact-intent.js';
 import { remainingBirthdaySaves, requestedBirthdaySaves } from '../birthday-import.js';
+import {
+  bookingDisclosure,
+  bookingDisclosureForRead,
+  bookingEvidence,
+  bookingModelWindow,
+  bookingText,
+  hotelTotalRequested,
+  isBookingProjectionSafe,
+  type VerifiedHotelTotal,
+} from '../booking-disclosure.js';
 import { calendarAgendaSummary } from '../calendar-agenda.js';
 import { CARD_NOT_BUILT, requestedCardIntent } from '../card-intent.js';
 import { responseCardSteps } from '../card-steps.js';
@@ -84,6 +94,7 @@ import {
   isConversationLocalContext,
   latestOwnerIntent,
   needsConversationReasoning,
+  ownerAuthoredWindow,
 } from '../owner-intent.js';
 import { PLANNER_VERSION } from '../planner.js';
 import { detectPersonalReadRequest, type PersonalReadRequest } from '../read-intent.js';
@@ -93,6 +104,8 @@ import {
   type ActionEvidence,
   enforcePersonalReadResponse,
   enforceResponseContract,
+  verifiedBookingDeposit,
+  verifiedHotelBookingTotal,
   verifiedReadResponse,
 } from '../response-contract.js';
 import { createSuggestion } from '../suggestions.js';
@@ -154,7 +167,7 @@ function calendarSkillNextStepOutput(projection: string, nextStep: string): stri
  * system will keep, and which the response contract then has to blank out.
  */
 export const SCHEDULE_DIRECTIVE =
-  '\nThis turn defers work to the future. Before you finish, call task.schedule with a concrete time and a self-contained instruction (or mission.update if this belongs to a mission). Do not promise to continue, watch, or keep updating anything unless that call succeeded — if you cannot schedule it, say so plainly and do the part you can do now.';
+  '\nThis turn defers work to the future. Before you finish, call task.schedule for a one-time follow-up, digest.schedule for an explicitly requested recurring digest in owner chat, or mission.update if this belongs to a mission. Do not promise to continue, watch, or keep updating anything unless that call succeeded — if you cannot schedule it, say so plainly and do the part you can do now.';
 
 function executionEvidence(deps: ExecutorDeps): ExecutionEvidenceRepository {
   return deps.persistence?.executionEvidence ?? createPostgresExecutionEvidenceRepository(deps.db);
@@ -566,6 +579,37 @@ function normalizeRecallLabel(value: string): string {
     .trim();
 }
 
+type BookingReadContext = {
+  resolvedReadIntent?: ResolvedReadIntent;
+  readRequest?: PersonalReadRequest | null;
+};
+
+function finalBookingDisclosure(
+  task: TaskLease,
+  state: TaskState,
+  window: ModelMessage[],
+  context?: BookingReadContext,
+) {
+  if (task.type !== 'chat_turn' || task.trust !== 'owner' || isForwardedIngest(task)) return;
+  const intent = latestOwnerIntent(window, {
+    trust: 'owner',
+    trigger: task.trigger,
+    clarificationContinuation: state.clarificationContinuation,
+  });
+  const request =
+    context?.readRequest ??
+    (context?.resolvedReadIntent?.kind === 'personal'
+      ? context.resolvedReadIntent.personal
+      : detectPersonalReadRequest(ownerAuthoredWindow(window, intent), {
+          now: task.createdAt,
+          timeZone: state.requestTimeZone,
+        }));
+  const disclosure =
+    intent.separation !== 'unknown' &&
+    bookingDisclosureForRead(intent.ownerAuthoredText, context?.resolvedReadIntent, request);
+  if (disclosure) return { ...disclosure, ownerText: intent.ownerAuthoredText, request };
+}
+
 /** Persist-before-send turns the task checkpoint into a small durable outbox. */
 export async function stageFinalResponse(
   deps: ExecutorDeps,
@@ -573,8 +617,59 @@ export async function stageFinalResponse(
   state: TaskState,
   window: ModelMessage[],
   pending: PendingFinal,
-  options?: { verifiedCompoundTripChecklist?: boolean },
+  options?: {
+    verifiedCompoundTripChecklist?: boolean;
+    bookingReadContext?: BookingReadContext;
+    verifiedCardHotelTotal?: VerifiedHotelTotal;
+  },
 ): Promise<ExecuteResult> {
+  const disclosure = finalBookingDisclosure(task, state, window, options?.bookingReadContext);
+  if (disclosure) {
+    const visibleText = bookingText(pending.text);
+    if (visibleText || !pending.text.trim()) {
+      pending.text = visibleText;
+    } else {
+      pending.text = 'I could not verify the requested booking detail.';
+      pending.terminalStatus = 'needs_attention';
+      pending.outcome = 'needs_attention';
+    }
+    pending.progress = bookingText(pending.progress);
+    if (disclosure.depositRequested) {
+      const request = disclosure.request;
+      const rows = request
+        ? await executionEvidence(deps).taskEvidence({ agentId: task.agentId, taskId: task.id })
+        : [];
+      const deposit = request && verifiedBookingDeposit(request, actionEvidence(rows, true));
+      pending.text =
+        deposit ?? 'I could not verify the deposit for this booking in the mail I checked.';
+      pending.progress = deposit
+        ? 'Verified the requested booking detail.'
+        : 'Booking detail unverified.';
+      if (!deposit) {
+        pending.terminalStatus = 'needs_attention';
+        pending.outcome = 'needs_attention';
+      }
+    }
+    if (
+      !disclosure.depositRequested &&
+      disclosure.request &&
+      hotelTotalRequested(disclosure.ownerText) &&
+      pending.outcome === 'done'
+    ) {
+      const rows = await executionEvidence(deps).taskEvidence({
+        agentId: task.agentId,
+        taskId: task.id,
+      });
+      const total = verifiedHotelBookingTotal(disclosure.request, actionEvidence(rows, true));
+      if (total)
+        pending.text = `${pending.text}\n\n${total.value}. [Booking email](https://mail.google.com/mail/u/0/#all/${total.threadId})`;
+    }
+    if (pending.responseCards)
+      pending.responseCards = pending.responseCards.filter((card) =>
+        isBookingProjectionSafe(card, options?.verifiedCardHotelTotal),
+      );
+    state.recall = undefined;
+  }
   const correctionOwnedChecklist =
     state.requestChecklist?.revision !== undefined ||
     state.requestChecklist?.revisionAudit !== undefined;
@@ -780,6 +875,124 @@ async function recordQualitySignals(
  * response contract still refuses to let prior-turn rows authorise a new
  * send, submission, or booking.
  */
+const digestReceiptSchema = z.object({
+  scheduleId: z.uuid(),
+  conversationId: z.uuid(),
+  inCurrentChat: z.boolean(),
+  topic: z.string(),
+  timezone: z.string(),
+  localTime: z.string(),
+  cadence: z.discriminatedUnion('kind', [
+    z.object({ kind: z.literal('daily') }),
+    z.object({ kind: z.literal('weekly'), days: z.array(z.number().int().min(0).max(6)) }),
+  ]),
+  enabled: z.boolean(),
+  nextRunAt: z.iso.datetime().nullable(),
+  status: z.enum(['saved', 'destination_conflict', 'moved', 'cancelled', 'deleted']).optional(),
+  lifecycle: z.enum(['cancelled', 'deleted']).nullable().optional(),
+});
+
+function describeDigestReceipt(receipt: z.infer<typeof digestReceiptSchema>): string {
+  const topic = receipt.topic.replace(/[`*_[\]<>]/g, '\\$&');
+  if (receipt.lifecycle) {
+    const action = receipt.lifecycle === 'deleted' ? 'Deleted' : 'Cancelled';
+    return `${action} the “${topic}” digest. It has no future runs. Schedule ID ${receipt.scheduleId}.`;
+  }
+  const destination = receipt.inCurrentChat
+    ? 'this chat'
+    : `[the original chat](/chat/${receipt.conversationId})`;
+  const week = [
+    'Sundays',
+    'Mondays',
+    'Tuesdays',
+    'Wednesdays',
+    'Thursdays',
+    'Fridays',
+    'Saturdays',
+  ];
+  const days =
+    receipt.cadence.kind === 'daily'
+      ? 'daily'
+      : new Intl.ListFormat('en-US').format(receipt.cadence.days.map((day) => week[day] ?? ''));
+  const timing = !receipt.enabled
+    ? 'This schedule is disabled.'
+    : receipt.nextRunAt
+      ? `Next run ${new Intl.DateTimeFormat('en-US', { dateStyle: 'medium', timeStyle: 'short', timeZone: receipt.timezone }).format(new Date(receipt.nextRunAt))}.`
+      : 'The next run is pending.';
+  const saved = `“${topic}” is set to post in ${destination} ${days} at ${receipt.localTime} (${receipt.timezone}). ${timing} Schedule ID ${receipt.scheduleId}.`;
+  if (receipt.status === 'moved') return `Moved the digest here. ${saved}`;
+  return receipt.status === 'destination_conflict'
+    ? `${saved} Do you want to keep that destination or move the digest here?`
+    : saved;
+}
+
+function digestReceiptText(rows: ExecutionEvidenceRecord[], draft: string): string | undefined {
+  const results = rows.filter((row) => row.status === 'succeeded');
+  const schedules = results.filter(
+    (row) => row.toolName === 'digest.schedule' || row.toolName === 'digest.manage',
+  );
+  // Preserve the other parts of compound replies and their saved IDs.
+  if (
+    rows.some(
+      (row) =>
+        row.toolName !== 'digest.schedule' &&
+        row.toolName !== 'digest.list' &&
+        row.toolName !== 'digest.manage',
+    )
+  ) {
+    const receipts = new Map<string, string>();
+    for (const row of schedules) {
+      const receipt = digestReceiptSchema.safeParse(row.result);
+      if (receipt.success && !draft.includes(receipt.data.scheduleId)) {
+        receipts.set(receipt.data.scheduleId, describeDigestReceipt(receipt.data));
+      }
+    }
+    return receipts.size ? [draft, ...receipts.values()].join('\n\n') : undefined;
+  }
+  // For a standalone digest turn the stored receipt controls the destination,
+  // even when the model draft describes a different chat.
+  const schedule = schedules.at(-1);
+  if (schedule) {
+    const receipt = digestReceiptSchema.safeParse(schedule.result);
+    if (receipt.success) return describeDigestReceipt(receipt.data);
+    const unresolved = z
+      .object({
+        status: z.enum(['ambiguous', 'move_requires_offer', 'not_found', 'stale_or_unavailable']),
+        matches: z.array(digestReceiptSchema).optional(),
+      })
+      .safeParse(schedule.result);
+    if (unresolved.success) {
+      switch (unresolved.data.status) {
+        case 'ambiguous':
+          return `Which digest do you mean?\n\n${unresolved.data.matches?.map(describeDigestReceipt).join('\n\n') ?? ''}`;
+        case 'move_requires_offer':
+          return 'To move a digest, first ask for that digest here so I can show you its current destination.';
+        case 'not_found':
+          return 'I couldn’t find a digest with that name in your schedules.';
+        case 'stale_or_unavailable':
+          return 'The digest changed before I could update it. Check your saved digests and try again.';
+      }
+    }
+    const rejected = z
+      .object({ status: z.enum(['topic_required', 'topic_mismatch']) })
+      .safeParse(schedule.result);
+    if (rejected.success) {
+      return rejected.data.status === 'topic_required'
+        ? 'What topic should the recurring digest cover?'
+        : 'I couldn’t save the digest with the requested topic. Please restate what it should cover.';
+    }
+    return;
+  }
+  const list = results.findLast((row) => row.toolName === 'digest.list');
+  if (!list) return;
+  const entries = z.object({ digests: z.array(digestReceiptSchema) }).safeParse(list.result);
+  if (!entries.success) return;
+  return (
+    entries.data.digests.map(describeDigestReceipt).join('\n\n') ||
+    'You have no saved recurring digests.'
+  );
+}
+
 export async function stageModelFinalResponse(
   deps: ExecutorDeps,
   task: TaskLease,
@@ -809,7 +1022,9 @@ export async function stageModelFinalResponse(
   // but a leaked tag in an email or SMS final would be robot syntax in front
   // of a human — stripping here is the defense in depth. The cues themselves
   // survive only into a dashboard chat_turn's persisted parts, below.
-  const strippedFinal = stripCueTags(pending.text);
+  const disclosure = finalBookingDisclosure(task, state, window, readContext);
+  const strippedFinal = stripCueTags(disclosure ? bookingText(pending.text) : pending.text);
+  if (disclosure) window = bookingModelWindow(window, disclosure.ownerText);
   pending.text = strippedFinal.text;
   const publicScope =
     readContext?.resolvedReadIntent?.kind === 'public_activity' ||
@@ -824,7 +1039,7 @@ export async function stageModelFinalResponse(
     ? allRows.filter((row) => /^web\.(?:search|fetch)$/.test(row.toolName))
     : allRows;
   const rawPriorRows =
-    !publicScope && task.conversationId
+    !publicScope && !disclosure && task.conversationId
       ? await evidenceRepository.conversationEvidence({
           agentId: task.agentId,
           conversationId: task.conversationId,
@@ -842,7 +1057,10 @@ export async function stageModelFinalResponse(
       deps.persistence?.conversationSearch ?? createPostgresConversationSearchRepository(deps.db),
   });
   const safeById = new Map(safeEvidence.rows.map((row) => [row.id, row]));
-  const rows = rawRows.map((row) => safeById.get(row.id) ?? row);
+  const rows = rawRows.map((row) => {
+    const safe = safeById.get(row.id) ?? row;
+    return disclosure ? bookingEvidence(safe) : safe;
+  });
   const priorRows = rawPriorRows.map((row) => safeById.get(row.id) ?? row);
   const evidence: ActionEvidence[] = [
     ...actionEvidence(priorRows, false),
@@ -1096,7 +1314,10 @@ export async function stageModelFinalResponse(
     ...(readContext?.compoundTripExtraction
       ? { compoundTripExtraction: readContext.compoundTripExtraction }
       : {}),
-    groundingCorpus: readContext?.groundingCorpus,
+    groundingCorpus:
+      disclosure && readContext?.groundingCorpus
+        ? bookingText(readContext.groundingCorpus)
+        : readContext?.groundingCorpus,
     liveCorpus: liveLookups.length > 0 ? liveLookupCorpus(rows) : undefined,
   };
   const missingRequestedPageReceipts = requestedPublicPageReceiptFindings(
@@ -1309,7 +1530,9 @@ export async function stageModelFinalResponse(
       };
   // A reviser is another generative surface: strip companion tags a second
   // time, then re-run the same authoritative response contract before publish.
-  const reflectedText = stripCueTags(reflection.text).text;
+  const reflectedText = stripCueTags(
+    disclosure ? bookingText(reflection.text) : reflection.text,
+  ).text;
   const reflectedCheck = reflection.revised
     ? enforceResponseContract(reflectedText, evidence, contractOptions)
     : initialCheck;
@@ -1365,7 +1588,7 @@ export async function stageModelFinalResponse(
       readContext?.resolvedReadIntent?.kind === 'combined'
         ? readContext.readRequest
         : contractOptions.readRequest,
-    ambient: readContext?.groundingCorpus,
+    ambient: contractOptions.groundingCorpus,
     requestText: latestUserText(window),
     lookupOrder: liveLookups.map((lookup) => lookup.kind),
   });
@@ -1378,6 +1601,14 @@ export async function stageModelFinalResponse(
   // also prefer a composed answer; their raw lookup trail stays secondary.
   const ownerRequest = latestUserText(window) ?? '';
   const cardRequested = requestedCardIntent(ownerRequest);
+  const verifiedCardHotelTotal =
+    cardRequested &&
+    disclosure &&
+    !disclosure.depositRequested &&
+    disclosure.request &&
+    hotelTotalRequested(disclosure.ownerText, true)
+      ? verifiedHotelBookingTotal(disclosure.request, actionEvidence(rawRows, true))
+      : undefined;
   const answerCardPreferred = prefersAnswerCard(ownerRequest);
   const trigger = task.trigger as {
     payload?: { refreshCardId?: unknown; refreshCardRevisionId?: unknown };
@@ -1476,13 +1707,17 @@ export async function stageModelFinalResponse(
       sourceKey: task.externalEventId ?? task.id,
       explicitRequest: Boolean(refreshCardId) || cardRequested,
       evidenceOnly: Boolean(refreshCardId),
+      verifiedHotelTotal: verifiedCardHotelTotal,
+      projectBookingFields: Boolean(
+        disclosure || (refreshCardId && bookingDisclosure(sourceText.split('\n')[0] ?? '')),
+      ),
       // A turn that called no tool has only its own reply to stand on. The
       // composer admits it as evidence in that case alone, under the same
       // verbatim rule, which is what the phone's hand-written kinds used to do
       // with a regex per fact.
-      answerText: checked.text,
+      answerText: disclosure ? bookingText(checked.text) : checked.text,
     });
-    if (generated) {
+    if (generated && (!disclosure || isBookingProjectionSafe(generated, verifiedCardHotelTotal))) {
       /*
        * A card read out of this turn's own reply is a view of the answer, not
        * an object the owner acquired: "leave around 2:45" is wrong by tomorrow
@@ -1674,9 +1909,10 @@ export async function stageModelFinalResponse(
       contractNotice: checked.blocked || undefined,
     });
   }
+  const finalText = digestReceiptText(rows, text) ?? text;
   // A known contact's plain answer would otherwise dead-end in the dashboard;
   // propose it back to them (owner-approved) so the thread does not go silent.
-  await maybeEnqueueKnownSenderReply(deps, task, text);
+  await maybeEnqueueKnownSenderReply(deps, task, finalText);
   return stageFinalResponse(
     deps,
     task,
@@ -1684,11 +1920,13 @@ export async function stageModelFinalResponse(
     window,
     {
       ...pending,
-      text,
-      progress: text.slice(0, 200),
+      text: finalText,
+      progress: finalText.slice(0, 200),
       contractNotice: checked.blocked || undefined,
     },
     {
+      bookingReadContext: readContext,
+      verifiedCardHotelTotal,
       verifiedCompoundTripChecklist:
         readContext?.verifiedCompoundTripChecklist === true && !checked.blocked,
     },
