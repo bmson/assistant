@@ -28,13 +28,21 @@ export interface TaskActivityDiagnostic {
 
 const MAX_DIAGNOSTICS = 32;
 const MAX_DIAGNOSTIC_TEXT = 3_000;
+const EXHAUSTED_RETRIES_TEXT =
+  'This scheduled run exhausted its retries. You can retry it in Activity on your iPhone.';
+const LEGACY_EXHAUSTED_RETRIES_TEXT =
+  'This scheduled run exhausted its retries. You can retry it from Activity.';
 
 export function taskActivityDiagnostics(state: unknown): TaskActivityDiagnostic[] {
   const records = (state as { activityDiagnostics?: unknown } | null)?.activityDiagnostics;
   if (!Array.isArray(records)) return [];
   return records.slice(-MAX_DIAGNOSTICS).flatMap((record) => {
     if (!record || typeof record.id !== 'string' || typeof record.text !== 'string') return [];
-    return [{ id: record.id, text: record.text.slice(0, MAX_DIAGNOSTIC_TEXT) }];
+    const text =
+      record.id.startsWith('retries-exhausted:') && record.text === LEGACY_EXHAUSTED_RETRIES_TEXT
+        ? EXHAUSTED_RETRIES_TEXT
+        : record.text;
+    return [{ id: record.id, text: text.slice(0, MAX_DIAGNOSTIC_TEXT) }];
   });
 }
 
@@ -68,7 +76,7 @@ export function activityRetriesExhaustedDiagnostic(
 ): TaskActivityDiagnostic {
   return {
     id: `retries-exhausted:${queueGeneration}`,
-    text: 'This scheduled run exhausted its retries. You can retry it from Activity.',
+    text: EXHAUSTED_RETRIES_TEXT,
   };
 }
 

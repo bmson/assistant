@@ -56,10 +56,24 @@ const PUBLISHER_PERMISSIONS_REQUIRED =
   "GitHub publishing permission denied. Check the repair publisher token's repository write access.";
 const SANDBOX_SETUP_FAILED = 'Hosted sandbox setup failed. No coding result was published.';
 const PROTECTED_PATCH_REJECTED = 'Hosted result contains duplicate or protected paths';
+export const PROTECTED_REPAIR_TARGET =
+  'The fix targets protected code. It requires a separate owner-led change.';
+
+const protectedRepairNextStep =
+  'Review the diagnosis in Improvements before making a separate owner-led change.';
+
+function blockedByProtectedTarget(issue: RepairIssue): boolean {
+  return issue.status === 'blocked' && issue.data.lastError === PROTECTED_REPAIR_TARGET;
+}
 
 /** Explicit owner decisions and intervention keep their original delivery route. */
 export function repairNoticeNeedsOwner(issue: RepairIssue): boolean {
-  if (issue.data.ownerActionRequired || issue.status === 'pr_open') return true;
+  if (
+    issue.data.ownerActionRequired ||
+    issue.status === 'pr_open' ||
+    blockedByProtectedTarget(issue)
+  )
+    return true;
   if (issue.status === 'monitoring') return Boolean(issue.data.mergeSha && issue.data.monitoringAt);
   return (
     issue.status === 'failed' &&
@@ -109,6 +123,10 @@ export function repairOutcome(issue: RepairIssue, failureStage?: RepairStage): R
   if (issue.status === 'blocked' && issue.data.ownerActionRequired) {
     message = issue.data.lastError ?? 'The investigation is blocked pending an owner action.';
     nextStep = issue.data.ownerActionRequired;
+  }
+  if (blockedByProtectedTarget(issue)) {
+    message = 'The proposed repair targets protected code. No coding run was dispatched.';
+    nextStep = protectedRepairNextStep;
   }
   // Only known internal outcomes are exposed. Arbitrary provider errors may
   // contain secrets; hiding those must not hide a confirmed sandbox failure.

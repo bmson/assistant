@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { repairNoticeNeedsOwner, repairOutcome } from './repair-outcome.js';
+import {
+  PROTECTED_REPAIR_TARGET,
+  repairNoticeNeedsOwner,
+  repairOutcome,
+} from './repair-outcome.js';
 import { type RepairIssue, repairTransition } from './self-repair.js';
 
 function issue(status: RepairIssue['status']): RepairIssue {
@@ -41,6 +45,17 @@ describe('deterministic repair outcomes', () => {
     failed.data.lastError = 'provider timeout sk-proj-SECRETSECRET';
     expect(JSON.stringify(repairOutcome(failed))).not.toContain('SECRET');
   });
+  it('keeps the owner notice for a blocked protected target without a stored action', () => {
+    const blocked = issue('blocked');
+    blocked.data.lastError = PROTECTED_REPAIR_TARGET;
+    expect(repairNoticeNeedsOwner(blocked)).toBe(true);
+    expect(repairOutcome(blocked)).toMatchObject({
+      message: 'The proposed repair targets protected code. No coding run was dispatched.',
+      nextStep: expect.stringContaining('owner-led'),
+    });
+    expect(repairNoticeNeedsOwner(issue('blocked'))).toBe(false);
+  });
+
   it('explains a rejected protected patch without suggesting that coding is still running', () => {
     const failed = issue('failed');
     failed.data.lastError = 'Hosted result contains duplicate or protected paths';

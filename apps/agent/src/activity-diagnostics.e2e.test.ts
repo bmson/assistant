@@ -23,7 +23,7 @@ import {
   FirestoreTaskActivityRepository,
   FirestoreTaskDiscoveryRepository,
 } from '@assistant/firestore';
-import { notificationLeg } from '@assistant/persistence';
+import { notificationLeg, PROTECTED_REPAIR_TARGET } from '@assistant/persistence';
 import { eq } from 'drizzle-orm';
 import { expect, it, vi } from 'vitest';
 import { notifyOwnerOfDeliveredAnswer } from '../../../packages/core/src/workflow/executor/notices.js';
@@ -42,6 +42,9 @@ const privateReply = 'Private fixture reply for the secondary chat.';
 const existingNotice = 'Existing synthetic owner notice.';
 const progressTitle = 'Synthetic background repair failure';
 const actionableTitle = 'Synthetic repair awaiting owner action';
+const protectedTitle = 'Synthetic repair requiring a separate owner-led change';
+const exhaustedText =
+  'This scheduled run exhausted its retries. You can retry it in Activity on your iPhone.';
 
 for (const driver of ['postgres', 'firestore'] as const) {
   it.skipIf(driver === 'firestore' && !process.env.FIRESTORE_EMULATOR_HOST)(
@@ -110,7 +113,7 @@ for (const driver of ['postgres', 'firestore'] as const) {
         const seedRepair = async (
           title: string,
           status: 'failed' | 'blocked',
-          ownerActionRequired?: string,
+          notice: { ownerActionRequired?: string; lastError?: string } = {},
         ) => {
           const issue = await reportRepair(repair, agentId, {
             key: title,
@@ -118,16 +121,15 @@ for (const driver of ['postgres', 'firestore'] as const) {
             title,
             summary: title,
           });
-          const updated = await repair.update(issue, status, { ownerActionRequired }, new Date());
+          const updated = await repair.update(issue, status, notice, new Date());
           if (!updated) throw new Error('Repair fixture update failed');
           return updated;
         };
         const ordinaryIssue = await seedRepair(progressTitle, 'failed');
-        await seedRepair(
-          actionableTitle,
-          'blocked',
-          'Choose whether to request another investigation.',
-        );
+        await seedRepair(actionableTitle, 'blocked', {
+          ownerActionRequired: 'Choose whether to request another investigation.',
+        });
+        await seedRepair(protectedTitle, 'blocked', { lastError: PROTECTED_REPAIR_TARGET });
 
         const router = {
           object: vi.fn(async () => ({
@@ -266,7 +268,7 @@ for (const driver of ['postgres', 'firestore'] as const) {
           [ordinary, progressTitle],
           [health, historyFailure],
           [dream, footnote],
-          ...exhausted.map((task) => [task, 'This scheduled run exhausted its retries.'] as const),
+          ...exhausted.map((task) => [task, exhaustedText] as const),
         ] as const;
         for (const [task, text] of cases) {
           const detail = store
@@ -294,10 +296,17 @@ for (const driver of ['postgres', 'firestore'] as const) {
         }
         expect(await openedText(primary.id)).toEqual([]);
         expect(await openedText(secondary.id)).toEqual([privateReply]);
-        expect(await openedText(notifications)).toEqual([
-          existingNotice,
-          expect.stringContaining(actionableTitle),
-        ]);
+        const ownerNotices = await openedText(notifications);
+        expect(ownerNotices).toHaveLength(3);
+        expect(ownerNotices).toEqual(
+          expect.arrayContaining([
+            existingNotice,
+            expect.stringContaining(actionableTitle),
+            expect.stringContaining(
+              `“${protectedTitle}”: The proposed repair targets protected code.`,
+            ),
+          ]),
+        );
       } finally {
         vi.unstubAllGlobals();
         vi.unstubAllEnvs();
