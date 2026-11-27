@@ -23,6 +23,7 @@ import {
 import { and, eq, gte, inArray, isNull, lt, ne, notInArray, or, sql } from 'drizzle-orm';
 import { loadConfig } from '../config.js';
 import { pendingKnowledgeGraphSourceCount } from '../memory/knowledge-graph.js';
+import { GOOGLE_CALENDAR_RECONNECT_NOTICE } from '../proactive/canaries.js';
 import type { ProactiveNotifier } from '../proactive/notify.js';
 import {
   assessProactiveCanaries,
@@ -188,6 +189,7 @@ export async function runAssistantHealthMonitor(
     readTotals?: CostRepository['totals'];
     ownerTimeZone?: () => Promise<string>;
     saveDiagnostic?: (id: string, text: string) => Promise<void>;
+    saveOwnerNotice?: (id: string, text: string) => Promise<boolean>;
     notifyOwner?: ProactiveNotifier;
   },
   opts: { agentId: string; taskId?: string; now?: Date },
@@ -372,7 +374,23 @@ export async function runAssistantHealthMonitor(
     }
   }
 
-  return { signals: signals.map((signal) => signal.detail), notified: notify.length > 0 };
+  let savedReconnectNotice = false;
+  if (canaries?.googleCalendar.state === 'expired' && deps.canaries && deps.saveOwnerNotice) {
+    // A prior provider outage may already own the diagnostic cooldown. Recheck the
+    // grant and key the owner's instruction to that connection across jobs and retries.
+    const connection = (await deps.canaries.google.get(opts.agentId))?.connection;
+    if (connection?.status === 'reconnect_required') {
+      savedReconnectNotice = await deps.saveOwnerNotice(
+        `calendar-reconnect:${opts.agentId}:${connection.id}`,
+        GOOGLE_CALENDAR_RECONNECT_NOTICE,
+      );
+    }
+  }
+
+  return {
+    signals: signals.map((signal) => signal.detail),
+    notified: notify.length > 0 || savedReconnectNotice,
+  };
 }
 
 /** The PostgreSQL implementation of the monitor's persistence. */

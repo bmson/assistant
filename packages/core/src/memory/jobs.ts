@@ -302,6 +302,22 @@ export async function runCodeJob(
     });
     if (!saved) throw new Error('Activity diagnostic task is unavailable');
   }
+  async function saveOwnerNotice(channelMessageId: string, text: string): Promise<boolean> {
+    const conversationId = deps.persistence
+      ? await deps.persistence.notifications.getOrCreate(task.agentId)
+      : await getOrCreateNotificationsConversation(deps.db, task.agentId);
+    const messages = deps.persistence?.messages ?? createPostgresMessageRepository(deps.db);
+    const saved = await messages.append({
+      conversationId,
+      taskId: task.id,
+      role: 'assistant',
+      origin: 'assistant',
+      parts: [{ type: 'text', text }],
+      text,
+      channelMessageId,
+    });
+    return Boolean(saved);
+  }
 
   switch (job) {
     case 'reminder.notify': {
@@ -871,19 +887,7 @@ export async function runCodeJob(
               await saveDiagnostic(key, text);
               return;
             }
-            const conversationId = deps.persistence
-              ? await deps.persistence.notifications.getOrCreate(task.agentId)
-              : await getOrCreateNotificationsConversation(deps.db, task.agentId);
-            const messages = deps.persistence?.messages ?? createPostgresMessageRepository(deps.db);
-            await messages.append({
-              conversationId,
-              taskId: task.id,
-              role: 'assistant',
-              origin: 'assistant',
-              parts: [{ type: 'text', text }],
-              text,
-              channelMessageId: key,
-            });
+            await saveOwnerNotice(key, text);
           },
         },
         task.agentId,
@@ -928,6 +932,7 @@ export async function runCodeJob(
             : undefined,
           notifyOwner: deps.notifyOwner,
           saveDiagnostic,
+          saveOwnerNotice,
         },
         { agentId: task.agentId, taskId: task.id },
       );

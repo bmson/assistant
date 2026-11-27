@@ -173,6 +173,9 @@ export async function assessProactiveCanaries(
 
 export type ProactiveCanaries = Awaited<ReturnType<typeof assessProactiveCanaries>>;
 
+export const GOOGLE_CALENDAR_RECONNECT_NOTICE =
+  'Google Calendar access expired. Reconnect in Google Calendar settings.';
+
 export function proactiveCanaryProblems(canaries: ProactiveCanaries) {
   const names = {
     pulse: 'Pulse',
@@ -185,6 +188,8 @@ export function proactiveCanaryProblems(canaries: ProactiveCanaries) {
     const state = canaries[key].state;
     if (key === 'pulse' && state === 'missing')
       return [{ key, detail: 'Pulse schedule is missing.' }];
+    if (key === 'googleCalendar' && state === 'expired')
+      return [{ key, detail: GOOGLE_CALENDAR_RECONNECT_NOTICE }];
     return ['expired', 'overdue', 'unavailable', 'incomplete'].includes(state)
       ? [{ key, detail: `${names[key]}: ${state}.` }]
       : [];
