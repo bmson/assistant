@@ -1,5 +1,6 @@
 /** Protected paired-deploy preflight. GETs and canonical receipt readback only;
  * this command never creates a baseline, grant, hold or approval. */
+
 import { createHash } from 'node:crypto';
 import { lstatSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -26,6 +27,7 @@ import { verifyPreAuthEnvironment } from './owner-editor-release-inventory.js';
 import { bootstrapDigest, reviewedCurrentEnvironment } from './owner-release-current-snapshot.js';
 import { createImageResolutionReader } from './owner-release-image-resolution.js';
 import { preloadArchivedOriginalForProtectedRelease } from './owner-restore-target-verify.js';
+import { loadRetainedServingImageEvidence } from './owner-serving-image-evidence.js';
 import { protectedWebTagCredential } from './owner-web-tag-cloud.js';
 
 export async function runEstimatedCostReleasePreflight(mode?: string) {
@@ -54,7 +56,12 @@ export async function runEstimatedCostReleasePreflight(mode?: string) {
   await preloadArchivedOriginalForProtectedRelease(env, profile.source);
   const token = await protectedWebTagCredential();
   const read = estimatedCostMetadataRead(token, Date.now() + 180000);
-  const resolveImage = createImageResolutionReader(token);
+  const resolveImage = createImageResolutionReader(
+    token,
+    fetch,
+    undefined,
+    loadRetainedServingImageEvidence(),
+  );
   for (const role of ['web', 'agent'] as const) await resolveImage(current.services[role].image);
   const { verifyHostedReclosedBaseline } = await import('./owner-release-reclosed-hosted.js');
   const reclosed = await verifyHostedReclosedBaseline(current);

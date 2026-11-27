@@ -6,13 +6,38 @@ and subprocess groups. It never creates, boots, shuts down or deletes a device.
 """
 import sys
 
-if len(sys.argv) != 2 or sys.argv[1] not in {'run', 'cleanup', 'run-calendar', 'cleanup-calendar'}:
-    raise SystemExit('Expected run, cleanup, run-calendar or cleanup-calendar')
+modes = {'run', 'cleanup', 'run-calendar', 'cleanup-calendar', 'run-noticing', 'cleanup-noticing'}
+if len(sys.argv) != 2 or sys.argv[1] not in modes:
+    raise SystemExit('Expected one of ' + ', '.join(sorted(modes)))
 
-calendar = sys.argv[1].endswith('-calendar')
-evidence_name = 'household-calendar-smoke' if calendar else 'native-controls'
+action, _, phase = sys.argv[1].partition('-')
+smoke = bool(phase)
+if phase == 'calendar':
+    evidence_name = 'household-calendar-smoke'
+    expected_methods = ['HouseholdCalendarUITests/testHouseholdCalendarChoicesReopenAndPreview']
+    result_name = 'household-calendar.xcresult'
+    scope = 'synthetic household calendar picker smoke only'
+    qualification = 'synthetic calendar picker simulator smoke'
+    build_seconds, test_seconds, allowance = 350, 300, '240'
+elif phase == 'noticing':
+    evidence_name = 'noticing-smoke'
+    expected_methods = ['MobileControlsUITests/testNoticingShowsOverallHealthFromTheServer']
+    result_name = 'Noticing.xcresult'
+    scope = 'synthetic Noticing status smoke only'
+    qualification = 'synthetic Noticing status smoke; no physical-device or live push acceptance'
+    build_seconds, test_seconds, allowance = 405, 150, '120'
+else:
+    evidence_name = 'native-controls'
+    expected_methods = [
+        'MobileControlsUITests/testNativeControlsCapability',
+        'MobileControlsUITests/testAccessibleControlsMatrix',
+    ]
+    result_name = 'capability.xcresult'
+    scope = 'synthetic capability and 20-case accessibility matrix only'
+    qualification = 'synthetic capability and 20-case native simulator matrix; no physical-device, VoiceOver or persistence acceptance'
+    build_seconds, test_seconds, allowance = 480, 1020, '900'
 
-if sys.argv[1] in {'run', 'run-calendar'}:
+if action == 'run':
     import os, sys, json, re, time, signal, selectors, subprocess, hashlib, plistlib
     from pathlib import Path
     root = Path(os.environ['RUNNER_TEMP']) / (evidence_name + '-evidence')
@@ -21,7 +46,7 @@ if sys.argv[1] in {'run', 'run-calendar'}:
     env = {k:v for k,v in os.environ.items() if k in {'HOME','USER','LOGNAME','SHELL','TMPDIR','LANG','LC_ALL'}}
     env['PATH'] = '/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin'
     log_bytes = 0
-    budget = 600 if calendar else 2100
+    budget = 600 if smoke else 2100
     elapsed = time.time() - float((Path(os.environ['RUNNER_TEMP'])/(evidence_name+'-start')).read_text())
     if not 0 <= elapsed < budget: raise RuntimeError('Job budget unavailable')
     main_deadline = time.monotonic() + budget - elapsed
@@ -144,12 +169,11 @@ if sys.argv[1] in {'run', 'run-calendar'}:
             raise RuntimeError(name+' failed: '+str(record))
         return (root/(name+'.log')).read_text(errors='replace')
     try:
-        if not calendar and os.environ['GITHUB_RUN_ATTEMPT'] != '1': raise RuntimeError('No rerun authority')
+        if not smoke and os.environ['GITHUB_RUN_ATTEMPT'] != '1': raise RuntimeError('No rerun authority')
         head = run('source-head', ['git','rev-parse','HEAD'], 10).strip()
         if head != os.environ['EXPECTED_HEAD']: raise RuntimeError('Checkout pin mismatch')
         paths = sorted(set(Path('apps/ios').rglob('*.swift')) | {Path('apps/ios/Assistant.xcodeproj/project.pbxproj'), Path('infra/ios-native-controls.py'), Path('infra/ios-detect-changes.sh'), Path('infra/ios-detect-changes.test.sh'), Path('.github/workflows/ios.yml'), Path('apps/ios/Assistant.xcodeproj/xcshareddata/xcschemes/AssistantUIFixtures.xcscheme')})
         pins = {str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
-        scope = 'synthetic household calendar picker smoke only' if calendar else 'synthetic capability and 20-case accessibility matrix only'
         save('source.json', {'head':head,'pullRequestHead':os.environ['PR_HEAD'],'pins':pins,'qualificationVersion':3,'scope':scope})
         if os.environ.get('RUNNER_ENVIRONMENT') != 'github-hosted': raise RuntimeError('Fixture ownership requires the disposable hosted job')
         udid = os.environ['DESTINATION_UDID']
@@ -160,7 +184,7 @@ if sys.argv[1] in {'run', 'run-calendar'}:
         # The preceding ordinary app build/tests already qualified this destination.
         # Do not cold-boot, create, delete or inventory simulators here.
         approval_evidence = root.with_name('native-controls-evidence')
-        reuse = calendar and (approval_evidence / 'binary-pins.json').is_file()
+        reuse = phase == 'calendar' and (approval_evidence / 'binary-pins.json').is_file()
         if reuse:
             prior_source = json.loads((approval_evidence / 'source.json').read_text())
             prior_cleanup = json.loads((approval_evidence / 'cleanup.json').read_text())
@@ -173,9 +197,9 @@ if sys.argv[1] in {'run', 'run-calendar'}:
                     or not prior_cleanup.get('fixtureProcessesAbsent')):
                 raise RuntimeError('Approval fixture cleanup is incomplete')
         else:
-            if main_deadline-time.monotonic()<(540 if calendar else 1800):
+            if main_deadline-time.monotonic()<(540 if smoke else 1800):
                 raise RuntimeError('Insufficient admitted build/test/cleanup reserve')
-            run('build', ['xcodebuild','-project','apps/ios/Assistant.xcodeproj','-scheme','AssistantUIFixtures','-configuration','Debug','-destination','id='+udid,'-derivedDataPath',str(build),'CODE_SIGNING_ALLOWED=NO','CODE_SIGNING_REQUIRED=NO','CODE_SIGN_IDENTITY=','build-for-testing'], 350 if calendar else 480)
+            run('build', ['xcodebuild','-project','apps/ios/Assistant.xcodeproj','-scheme','AssistantUIFixtures','-configuration','Debug','-destination','id='+udid,'-derivedDataPath',str(build),'CODE_SIGNING_ALLOWED=NO','CODE_SIGNING_REQUIRED=NO','CODE_SIGN_IDENTITY=','build-for-testing'], build_seconds)
         products = build / 'Build/Products'
         runs = list(products.glob('AssistantUIFixtures_*.xctestrun'))
         if len(runs) != 1: raise RuntimeError('Expected exactly one built xctestrun')
@@ -199,21 +223,16 @@ if sys.argv[1] in {'run', 'run-calendar'}:
         if reuse and json.loads((approval_evidence / 'binary-pins.json').read_text()) != binary_pins:
             raise RuntimeError('Reused fixture build changed')
         save('binary-pins.json', binary_pins)
-        if calendar:
+        if phase == 'calendar':
             save('build-origin.json', {'reusedApprovalBuild':reuse,'sourceHead':head})
         if any(hashlib.sha256(Path(p).read_bytes()).hexdigest()!=h for p,h in pins.items()): raise RuntimeError('Source drift')
-        calendar_method = 'HouseholdCalendarUITests/testHouseholdCalendarChoicesReopenAndPreview'
-        expected_methods = [calendar_method] if calendar else [
-            'MobileControlsUITests/testNativeControlsCapability',
-            'MobileControlsUITests/testAccessibleControlsMatrix',
-        ]
         selection = ['-only-testing:AssistantUITests/' + method for method in expected_methods]
-        result = root / ('household-calendar.xcresult' if calendar else 'capability.xcresult')
-        allowance = '240' if calendar else '900'
-        test_budget = 300 if calendar else 1020
-        output = run('test', ['xcodebuild','test-without-building','-xctestrun',str(runs[0]),'-destination','id='+udid,'-destination-timeout','30','-collect-test-diagnostics','never','-parallel-testing-enabled','NO','-maximum-concurrent-test-simulator-destinations','1','-test-timeouts-enabled','YES','-default-test-execution-time-allowance',allowance,'-maximum-test-execution-time-allowance',allowance,*selection,'-resultBundlePath',str(result)], test_budget)
-        summary = json.loads(run('summary', ['xcrun','xcresulttool','get','test-results','summary','--path',str(result)], 30 if calendar else 10))
-        tests = json.loads(run('named-tests', ['xcrun','xcresulttool','get','test-results','tests','--path',str(result)], 30 if calendar else 10))
+        result = root / result_name
+        output = run('test', ['xcodebuild','test-without-building','-xctestrun',str(runs[0]),'-destination','id='+udid,'-destination-timeout','30','-collect-test-diagnostics','never','-parallel-testing-enabled','NO','-maximum-concurrent-test-simulator-destinations','1','-test-timeouts-enabled','YES','-default-test-execution-time-allowance',allowance,'-maximum-test-execution-time-allowance',allowance,*selection,'-resultBundlePath',str(result)], test_seconds)
+        # Hosted runners can take longer to start the result reader than to read the bundle.
+        metadata_seconds = 30 if smoke else 60
+        summary = json.loads(run('summary', ['xcrun','xcresulttool','get','test-results','summary','--path',str(result)], metadata_seconds))
+        tests = json.loads(run('named-tests', ['xcrun','xcresulttool','get','test-results','tests','--path',str(result)], metadata_seconds))
         test_class, test_method = expected_methods[0].split('/')
         named = re.search(re.escape(test_class)+r'[^\n]{0,160}'+re.escape(test_method)+r'[^\n]{0,80}\bpassed\b', output, re.I)
         cases = []
@@ -227,7 +246,6 @@ if sys.argv[1] in {'run', 'run-calendar'}:
         structured = len(cases)==count and identities == set(expected_methods) and all(bundle and node.get('result')=='Passed' for node,bundle in cases)
         if not structured or not named or [summary.get(k) for k in ['totalTestCount','passedTests','failedTests','skippedTests']] != [count,count,0,0]:
             raise RuntimeError('Missing exact named PASS/zero-skip evidence')
-        qualification = 'synthetic calendar picker simulator smoke' if calendar else 'synthetic capability and 20-case native simulator matrix; no physical-device, VoiceOver or persistence acceptance'
         save('outcome.json', {'result':'PASS','namedTests':['AssistantUITests/'+method for method in expected_methods],'summary':summary,'sourceHead':head,'pullRequestHead':os.environ['PR_HEAD'],'qualification':qualification})
     except BaseException as error:
         save('failure.json', {'result':'HOLD','error':repr(error)})

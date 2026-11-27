@@ -215,6 +215,10 @@ The recovery digest reads up to 500 messages received during the outage, newest 
 
 **Checks.** Briefing delivered today; pulse ran in the last hour; extraction processed more than 0 in 24 hours (or ingest volume was 0); Google calendar connected; phone snapshot newer than 24 hours; weather available today; held under 25% of the daily cap; texts today within the cap.
 
+At exactly 25% held, the health card reports that the threshold has been reached. Above 25% it reports that the threshold has been exceeded. Repeated checks share the existing daily budget alert.
+
+The iPhone Noticing screen displays the server’s combined health result above the detailed checks. Older responses that omit the overall result show “Overall status unavailable.”
+
 **Where.** Extend `packages/core/src/proactive/pipeline-health.ts` (`assessProactiveHealth`) and `packages/application/src/proactive-health.ts`, with Firestore reads in `packages/firestore/src/proactive-health.ts`. Use the existing `assistant-health-monitor` schedule (`packages/core/src/workflow/health-monitor.ts`) rather than a new one, and expose the result through `GET /api/mobile/v1/workspace`. The iOS card is E5.
 
 **Tests.** One test per check, with fixed clocks. Red sends one interrupt notice a day.

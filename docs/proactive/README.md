@@ -63,7 +63,7 @@ Keep the flag off while replacing or draining incompatible readers. Before rolli
 
 The Phase 0 gate requires seven actual days of evidence covering daily briefing delivery, chat isolation, cost holds under 25% of the daily cap, extraction on days with eligible mail, and zero texts for routine replies. Record owner and household opt-ins before using their optional sources or delivery channels.
 
-H1 covers five of 28 synthetic scenarios on PostgreSQL and Firestore. The seven on-time replay deliveries per driver include both D7 bill reminders. Production recall remains unmeasured. [H1 replay](https://github.com/bmson/assistant/pull/972), [D7 bill timing](https://github.com/bmson/assistant/pull/974), [scorecard and coverage](golden-signals.md#running-the-replay).
+The local H1 replay at `2dda415724793cb713f7489baabbcd8fea8fd400` covered six of 28 synthetic scenarios on both PostgreSQL and Firestore. Five passed, and S08 recorded a missing revised-date stack item. Each driver measured 7/8 recall, 7/7 precision, and zero quiet violations. The remaining 22 scenarios are unimplemented. Production recall remains unmeasured. [H1 replay](https://github.com/bmson/assistant/pull/972), [D7 bill timing](https://github.com/bmson/assistant/pull/974), [scorecard and coverage](golden-signals.md#running-the-replay).
 
 ## Status board
 
@@ -77,7 +77,7 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | A4  | Stop mirroring secondary-chat replies into the primary chat            | 0     | M    | —          | in review (private answer-ready push)                         |
 | A5  | Checklist dedupe ignores trailing punctuation                          | 0     | S    | —          | in review                                                     |
 | A6  | Guard against promises without a tool call                             | 2     | M    | —          | in review (cancel and delete receipt checks)                  |
-| A7  | Self-repair cadence respects its daily limit                           | 0     | S    | —          | in review                                                     |
+| A7  | Self-repair cadence respects its daily limit                           | 0     | S    | —          | in review (keep follow-ups due at the daily dispatch limit)   |
 | A8  | Truthful "Needs you" count; archive needs_attention in Firestore       | 1     | M    | —          | in review (consistent counts and attention archival)          |
 | A9  | Firestore parity for every route the phone calls                       | 1     | M    | —          | in review (native route and method checks)                    |
 | A10 | Retire `morning-brief` in Firestore                                    | 0     | S    | —          | in review                                                     |
@@ -86,7 +86,7 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | A13 | Owner time zone in every card                                          | 0     | S    | —          | in review (owner time in calendar, briefing and Pulse cards)  |
 | A14 | Brief calendar answers                                                 | 1     | M    | —          | in review (compact agenda and calendar recovery)              |
 | A15 | Each turn answers its own message                                      | 0     | M    | —          | in review (originating turns and independent read requests)   |
-| A16 | Weather plausibility                                                   | 0     | S    | —          | in review (hourly snow corroboration)                         |
+| A16 | Weather plausibility                                                   | 0     | S    | —          | in review (daily, current and hourly snow evidence)           |
 | A17 | Texts only for urgent items                                            | 0     | S    | —          | in review (urgent SMS quota and retry checks)                 |
 | B1  | Calendar connection health and warning                                 | 1     | S    | —          | open                                                          |
 | B2  | Household calendar setup and classification                            | 1     | M    | B1         | Household, Work, School, Activity, Holidays and Ignore        |
@@ -139,7 +139,7 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | G2  | Health data minimization                                               | 4     | M    | —          | open                                                          |
 | G3  | Permissions live in policy, not memory                                 | 5     | S    | —          | open                                                          |
 | G4  | Household consent and visibility                                       | 5     | S    | B2         | open                                                          |
-| H1  | Golden-signal benchmark harness                                        | 3     | L    | —          | in progress (S13, S14, S16, S17, S24 on both drivers)         |
+| H1  | Golden-signal benchmark harness                                        | 3     | L    | —          | in progress (6 of 28 measured on both drivers)                |
 | H2  | Weekly missed-signal audit                                             | 5     | M    | H1         | open                                                          |
 | H3  | Proactive telemetry                                                    | 5     | M    | —          | open                                                          |
-| H4  | Daily canary                                                           | 0     | S    | —          | in review (source checks and one daily health alert)          |
+| H4  | Daily canary                                                           | 0     | S    | —          | in review (25% alert and overall iPhone health status)        |

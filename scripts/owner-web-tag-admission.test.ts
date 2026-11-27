@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -11,11 +12,28 @@ const mocked = vi.hoisted(() => ({
   bindRetirement: vi.fn(),
   hold: vi.fn(),
   project: vi.fn(),
+  ordinary: vi.fn(),
+  review: vi.fn(),
+  verifyCurrent: vi.fn(),
+  initialize: vi.fn(),
+}));
+vi.mock('./owner-ordinary-canonical-recovery.js', () => ({
+  loadOrdinaryCanonicalRecovery: mocked.ordinary,
+}));
+vi.mock('./owner-release-bootstrap.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./owner-release-bootstrap.js')>()),
+  reviewedBootstrap: mocked.review,
+  verifyCurrentSnapshot: mocked.verifyCurrent,
 }));
 vi.mock('./owner-web-tag-cloud.js', () => ({ protectedWebTagCloud: mocked.cloud }));
 vi.mock('./owner-web-tag-artifact.js', () => ({ readProtectedWebTagArtifact: mocked.artifact }));
+vi.mock('./owner-web-release-native-controller.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./owner-web-release-native-controller.js')>()),
+  initializePairedWebLifecycle: mocked.initialize,
+}));
 vi.mock('./owner-web-release-phase-receipts.js', () => ({
   openPrivateReleasePhaseReceipts: mocked.openReceipts,
+  createPrivateReleasePhaseReceipts: mocked.openReceipts,
 }));
 vi.mock('./owner-web-release-retirement-binding.js', () => ({
   bindCapturedRetirementToLifecycle: mocked.bindRetirement,
@@ -25,12 +43,47 @@ vi.mock('./owner-web-release-native-proof.js', () => ({
   projectNativeWebSnapshot: mocked.project,
 }));
 
-import { runWebTagAdmission, verifyAdmissionContext } from './owner-web-tag-admission.js';
+import { registerImageResolution } from './owner-release-image-resolution.js';
+import {
+  runWebTagAdmission,
+  runWebTagAdmissionCli,
+  verifyAdmissionContext,
+} from './owner-web-tag-admission.js';
 import { HISTORICAL_WEB_TAGS, WEB_SERVICE } from './owner-web-tag-retirement.js';
 
 const hash = (s: string) => createHash('sha256').update(s).digest('hex');
-const source = 'a'.repeat(40),
-  newImage = `us-west1-docker.pkg.dev/bmson-assistant/assistant/web@sha256:${'b'.repeat(64)}`;
+const source = 'a'.repeat(40);
+const webImageRoot = 'us-west1-docker.pkg.dev/bmson-assistant/assistant/web';
+const ociManifest = 'application/vnd.oci.image.manifest.v1+json';
+const child = JSON.stringify({
+  schemaVersion: 2,
+  mediaType: ociManifest,
+  config: {
+    digest: `sha256:${'b'.repeat(64)}`,
+    size: 1,
+    mediaType: 'application/vnd.oci.image.config.v1+json',
+  },
+  layers: [
+    {
+      digest: `sha256:${'b'.repeat(64)}`,
+      size: 1,
+      mediaType: 'application/vnd.oci.image.layer.v1.tar',
+    },
+  ],
+});
+const index = JSON.stringify({
+  schemaVersion: 2,
+  mediaType: 'application/vnd.oci.image.index.v1+json',
+  manifests: [
+    {
+      digest: `sha256:${hash(child)}`,
+      size: Buffer.byteLength(child),
+      mediaType: ociManifest,
+      platform: { os: 'linux', architecture: 'amd64' },
+    },
+  ],
+});
+const newImage = `${webImageRoot}@sha256:${hash(index)}`;
 const candidate = 'candidate-123-1',
   resume = 'resume-123-1';
 const uri = (tag: string) => `https://${tag}---assistant-web-3gimfiaifa-uw.a.run.app`;
@@ -115,7 +168,7 @@ beforeEach(() => {
     components: {
       web: {
         image: newImage,
-        digest: `sha256:${'b'.repeat(64)}`,
+        digest: `sha256:${hash(index)}`,
         apiContract: 1,
         peerApi: { min: 1, max: 1 },
         schema: { min: 1, max: 1 },
@@ -196,6 +249,261 @@ async function completeBarrier() {
   staged(true);
   await runWebTagAdmission('--retire-after-paused');
 }
+function ordinaryFixture() {
+  const canonicalRevision = 'assistant-web-recovered';
+  const candidateRevision = 'assistant-web-old-paused';
+  const candidateTag = 'candidate-111-1';
+  const retiredTag = 'resume-111-1';
+  const oldSource = 'd'.repeat(40);
+  const evidenceSha256 = 'e'.repeat(64);
+  const canonicalRevisionSha256 = 'f'.repeat(64);
+  const canonicalRevisionUidSha256 = 'a'.repeat(64);
+  const canonicalImage = `us-west1-docker.pkg.dev/bmson-assistant/assistant/web@sha256:${'d'.repeat(64)}`;
+  const definition = {
+    revision: canonicalRevision,
+    uid: 'service-uid',
+    proof: { uid: canonicalRevisionUidSha256, source: oldSource },
+    revisionSha256: canonicalRevisionSha256,
+    image: canonicalImage,
+  };
+  mocked.ordinary.mockReturnValue({
+    canonicalRevision,
+    candidateRevision,
+    candidateTag,
+    retiredAliases: {
+      candidate: { tag: candidateTag, uriSha256: hash(uri(candidateTag)) },
+      resume: { tag: retiredTag, uriSha256: hash(uri(retiredTag)) },
+    },
+    canonicalServiceUidSha256: hash(definition.uid),
+    canonicalRevisionUidSha256,
+    canonicalRevisionSha256,
+    canonicalImage,
+    priorBarrierSha256: 'c'.repeat(64),
+    evidenceSha256,
+  });
+  mocked.review.mockReturnValue({ kind: 'current-snapshot', services: { web: definition } });
+  vi.stubEnv('OWNER_RELEASE_BOOTSTRAP_RECEIPT', '{}');
+  native[canonicalRevision] = revision(canonicalRevision, canonicalImage, false);
+  native[candidateRevision] = revision(candidateRevision, canonicalImage, true);
+  setService([], canonicalImage);
+  service.traffic = [{ type, revision: canonicalRevision, percent: 100 }];
+  service.trafficStatuses = structuredClone(service.traffic);
+
+  const manifestFile = process.env.OWNER_TAG_MANIFEST_PATH as string;
+  const { manifestDigest: _currentDigest, ...template } = JSON.parse(
+    readFileSync(manifestFile, 'utf8'),
+  );
+  template.release = oldSource;
+  template.components.web.image = canonicalImage;
+  template.components.web.digest = `sha256:${'d'.repeat(64)}`;
+  const manifest = JSON.stringify({ ...template, manifestDigest: hash(JSON.stringify(template)) });
+  const archivePath = join(temp, 'old-creation.zip');
+  const receiptFile = join(temp, 'owner-web-tag-creation.json');
+  const priorManifestFile = join(temp, 'release-manifest.json');
+  writeFileSync(priorManifestFile, manifest);
+  writeFileSync(
+    receiptFile,
+    JSON.stringify({
+      format: 1,
+      runId: 111,
+      runAttempt: 1,
+      source: oldSource,
+      manifestSha256: hash(manifest),
+      records: [
+        {
+          kind: 'candidate',
+          revision: candidateRevision,
+          image: canonicalImage,
+          writesPaused: true,
+          uriSha256: hash(uri(candidateTag)),
+          legacyBarrierCompleted: false,
+        },
+      ],
+    }),
+  );
+  execFileSync('zip', ['-q', '-0', '-X', '-j', archivePath, receiptFile, priorManifestFile]);
+  const archiveBytes = readFileSync(archivePath);
+  mocked.artifact.mockResolvedValue({
+    runMetadata: {
+      repository: { full_name: 'bmson/assistant' },
+      head_repository: { full_name: 'bmson/assistant' },
+      path: '.github/workflows/deploy.yml',
+      head_branch: 'main',
+      event: 'workflow_dispatch',
+      id: 111,
+      run_attempt: 1,
+      head_sha: oldSource,
+      status: 'completed',
+      conclusion: 'failure',
+    },
+    artifactMetadata: {
+      name: `owner-web-tag-creation-${oldSource}-111-1`,
+      digest: `sha256:${createHash('sha256').update(archiveBytes).digest('hex')}`,
+      size_in_bytes: archiveBytes.length,
+      expired: false,
+      workflow_run: { id: 111, head_sha: oldSource },
+    },
+    archiveBytes,
+  });
+  mocked.openReceipts.mockReturnValue({
+    readCurrent: () => ({
+      context: { currentBinding: { ordinaryRecoverySha256: evidenceSha256 } },
+      phase: 'promotedP',
+      snapshot: { revisions: {} },
+    }),
+  });
+  return { canonicalRevision, candidateRevision, candidateTag, retiredTag, evidenceSha256 };
+}
+
+describe('ordinary recovered canonical admission', () => {
+  it('uses the genuine candidate-only archive and preserves the no-write 600-second drain', async () => {
+    const f = ordinaryFixture();
+    await runWebTagAdmission('--capture');
+    const capture = JSON.parse(readFileSync(join(temp, 'owner-web-tag-capture.json'), 'utf8'));
+    expect(capture.canonical).toBe(f.canonicalRevision);
+    expect(capture.ordinaryRecoverySha256).toBe(f.evidenceSha256);
+    expect(capture.proofs).toMatchObject([
+      {
+        revision: f.candidateRevision,
+        tag: f.candidateTag,
+        writesPaused: true,
+        legacyBarrierCompleted: false,
+        nativeTagObserved: false,
+      },
+    ]);
+    expect(mocked.artifact).toHaveBeenCalledExactlyOnceWith(111, 1, expect.any(Function));
+    expect(mocked.verifyCurrent).toHaveBeenCalledOnce();
+    await runWebTagAdmission('--native-init');
+    expect(mocked.initialize).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        canonical: f.canonicalRevision,
+        retiredTags: expect.arrayContaining([f.candidateTag, f.retiredTag]),
+        currentBinding: expect.objectContaining({ ordinaryRecoverySha256: f.evidenceSha256 }),
+      }),
+      expect.any(Object),
+      expect.any(Object),
+      expect.any(Object),
+    );
+    setService([{ tag: candidate, revision: 'assistant-web-new-paused', percent: 100 }], newImage);
+    await runWebTagAdmission('--retire-after-paused');
+    expect(io.patchTraffic).not.toHaveBeenCalled();
+    expect(io.drain).toHaveBeenCalledExactlyOnceWith(600);
+    await runWebTagAdmission('--verify-admission');
+  });
+
+  it('rejects a candidate receipt that conflicts with the independently observed retired alias URI', async () => {
+    ordinaryFixture();
+    const evidence = mocked.ordinary();
+    evidence.retiredAliases.candidate.uriSha256 = hash('different candidate URI');
+    await expect(runWebTagAdmission('--capture')).rejects.toThrow(
+      'Reviewed historical candidate ownership changed',
+    );
+    expect(io.patchTraffic).not.toHaveBeenCalled();
+  });
+
+  it('rejects a desired historical alias during capture even when the observed route is untagged', async () => {
+    const f = ordinaryFixture();
+    service.traffic = [{ type, revision: f.canonicalRevision, percent: 100, tag: f.retiredTag }];
+    await expect(runWebTagAdmission('--capture')).rejects.toThrow(
+      'Desired and observed traffic differ',
+    );
+    expect(mocked.artifact).not.toHaveBeenCalled();
+  });
+
+  it.each(['candidateTag', 'retiredTag'] as const)(
+    'rejects a historical %s that reappears before drain',
+    async (alias) => {
+      const f = ordinaryFixture();
+      await runWebTagAdmission('--capture');
+      setService(
+        [
+          { tag: candidate, revision: 'assistant-web-new-paused', percent: 100 },
+          { tag: f[alias], revision: f.candidateRevision },
+        ],
+        newImage,
+      );
+      await expect(runWebTagAdmission('--retire-after-paused')).rejects.toThrow('alias reappeared');
+      expect(io.patchTraffic).not.toHaveBeenCalled();
+      expect(io.drain).not.toHaveBeenCalled();
+    },
+  );
+
+  it('blocks a reviewed local resume alias that returns after the drain', async () => {
+    const f = ordinaryFixture();
+    await runWebTagAdmission('--capture');
+    setService([{ tag: candidate, revision: 'assistant-web-new-paused', percent: 100 }], newImage);
+    await runWebTagAdmission('--retire-after-paused');
+    setService(
+      [
+        { tag: candidate, revision: 'assistant-web-new-paused', percent: 100 },
+        { tag: f.retiredTag, revision: f.canonicalRevision },
+      ],
+      newImage,
+    );
+    await expect(runWebTagAdmission('--verify-admission')).rejects.toThrow('barrier incomplete');
+    expect(io.patchTraffic).not.toHaveBeenCalled();
+  });
+});
+
+describe('protected CLI failure diagnostics', () => {
+  const fallback =
+    'BASIC5 web alias ownership or retirement/drain barrier stopped; admission is unapproved.';
+  const privateFailure = new Error(
+    'private bearer in /private/token from https://example.invalid/provider',
+  );
+
+  it('reports the cloud credential stage without including the underlying error', async () => {
+    mocked.cloud.mockImplementation(async (mark: (stage: string) => void) => {
+      mark('cloud_access_token');
+      throw privateFailure;
+    });
+    const report = vi.fn<(message: string) => void>();
+    expect(await runWebTagAdmissionCli(['--capture'], report)).toBe(1);
+    expect(report).toHaveBeenCalledExactlyOnceWith(`${fallback} [stage=cloud_credential]\n`);
+  });
+
+  it.each(['github_token_file', 'historical_artifact_metadata', 'historical_artifact_download'])(
+    'reports only the bounded %s stage for historical artifacts',
+    async (stage) => {
+      ordinaryFixture();
+      mocked.artifact.mockImplementation(async (_run, _attempt, mark) => {
+        mark(stage);
+        throw privateFailure;
+      });
+      const report = vi.fn<(message: string) => void>();
+      expect(await runWebTagAdmissionCli(['--capture'], report)).toBe(1);
+      expect(report).toHaveBeenCalledExactlyOnceWith(`${fallback} [stage=${stage}]\n`);
+    },
+  );
+
+  it('does not accept an unrecognized stage as public diagnostic text', async () => {
+    ordinaryFixture();
+    mocked.artifact.mockImplementation(async (_run, _attempt, mark) => {
+      mark(privateFailure.message);
+      throw privateFailure;
+    });
+    const report = vi.fn<(message: string) => void>();
+    expect(await runWebTagAdmissionCli(['--capture'], report)).toBe(1);
+    expect(report).toHaveBeenCalledExactlyOnceWith(`${fallback}\n`);
+  });
+
+  it('distinguishes an ordinary identity failure', async () => {
+    mocked.ordinary.mockImplementation(() => {
+      throw privateFailure;
+    });
+    const report = vi.fn<(message: string) => void>();
+    expect(await runWebTagAdmissionCli(['--capture'], report)).toBe(1);
+    expect(report).toHaveBeenCalledExactlyOnceWith(`${fallback} [stage=ordinary_identity]\n`);
+  });
+
+  it('keeps the generic failure for an unknown step and never emits raw error content', async () => {
+    io.readService.mockRejectedValue(privateFailure);
+    const report = vi.fn<(message: string) => void>();
+    expect(await runWebTagAdmissionCli(['--capture'], report)).toBe(1);
+    expect(report).toHaveBeenCalledExactlyOnceWith(`${fallback}\n`);
+  });
+});
+
 describe('paired native admission command', () => {
   it('captures absent legacy alias with immutable timeout proof and always completes600 before admission', async () => {
     await completeBarrier();
@@ -289,6 +597,60 @@ describe('paired native admission command', () => {
       receipt.records.map((r: { legacyBarrierCompleted: boolean }) => r.legacyBarrierCompleted),
     ).toEqual([false, true]);
     expect(saved).not.toContain('private-never-publish');
+  });
+  it('binds protected shell resume recording to the exact alias and verified native child', async () => {
+    await completeBarrier();
+    const expected = 'assistant-web-r-123-1-aaaaaaaa';
+    setService(
+      [
+        { tag: candidate, revision: 'assistant-web-new-paused', percent: 100 },
+        { tag: resume, revision: 'assistant-web-new-resume' },
+      ],
+      newImage,
+    );
+    vi.stubEnv('OWNER_TAG_EXPECTED_RESUME_REVISION', expected);
+    await expect(runWebTagAdmission('--record-resume')).rejects.toThrow('exact protected revision');
+
+    setService(
+      [
+        { tag: candidate, revision: 'assistant-web-new-paused', percent: 100 },
+        { tag: resume, revision: expected },
+      ],
+      newImage,
+    );
+    const resolved = registerImageResolution(
+      newImage,
+      Buffer.from(index),
+      Buffer.from(child),
+    ).resolved;
+    const readback = revision(expected, resolved, false, true);
+    const resolvedNative = {
+      ...readback,
+      containers: readback.containers.map((container) => ({ ...container, name: 'web-1' })),
+      containerStatuses: [{ name: 'web-1', imageDigest: newImage }],
+    };
+    native[expected] = resolvedNative;
+    await expect(runWebTagAdmission('--record-resume')).rejects.toThrow('Immutable image');
+    native[expected] = {
+      ...resolvedNative,
+      containerStatuses: [{ name: 'web-1', imageDigest: resolved }],
+      containers: resolvedNative.containers.map((container) => ({
+        ...container,
+        env: container.env.map((entry) =>
+          entry.name === 'ASSISTANT_RELEASE_SOURCE_SHA'
+            ? { ...entry, value: '9'.repeat(40) }
+            : entry,
+        ),
+      })),
+    };
+    await expect(runWebTagAdmission('--record-resume')).rejects.toThrow('source identity');
+    native[expected] = {
+      ...resolvedNative,
+      containerStatuses: [{ name: 'web-1', imageDigest: resolved }],
+    };
+    await runWebTagAdmission('--record-resume');
+    const { records } = JSON.parse(readFileSync(join(temp, 'owner-web-tag-creation.json'), 'utf8'));
+    expect(records[1]).toMatchObject({ revision: expected, image: newImage, writesPaused: false });
   });
   it('fails before patch for changed UID or unsafe old native timeout', async () => {
     await runWebTagAdmission('--capture');

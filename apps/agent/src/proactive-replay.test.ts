@@ -14,6 +14,7 @@ import {
 import { createFirestoreExecutionPersistence } from '@assistant/firestore';
 import {
   admittedBillEmailEvidence,
+  type BriefingRunOutcome,
   type ExecutionPersistence,
   emailIngestReadable,
   notificationLeg,
@@ -34,8 +35,18 @@ import {
   processMessage,
 } from '../../../packages/modules/src/google/email-sync.js';
 import { createIsolatedTestDatabase } from './isolated-test-database.fixture.js';
-import { replayCardGrounded, replayCases, teacherMessages } from './proactive-replay-cases.js';
-import { type ReplayTick, scoreReplayCase, writeReplayEvidence } from './proactive-replay-score.js';
+import {
+  deliveryMail,
+  replayCardGrounded,
+  replayCases,
+  teacherMessages,
+} from './proactive-replay-cases.js';
+import {
+  type ReplayTick,
+  scoreReplayCase,
+  scoreReplayKinds,
+  writeReplayEvidence,
+} from './proactive-replay-score.js';
 
 const RECEIVED = new Date('2026-11-18T23:01:00Z');
 const at = (minutes: number) => new Date(RECEIVED.getTime() + minutes * 60_000);
@@ -80,13 +91,15 @@ describe('frozen proactive replay', () => {
         const evidence: Record<string, Record<string, string | number | boolean | null>> = {};
         const ticks = new Map<string, ReplayTick[]>();
         const scores = () =>
-          Object.values(replayCases).map((definition) =>
-            scoreReplayCase(
-              definition,
-              ticks.get(definition.id) ?? [],
-              evidence[definition.id] ?? {},
-            ),
-          );
+          Object.values(replayCases)
+            .filter(({ id }) => id !== replayCases.delivery.id || evidence[id])
+            .map((definition) =>
+              scoreReplayCase(
+                definition,
+                ticks.get(definition.id) ?? [],
+                evidence[definition.id] ?? {},
+              ),
+            );
         try {
           if (driver === 'postgres') {
             const isolated = await createIsolatedTestDatabase();
@@ -263,6 +276,14 @@ describe('frozen proactive replay', () => {
                     .where(eq(messages.conversationId, conversationId))
                 ).map((row) => row.parts);
           };
+          const readMessageParts = async (id: string): Promise<unknown[]> => {
+            if (store) return (await store.doc('messages', id).get()).get('parts') ?? [];
+            const [row] = await db
+              .select({ parts: messages.parts })
+              .from(messages)
+              .where(eq(messages.id, id));
+            return Array.isArray(row?.parts) ? row.parts : [];
+          };
           const readLedger = async () =>
             store
               ? (
@@ -299,7 +320,14 @@ describe('frozen proactive replay', () => {
                 .where(and(eq(conversations.agentId, agentId), eq(messages.role, 'assistant')))
             ).length;
           };
-          const observe = async <T extends { delivered: string | null | boolean; pinged: boolean }>(
+          const observe = async <
+            T extends {
+              delivered: string | null | boolean;
+              pinged: boolean;
+              outcome?: BriefingRunOutcome;
+              mailScanned?: number;
+            },
+          >(
             caseId: string,
             name: string,
             sourceAt: Date,
@@ -310,7 +338,13 @@ describe('frozen proactive replay', () => {
             const callCount = notifyOwner.mock.calls.length;
             const noticeCount = await countOwnerNotices();
             const result = await producer();
-            const parts = (await readParts()).flat() as Array<{
+            const parts = (
+              result.mailScanned === undefined
+                ? (await readParts()).flat()
+                : result.outcome?.kind === 'delivered'
+                  ? await readMessageParts(result.outcome.messageId)
+                  : []
+            ) as Array<{
               type?: string;
               data?: Parameters<typeof replayCardGrounded>[1];
             }>;
@@ -319,6 +353,12 @@ describe('frozen proactive replay', () => {
             observations.push({
               name,
               elapsedMinutes: elapsed(clock),
+              ...(result.mailScanned !== undefined && {
+                briefing: {
+                  outcome: result.outcome?.kind ?? null,
+                  mailScanned: result.mailScanned,
+                },
+              }),
               candidates:
                 'candidates' in result && typeof result.candidates === 'number'
                   ? result.candidates
@@ -940,7 +980,168 @@ describe('frozen proactive replay', () => {
               ]),
             );
           }
-          expect(scores().filter((item) => !item.passed && item.id !== billLeadCase)).toEqual([]);
+          const deliveryId = replayCases.delivery.id;
+          const deliveryScore = vi.fn(async () => ({
+            ok: true,
+            object: {
+              category: 'transactional',
+              actionable: false,
+              importance: 3,
+              dates: [],
+              reason: 'Synthetic store delivery status',
+            },
+          }));
+          const deliveryDeps = {
+            ...deps,
+            router: { object: deliveryScore } as unknown as EmailSyncDeps['router'],
+          };
+          known.set(deliveryMail.from, 'known');
+          const admitDeliveryMail = async (mail: typeof deliveryMail.original) => {
+            const id = randomUUID();
+            const receivedAt = new Date(mail.receivedAt);
+            clock = receivedAt;
+            fixtureMail.set(id, {
+              threadId: deliveryMail.threadId,
+              from: deliveryMail.from,
+              subject: mail.subject,
+              body: mail.body,
+              at: receivedAt,
+            });
+            threadHeads.set(deliveryMail.threadId, id);
+            expect(await processMessage(deliveryDeps, agentId, owner.email, known, id)).toBe(
+              'triaged',
+            );
+            const key = `gmail:${id}`;
+            const row = await readIngest(key);
+            expect(row).toMatchObject({
+              agentId,
+              channelMessageId: key,
+              providerMessageId: id,
+              providerThreadId: deliveryMail.threadId,
+              providerReceivedAt: receivedAt,
+              fromEmail: deliveryMail.from,
+              subject: mail.subject,
+              authenticated: true,
+              ingestMode: 'direct',
+              pipelineStage: 'message_persisted',
+              scoreOutcome: 'model_prepared',
+              messagePersisted: true,
+              admittedSourceKind: 'message',
+            });
+            expect(emailIngestReadable(row)).toBe(true);
+            if (!row.admittedSourceId) throw new Error('Missing canonical delivery mail message');
+            const [part] = await readMessageParts(row.admittedSourceId);
+            const sourceText = (part as { type?: string; text?: string } | undefined)?.text;
+            expect(part).toEqual({ type: 'text', text: mail.body });
+            await setIngestClock(row.id, receivedAt);
+            return { ...row, sourceText };
+          };
+          const originalMail = await admitDeliveryMail(deliveryMail.original);
+          const updatedMail = await admitDeliveryMail(deliveryMail.replacement);
+          expect(originalMail.conversationId).toBeTruthy();
+          expect(updatedMail.conversationId).toBe(originalMail.conversationId);
+          expect(updatedMail.admittedSourceId).not.toBe(originalMail.admittedSourceId);
+          expect(deliveryScore).toHaveBeenCalledTimes(2);
+          const replacementReceivedAt = updatedMail.providerReceivedAt;
+          if (!replacementReceivedAt || !originalMail.providerReceivedAt)
+            throw new Error('Missing delivery mail receipt timestamp');
+          expect(replacementReceivedAt.getTime()).toBeGreaterThan(
+            originalMail.providerReceivedAt.getTime(),
+          );
+          expect(
+            await pulseDeps.emailThreadReader({ threadId: deliveryMail.threadId }),
+          ).toMatchObject({
+            latestMessageId: updatedMail.providerMessageId,
+            latestReceivedAt: replacementReceivedAt,
+          });
+          const sweepDeliveryMorning = (tick: string, sourceMomentKey: string | null) =>
+            observe(deliveryId, tick, replacementReceivedAt, sourceMomentKey, () =>
+              runBriefing(
+                {
+                  db,
+                  ...(driver === 'firestore' ? { persistence } : {}),
+                  router: {
+                    object: async () => ({
+                      ok: true,
+                      object: { lead: "Here's your morning update." },
+                    }),
+                  } as unknown as Parameters<typeof runBriefing>[0]['router'],
+                  notifyOwner,
+                },
+                { agentId, now: clock },
+              ),
+            );
+          clock = new Date(deliveryMail.original.sweepAt);
+          const originalSweepAt = clock.toISOString();
+          const originalSweep = await sweepDeliveryMorning('original delivery date morning', null);
+          clock = new Date(deliveryMail.replacement.sweepAt);
+          const revisedSweepAt = clock.toISOString();
+          const revisedSweep = await sweepDeliveryMorning(
+            'revised delivery date morning',
+            `delivery-today:${updatedMail.channelMessageId}`,
+          );
+          const ownerLocalTime = new Intl.DateTimeFormat('sv-SE', {
+            timeZone: owner.timezone,
+            dateStyle: 'short',
+            timeStyle: 'short',
+          });
+          expect(ownerLocalTime.format(new Date(originalSweepAt))).toBe(
+            `${deliveryMail.original.date} 08:05`,
+          );
+          expect(ownerLocalTime.format(new Date(revisedSweepAt))).toBe(
+            `${deliveryMail.replacement.date} 08:05`,
+          );
+          for (const sweep of [originalSweep, revisedSweep])
+            expect(['quiet', 'delivered']).toContain(sweep.outcome?.kind);
+          const deliveryFacts = {
+            originalReceivedAt: originalMail.providerReceivedAt.toISOString(),
+            replacementReceivedAt: replacementReceivedAt.toISOString(),
+            originalSweepAt,
+            revisedSweepAt,
+            originalMailScanned: originalSweep.mailScanned,
+            revisedMailScanned: revisedSweep.mailScanned,
+            authenticatedReplacement: updatedMail.authenticated,
+            shipmentThread: updatedMail.providerThreadId,
+            originalSourceText: originalMail.sourceText ?? null,
+            replacementSourceText: updatedMail.sourceText ?? null,
+          };
+          expect(deliveryFacts).toEqual(replayCases.delivery.facts);
+          evidence[deliveryId] = deliveryFacts;
+          const scored = scores();
+          expect(
+            scored.filter(({ passed, id }) => !passed && id !== billLeadCase && id !== deliveryId),
+          ).toEqual([]);
+          expect(scoreReplayKinds(scored.filter(({ id }) => id === cancellationId))).toMatchObject([
+            {
+              kind: 'calendar-cancelled',
+              expected: 1,
+              delivered: 1,
+              matched: 1,
+              recall: 1,
+              precision: 1,
+              expectations: [{ earliestMinutes: 0, latestMinutes: 20, credit: 1 }],
+              observedTiming: [{ elapsedMinutes: 19 }],
+            },
+          ]);
+          const paid = scored.filter(({ id }) => id === billId);
+          expect(scoreReplayKinds(paid)).toEqual([]);
+          expect(paid).toMatchObject([
+            {
+              sourceEvidence: {
+                beforePayment: 'due',
+                afterWrongReceipt: 'due',
+                afterPayment: 'paid',
+                exactReceipt: true,
+              },
+              quietViolations: 0,
+              quietChecks: [
+                'paid pulse',
+                'out-of-order paid pulse',
+                'paid morning briefing',
+                'payment wins admission race',
+              ].map((tick) => ({ tick, observations: 1, violations: 0 })),
+            },
+          ]);
         } finally {
           try {
             writeReplayEvidence(driver, scores());

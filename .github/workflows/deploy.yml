@@ -40,6 +40,11 @@ on:
         description: Signed recovery review for the exact prebuilt API 3 pair
         required: false
         type: string
+      ordinary_api3_recovery:
+        description: Use the reviewed recovery evidence for the serving API 3 release
+        required: false
+        default: false
+        type: boolean
       archive_maintenance_run_id:
         description: Exact protected maintenance run that established the disabled archive bootstrap
         required: false
@@ -181,6 +186,40 @@ jobs:
           repository: ${{ github.repository }}
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
+      - name: Validate ordinary API 3 recovery before authentication
+        if: inputs.ordinary_api3_recovery == true
+        env:
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+          RELEASE_PREBUILT_RUN_ID: ${{ inputs.prebuilt_run_id }}
+          API3_RECOVERY_PROOF: ${{ inputs.api3_recovery_proof }}
+          REQUESTED_PERSISTENCE: ${{ inputs.persistence }}
+          REQUESTED_COMPONENTS: ${{ inputs.components }}
+          NATIVE_WEB_QUALIFICATION: ${{ inputs.native_web_qualification }}
+          BUILD_ONLY: ${{ inputs.build_only }}
+          BREAK_GLASS: ${{ inputs.break_glass }}
+          BREAK_GLASS_REASON: ${{ inputs.break_glass_reason }}
+          ARCHIVE_MAINTENANCE_RUN_ID: ${{ inputs.archive_maintenance_run_id }}
+          ARCHIVE_RESTORE_PROOF: ${{ inputs.archive_restore_proof }}
+          OWNER_RELEASE_RECLOSED_PREDECESSOR_RUN_ID: ${{ inputs.reclosed_predecessor_run_id }}
+          OWNER_RELEASE_BOOTSTRAP_RECEIPT: ${{ inputs.bootstrap_snapshot }}
+          OWNER_RELEASE_BOOTSTRAP_SHA256: ${{ inputs.bootstrap_snapshot_sha256 }}
+          ESTIMATED_COST_RELEASE_PROFILE_JSON: ${{ inputs.estimated_cost_release_profile }}
+          ESTIMATED_COST_DRAIN_PACKET_JSON: ${{ inputs.estimated_cost_drain_packet }}
+          GOOGLE_CALENDAR_OAUTH_CALLBACK_URL: ${{ inputs.google_calendar_oauth_callback_url }}
+        run: |
+          [[ "$GITHUB_JOB" == plan && -z "$API3_RECOVERY_PROOF" &&
+             -z "$ARCHIVE_MAINTENANCE_RUN_ID$ARCHIVE_RESTORE_PROOF$OWNER_RELEASE_RECLOSED_PREDECESSOR_RUN_ID" &&
+             -z "$ESTIMATED_COST_DRAIN_PACKET_JSON$GOOGLE_CALENDAR_OAUTH_CALLBACK_URL$BREAK_GLASS_REASON" &&
+             "$OWNER_RELEASE_BOOTSTRAP_SHA256" =~ ^[a-f0-9]{64}$ ]] || exit 1
+          node infra/gcp/verify-prebuilt-firestore.mjs validate-context "$RELEASE_SHA" || exit 1
+          node -e '
+            const env = process.env;
+            const profile = JSON.parse(env.ESTIMATED_COST_RELEASE_PROFILE_JSON);
+            const receipt = JSON.parse(env.OWNER_RELEASE_BOOTSTRAP_RECEIPT);
+            if (profile.mode !== "compatible-off" || profile.source !== env.RELEASE_SHA ||
+                receipt.kind !== "current-snapshot" || receipt.source !== env.RELEASE_SHA)
+              process.exit(1);
+          '
       - name: Validate build-only scope before source verification or authentication
         if: inputs.build_only == true
         env:
@@ -709,6 +748,41 @@ jobs:
           else
             echo 'basic5=false' >> "$GITHUB_OUTPUT"
           fi
+      - name: Install reviewed ordinary API 3 recovery evidence
+        if: inputs.ordinary_api3_recovery == true
+        env:
+          OWNER_ORDINARY_API3_RECOVERY: ${{ inputs.ordinary_api3_recovery }}
+          IMAGE_TAG: ${{ needs.plan.outputs.sha }}
+          RELEASE_COMPONENTS: ${{ needs.plan.outputs.components }}
+          REQUESTED_PERSISTENCE: ${{ inputs.persistence }}
+          REQUESTED_COMPONENTS: ${{ inputs.components }}
+          BUILD_ONLY: ${{ inputs.build_only }}
+          BREAK_GLASS: ${{ inputs.break_glass }}
+          NATIVE_WEB_QUALIFICATION: ${{ inputs.native_web_qualification }}
+          GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          GCP_DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          FIRESTORE_PAIR: ${{ steps.release_path.outputs.firestore_pair }}
+          BASIC5: ${{ steps.release_path.outputs.basic5 }}
+        run: |
+          [[ "$GITHUB_JOB" == release && "$FIRESTORE_PAIR" == true &&
+             "$BASIC5" == true && "$CURRENT_ONLY_CLEANUP" != true ]] || exit 1
+          pnpm exec tsx scripts/owner-api3-recovery-intake.ts --install
+      - name: Qualify the ordinary API 3 worker rollback before delivery guard mutations
+        if: inputs.ordinary_api3_recovery == true
+        env:
+          IMAGE_TAG: ${{ needs.plan.outputs.sha }}
+          REQUESTED_PERSISTENCE: ${{ inputs.persistence }}
+          REQUESTED_COMPONENTS: ${{ inputs.components }}
+          BUILD_ONLY: ${{ inputs.build_only }}
+          BREAK_GLASS: ${{ inputs.break_glass }}
+          NATIVE_WEB_QUALIFICATION: ${{ inputs.native_web_qualification }}
+          GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          GCP_DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+        run: |
+          [[ "$GITHUB_JOB" == release ]] || exit 1
+          baseline="$(pnpm exec tsx scripts/owner-worker-recovery.ts --preflight)" || exit 1
+          [[ -n "$baseline" && "$baseline" != *$'\n'* && "$baseline" != *$'\r'* ]] || exit 1
+          printf 'OWNER_WORKER_BASELINE=%s\n' "$baseline" >> "$GITHUB_ENV"
       - name: Bind the maintained native pair and archive before any delivery mutation
         if: inputs.archive_maintenance_run_id != ''
         env:
@@ -779,6 +853,12 @@ jobs:
       - name: Release Firestore pair with delivery guard
         if: steps.release_path.outputs.firestore_pair == 'true'
         env:
+          OWNER_ORDINARY_API3_RECOVERY: ${{ inputs.ordinary_api3_recovery }}
+          REQUESTED_PERSISTENCE: ${{ inputs.persistence }}
+          REQUESTED_COMPONENTS: ${{ inputs.components }}
+          BUILD_ONLY: ${{ inputs.build_only }}
+          BREAK_GLASS: ${{ inputs.break_glass }}
+          NATIVE_WEB_QUALIFICATION: ${{ inputs.native_web_qualification }}
           GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           GCP_DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
           RELEASE_BASIC5: ${{ steps.release_path.outputs.basic5 }}
@@ -897,8 +977,11 @@ jobs:
       - name: Remove runner-local private archived runtime inputs
         if: always() && inputs.archive_maintenance_run_id != ''
         run: /usr/bin/rm -rf -- "$RUNNER_TEMP/owner-archived-runtime-pack" "$RUNNER_TEMP/archive-maintenance" "$RUNNER_TEMP/owner-reclosed-predecessor"
+      - name: Remove runner-local private ordinary API 3 recovery evidence
+        if: always() && inputs.ordinary_api3_recovery == true
+        run: /usr/bin/rm -f -- "$RUNNER_TEMP/ordinary-api3-identity.json" "$RUNNER_TEMP/ordinary-api3-workers.json"
       - name: Keep only the current deployment
-        if: vars.CURRENT_ONLY_CLEANUP == 'true' && inputs.archive_maintenance_run_id == ''
+        if: vars.CURRENT_ONLY_CLEANUP == 'true' && inputs.archive_maintenance_run_id == '' && inputs.ordinary_api3_recovery != true
         run: >-
           python3 infra/gcp/cleanup-current.py
           --project "$GCP_PROJECT" --region "$GCP_REGION"
@@ -908,6 +991,7 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' &&
       inputs.native_web_qualification == 'read_only' && inputs.build_only != true &&
+      inputs.ordinary_api3_recovery != true &&
       inputs.prebuilt_run_id == '' && inputs.api3_recovery_proof == '' &&
       inputs.archive_maintenance_run_id == '' && inputs.archive_restore_proof == '' &&
       github.ref == 'refs/heads/main' && github.run_attempt == '1' &&

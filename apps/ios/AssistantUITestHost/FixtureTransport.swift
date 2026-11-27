@@ -7,6 +7,7 @@ final class FixtureTransport: URLProtocol, @unchecked Sendable {
     final class State: @unchecked Sendable {
         private let lock = NSLock()
         private var data: Data?
+        private var noticing: Data?
         private var count = 0
         private var householdCalendar = false
         private var choices: [String: String] = [:]
@@ -21,10 +22,11 @@ final class FixtureTransport: URLProtocol, @unchecked Sendable {
             (id: "holidays", name: "Holiday calendar", purpose: "holidays", title: "Local holiday")
         ]
 
-        func install(_ value: Data, householdCalendar: Bool) {
+        func install(_ value: Data, householdCalendar: Bool, noticing: Data?) {
             lock.withLock {
                 data = value
                 self.householdCalendar = householdCalendar
+                self.noticing = noticing
             }
         }
 
@@ -33,6 +35,10 @@ final class FixtureTransport: URLProtocol, @unchecked Sendable {
                 if let url = request.url, url.scheme == "https", url.host == "fixture.invalid" {
                     if request.httpMethod == "GET", url.path == "/api/mobile/v1/overview", url.query == nil {
                         return data
+                    }
+                    if request.httpMethod == "GET", url.path == "/api/mobile/v1/proactive-health",
+                       url.query == nil, let noticing {
+                        return noticing
                     }
                     if householdCalendar, let response = householdResponse(for: request, url: url) {
                         return response
