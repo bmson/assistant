@@ -1,0 +1,39 @@
+name: Hosted token check
+
+on:
+  push:
+    branches:
+      - codex/hosted-token-control-45974929816
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 26
+      - name: Verify the historical archive using the hosted token
+        shell: bash
+        env:
+          OWNER_TAG_EXISTING_GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -o noclobber
+          umask 077
+          token_file="${RUNNER_TEMP}/owner-web-tag-github-token"
+          owned_token_file=false
+          trap 'if [[ "$owned_token_file" == true ]]; then unlink "$token_file"; fi' EXIT
+          exec 3>"$token_file"
+          owned_token_file=true
+          printf '%s' "$OWNER_TAG_EXISTING_GITHUB_TOKEN" >&3
+          exec 3>&-
+          unset OWNER_TAG_EXISTING_GITHUB_TOKEN
+          node --no-warnings .github/hosted-token-check.mjs
