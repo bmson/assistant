@@ -415,12 +415,22 @@ function projectSnapshot(raw: unknown, native: Record<string, unknown>, c: Conte
       addressed.every(([name]) => known.includes(name)),
   );
   const ordinaryRecovery = c.currentBinding?.ordinaryRecoverySha256 !== undefined;
+  const pausedBootstrapCandidate = c.currentBinding?.preclosed
+    ? releaseIdentity(c, 'P').revision
+    : undefined;
   const routed = new Set([...desired, ...observed].map(({ revision }) => revision));
   const revisions = Object.fromEntries(
     addressed.map(([name, value]) => [
       name,
-      // An old immutable revision can become RETIRED once its last route disappears.
-      revisionProof(value, name, c, ordinaryRecovery && name !== latestReady && !routed.has(name)),
+      // Cloud Run can retire P as soon as closeP removes its final route.
+      revisionProof(
+        value,
+        name,
+        c,
+        (ordinaryRecovery || name === pausedBootstrapCandidate) &&
+          name !== latestReady &&
+          !routed.has(name),
+      ),
     ]),
   );
   requireNative(Array.isArray(s.urls) && s.urls.length <= 9);
