@@ -1,12 +1,35 @@
 import type {
   ApprovalPolicyRepository,
   OwnerSettings,
+  QuietHoursWindow,
   ReminderRepository,
   ScheduleRecord,
   ScheduleRepository,
   SettingsRepository,
 } from '@assistant/persistence';
 import { reminderScheduleIsActive, reminderScheduleTemplate } from '@assistant/persistence';
+
+export interface QuietHoursSettings extends QuietHoursWindow {
+  timezone: string;
+}
+
+export function parseQuietHoursWindow(input: Record<string, unknown>): QuietHoursWindow | null {
+  const { quietStartMin, quietEndMin } = input;
+  if (quietStartMin === null && quietEndMin === null) return { quietStartMin, quietEndMin };
+  if (
+    typeof quietStartMin !== 'number' ||
+    typeof quietEndMin !== 'number' ||
+    !validQuietMinute(quietStartMin) ||
+    !validQuietMinute(quietEndMin) ||
+    quietStartMin === quietEndMin
+  )
+    return null;
+  return { quietStartMin, quietEndMin };
+}
+
+function validQuietMinute(value: number): boolean {
+  return Number.isInteger(value) && value >= 0 && value < 1440;
+}
 
 export interface NotificationPrefsView {
   quietStart: string;
@@ -90,7 +113,34 @@ export function createSettingsFacade(
     if (!row) throw new Error('No agent configured.');
     return row;
   };
+  const getQuietHours = async (agentId: string): Promise<QuietHoursSettings> => {
+    const agent = await owner();
+    if (agent.id !== agentId || !isValidTimezone(agent.timezone))
+      throw new Error('Quiet hours owner unavailable');
+    const prefs = await persistence.settings.getNotificationPrefs(agentId);
+    const window = parseQuietHoursWindow({
+      quietStartMin: prefs?.quietStartMin,
+      quietEndMin: prefs?.quietEndMin,
+    });
+    return {
+      timezone: agent.timezone,
+      quietStartMin: window?.quietStartMin ?? null,
+      quietEndMin: window?.quietEndMin ?? null,
+    };
+  };
   return {
+    getQuietHours,
+    async updateQuietHours(agentId: string, window: QuietHoursWindow): Promise<QuietHoursSettings> {
+      const agent = await owner();
+      if (
+        agent.id !== agentId ||
+        !isValidTimezone(agent.timezone) ||
+        !parseQuietHoursWindow({ ...window }) ||
+        !(await persistence.settings.updateQuietHours(agentId, window))
+      )
+        throw new Error('Quiet hours save unavailable');
+      return getQuietHours(agentId);
+    },
     async getOverview(): Promise<SettingsOverview> {
       const agent = await owner();
       const [scheduleRows, policies, prefs, heldLast24h] = await Promise.all([

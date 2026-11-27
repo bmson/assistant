@@ -108,6 +108,10 @@ import {
 } from '@assistant/application/profile';
 import { getProviderBilling } from '@assistant/application/provider-billing';
 import {
+  createPostgresSettingsPersistence,
+  createSettingsFacade,
+} from '@assistant/application/settings';
+import {
   estimatedCostApprovalEnabled,
   loadConfig,
   mcpOAuthReleaseReady,
@@ -227,6 +231,7 @@ import {
   allowsManualMcpCredential,
   embeddingSpaceIdentityKey,
   POSTGRES_EMBEDDING_DIMENSIONS,
+  type QuietHoursWindow,
   type RecallSurfacingRepository,
   type SelfRepairRepository,
   validateEmbedding,
@@ -722,23 +727,50 @@ export function getWorkspace(): WorkspaceStore {
   return globalCache.__assistantWorkspace;
 }
 
-export async function getMobileNoticingHealth(ownerId: string) {
-  const now = new Date();
+export async function mobileQuietHours(ownerId: string, window?: QuietHoursWindow) {
+  const run = (settings: ReturnType<typeof createSettingsFacade>) =>
+    window ? settings.updateQuietHours(ownerId, window) : settings.getQuietHours(ownerId);
   if (loadConfig().PERSISTENCE_DRIVER === 'firestore') {
     const store = getFirestoreInstallationStore();
     await assertFirestoreInstallationOwner(store, ownerId);
     const fence = await readPrivacyErasureFence(store, ownerId);
-    const [health, briefing, diagnostics] = await Promise.all([
+    const result = await run(
+      createSettingsFacade(createFirestoreSettingsPersistence(store, ownerId)),
+    );
+    await assertFirestoreInstallationOwner(store, ownerId);
+    await assertPrivacyErasureFenceUnchanged(store, ownerId, fence);
+    return result;
+  }
+
+  return withPostgresPrivacyObservationFence(getDb(), ownerId, async (tx) => {
+    const db = tx as unknown as Db;
+    await assertPostgresInstallationOwner(db, ownerId);
+    const result = await run(createSettingsFacade(createPostgresSettingsPersistence(db)));
+    await assertPostgresInstallationOwner(db, ownerId);
+    return result;
+  });
+}
+
+export async function getMobileNoticingHealth(ownerId: string) {
+  const now = new Date();
+  const since = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  if (loadConfig().PERSISTENCE_DRIVER === 'firestore') {
+    const store = getFirestoreInstallationStore();
+    await assertFirestoreInstallationOwner(store, ownerId);
+    const fence = await readPrivacyErasureFence(store, ownerId);
+    const [health, briefing, diagnostics, held] = await Promise.all([
       proactiveHealthView(new FirestoreProactiveHealthRepository(store), ownerId, () =>
         new FirestoreCostRepository(store).totals(),
       ),
       readFirestoreBriefingHealth(store, ownerId, now),
       proactiveCanaryView(createFirestoreProactiveCanaryRepository(store), ownerId, now),
+      createFirestoreSettingsPersistence(store, ownerId).settings.countHeldPings(ownerId, since),
     ]);
     await assertFirestoreInstallationOwner(store, ownerId);
     await assertPrivacyErasureFenceUnchanged(store, ownerId, fence);
     return {
       ...health,
+      quietHoursHeld24h: held.quietHours,
       healthy: health.healthy && briefing.ok && !diagnostics.warnings.length,
       briefing,
       canaries: diagnostics.canaries,
@@ -746,13 +778,15 @@ export async function getMobileNoticingHealth(ownerId: string) {
     };
   }
   return withPostgresMemoryBrowseRead(async (db) => {
-    const [health, briefing, diagnostics] = await Promise.all([
+    const [health, briefing, diagnostics, held] = await Promise.all([
       proactiveHealthView(db, ownerId, () => createPostgresCostRepository(db).totals()),
       readPostgresBriefingHealth(db, now, ownerId),
       proactiveCanaryView(createPostgresProactiveCanaryRepository(db), ownerId, now),
+      createPostgresSettingsPersistence(db).settings.countHeldPings(ownerId, since),
     ]);
     return {
       ...health,
+      quietHoursHeld24h: held.quietHours,
       healthy: health.healthy && briefing.ok && !diagnostics.warnings.length,
       briefing,
       canaries: diagnostics.canaries,
