@@ -126,3 +126,182 @@ it.each([
     expect(container.textContent?.includes('Couldn’t confirm the change')).toBe(!confirmed);
   },
 );
+
+const statusPath = `/api/mobile/v1/mcp/${connectionId}/oauth`;
+const button = (label: string) =>
+  [...container.querySelectorAll('button')].find(
+    (node) =>
+      (node.querySelector('[aria-live="polite"]')?.textContent ?? node.textContent) === label,
+  );
+
+it.each(['network', 'http503'] as const)(
+  'recovers an initial %s status failure through an explicit read-only retry',
+  async (failure) => {
+    const fetch = vi.fn();
+    if (failure === 'network') fetch.mockRejectedValueOnce(new TypeError('Synthetic offline'));
+    else fetch.mockResolvedValueOnce(new Response(null, { status: 503 }));
+    fetch.mockResolvedValueOnce(
+      Response.json({ connectionId, signInAvailable: true, grant: 'authorized' }),
+    );
+    vi.stubGlobal('fetch', fetch);
+    await act(async () =>
+      root.render(<McpOAuthControl connectionId={connectionId} disabled={false} />),
+    );
+    expect(container.textContent).toContain('Couldn’t load the saved sign-in status. Try again.');
+    expect(button('Check sign-in status')).toBeDefined();
+    expect(button('Sign in to this service')).toBeUndefined();
+    expect(button('Reconnect sign-in')).toBeUndefined();
+    expect(button('Disconnect sign-in')).toBeUndefined();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await act(async () => button('Check sign-in status')?.click());
+    expect(container.textContent).toContain('Tool sign-in authorized');
+    expect(button('Disconnect sign-in')).toBeDefined();
+    expect(button('Check sign-in status')).toBeUndefined();
+    expect(fetch.mock.calls.map(([url, options]) => [url, options.method])).toEqual([
+      [statusPath, 'GET'],
+      [statusPath, 'GET'],
+    ]);
+  },
+);
+
+it('hides canonical unavailable-none after a recovery read and never probes its provider', async () => {
+  const fetch = vi
+    .fn()
+    .mockRejectedValueOnce(new TypeError('Synthetic offline'))
+    .mockResolvedValueOnce(Response.json({ connectionId, signInAvailable: false, grant: 'none' }));
+  vi.stubGlobal('fetch', fetch);
+  await act(async () =>
+    root.render(<McpOAuthControl connectionId={connectionId} disabled={false} />),
+  );
+  await act(async () => button('Check sign-in status')?.click());
+  expect(container.querySelector('button')).toBeNull();
+  expect(container.textContent).toBe('');
+  expect(fetch.mock.calls.map(([url, options]) => [url, options.method])).toEqual([
+    [statusPath, 'GET'],
+    [statusPath, 'GET'],
+  ]);
+});
+
+it('recovers reconnectable status without starting consent or probing until the owner explicitly checks', async () => {
+  const status = { connectionId, signInAvailable: true, grant: 'reauthorization_required' };
+  const fetch = vi
+    .fn()
+    .mockRejectedValueOnce(new TypeError('Synthetic offline'))
+    .mockResolvedValueOnce(Response.json(status))
+    .mockResolvedValueOnce(Response.json({ ...status, providerAvailable: true }));
+  vi.stubGlobal('fetch', fetch);
+  await act(async () =>
+    root.render(<McpOAuthControl connectionId={connectionId} disabled={false} />),
+  );
+  await act(async () => button('Check sign-in status')?.click());
+  expect(container.textContent).toContain('Tool sign-in needs attention');
+  expect(button('Check browser sign-in')).toBeDefined();
+  expect(button('Reconnect sign-in')).toBeUndefined();
+  expect(fetch).toHaveBeenCalledTimes(2);
+  await act(async () => button('Check browser sign-in')?.click());
+  expect(button('Reconnect sign-in')).toBeDefined();
+  expect(fetch.mock.calls.map(([url, options]) => [url, options.method])).toEqual([
+    [statusPath, 'GET'],
+    [statusPath, 'GET'],
+    [`${statusPath}?verify=provider`, 'GET'],
+  ]);
+});
+
+it('reconciles an expired attempt and confirms disconnect only after canonical none readback', async () => {
+  sessionStorage.setItem(key, flowId);
+  const authorized = { connectionId, signInAvailable: true, grant: 'authorized' };
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(Response.json({ connectionId, flowId, outcome: 'expired' }))
+    .mockResolvedValueOnce(Response.json(authorized))
+    .mockResolvedValueOnce(Response.json({ ...authorized, grant: 'none' }))
+    .mockResolvedValueOnce(Response.json({ ...authorized, grant: 'none' }));
+  vi.stubGlobal('fetch', fetch);
+  await act(async () =>
+    root.render(<McpOAuthControl connectionId={connectionId} disabled={false} />),
+  );
+  expect(container.textContent).toContain('This sign-in attempt expired');
+  expect(container.textContent).toContain('Tool sign-in authorized');
+  expect(sessionStorage.getItem(key)).toBeNull();
+  expect(fetch).toHaveBeenCalledTimes(2);
+  await act(async () => button('Disconnect sign-in')?.click());
+  expect(button('Confirm disconnect')).toBeDefined();
+  expect(fetch).toHaveBeenCalledTimes(2);
+  await act(async () => button('Confirm disconnect')?.click());
+  expect(container.textContent).toContain('Tool sign-in disconnected.');
+  expect(container.textContent).not.toContain('Tool sign-in authorized');
+  expect(fetch.mock.calls.map(([url, options]) => [url, options.method])).toEqual([
+    [`${statusPath}/flow?flowId=${flowId}`, 'GET'],
+    [statusPath, 'GET'],
+    [statusPath, 'DELETE'],
+    [statusPath, 'GET'],
+  ]);
+});
+
+it('does not confirm or repeat disconnect when canonical readback fails, and recovers with GET only', async () => {
+  const authorized = { connectionId, signInAvailable: true, grant: 'authorized' };
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(Response.json(authorized))
+    .mockResolvedValueOnce(Response.json({ ...authorized, grant: 'none' }))
+    .mockRejectedValueOnce(new TypeError('Synthetic readback failure'))
+    .mockResolvedValueOnce(Response.json({ ...authorized, grant: 'none' }));
+  vi.stubGlobal('fetch', fetch);
+  await act(async () =>
+    root.render(<McpOAuthControl connectionId={connectionId} disabled={false} />),
+  );
+  await act(async () => button('Disconnect sign-in')?.click());
+  await act(async () => button('Confirm disconnect')?.click());
+  expect(container.textContent).toContain('Couldn’t confirm the change');
+  expect(container.textContent).not.toContain('Tool sign-in disconnected.');
+  expect(button('Check sign-in status')).toBeDefined();
+  expect(button('Disconnect sign-in')?.disabled).toBe(true);
+  expect(fetch).toHaveBeenCalledTimes(3);
+  await act(async () => button('Check sign-in status')?.click());
+  expect(container.textContent).not.toContain('Tool sign-in authorized');
+  expect(button('Disconnect sign-in')).toBeUndefined();
+  expect(button('Check sign-in status')).toBeUndefined();
+  expect(fetch.mock.calls.map(([url, options]) => [url, options.method])).toEqual([
+    [statusPath, 'GET'],
+    [statusPath, 'DELETE'],
+    [statusPath, 'GET'],
+    [statusPath, 'GET'],
+  ]);
+});
+
+it('keeps repeated status-read failures recoverable without implying a mutation or retrying automatically', async () => {
+  const fetch = vi
+    .fn()
+    .mockRejectedValueOnce(new TypeError('Synthetic offline'))
+    .mockResolvedValueOnce(new Response(null, { status: 503 }))
+    .mockResolvedValueOnce(
+      Response.json({ connectionId, signInAvailable: true, grant: 'authorized' }),
+    );
+  vi.stubGlobal('fetch', fetch);
+  await act(async () =>
+    root.render(<McpOAuthControl connectionId={connectionId} disabled={false} />),
+  );
+  await act(async () => button('Check sign-in status')?.click());
+  expect(container.textContent).toContain('Couldn’t load the saved sign-in status. Try again.');
+  expect(container.textContent).not.toContain('Couldn’t confirm the change');
+  expect(button('Check sign-in status')).toBeDefined();
+  expect(fetch).toHaveBeenCalledTimes(2);
+  await act(async () => button('Check sign-in status')?.click());
+  expect(container.textContent).toContain('Tool sign-in authorized');
+  expect(fetch.mock.calls.map(([url, options]) => [url, options.method])).toEqual([
+    [statusPath, 'GET'],
+    [statusPath, 'GET'],
+    [statusPath, 'GET'],
+  ]);
+});
+
+it('retains the parent disabled gate on status recovery', async () => {
+  const fetch = vi.fn().mockRejectedValueOnce(new TypeError('Synthetic offline'));
+  vi.stubGlobal('fetch', fetch);
+  await act(async () =>
+    root.render(<McpOAuthControl connectionId={connectionId} disabled={true} />),
+  );
+  expect(button('Check sign-in status')?.disabled).toBe(true);
+  await act(async () => button('Check sign-in status')?.click());
+  expect(fetch).toHaveBeenCalledTimes(1);
+});
