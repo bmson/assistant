@@ -1462,6 +1462,76 @@ describe('reviewed zero-tag disabled capture adapter', () => {
     };
     return f;
   }
+  it('holds retired or unhealthy native revisions while routed or latest in ordinary recovery', async () => {
+    const f = reviewed();
+    const canonical = f.native[f.context.canonical]!;
+    canonical.conditions = [{ type: 'Ready', state: 'CONDITION_SUCCEEDED' }];
+    f.service.scaling = { scalingMode: 'AUTOMATIC' };
+    Object.assign(f.context.currentBinding!, {
+      serviceSha256: bootstrapDigest(f.service),
+      revisionSha256: bootstrapDigest(canonical),
+      preclosed: false,
+      ordinaryRecoverySha256: 'f'.repeat(64),
+    });
+    const p = releaseIdentity(f.context, 'P');
+    f.setInitialReply((op) => {
+      f.service.urls = [f.service.uri];
+      return reply(op);
+    });
+    let state = await nativeWebCreationFixtureClient(f.deps).execute(f.state(), 'createP', stamp);
+    const traffic = nativeWebTrafficFixtureClient(f.deps);
+    state = await traffic.execute(state, 'attachP', stamp);
+    const project = () => projectNativeWebSnapshot(f.service, f.native, f.context);
+    const beforeWrites = f.writes();
+    const statuses = copy(f.service.trafficStatuses);
+    const statusAlias = f.service.trafficStatuses.find(
+      (row: { tag?: string }) => row.tag === p.tag,
+    )!;
+    statusAlias.revision = f.context.canonical;
+    await expect(
+      nativeWebTrafficFixtureClient(f.deps).execute(state, 'promoteP', stamp),
+    ).rejects.toMatchObject({ mutationState: 'not_attempted' });
+    f.service.trafficStatuses = statuses;
+    f.service.urls.push(f.service.uri.replace('https://', 'https://candidate-99999-1---'));
+    await expect(
+      nativeWebTrafficFixtureClient(f.deps).execute(state, 'promoteP', stamp),
+    ).rejects.toMatchObject({ mutationState: 'not_attempted' });
+    f.service.urls.pop();
+    expect(f.writes()).toBe(beforeWrites);
+    const retired = [
+      { type: 'Ready', state: 'CONDITION_SUCCEEDED', revisionReason: 'RETIRED' },
+      { type: 'Active', state: 'CONDITION_FAILED', revisionReason: 'RETIRED' },
+      {
+        type: 'ResourcesAvailable',
+        state: 'CONDITION_RECONCILING',
+        revisionReason: 'RETIRED',
+      },
+    ];
+    canonical.conditions = copy(retired);
+    expect(project).toThrow();
+    canonical.conditions = [{ type: 'Ready', state: 'CONDITION_SUCCEEDED' }];
+
+    await nativeWebTrafficFixtureClient(f.deps).execute(state, 'promoteP', stamp);
+    canonical.conditions = copy(retired);
+    expect(project).not.toThrow();
+    canonical.conditions[1]!.revisionReason = 'HEALTH_CHECK_SKIPPED';
+    expect(project).toThrow();
+    canonical.conditions = copy(retired);
+    f.native[p.revision]!.conditions = copy(retired);
+    expect(project).toThrow();
+    f.service.traffic = [
+      {
+        type: 'TRAFFIC_TARGET_ALLOCATION_TYPE_REVISION',
+        revision: f.context.canonical,
+        percent: 100,
+      },
+    ];
+    f.service.trafficStatuses = copy(f.service.traffic);
+    canonical.conditions = [{ type: 'Ready', state: 'CONDITION_SUCCEEDED' }];
+    expect(project).toThrow(); // Latest P remains strict even after removing every P route.
+    f.native[p.revision]!.conditions = [{ type: 'Ready', state: 'CONDITION_SUCCEEDED' }];
+    expect(project).not.toThrow();
+  });
   it('captures the reviewed retained canonical without an existing tag or fabricated retirement PATCH', () => {
     const f = reviewed();
     let saved: State | undefined;
