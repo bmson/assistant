@@ -2,6 +2,7 @@ import {
   createImageResolutionReader,
   verifyRevisionImage,
 } from './owner-release-image-resolution.js';
+import { loadRetainedServingImageEvidence } from './owner-serving-image-evidence.js';
 /** Protected, GET-only observations. Never authorizes traffic or maintenance. */
 
 import { execFile } from 'node:child_process';
@@ -940,7 +941,12 @@ async function main(mark: InventoryStageMarker) {
       ),
     mark,
     current,
-    createImageResolutionReader(token.trim(), fetch, started + 60000),
+    createImageResolutionReader(
+      token.trim(),
+      fetch,
+      started + 60000,
+      releasePreflight ? loadRetainedServingImageEvidence() : undefined,
+    ),
     candidateSource,
     reclosed,
   );

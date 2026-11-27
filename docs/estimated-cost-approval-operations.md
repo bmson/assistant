@@ -16,6 +16,14 @@ After provisioning the baseline below, dispatch the protected paired release at 
 
 A subsequent deployment must explicitly refresh the source-bound profile, even when deliberately turning the feature off. Missing configuration is rejected before delivery holds are acquired. Do not roll back to escrow-unaware code while active or uncertain liabilities exist. A compatible OFF release preserves liability and receipt semantics; it does not erase financial state.
 
+## Upgrading the retained API 3 pair
+
+The `ordinary_api3_recovery` input applies to the compatible-OFF upgrade from the reviewed serving pair on `d6954975`. Use a fresh current snapshot of both services, a current compatible-OFF profile and a signed full Firestore build for the exact main commit. Keep cleanup disabled during this operation. The normal spending activation on the new source uses its own drain and baseline.
+
+The protected job reads two specific generations from the reviewed evidence bucket. The first identifies the agent and web images of the existing revisions. Traffic recovery uses those existing revisions. The second records an isolated restore of each replacement worker image. Worker recovery uses digest-pinned images in the recovery repository. The workflow checks their availability and the three live job configurations before changing the release. A partial or uncertain update requires native readback before any retry.
+
+Retain complete runnable copies of the current, candidate and recovery images, including their manifests, configs, layers, attestations and signature evidence. Before removing a retention tag or scheduling registry cleanup, verify that each active service and job still has a retrievable recovery image from persistent storage. Keep the signed identity records and rehearsal receipts alongside the image references.
+
 ## Baseline provisioning
 
 `scripts/estimated-cost-baseline-operator.ts` uses the existing verified human account, fixed `bmson-assistant` / `assistant-production` target, exact clean main source, current recovery/index inventory and reviewed native service snapshot. It refuses credential overrides, impersonation and alternate targets. All operator files must be bounded, private, regular files; retain them outside the repository. No new IAM grant or credential is part of this command.
