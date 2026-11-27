@@ -3,6 +3,7 @@ import {
   assistantHealthAlerts,
   conversations,
   createDb,
+  createPostgresTaskRepository,
   type Db,
   knowledgeGraphSources,
   memories,
@@ -11,6 +12,7 @@ import {
   responseChecks,
   tasks,
 } from '@assistant/db';
+import { taskActivityDiagnostics } from '@assistant/persistence';
 import { and, eq, inArray } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { loadConfig, resetConfigForTest } from '../config.js';
@@ -73,10 +75,50 @@ afterAll(async () => {
   await (db as unknown as { $client?: { end: () => Promise<void> } }).$client?.end?.();
 });
 
+async function monitor(now: Date = new Date()) {
+  const repository = createPostgresTaskRepository(db);
+  const { task } = await repository.createTask({
+    agentId,
+    type: 'scheduled',
+    trust: 'assistant',
+    trigger: { source: 'schedule', payload: { job: 'health.monitor' } },
+  });
+  return runAssistantHealthMonitor(
+    {
+      db,
+      saveDiagnostic: async (id, text) => {
+        expect(
+          await repository.appendActivityDiagnostic({
+            agentId,
+            taskId: task.id,
+            diagnostic: { id, text },
+          }),
+        ).toBe(true);
+      },
+    },
+    { agentId, now },
+  );
+}
+
+async function diagnostics() {
+  const rows = await db
+    .select({ state: tasks.state })
+    .from(tasks)
+    .where(eq(tasks.agentId, agentId))
+    .orderBy(tasks.createdAt);
+  const chat = await db
+    .select({ id: messages.id })
+    .from(messages)
+    .innerJoin(conversations, eq(conversations.id, messages.conversationId))
+    .where(eq(conversations.agentId, agentId));
+  expect(chat).toEqual([]);
+  return rows.flatMap(({ state }) => taskActivityDiagnostics(state));
+}
+
 describe('assistant health monitor (integration)', () => {
   it('stays quiet for a healthy agent', async (ctx) => {
     if (!dbUp) return ctx.skip();
-    const result = await runAssistantHealthMonitor({ db }, { agentId });
+    const result = await monitor();
     expect(result).toEqual({ signals: [], notified: false });
   });
 
@@ -133,15 +175,10 @@ describe('assistant health monitor (integration)', () => {
     );
 
     const firstNow = new Date();
-    const result = await runAssistantHealthMonitor({ db }, { agentId, now: firstNow });
+    const result = await monitor(firstNow);
     expect(result.notified).toBe(true);
     expect(result.signals).toHaveLength(5);
-    const notices = await db
-      .select({ text: messages.text })
-      .from(messages)
-      .innerJoin(conversations, eq(conversations.id, messages.conversationId))
-      .where(and(eq(conversations.agentId, agentId), eq(conversations.title, 'Notifications')))
-      .orderBy(messages.createdAt);
+    const notices = await diagnostics();
     expect(notices).toHaveLength(1);
     expect(notices[0]?.text).toContain('quarantined after bounded retries');
     expect(notices[0]?.text).toContain('verification was unavailable 2 times');
@@ -152,10 +189,7 @@ describe('assistant health monitor (integration)', () => {
     // The next daily pass records fresh observations but does not repeat the
     // same owner message. A week later an unresolved graph incident is safely
     // reminded; response-quality rows have aged out by then.
-    const sameIncident = await runAssistantHealthMonitor(
-      { db },
-      { agentId, now: new Date(firstNow.getTime() + 60 * 60 * 1000) },
-    );
+    const sameIncident = await monitor(new Date(firstNow.getTime() + 60 * 60 * 1000));
     expect(sameIncident).toMatchObject({ notified: false, signals: expect.any(Array) });
     const [quarantineAlert] = await db
       .select({ observations: assistantHealthAlerts.observationCount })
@@ -168,30 +202,19 @@ describe('assistant health monitor (integration)', () => {
       );
     expect(quarantineAlert?.observations).toBe(2);
 
-    const reminder = await runAssistantHealthMonitor(
-      { db },
-      { agentId, now: new Date(firstNow.getTime() + 8 * 24 * 60 * 60 * 1000) },
-    );
+    const reminder = await monitor(new Date(firstNow.getTime() + 8 * 24 * 60 * 60 * 1000));
     expect(reminder).toMatchObject({
       notified: true,
       signals: [expect.stringContaining('quarantined')],
     });
-    const reminderNotices = await db
-      .select({ text: messages.text })
-      .from(messages)
-      .innerJoin(conversations, eq(conversations.id, messages.conversationId))
-      .where(and(eq(conversations.agentId, agentId), eq(conversations.title, 'Notifications')))
-      .orderBy(messages.createdAt);
+    const reminderNotices = await diagnostics();
     expect(reminderNotices).toHaveLength(2);
 
     await db
       .update(knowledgeGraphSources)
       .set({ status: 'ready' })
       .where(eq(knowledgeGraphSources.memoryId, memory.id));
-    const resolved = await runAssistantHealthMonitor(
-      { db },
-      { agentId, now: new Date(firstNow.getTime() + 8 * 24 * 60 * 60 * 1000 + 1) },
-    );
+    const resolved = await monitor(new Date(firstNow.getTime() + 8 * 24 * 60 * 60 * 1000 + 1));
     expect(resolved).toEqual({ signals: [], notified: false });
     const unresolved = await db
       .select({ kind: assistantHealthAlerts.kind })
@@ -208,16 +231,9 @@ describe('assistant health monitor (integration)', () => {
       .set({ status: 'quarantined' })
       .where(eq(knowledgeGraphSources.memoryId, memory.id));
     const concurrentNow = new Date(firstNow.getTime() + 8 * 24 * 60 * 60 * 1000 + 2);
-    const concurrent = await Promise.all([
-      runAssistantHealthMonitor({ db }, { agentId, now: concurrentNow }),
-      runAssistantHealthMonitor({ db }, { agentId, now: concurrentNow }),
-    ]);
+    const concurrent = await Promise.all([monitor(concurrentNow), monitor(concurrentNow)]);
     expect(concurrent.filter((result) => result.notified)).toHaveLength(1);
-    const concurrentNotices = await db
-      .select({ text: messages.text })
-      .from(messages)
-      .innerJoin(conversations, eq(conversations.id, messages.conversationId))
-      .where(and(eq(conversations.agentId, agentId), eq(conversations.title, 'Notifications')));
+    const concurrentNotices = await diagnostics();
     expect(concurrentNotices).toHaveLength(3);
   });
 
@@ -254,11 +270,11 @@ describe('assistant health monitor (integration)', () => {
       })),
     );
 
-    const enabled = await runAssistantHealthMonitor({ db }, { agentId });
+    const enabled = await monitor();
     expect(enabled.signals.some((signal) => signal.includes('GraphRAG'))).toBe(true);
     resetConfigForTest();
     loadConfig({ CHAT_RECALL_ENABLED: 'false', GRAPH_RAG_ENABLED: 'false' });
-    const result = await runAssistantHealthMonitor({ db }, { agentId });
+    const result = await monitor();
     expect(result.signals.every((signal) => !signal.includes('GraphRAG'))).toBe(true);
     const graphAlerts = await db
       .select({ status: assistantHealthAlerts.status })
@@ -290,7 +306,7 @@ describe('assistant health monitor (integration)', () => {
       })),
     );
 
-    const result = await runAssistantHealthMonitor({ db }, { agentId });
+    const result = await monitor();
     expect(
       result.signals.some((signal) =>
         signal.includes('GraphRAG source facts are waiting to be indexed'),

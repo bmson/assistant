@@ -124,7 +124,7 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | E3  | Weekly review and monthly renewals                                     | 5     | S    | E1         | open                                                          |
 | E4  | Card actions                                                           | 3     | M    | —          | open                                                          |
 | E5  | Proactive settings and Noticing health card on iOS                     | 3     | M    | H4         | in progress (source and producer health on the phone)         |
-| E6  | Internal notices out of the owner's chats                              | 3     | S    | A4         | open                                                          |
+| E6  | Internal notices out of the owner's chats                              | 3     | S    | A4         | in progress (Activity diagnostics and Calendar owner notices) |
 | E7  | Per-person and per-day views                                           | 4     | M    | C6         | open                                                          |
 | E8  | Actionable push notifications                                          | 4     | M    | E4         | open                                                          |
 | E9  | More shows only meaningful automations                                 | 3     | S    | A10        | in review (native Automations list)                           |

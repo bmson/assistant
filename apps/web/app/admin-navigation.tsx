@@ -9,6 +9,7 @@ export function AdminNavigation({ passkey }: { passkey: boolean }) {
   const pathname = usePathname();
   const links = [
     { href: '/chat', label: 'Chat' },
+    { href: '/tasks', label: 'Activity' },
     { href: '/profile', label: 'Memory' },
     { href: '/settings', label: 'Settings' },
     ...(passkey ? [{ href: '/security', label: 'Security' }] : []),

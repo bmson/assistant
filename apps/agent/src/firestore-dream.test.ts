@@ -2,7 +2,11 @@ import { createHash, randomUUID } from 'node:crypto';
 import { type ExecutorDeps, executeTask } from '@assistant/core';
 import type { Db } from '@assistant/db';
 import { createFirestoreExecutionPersistence } from '@assistant/firestore';
-import { type ExecutionPersistence, embeddingSpaceIdentityKey } from '@assistant/persistence';
+import {
+  type ExecutionPersistence,
+  embeddingSpaceIdentityKey,
+  taskActivityDiagnostics,
+} from '@assistant/persistence';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   decodeRecord,
@@ -229,14 +233,16 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
         .docs;
       expect(notes.map((doc) => doc.get('kind')).sort()).toEqual(['anticipation', 'footnote']);
 
-      const marker = await store.doc('notificationConversations', agentId).get();
-      const messages = await store
-        .collection('messages')
-        .where('conversationId', '==', marker.get('conversationId'))
-        .get();
-      expect(messages.docs.map((doc) => doc.get('text'))).toEqual([
-        expect.stringContaining('2 patterns I noticed are waiting'),
+      const saved = await persistence.tasks.getTask(taskId);
+      expect(taskActivityDiagnostics(saved?.state)).toEqual([
+        {
+          id: 'overnight-reflection',
+          text: expect.stringContaining('2 patterns I noticed are waiting'),
+        },
       ]);
+      expect((await store.collection('messages').where('taskId', '==', taskId).get()).empty).toBe(
+        true,
+      );
     });
 
     it('skips a quiet day without calling the model', async () => {

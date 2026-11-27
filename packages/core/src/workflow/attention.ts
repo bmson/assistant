@@ -1,6 +1,8 @@
-import { type Db, type TaskRow, tasks } from '@assistant/db';
+import { createPostgresTaskRepository, type Db, type TaskRow, tasks } from '@assistant/db';
 import {
+  activityRetriesExhaustedDiagnostic,
   hasEffectiveNotificationDelivery,
+  isActivityDiagnosticJob,
   type MaintenanceRepository,
   type NotificationDeliveryResult,
   notificationDeliveryKey,
@@ -37,6 +39,19 @@ function attentionText(task: Pick<TaskRow, 'status' | 'title' | 'progress'>): st
   return `${label ? `I got stuck on ${label}` : 'I got stuck on something'} and need you.${detail} Retry it from Activity, or tell me what to do.`;
 }
 
+/** Recover a historical exhausted run without sending it back to chat. */
+async function recoverActivityDiagnostic(
+  repository: TaskRepository,
+  task: TaskRow,
+): Promise<boolean> {
+  const saved = await repository.appendActivityDiagnostic({
+    agentId: task.agentId,
+    taskId: task.id,
+    diagnostic: activityRetriesExhaustedDiagnostic(task.queueGeneration),
+  });
+  return saved && (await markAttentionNotified(repository, task.id));
+}
+
 /**
  * Sweep backstop for a crash between a needs_attention/waiting_event transition
  * and its owner notice: the task is parked for the owner but no dashboard row or
@@ -71,6 +86,11 @@ export async function renotifyStalledAttention(
   for (const task of rows) {
     try {
       const text = attentionText(task);
+      if (isActivityDiagnosticJob(task) && /^attempt \d+ failed:/u.test(task.progress)) {
+        if (await recoverActivityDiagnostic(createPostgresTaskRepository(db), task))
+          renotified += 1;
+        continue;
+      }
       let notified = false;
       // Deliver to the task's own thread, or — for a conversation-less assistant
       // task — the Notifications sink, so the owner has an on-dashboard copy even
@@ -138,6 +158,10 @@ async function renotifyPortable(
   for (const task of rows) {
     try {
       const text = attentionText(task);
+      if (isActivityDiagnosticJob(task) && /^attempt \d+ failed:/u.test(task.progress)) {
+        if (await recoverActivityDiagnostic(store.tasks, task)) renotified += 1;
+        continue;
+      }
       // The same destinations as the PostgreSQL pass: the task's own thread,
       // or the Notifications sink for a conversation-less assistant task.
       let notified = await store.maintenance.postAttentionNotice({

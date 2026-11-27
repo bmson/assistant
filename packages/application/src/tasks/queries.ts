@@ -18,6 +18,7 @@ import {
 import type {
   ActivityTaskRecord,
   TaskActivityDetailRepository,
+  TaskActivityDiagnostic,
   TaskActivityRepository,
 } from '@assistant/persistence';
 import {
@@ -27,6 +28,7 @@ import {
   estimatedCostOperationLocator,
   needsYouTaskStatuses,
   type TaskTimelineKind,
+  taskActivityDiagnostics,
   timelineTime,
 } from '@assistant/persistence';
 import { and, asc, count, desc, eq, inArray, isNotNull, isNull, lt, sql } from 'drizzle-orm';
@@ -58,6 +60,7 @@ export interface ActivityItem {
   hasPendingApproval: boolean;
   hasActiveAutonomy: boolean;
   stuckWaiting: boolean;
+  diagnostics?: TaskActivityDiagnostic[];
   estimatedCostOperationId?: string | null;
 }
 
@@ -73,12 +76,18 @@ export type ActivityStatus = Pick<
   | 'hasPendingApproval'
   | 'hasActiveAutonomy'
   | 'stuckWaiting'
+  | 'diagnostics'
   | 'estimatedCostOperationId'
 >;
 
 export interface ActivityList {
   items: ActivityItem[];
   archivedCount: number;
+}
+
+function activityDiagnosticProjection(state: unknown): { diagnostics?: TaskActivityDiagnostic[] } {
+  const diagnostics = taskActivityDiagnostics(state);
+  return diagnostics.length ? { diagnostics } : {};
 }
 
 function activityItem(
@@ -89,6 +98,7 @@ function activityItem(
   const hasPendingApproval = pendingApprovalTaskIds.has(task.id);
   return {
     ...task,
+    ...activityDiagnosticProjection(state),
     estimatedCostOperationId: estimatedCostOperationLocator(task.status, state),
     progress: activityProgress(task.status, task.progress),
     hasPendingApproval,
@@ -110,6 +120,7 @@ function activityStatus(task: ActivityTaskRecord, hasPendingApproval: boolean): 
     hasPendingApproval: item.hasPendingApproval,
     hasActiveAutonomy: item.hasActiveAutonomy,
     stuckWaiting: item.stuckWaiting,
+    ...(item.diagnostics ? { diagnostics: item.diagnostics } : {}),
     estimatedCostOperationId: item.estimatedCostOperationId,
   };
 }
@@ -271,6 +282,7 @@ export interface TaskSnapshot {
   nextAction: string;
   progress: string;
   progressPercent: number | null;
+  diagnostics?: TaskActivityDiagnostic[];
   plan: RecordedValue | null;
   checklist?: {
     items: RequestChecklist['items'];
@@ -506,6 +518,7 @@ export async function getTaskDetail(
       progress: tasks.progress,
       progressPercent: tasks.progressPercent,
       plan: tasks.plan,
+      diagnosticState: sql<unknown>`jsonb_build_object('activityDiagnostics', ${tasks.state}->'activityDiagnostics')`,
       checklist: sql<unknown>`${tasks.state}->'requestChecklist'`,
       archivedAt: tasks.archivedAt,
       autonomyGrant: tasks.autonomyGrant,
@@ -635,12 +648,13 @@ export async function getTaskDetail(
   const decisionOf = (value: unknown) =>
     (value ?? {}) as { riskTier?: unknown; policyId?: unknown };
 
-  const { autonomyGrant, plan, checklist, ...rest } = task;
+  const { autonomyGrant, plan, checklist, diagnosticState, ...rest } = task;
   const parsedChecklist = RequestChecklistSchema.safeParse(checklist);
   const snapshot: TaskSnapshot = {
     ...rest,
     agentId: agent.id,
     progress: activityProgress(task.status, task.progress),
+    ...activityDiagnosticProjection(diagnosticState),
     plan: record(plan, MAX_RECORDED_CHARS),
     ...(parsedChecklist.success ? { checklist: checklistSnapshot(parsedChecklist.data) } : {}),
   };
@@ -734,6 +748,7 @@ export async function getTaskDetailWithRepository(
     ...task,
     agentId,
     progress: activityProgress(task.status, task.progress),
+    ...activityDiagnosticProjection(state),
     plan: record(plan, MAX_RECORDED_CHARS),
     ...(parsedChecklist.success ? { checklist: checklistSnapshot(parsedChecklist.data) } : {}),
   };

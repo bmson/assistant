@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import {
   type RepairIssue,
   repairClaimCandidate,
+  repairNoticeNeedsOwner,
   repairTransition,
   type SelfRepairRepository,
 } from '@assistant/persistence';
@@ -671,7 +672,14 @@ describe('issue-to-PR flow', () => {
       },
     } as never);
     await runRepairCycle(deps, 'owner', 'task', now);
-    expect(rows.get(issue.id)?.status).toBe('blocked');
+    const blocked = rows.get(issue.id);
+    expect(blocked?.status).toBe('blocked');
+    expect(blocked && repairNoticeNeedsOwner(blocked)).toBe(true);
+    await runRepairCycle(deps, 'owner', 'task', now);
+    expect(deps.notify).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ id: issue.id, status: 'blocked' }),
+      expect.stringContaining('owner-led'),
+    );
     expect(deps.worker?.dispatch).not.toHaveBeenCalled();
   });
   it('does not blindly redispatch after an ambiguous external failure', async () => {
