@@ -5,6 +5,7 @@ import {
   type TaskRow,
 } from '@assistant/db';
 import {
+  type BudgetRetry,
   chatReplyOrigin,
   hasEffectiveNotificationDelivery,
   type MessageRepository,
@@ -15,6 +16,7 @@ import {
 } from '@assistant/persistence';
 import { persistMessage } from '../../chat.js';
 import { compactChatMessageParts } from '../../chat-card.js';
+import { costTotals } from '../../cost.js';
 import { markAttentionNotified } from '../machine.js';
 import { GOAL_BLOCKED_PREFIX } from '../schedules.js';
 import type { ExecutorDeps } from './types.js';
@@ -168,6 +170,54 @@ export async function postBackgroundNotice(
     console.error('background notice failed', err);
     return false;
   }
+}
+
+export async function postBudgetPauseNotice(
+  deps: ExecutorDeps,
+  task: TaskRow,
+  cause: {
+    reason: string;
+    scope?: BudgetRetry['scope'];
+    budgetRetry?: BudgetRetry;
+    approvedAction?: boolean;
+  },
+): Promise<void> {
+  if (!task.conversationId && !isBackgroundTask(task)) return;
+
+  const scope = cause.scope ?? cause.budgetRetry?.scope;
+  let summary = cause.reason;
+  let text = summary;
+  if (scope) {
+    const limit = cause.approvedAction
+      ? `The approved action could not fit within the ${scope} limit.`
+      : `The ${scope} limit paused this work.`;
+    let amounts = 'Spending details are unavailable.';
+    try {
+      const totals = await costTotals(deps.persistence?.costs ?? deps.db);
+      const spent = scope === 'daily' ? totals.dailySpentUsd : totals.monthlySpentUsd;
+      const held = scope === 'daily' ? totals.dailyHeldUsd : totals.monthlyHeldUsd;
+      amounts =
+        held === undefined
+          ? `$${spent.toFixed(2)} recorded as spend. Holds unavailable.`
+          : `$${spent.toFixed(2)} recorded as spend and $${held.toFixed(2)} held.`;
+    } catch {
+      // The task is already parked. A failed ledger read only limits the copy.
+    }
+    summary = `${limit} ${amounts}`;
+    text = `${summary} Review or raise the limit in [Costs](/costs).`;
+  }
+
+  const parts = [
+    {
+      type: 'notice',
+      notice: 'parked',
+      taskId: task.id,
+      presentation: { version: 1, headline: 'Work paused', summary },
+    },
+  ];
+  if (task.conversationId)
+    await postConversationNotice(deps.persistence?.messages ?? deps.db, task, text, parts);
+  else await postBackgroundNotice(deps, task, text, parts, 'parked');
 }
 
 /**

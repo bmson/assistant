@@ -254,7 +254,11 @@ const ChatMessageRow = memo(function ChatMessageRow({
           originalText={retraction?.originalText}
           retractionReason={retraction?.reason}
           actions={
-            noticeKind === 'turn-failed' ? (
+            noticeKind === 'parked' && fullText.endsWith('[Costs](/costs).') ? (
+              <Link href="/costs" className={chip.accent}>
+                Open Costs
+              </Link>
+            ) : noticeKind === 'turn-failed' ? (
               <>
                 {failedReason === 'budget' ? (
                   <Link href="/costs" className={chip.accent}>
