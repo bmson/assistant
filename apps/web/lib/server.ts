@@ -1,5 +1,6 @@
 // Server-only singletons. Cached on globalThis so Next dev hot-reload doesn't
 // leak postgres connection pools on every recompile.
+
 import path from 'node:path';
 import {
   acknowledgeChatMessageDelivery,
@@ -95,6 +96,7 @@ import { readAuditInvestigation } from '@assistant/application/audit-investigati
 import type { CallsPorts } from '@assistant/application/calls';
 import type { GoalInput } from '@assistant/application/goals';
 import { createGoogleCalendarConnectionService } from '@assistant/application/google-calendar-connection';
+import { createGoogleHouseholdCalendarService } from '@assistant/application/google-household-calendar';
 import { GRAPH_EXTRACTION_VERSION } from '@assistant/application/knowledge-graph';
 import type { ModelProviderPorts } from '@assistant/application/model-providers';
 import { listPeopleDirectoryPage, personSummaryFromStoredRow } from '@assistant/application/people';
@@ -116,14 +118,17 @@ import {
   validateAgentPersistenceConfig,
   validateRestoreRehearsalConfig,
 } from '@assistant/config';
+import { googleHouseholdExtendedPurposesReady } from '@assistant/config/google-calendar';
 import {
   encodeMessageCursor,
   getAgent,
   getOrCreatePrimaryConversation,
 } from '@assistant/core/chat';
 import {
+  getGoogleCalendarAccessToken,
   googleCalendarOAuthConfig,
   googleCalendarWriteContractReady,
+  reportGoogleCalendarReadFailure,
 } from '@assistant/core/google-calendar-oauth';
 import {
   decryptStoredCredential,
@@ -154,6 +159,7 @@ import {
   createPostgresEstimatedCostTurnParking,
   createPostgresGeneratedCardRepository,
   createPostgresGoogleCalendarConnectionRepository,
+  createPostgresHomeWeatherRepository,
   createPostgresMcpOAuthRepository,
   createPostgresModelCatalogRepository,
   createPostgresModelConnectionRepository,
@@ -161,6 +167,7 @@ import {
   createPostgresProactiveCanaryRepository,
   createPostgresRecallSurfacingRepository,
   createPostgresResearchAssignmentRepository,
+  createPostgresSavedPlacesRepository,
   createPostgresSelfRepairRepository,
   createPostgresTaskDiscoveryRepository,
   createPostgresToolExecutionRepository,
@@ -186,6 +193,7 @@ import {
   createFirestoreMcpOAuthRepository,
   createFirestoreProactiveCanaryRepository,
   createFirestoreProfileMemoryCommandPersistence,
+  createFirestoreSavedPlacesRepository,
   createFirestoreSettingsPersistence,
   createInstallationStore,
   FirestoreActiveJobLookup,
@@ -205,6 +213,7 @@ import {
   FirestoreMcpConnectionReadRepository,
   FirestoreModelCatalogRepository,
   FirestoreModelConnectionRepository,
+  FirestoreOwnerContextRepository,
   FirestoreOwnerKnowledgeGraphFactRepository,
   FirestoreProactiveHealthRepository,
   FirestoreRecallFeedbackRepository,
@@ -243,6 +252,12 @@ import {
   resolveMcpOAuthClient,
 } from '@assistant/tools/mcp-oauth-registration';
 import { createMcpOAuthService } from '@assistant/tools/mcp-oauth-service';
+import {
+  fetchHouseholdCalendarBusy,
+  fetchHouseholdCalendarDetails,
+  fetchHouseholdCalendarRoster,
+  GoogleClient,
+} from '@assistant/tools/modules/google';
 import {
   GcsWorkspaceStore,
   LocalWorkspaceStore,
@@ -681,6 +696,44 @@ export const getAgentIdentity = cache(
     return getAssistantIdentity(getDb());
   },
 );
+
+/** Compose the private Home preference against the configured owner. */
+export async function homeWeatherSettingsPorts() {
+  const config = loadConfig();
+  if (config.PERSISTENCE_DRIVER === 'firestore') {
+    const problems = validateAgentPersistenceConfig(config);
+    if (problems.length) throw new Error(problems.join('; '));
+    return {
+      agentId: config.FIRESTORE_AGENT_ID,
+      repository: new FirestoreOwnerContextRepository(getFirestoreInstallationStore()),
+    };
+  }
+  const db = getDb();
+  return {
+    agentId: await assertPostgresInstallationOwner(db),
+    repository: createPostgresHomeWeatherRepository(db),
+  };
+}
+
+/** Compose the private address book against the configured owner. */
+export async function savedPlacesSettingsPorts() {
+  const config = loadConfig();
+  if (config.PERSISTENCE_DRIVER === 'firestore') {
+    const problems = validateAgentPersistenceConfig(config);
+    if (problems.length) throw new Error(problems.join('; '));
+    const store = getFirestoreInstallationStore();
+    await assertFirestoreInstallationOwner(store, config.FIRESTORE_AGENT_ID);
+    return {
+      agentId: config.FIRESTORE_AGENT_ID,
+      repository: createFirestoreSavedPlacesRepository(store),
+    };
+  }
+  const db = getDb();
+  return {
+    agentId: await assertPostgresInstallationOwner(db),
+    repository: createPostgresSavedPlacesRepository(db),
+  };
+}
 
 /** Owner-scoped recall hide/allow controls for web and mobile transports. */
 export async function getRecallSurfacingPorts(): Promise<{
@@ -2211,8 +2264,7 @@ export async function loadOwnerMemoryCorrectionAuthorizationState(
   });
 }
 
-/** Optional personal Calendar onboarding, using the installation's existing store. */
-export function getGoogleCalendarConnectionService() {
+function googleCalendarConnectionRuntime() {
   const config = loadConfig();
   if (config.PERSISTENCE_DRIVER === 'firestore' && validateAgentPersistenceConfig(config).length)
     throw new Error('Calendar connection unavailable');
@@ -2220,11 +2272,61 @@ export function getGoogleCalendarConnectionService() {
     config.PERSISTENCE_DRIVER === 'firestore'
       ? createFirestoreGoogleCalendarConnectionRepository(getFirestoreInstallationStore())
       : createPostgresGoogleCalendarConnectionRepository(getDb());
+  return { repository, oauth: googleCalendarOAuthConfig(config) };
+}
+
+/** Optional personal Calendar onboarding, using the installation's existing store. */
+export function getGoogleCalendarConnectionService() {
+  const { repository, oauth } = googleCalendarConnectionRuntime();
   return createGoogleCalendarConnectionService({
     repository,
-    config: googleCalendarOAuthConfig(config),
+    config: oauth,
     writeContractReady: googleCalendarWriteContractReady(),
   });
+}
+
+export function getGoogleHouseholdCalendarService() {
+  const { repository, oauth } = googleCalendarConnectionRuntime();
+  if (!oauth) throw new Error('Personal Calendar unavailable');
+  return createGoogleHouseholdCalendarService(
+    repository,
+    (ownerId, connectionId, assertCurrent) => {
+      const client = new GoogleClient({
+        clientId: '',
+        clientSecret: '',
+        refreshToken: '',
+        tokenProvider: {
+          // This client exposes no provider cursor.
+          cursorSecret: '',
+          authorizeRequest: assertCurrent,
+          accessToken: (forceRefresh, rejectedAccessToken) =>
+            getGoogleCalendarAccessToken({
+              config: oauth,
+              repository,
+              ownerId,
+              expectedConnectionId: connectionId,
+              forceRefresh,
+              rejectedAccessToken,
+            }),
+          requestFailed: (failure) =>
+            reportGoogleCalendarReadFailure({
+              repository,
+              ownerId,
+              connectionId,
+              ...failure,
+              // The free/busy endpoint uses POST for a read.
+              method: undefined,
+            }),
+        },
+      });
+      return {
+        roster: () => fetchHouseholdCalendarRoster(client),
+        details: (source, window) => fetchHouseholdCalendarDetails(client, source, window),
+        busy: (sources, window) => fetchHouseholdCalendarBusy(client, sources, window),
+      };
+    },
+    googleHouseholdExtendedPurposesReady(loadConfig()),
+  );
 }
 
 /** Read one configured-owner MCP reference. Credentials are never returned to diagnostics. */

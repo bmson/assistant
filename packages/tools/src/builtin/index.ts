@@ -20,7 +20,10 @@ import {
 import {
   type ConversationSearchRepository,
   embeddingSpaceIdentityKey,
+  groundMemoryPersonReference,
+  groundPersonEvidence,
   type MemoryToolRepository,
+  personSourceTextHash,
   type TaskRepository,
 } from '@assistant/persistence';
 import { and, eq, gt, gte, isNotNull, isNull, ne, or, sql } from 'drizzle-orm';
@@ -133,6 +136,15 @@ export function registerPortableMemoryTools(
           .max(120)
           .default('')
           .describe('Who the fact is about: "owner", a person\'s name, or empty if about no one.'),
+        personEvidence: z
+          .object({
+            canonicalName: z.string().min(1).max(120),
+            quote: z.string().min(1).max(500),
+          })
+          .optional()
+          .describe(
+            'For an alternate name, existing record label, or same-name person that the owner explicitly identifies. Copy the complete latest owner message tying the subject to the canonical name and its email address or phone number.',
+          ),
         domain: z
           .enum(['identity', 'work', 'home', 'relationships', 'preferences', 'health', 'other'])
           .optional(),
@@ -178,6 +190,13 @@ export function registerPortableMemoryTools(
           args.category === 'experience'
             ? new Date(ctx.now().getTime() + 90 * 24 * 3600 * 1000)
             : null;
+        const source =
+          ctx.trust === 'owner' && !ctx.tainted ? ctx.directOwnerMemorySource : undefined;
+        const evidence = source
+          ? args.personEvidence
+            ? groundPersonEvidence(args.personEvidence, args.subject, [source.text])
+            : groundMemoryPersonReference(args.subject, source.text)
+          : undefined;
         const result = await deps.memory.save({
           agentId: ctx.agentId,
           content: args.content,
@@ -192,6 +211,18 @@ export function registerPortableMemoryTools(
           originTrust: ctx.trust,
           quarantined,
           subject: args.subject || undefined,
+          ...(args.subject && (args.personEvidence || args.subject.trim().toLowerCase() !== 'owner')
+            ? {
+                personEvidence:
+                  evidence && source
+                    ? {
+                        ...evidence,
+                        sourceMessageId: source.id,
+                        sourceTextHash: personSourceTextHash(source.text),
+                      }
+                    : null,
+              }
+            : {}),
           domain: args.domain,
           sourceTaskId: ctx.taskId,
           expiresAt,

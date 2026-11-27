@@ -56,6 +56,26 @@ const expected: MigrationTailMetadata[] = [
     folderMillis: 1795055402677,
     hash: '96d4885c5b0b622079b2e4bb78d5d7b6969518fb14dae8485c653b3506d9f30b',
   },
+  {
+    folderMillis: 1795126823025,
+    hash: 'f7a937e2cde1800ee035b19a6ecc799e790b62631d77e7027430b3523de5d267',
+  },
+  {
+    folderMillis: 1795128160098,
+    hash: '94ff304e909bbf7f077a53c49c7611accc5b1a2ee6fd864e06ea8b76897d04d7',
+  },
+  {
+    folderMillis: 1795129102426,
+    hash: '4f70d3d8cc3f973504a0edebbe58ff34343b46cd05c17b585e4d75d178631511',
+  },
+  {
+    folderMillis: 1795146319726,
+    hash: 'cb3c08c4916d391b9cde8a8e54b49a021106c9fa925cfbc2422762f8fc726ece',
+  },
+  {
+    folderMillis: 1795711047896,
+    hash: '676b1049e2e167c5213fa062018282f261922be2b4d6261fdd55d40a4d831eb8',
+  },
 ];
 const applied = (count: number): AppliedMigrationTailRow[] =>
   expected.slice(0, count).map((migration) => ({
@@ -73,7 +93,7 @@ describe('owner-editor migration tail guard', () => {
     expect(shipped).toEqual(expected);
   });
 
-  it.each([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])(
+  it.each([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17])(
     'accepts canonical strict prefix length %i',
     (count) => {
       expect(() =>
@@ -81,6 +101,18 @@ describe('owner-editor migration tail guard', () => {
       ).not.toThrow();
     },
   );
+
+  it('rejects the standalone B2 migration at the C1 ordinal', () => {
+    expect(() =>
+      assertCompatibleOwnerEditorMigrationTail(expected, [
+        ...applied(12),
+        {
+          hash: '94ff304e909bbf7f077a53c49c7611accc5b1a2ee6fd864e06ea8b76897d04d7',
+          createdAt: '1795127468858',
+        },
+      ]),
+    ).toThrow('Incompatible owner-editor migration ledger.');
+  });
 
   it('rejects the historical contact-only 0131 watermark', () => {
     expect(() =>

@@ -1,5 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import type { AmbientSnapshotRepository, OwnerAmbientSnapshot } from '@assistant/persistence';
+import {
+  type AmbientSnapshotRepository,
+  type OwnerAmbientSnapshot,
+  readHomeWeatherSettings,
+} from '@assistant/persistence';
 import type { Transaction } from '@google-cloud/firestore';
 import { assertPrivacyErasureInactiveInTransaction } from './privacy-erasure.js';
 import { encodeRecord, type InstallationStore } from './store.js';
@@ -29,6 +33,17 @@ export class FirestoreAmbientSnapshotRepository implements AmbientSnapshotReposi
     await this.store.db.runTransaction(async (tx) => {
       // Location-derived owner context must not reappear during an erasure.
       await assertPrivacyErasureInactiveInTransaction(tx, this.store, snapshot.agentId);
+      const home = (snapshot.sources as { home?: { revision: string } } | null)?.home;
+      if (home) {
+        const owner = await tx.get(this.store.doc('agents', snapshot.agentId));
+        const settings = readHomeWeatherSettings(owner.get('homeWeather'));
+        if (
+          owner.get('id') !== snapshot.agentId ||
+          !settings?.enabled ||
+          settings.revision !== home.revision
+        )
+          throw new Error('Home weather settings changed during refresh');
+      }
       const [current, legacy] = await Promise.all([tx.get(ref), this.legacy(tx, snapshot.agentId)]);
       const id =
         (current.exists && typeof current.get('id') === 'string' && current.get('id')) ||

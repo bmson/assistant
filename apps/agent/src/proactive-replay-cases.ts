@@ -20,7 +20,63 @@ export const teacherMessages = [
   { tick: 'next morning photo message', subject: 'Send the class photo selection' },
 ] as const;
 
+const originalDeliveryDate = '2026-12-09';
+const revisedDeliveryDate = '2026-12-10';
+const shipmentRef = 'SYN-DELIVERY-08';
+export const deliveryMail = {
+  threadId: 'synthetic-store-delivery',
+  from: 'dispatch@example.test',
+  original: {
+    date: originalDeliveryDate,
+    receivedAt: '2026-12-09T02:00:00.000Z',
+    subject: 'Original store delivery date',
+    body: `Store delivery ${shipmentRef} is scheduled for ${originalDeliveryDate}.`,
+    sweepAt: '2026-12-09T16:05:00.000Z',
+  },
+  replacement: {
+    date: revisedDeliveryDate,
+    receivedAt: '2026-12-09T15:30:00.000Z',
+    subject: 'Revised store delivery date',
+    body: `Store delivery ${shipmentRef} was moved from ${originalDeliveryDate}. The current delivery date is ${revisedDeliveryDate}.`,
+    sweepAt: '2026-12-10T16:05:00.000Z',
+  },
+};
+
+const replacementAge = (ownerLocalTime: string) =>
+  (Date.parse(`${revisedDeliveryDate}T${ownerLocalTime}:00-08:00`) -
+    Date.parse(deliveryMail.replacement.receivedAt)) /
+  60_000;
+
 export const replayCases = {
+  delivery: {
+    id: 'S08',
+    facts: {
+      originalReceivedAt: deliveryMail.original.receivedAt,
+      replacementReceivedAt: deliveryMail.replacement.receivedAt,
+      originalSweepAt: deliveryMail.original.sweepAt,
+      revisedSweepAt: deliveryMail.replacement.sweepAt,
+      originalMailScanned: 2,
+      revisedMailScanned: 1,
+      authenticatedReplacement: true,
+      shipmentThread: deliveryMail.threadId,
+      originalSourceText: deliveryMail.original.body,
+      replacementSourceText: deliveryMail.replacement.body,
+    },
+    ticks: {
+      'original delivery date morning': {
+        deliveries: 0,
+        phase: 'suppressed',
+        reason: 'quiet-briefing',
+      },
+      'revised delivery date morning': {
+        deliveries: 1,
+        kind: 'delivery-today',
+        channel: 'stack',
+        earliestMinutes: replacementAge('08:00'),
+        latestMinutes: replacementAge('11:59'),
+      },
+    },
+  },
   practice: {
     id: 'S16',
     facts: {
@@ -146,6 +202,32 @@ interface ReplayCard {
 /** Check owner-visible fixture facts, independently of ledger kind and key. */
 export function replayCardGrounded(caseId: string, card: ReplayCard, tick: string): boolean {
   switch (caseId) {
+    case replayCases.delivery.id: {
+      const text = [
+        card.title,
+        card.summary,
+        ...(card.details ?? []).map(({ value }) => value),
+      ].join(' ');
+      const startsAt = card.startsAt;
+      const revisedDate =
+        startsAt === undefined
+          ? text.includes(revisedDeliveryDate)
+          : startsAt === revisedDeliveryDate ||
+            (Number.isFinite(Date.parse(startsAt)) &&
+              new Intl.DateTimeFormat('en-CA', {
+                timeZone: 'America/Los_Angeles',
+                year: 'numeric',
+                month: '2-digit',
+                day: '2-digit',
+              }).format(new Date(startsAt)) === revisedDeliveryDate);
+      return (
+        text.includes(shipmentRef) &&
+        revisedDate &&
+        /\b(?:is|will) (?:anyone|someone|somebody) (?:be )?(?:at )?home\b|\b(?:check|confirm) (?:if|whether) (?:anyone|someone|somebody) (?:is|will be) (?:at )?home\b/i.test(
+          text,
+        )
+      );
+    }
     case replayCases.practice.id:
       return (
         card.startsAt === '2026-11-20T01:30:00.000Z' &&

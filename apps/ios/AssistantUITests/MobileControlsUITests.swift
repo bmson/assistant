@@ -14,6 +14,26 @@ final class MobileControlsUITests: XCTestCase {
     private let sourceFact = "The phone calendar was not checked. These synthetic facts are not evidence of live calendar coverage."
     private let actionSummary = "Read both original listings before deciding."
 
+    func testNoticingShowsOverallHealthFromTheServer() throws {
+        executionTimeAllowance = 120
+        deadline = ContinuousClock.now.advanced(by: .seconds(120))
+        let app = XCUIApplication()
+        defer { app.terminate() }
+        let cases = [
+            ("noticing-healthy", "Checks are healthy"),
+            ("noticing-attention", "Checks need attention"),
+            ("noticing-unavailable", "Overall status unavailable")
+        ]
+        for (scene, status) in cases {
+            try launch(app, fixture: scene)
+            try require(app.staticTexts[status].waitForExistence(timeout: waitBudget()),
+                        "Noticing did not show the reported health state", app)
+            try assertTransport(app)
+            try capture(app, scene)
+            app.terminate()
+        }
+    }
+
     func testNativeControlsCapability() throws {
         continueAfterFailure = true
         executionTimeAllowance = 60

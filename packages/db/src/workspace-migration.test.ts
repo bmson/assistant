@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { fileURLToPath } from 'node:url';
 import {
   INSTALLATION_RUNTIME_EXCLUSIONS_V2,
   idempotencyIdentityDigest,
@@ -7,11 +6,9 @@ import {
   modelToolCallIdentityDigest,
   toolCallReceiptKeyId,
 } from '@assistant/persistence';
-import { drizzle } from 'drizzle-orm/postgres-js';
-import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import postgres from 'postgres';
 import { afterEach, describe, expect, it } from 'vitest';
-import { allocateTestTarget, assertAllocatedTestTarget } from './test-target.js';
+import { withDisposableTestDatabase } from './disposable-test-database.js';
 import {
   exportWorkspaceSnapshot,
   filterPortableMaintenanceCursorRows,
@@ -47,69 +44,6 @@ describe('portable memory witness filtering', () => {
 
 const databaseUrl = process.env.DATABASE_URL;
 const enabled = Boolean(databaseUrl && new URL(databaseUrl).pathname.endsWith('_test'));
-
-async function withDisposableWorkspaceDatabase<T>(
-  run: (client: postgres.Sql, databaseUrl: string) => Promise<T>,
-): Promise<T> {
-  assertAllocatedTestTarget({
-    databaseUrl: process.env.DATABASE_URL,
-    testDatabaseUrl: process.env.TEST_DATABASE_URL,
-    token: process.env.ASSISTANT_TEST_TARGET_TOKEN,
-  });
-  const target = allocateTestTarget(process.env.DATABASE_URL);
-  const adminUrl = new URL(target.databaseUrl);
-  adminUrl.pathname = '/postgres';
-  const admin = postgres(adminUrl.toString(), { max: 1, onnotice: () => {} });
-  let created = false;
-  let client: postgres.Sql | undefined;
-  let result: { value: T } | undefined;
-  let primaryError: unknown;
-  const cleanupErrors: unknown[] = [];
-  try {
-    await admin.unsafe(`CREATE DATABASE "${target.databaseName}"`);
-    created = true;
-    await admin.unsafe(
-      `COMMENT ON DATABASE "${target.databaseName}" IS 'assistant-test-target:${target.token}'`,
-    );
-    client = postgres(target.databaseUrl, { max: 1, onnotice: () => {} });
-    await migrate(drizzle(client), {
-      migrationsFolder: fileURLToPath(new URL('../drizzle/', import.meta.url)),
-    });
-    result = { value: await run(client, target.databaseUrl) };
-  } catch (error) {
-    primaryError = error;
-  } finally {
-    const attemptCleanup = async (cleanup: () => Promise<unknown>) => {
-      try {
-        await cleanup();
-      } catch (error) {
-        cleanupErrors.push(error);
-      }
-    };
-    if (client) await attemptCleanup(() => client!.end({ timeout: 5 }));
-    if (created)
-      await attemptCleanup(async () => {
-        const [owned] = await admin<{ marker: string | null }[]>`
-          SELECT shobj_description(oid, 'pg_database') AS marker
-          FROM pg_database WHERE datname = ${target.databaseName}
-        `;
-        if (owned?.marker !== `assistant-test-target:${target.token}`)
-          throw new Error('Workspace export test database ownership mismatch');
-        await admin.unsafe(`DROP DATABASE "${target.databaseName}" WITH (FORCE)`);
-      });
-    await attemptCleanup(() => admin.end({ timeout: 5 }));
-  }
-  if (primaryError && cleanupErrors.length)
-    throw new AggregateError(
-      [primaryError, ...cleanupErrors],
-      'Workspace export test and cleanup failed',
-    );
-  if (primaryError) throw primaryError;
-  if (cleanupErrors.length)
-    throw new AggregateError(cleanupErrors, 'Workspace export test cleanup failed');
-  if (!result) throw new Error('Workspace export test produced no result');
-  return result.value;
-}
 
 describe.skipIf(!enabled)('PostgreSQL workspace migration export', () => {
   const ids = {
@@ -220,7 +154,7 @@ describe.skipIf(!enabled)('PostgreSQL workspace migration export', () => {
 
   it('exports every declared PostgreSQL table for a single-owner installation', async () => {
     if (!databaseUrl) return;
-    await withDisposableWorkspaceDatabase(async (client, isolatedUrl) => {
+    await withDisposableTestDatabase(async (client, isolatedUrl) => {
       const owner = { id: ids.agent };
       await client`insert into agents (id, name, email, workspace_prefix) values (${owner.id}, 'Migration test owner', ${`${owner.id}@example.test`}, ${`workspace/${owner.id}`})`;
       await client`insert into models (id, label, capabilities, enabled) values ('synthetic/migration-export', 'Migration export model', '{}'::jsonb, true)`;
@@ -565,7 +499,7 @@ describe.skipIf(!enabled)('PostgreSQL workspace migration export', () => {
   });
 
   it('exports only the selected owner’s owner-call grant rows from a multi-agent database', async () => {
-    await withDisposableWorkspaceDatabase(async (client, isolatedUrl) => {
+    await withDisposableTestDatabase(async (client, isolatedUrl) => {
       const ownerId = randomUUID();
       const otherOwnerId = randomUUID();
       const approvalIds = [randomUUID(), randomUUID()] as const;

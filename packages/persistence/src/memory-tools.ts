@@ -1,4 +1,5 @@
 import type { EmbeddingSpace } from './embedding.js';
+import type { GroundedPersonEvidence } from './person-evidence.js';
 import type { Records } from './records.js';
 
 export type MemoryRecallRow = Omit<Records['memories'], 'embedding'> & {
@@ -22,6 +23,7 @@ export interface MemorySaveInput {
   quarantined: boolean;
   subject?: string;
   subjectRelationship?: string;
+  personEvidence?: GroundedPersonEvidence | null;
   domain?: string;
   sourceTaskId?: string;
   expiresAt?: Date | null;

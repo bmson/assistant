@@ -54,6 +54,14 @@ vi.mock('@/app/settings/actions', () => ({
 }));
 vi.mock('@/lib/server', () => ({
   getWorkspaceSettings: async () => ({ policies: [] }),
+  savedPlacesSettingsPorts: async () => ({
+    agentId: 'fixture',
+    repository: { list: async () => ({ generation: null, places: [] }) },
+  }),
+  homeWeatherSettingsPorts: async () => ({
+    agentId: 'fixture',
+    repository: { getHomeWeather: async () => null },
+  }),
 }));
 vi.mock('@/lib/task-activity', () => ({
   discoverTaskActivity: async () => ({

@@ -1,4 +1,6 @@
 import type {
+  HomeWeatherRepository,
+  HomeWeatherSettings,
   OwnerAmbientSnapshot,
   OwnerCommitment,
   OwnerContextRepository,
@@ -9,9 +11,13 @@ import {
   isOwnerContextCommitmentSourceEligible,
   isOwnerContextFixtureConversationMetadata,
   isOwnerContextFixtureMessageSource,
+  readHomeWeatherSettings,
 } from '@assistant/persistence';
 import type { QueryDocumentSnapshot } from '@google-cloud/firestore';
-import { privacyErasureIsActive } from './privacy-erasure.js';
+import {
+  assertPrivacyErasureInactiveInTransaction,
+  privacyErasureIsActive,
+} from './privacy-erasure.js';
 import { decodeRecord, documentKey, type InstallationStore } from './store.js';
 
 const COMMITMENT_PAGE_SIZE = 100;
@@ -43,10 +49,34 @@ function decodedIdentityMatches(
  * require its stored `agentId` to match. A malformed or foreign document is
  * ignored; its content is never treated as installation-global context.
  */
-export class FirestoreOwnerContextRepository implements OwnerContextRepository {
+export class FirestoreOwnerContextRepository
+  implements OwnerContextRepository, HomeWeatherRepository
+{
   readonly kind = 'owner-context-repository' as const;
 
   constructor(readonly store: InstallationStore) {}
+
+  async getHomeWeather(agentId: string) {
+    const [owner, erasure] = await this.store.db.getAll(
+      this.store.doc('agents', agentId),
+      this.store.doc('privacyErasureJobs', agentId),
+    );
+    if (owner?.get('id') !== agentId) return null;
+    if (erasure?.exists && privacyErasureIsActive(erasure.get('status'))) return null;
+    return readHomeWeatherSettings(owner.get('homeWeather'));
+  }
+
+  async setHomeWeather(agentId: string, value: HomeWeatherSettings | null) {
+    return this.store.db.runTransaction(async (tx) => {
+      const owners = await tx.get(this.store.collection('agents').limit(2));
+      const owner = owners.docs[0];
+      if (owners.size !== 1 || owner?.id !== documentKey(agentId) || owner.get('id') !== agentId)
+        return false;
+      await assertPrivacyErasureInactiveInTransaction(tx, this.store, agentId);
+      tx.update(owner.ref, { homeWeather: value });
+      return true;
+    });
+  }
 
   async getOwnerCard(agentId: string) {
     const erasure = await this.store.doc('privacyErasureJobs', agentId).get();

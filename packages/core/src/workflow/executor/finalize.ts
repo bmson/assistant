@@ -52,6 +52,16 @@ import {
   requestedPrivateArtifactIntent,
 } from '../artifact-intent.js';
 import { remainingBirthdaySaves, requestedBirthdaySaves } from '../birthday-import.js';
+import {
+  bookingDisclosure,
+  bookingDisclosureForRead,
+  bookingEvidence,
+  bookingModelWindow,
+  bookingText,
+  hotelTotalRequested,
+  isBookingProjectionSafe,
+  type VerifiedHotelTotal,
+} from '../booking-disclosure.js';
 import { calendarAgendaSummary } from '../calendar-agenda.js';
 import { CARD_NOT_BUILT, requestedCardIntent } from '../card-intent.js';
 import { responseCardSteps } from '../card-steps.js';
@@ -84,6 +94,7 @@ import {
   isConversationLocalContext,
   latestOwnerIntent,
   needsConversationReasoning,
+  ownerAuthoredWindow,
 } from '../owner-intent.js';
 import { PLANNER_VERSION } from '../planner.js';
 import { detectPersonalReadRequest, type PersonalReadRequest } from '../read-intent.js';
@@ -93,6 +104,8 @@ import {
   type ActionEvidence,
   enforcePersonalReadResponse,
   enforceResponseContract,
+  verifiedBookingDeposit,
+  verifiedHotelBookingTotal,
   verifiedReadResponse,
 } from '../response-contract.js';
 import { createSuggestion } from '../suggestions.js';
@@ -566,6 +579,37 @@ function normalizeRecallLabel(value: string): string {
     .trim();
 }
 
+type BookingReadContext = {
+  resolvedReadIntent?: ResolvedReadIntent;
+  readRequest?: PersonalReadRequest | null;
+};
+
+function finalBookingDisclosure(
+  task: TaskLease,
+  state: TaskState,
+  window: ModelMessage[],
+  context?: BookingReadContext,
+) {
+  if (task.type !== 'chat_turn' || task.trust !== 'owner' || isForwardedIngest(task)) return;
+  const intent = latestOwnerIntent(window, {
+    trust: 'owner',
+    trigger: task.trigger,
+    clarificationContinuation: state.clarificationContinuation,
+  });
+  const request =
+    context?.readRequest ??
+    (context?.resolvedReadIntent?.kind === 'personal'
+      ? context.resolvedReadIntent.personal
+      : detectPersonalReadRequest(ownerAuthoredWindow(window, intent), {
+          now: task.createdAt,
+          timeZone: state.requestTimeZone,
+        }));
+  const disclosure =
+    intent.separation !== 'unknown' &&
+    bookingDisclosureForRead(intent.ownerAuthoredText, context?.resolvedReadIntent, request);
+  if (disclosure) return { ...disclosure, ownerText: intent.ownerAuthoredText, request };
+}
+
 /** Persist-before-send turns the task checkpoint into a small durable outbox. */
 export async function stageFinalResponse(
   deps: ExecutorDeps,
@@ -573,8 +617,59 @@ export async function stageFinalResponse(
   state: TaskState,
   window: ModelMessage[],
   pending: PendingFinal,
-  options?: { verifiedCompoundTripChecklist?: boolean },
+  options?: {
+    verifiedCompoundTripChecklist?: boolean;
+    bookingReadContext?: BookingReadContext;
+    verifiedCardHotelTotal?: VerifiedHotelTotal;
+  },
 ): Promise<ExecuteResult> {
+  const disclosure = finalBookingDisclosure(task, state, window, options?.bookingReadContext);
+  if (disclosure) {
+    const visibleText = bookingText(pending.text);
+    if (visibleText || !pending.text.trim()) {
+      pending.text = visibleText;
+    } else {
+      pending.text = 'I could not verify the requested booking detail.';
+      pending.terminalStatus = 'needs_attention';
+      pending.outcome = 'needs_attention';
+    }
+    pending.progress = bookingText(pending.progress);
+    if (disclosure.depositRequested) {
+      const request = disclosure.request;
+      const rows = request
+        ? await executionEvidence(deps).taskEvidence({ agentId: task.agentId, taskId: task.id })
+        : [];
+      const deposit = request && verifiedBookingDeposit(request, actionEvidence(rows, true));
+      pending.text =
+        deposit ?? 'I could not verify the deposit for this booking in the mail I checked.';
+      pending.progress = deposit
+        ? 'Verified the requested booking detail.'
+        : 'Booking detail unverified.';
+      if (!deposit) {
+        pending.terminalStatus = 'needs_attention';
+        pending.outcome = 'needs_attention';
+      }
+    }
+    if (
+      !disclosure.depositRequested &&
+      disclosure.request &&
+      hotelTotalRequested(disclosure.ownerText) &&
+      pending.outcome === 'done'
+    ) {
+      const rows = await executionEvidence(deps).taskEvidence({
+        agentId: task.agentId,
+        taskId: task.id,
+      });
+      const total = verifiedHotelBookingTotal(disclosure.request, actionEvidence(rows, true));
+      if (total)
+        pending.text = `${pending.text}\n\n${total.value}. [Booking email](https://mail.google.com/mail/u/0/#all/${total.threadId})`;
+    }
+    if (pending.responseCards)
+      pending.responseCards = pending.responseCards.filter((card) =>
+        isBookingProjectionSafe(card, options?.verifiedCardHotelTotal),
+      );
+    state.recall = undefined;
+  }
   const correctionOwnedChecklist =
     state.requestChecklist?.revision !== undefined ||
     state.requestChecklist?.revisionAudit !== undefined;
@@ -809,7 +904,9 @@ export async function stageModelFinalResponse(
   // but a leaked tag in an email or SMS final would be robot syntax in front
   // of a human — stripping here is the defense in depth. The cues themselves
   // survive only into a dashboard chat_turn's persisted parts, below.
-  const strippedFinal = stripCueTags(pending.text);
+  const disclosure = finalBookingDisclosure(task, state, window, readContext);
+  const strippedFinal = stripCueTags(disclosure ? bookingText(pending.text) : pending.text);
+  if (disclosure) window = bookingModelWindow(window, disclosure.ownerText);
   pending.text = strippedFinal.text;
   const publicScope =
     readContext?.resolvedReadIntent?.kind === 'public_activity' ||
@@ -824,7 +921,7 @@ export async function stageModelFinalResponse(
     ? allRows.filter((row) => /^web\.(?:search|fetch)$/.test(row.toolName))
     : allRows;
   const rawPriorRows =
-    !publicScope && task.conversationId
+    !publicScope && !disclosure && task.conversationId
       ? await evidenceRepository.conversationEvidence({
           agentId: task.agentId,
           conversationId: task.conversationId,
@@ -842,7 +939,10 @@ export async function stageModelFinalResponse(
       deps.persistence?.conversationSearch ?? createPostgresConversationSearchRepository(deps.db),
   });
   const safeById = new Map(safeEvidence.rows.map((row) => [row.id, row]));
-  const rows = rawRows.map((row) => safeById.get(row.id) ?? row);
+  const rows = rawRows.map((row) => {
+    const safe = safeById.get(row.id) ?? row;
+    return disclosure ? bookingEvidence(safe) : safe;
+  });
   const priorRows = rawPriorRows.map((row) => safeById.get(row.id) ?? row);
   const evidence: ActionEvidence[] = [
     ...actionEvidence(priorRows, false),
@@ -1096,7 +1196,10 @@ export async function stageModelFinalResponse(
     ...(readContext?.compoundTripExtraction
       ? { compoundTripExtraction: readContext.compoundTripExtraction }
       : {}),
-    groundingCorpus: readContext?.groundingCorpus,
+    groundingCorpus:
+      disclosure && readContext?.groundingCorpus
+        ? bookingText(readContext.groundingCorpus)
+        : readContext?.groundingCorpus,
     liveCorpus: liveLookups.length > 0 ? liveLookupCorpus(rows) : undefined,
   };
   const missingRequestedPageReceipts = requestedPublicPageReceiptFindings(
@@ -1309,7 +1412,9 @@ export async function stageModelFinalResponse(
       };
   // A reviser is another generative surface: strip companion tags a second
   // time, then re-run the same authoritative response contract before publish.
-  const reflectedText = stripCueTags(reflection.text).text;
+  const reflectedText = stripCueTags(
+    disclosure ? bookingText(reflection.text) : reflection.text,
+  ).text;
   const reflectedCheck = reflection.revised
     ? enforceResponseContract(reflectedText, evidence, contractOptions)
     : initialCheck;
@@ -1365,7 +1470,7 @@ export async function stageModelFinalResponse(
       readContext?.resolvedReadIntent?.kind === 'combined'
         ? readContext.readRequest
         : contractOptions.readRequest,
-    ambient: readContext?.groundingCorpus,
+    ambient: contractOptions.groundingCorpus,
     requestText: latestUserText(window),
     lookupOrder: liveLookups.map((lookup) => lookup.kind),
   });
@@ -1378,6 +1483,14 @@ export async function stageModelFinalResponse(
   // also prefer a composed answer; their raw lookup trail stays secondary.
   const ownerRequest = latestUserText(window) ?? '';
   const cardRequested = requestedCardIntent(ownerRequest);
+  const verifiedCardHotelTotal =
+    cardRequested &&
+    disclosure &&
+    !disclosure.depositRequested &&
+    disclosure.request &&
+    hotelTotalRequested(disclosure.ownerText, true)
+      ? verifiedHotelBookingTotal(disclosure.request, actionEvidence(rawRows, true))
+      : undefined;
   const answerCardPreferred = prefersAnswerCard(ownerRequest);
   const trigger = task.trigger as {
     payload?: { refreshCardId?: unknown; refreshCardRevisionId?: unknown };
@@ -1476,13 +1589,17 @@ export async function stageModelFinalResponse(
       sourceKey: task.externalEventId ?? task.id,
       explicitRequest: Boolean(refreshCardId) || cardRequested,
       evidenceOnly: Boolean(refreshCardId),
+      verifiedHotelTotal: verifiedCardHotelTotal,
+      projectBookingFields: Boolean(
+        disclosure || (refreshCardId && bookingDisclosure(sourceText.split('\n')[0] ?? '')),
+      ),
       // A turn that called no tool has only its own reply to stand on. The
       // composer admits it as evidence in that case alone, under the same
       // verbatim rule, which is what the phone's hand-written kinds used to do
       // with a regex per fact.
-      answerText: checked.text,
+      answerText: disclosure ? bookingText(checked.text) : checked.text,
     });
-    if (generated) {
+    if (generated && (!disclosure || isBookingProjectionSafe(generated, verifiedCardHotelTotal))) {
       /*
        * A card read out of this turn's own reply is a view of the answer, not
        * an object the owner acquired: "leave around 2:45" is wrong by tomorrow
@@ -1689,6 +1806,8 @@ export async function stageModelFinalResponse(
       contractNotice: checked.blocked || undefined,
     },
     {
+      bookingReadContext: readContext,
+      verifiedCardHotelTotal,
       verifiedCompoundTripChecklist:
         readContext?.verifiedCompoundTripChecklist === true && !checked.blocked,
     },

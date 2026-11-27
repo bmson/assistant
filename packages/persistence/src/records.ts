@@ -3,6 +3,8 @@ import type { CalendarAccount } from './calendar-accounts.js';
 import type { DocumentExtractionMetadata } from './document-extraction-metadata.js';
 /** Portable record shapes. PostgreSQL compatibility is checked by records.test.ts.
  * These types are owned by persistence: change them intentionally, not on every SQL migration. */
+import type { HomeWeatherSettings } from './home-weather.js';
+import type { HouseholdHandoffRecord } from './household-handoff.js';
 import type { KnowledgeGraphAssertion } from './knowledge-graph-sync.js';
 import type {
   OwnerCallGrantOperation,
@@ -12,9 +14,22 @@ import type { OwnerEditorOperationRecord } from './owner-editor.js';
 import type { OwnerCorrection } from './owner-memory-correction.js';
 import type { OwnerMemoryWriteWitness } from './owner-memory-write-witness.js';
 import type { OwnerCallActionGrantUsage } from './phone-call-owner-action-grant.js';
+import type { SavedPlaceRecord } from './saved-places.js';
+import type { Signal } from './signals.js';
 
 export interface Records {
+  savedPlaces: SavedPlaceRecord;
+  householdHandoffs: HouseholdHandoffRecord;
+  signals: {
+    id: string;
+    agentId: string;
+    kind: Signal['kind'];
+    at: string;
+    subjectPersonIds: string[];
+    record: Signal;
+  };
   googleCalendarConnections: { agentId: string; state: unknown; updatedAt: Date };
+  googleHouseholdCalendarChoices: { agentId: string; settings: unknown };
   ownerEditorOperations: OwnerEditorOperationRecord;
   ownerCallGrantOperations: OwnerCallGrantOperation;
   ownerCallGrantOperationSlots: OwnerCallGrantOperationSlot;
@@ -75,6 +90,7 @@ export interface Records {
     workspacePrefix: string;
     browserProfilePath: string | null;
     credentialRefs: unknown;
+    homeWeather: HomeWeatherSettings | null;
     createdAt: Date;
     updatedAt: Date;
   };

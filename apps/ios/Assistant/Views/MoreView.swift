@@ -1646,6 +1646,18 @@ struct NoticingHealthView: View {
     var body: some View {
         AssistantSettingsList {
             if let health {
+                Section {
+                    if let healthy = health.healthy {
+                        Label {
+                            Text(healthy ? "Checks are healthy" : "Checks need attention")
+                        } icon: {
+                            Image(systemName: healthy ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+                                .foregroundStyle(healthy ? Color.green : Color.red)
+                        }
+                    } else {
+                        Label("Overall status unavailable", systemImage: "questionmark.circle")
+                    }
+                }
                 Section("Mail received in the last 7 days") {
                     LabeledContent("Received", value: String(health.mailReceived7d))
                     LabeledContent("Available to the assistant", value: String(health.mailScored7d))

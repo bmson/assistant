@@ -3,6 +3,7 @@ import type {
   DirectEmailRouting,
   DocumentExtractionMetadata,
   EmailContentProvenanceSnapshot,
+  HomeWeatherSettings,
   ImportArchiveDiagnostics,
   ImportUnitProvenance,
   OwnerCallGrantOperation,
@@ -13,6 +14,8 @@ import type {
   OwnerEditorTerminalResult,
   OwnerMemoryWriteWitness,
   Records,
+  SavedPlaceDetails,
+  Signal,
 } from '@assistant/persistence';
 import { sql } from 'drizzle-orm';
 import {
@@ -147,6 +150,7 @@ export const agents = pgTable('agents', {
   browserProfilePath: text('browser_profile_path'),
   /** Secret Manager secret NAMES (never raw secrets): { googleRefreshToken, twilioFrom, ... } */
   credentialRefs: jsonb('credential_refs').notNull().default({}),
+  homeWeather: jsonb('home_weather').$type<HomeWeatherSettings>(),
   ...timestamps,
 });
 
@@ -3784,4 +3788,51 @@ export const googleCalendarConnections = pgTable('google_calendar_connections', 
     .references(() => agents.id, { onDelete: 'cascade' }),
   state: jsonb('state').notNull(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const signals = pgTable(
+  'signals',
+  {
+    id: text().primaryKey(),
+    agentId: uuid('agent_id')
+      .notNull()
+      .references(() => agents.id, { onDelete: 'cascade' }),
+    kind: text().$type<Signal['kind']>().notNull(),
+    at: text().notNull(),
+    subjectPersonIds: text('subject_person_ids').array().notNull(),
+    record: jsonb().$type<Signal>().notNull(),
+  },
+  (t) => [
+    index('signals_agent_at_idx').on(t.agentId, t.at),
+    index('signals_agent_kind_at_idx').on(t.agentId, t.kind, t.at),
+    index('signals_subject_person_ids_idx').using('gin', t.subjectPersonIds),
+  ],
+);
+/** Owner choices scoped to the current personal Calendar grant. */
+export const googleHouseholdCalendarChoices = pgTable('google_household_calendar_choices', {
+  agentId: uuid('agent_id')
+    .primaryKey()
+    .references(() => googleCalendarConnections.agentId, { onDelete: 'cascade' }),
+  settings: jsonb('settings').notNull(),
+});
+
+export const savedPlaces = pgTable(
+  'saved_places',
+  {
+    id: uuid('id').primaryKey(),
+    agentId: uuid('agent_id')
+      .notNull()
+      .references(() => agents.id, { onDelete: 'cascade' }),
+    revision: uuid('revision').notNull(),
+    details: jsonb('details').$type<SavedPlaceDetails>(),
+  },
+  (t) => [index('saved_places_agent_idx').on(t.agentId)],
+);
+
+export const householdHandoffs = pgTable('household_handoffs', {
+  agentId: uuid('agent_id')
+    .primaryKey()
+    .references(() => agents.id, { onDelete: 'cascade' }),
+  revision: uuid('revision').notNull(),
+  plan: jsonb('plan'),
 });

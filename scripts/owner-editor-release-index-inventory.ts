@@ -11,7 +11,9 @@ export const OWNER_EDITOR_RELEASE_MANIFEST_SHA256 =
   '5baaca10aa089b2eac771de7c9086317206bd937d09a89ea6e937ac945e03cd1';
 export const INDEX_MANIFEST_DIGEST = {
   'approved-observer': OWNER_EDITOR_RELEASE_MANIFEST_SHA256,
-  'release-candidate': '6d865448c246fd9ac1bcbe179204becfb23fabfee0b45369103b1352345fc553',
+  'release-candidate-pre-signals':
+    '6d865448c246fd9ac1bcbe179204becfb23fabfee0b45369103b1352345fc553',
+  'release-candidate': 'f2ddade854dca286c13740fe79b29b43feb243e5548b81c2157f2e030f6fb98a',
 } as const;
 export type IndexManifestScope = keyof typeof INDEX_MANIFEST_DIGEST;
 const PROJECT_ID = 'bmson-assistant';

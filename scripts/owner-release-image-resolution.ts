@@ -91,8 +91,8 @@ function selected(parent: Obj): Obj {
   requireImage(entries.filter((entry) => entry.digest === child.digest).length === 1);
   return child;
 }
-/** Verify exact raw parent/child bytes before caching their immutable relationship. */
-export function registerImageResolution(
+/** Verify exact raw parent/child bytes without changing the image cache. */
+export function validateImageResolution(
   image: string,
   parentBytes: Uint8Array,
   childBytes: Uint8Array,
@@ -114,10 +114,20 @@ export function registerImageResolution(
     requireImage(Buffer.from(parentBytes).equals(Buffer.from(childBytes)));
   }
   const resolved = `${image.split('@')[0]}@${childDigest}`;
+  return { image, resolved, parentSha256: sha(parentBytes), childSha256: sha(childBytes) };
+}
+
+export function registerImageResolution(
+  image: string,
+  parentBytes: Uint8Array,
+  childBytes: Uint8Array,
+) {
+  const proof = validateImageResolution(image, parentBytes, childBytes);
+  const { resolved } = proof;
   requireImage(verified.size < 128 || verified.has(image));
   requireImage(!verified.has(image) || verified.get(image) === resolved);
   verified.set(image, resolved);
-  return { image, resolved, parentSha256: sha(parentBytes), childSha256: sha(childBytes) };
+  return proof;
 }
 /** Exact legacy equality stays valid. A different digest requires content and native status proof. */
 export function verifyRevisionImage(revision: unknown, expected: string): void {
@@ -145,6 +155,7 @@ export function createImageResolutionReader(
   token: string,
   request: typeof fetch = fetch,
   deadline = Date.now() + 60_000,
+  retained?: { registerServingImage(image: string): boolean },
 ) {
   requireImage(/^[A-Za-z0-9._~-]{1,16384}$/.test(token));
   let calls = 0;
@@ -184,7 +195,7 @@ export function createImageResolutionReader(
   }
   return async (image: string) => {
     requireImage(IMAGE.test(image));
-    if (verified.has(image)) return;
+    if (verified.has(image) || retained?.registerServingImage(image)) return;
     try {
       const parentBytes = await raw(image),
         parent = document(parentBytes);

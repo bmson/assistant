@@ -11,6 +11,7 @@ import {
 } from './owner-release-image-resolution.js';
 import { matchesNativeServiceDigest } from './owner-release-native-service-defaults.js';
 import { preloadArchivedOriginalForProtectedRelease } from './owner-restore-target-verify.js';
+import { loadRetainedServingImageEvidence } from './owner-serving-image-evidence.js';
 /** Fixed BASIC5 paired web lifecycle controller; caller supplies protected transport and operator hold verifier. */
 
 import { nativeWebCreationFixtureClient } from './owner-web-release-creation-client.js';
@@ -55,7 +56,12 @@ export async function protectedNativeReleaseDependencies(
 ): Promise<FixtureDependencies> {
   const archived = await preloadArchivedOriginalForProtectedRelease();
   const token = await protectedWebTagCredential();
-  const resolveImage = createImageResolutionReader(token);
+  const resolveImage = createImageResolutionReader(
+    token,
+    fetch,
+    undefined,
+    loadRetainedServingImageEvidence(),
+  );
   // Bootstrap capture has no lifecycle yet; its current bindings are checked by
   // the admission entrypoint. Every later phase must preload its own old parent.
   let context: Context | undefined;

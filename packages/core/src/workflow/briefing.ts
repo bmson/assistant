@@ -24,6 +24,7 @@ import {
   type CalendarOccurrenceIdentity,
   type CalendarOwnerParticipation,
   type CalendarPurpose,
+  DAILY_BRIEFING,
   type ExecutionPersistence,
   type OwnerNoticeDecisionFenceResult,
   resolveBookingLocalDateTime,
@@ -62,6 +63,14 @@ import { isFlightLikeCalendarEvent } from '../proactive/flight-calendar.js';
 import { briefingLifeContext } from '../proactive/life-context.js';
 import { type ProactiveNotifier, pingOwner } from '../proactive/notify.js';
 import {
+  bookingMailSubject,
+  bookingMailTitle,
+  bookingOccurrenceLabel,
+  bookingReference,
+  bookingSourceLabel,
+  bookingText,
+} from './booking-disclosure.js';
+import {
   agendaSection,
   type BriefingCard,
   type BriefingListItem,
@@ -81,6 +90,7 @@ import {
   verifiedOwnerParticipation,
 } from './calendar-relationship.js';
 import { weatherResponseCards } from './response-cards.js';
+import { zonedParts } from './schedule-time.js';
 import {
   createSuggestion,
   inactiveSuggestionSourceRefs,
@@ -724,7 +734,7 @@ function upcomingFrom(
         typeof date.iso !== 'string' ||
         typeof date.what !== 'string' ||
         typeof date.bookingIdentity !== 'string' ||
-        !date.bookingIdentity.trim()
+        !bookingReference(date.bookingIdentity.trim())
       )
         continue;
       const declaredCivilDate = typeof date.civilDate === 'string' ? date.civilDate : undefined;
@@ -839,7 +849,7 @@ function cancelledBookingDates(
         date.lifecycle !== 'cancelled' ||
         typeof date.what !== 'string' ||
         typeof date.bookingIdentity !== 'string' ||
-        !date.bookingIdentity.trim() ||
+        !bookingReference(date.bookingIdentity.trim()) ||
         typeof date.iso !== 'string'
       )
         continue;
@@ -1036,6 +1046,33 @@ type BriefingPersistence = Pick<
   'executionContext' | 'ownerContext' | 'briefing' | 'suggestions' | 'ownerNotices' | 'emailSync'
 >;
 
+/** The schedule records the original occurrence independently of worker start time. */
+function briefingOccurrenceDate(trigger: unknown, timeZone: string): string | undefined {
+  const event = trigger as {
+    source?: unknown;
+    externalEventId?: unknown;
+    payload?: { schedule?: unknown; job?: unknown; scheduleId?: unknown; occurrenceId?: unknown };
+  } | null;
+  const payload = event?.payload;
+  if (
+    event?.source !== 'schedule' ||
+    payload?.schedule !== DAILY_BRIEFING ||
+    payload.job !== 'briefing.compose' ||
+    typeof payload.scheduleId !== 'string' ||
+    typeof payload.occurrenceId !== 'string' ||
+    payload.occurrenceId !== event.externalEventId
+  )
+    return;
+  const prefix = `schedule:${payload.scheduleId}:`;
+  if (!payload.occurrenceId.startsWith(prefix)) return;
+  const occurrence = payload.occurrenceId.slice(prefix.length);
+  const wake = /^wake:(\d{4}-\d{2}-\d{2})$/.exec(occurrence);
+  if (wake) return wake[1];
+  const due = new Date(occurrence);
+  if (Number.isFinite(due.getTime()) && due.toISOString() === occurrence)
+    return zonedParts(timeZone, due).date;
+}
+
 export async function runBriefing(
   deps: {
     db: Db;
@@ -1046,7 +1083,7 @@ export async function runBriefing(
     heartbeat?: () => Promise<void>;
     persistence?: BriefingPersistence;
   },
-  opts: { taskId?: string; now?: Date; agentId?: string } = {},
+  opts: { taskId?: string; now?: Date; agentId?: string; trigger?: unknown } = {},
 ): Promise<BriefingResult> {
   const { db, router } = deps;
   const now = opts.now ?? new Date();
@@ -1108,6 +1145,15 @@ export async function runBriefing(
       }
     }
 
+    const intendedDate = briefingOccurrenceDate(opts.trigger, agent.timezone);
+    const occurrenceExpired = () =>
+      intendedDate !== undefined &&
+      intendedDate !== zonedParts(agent.timezone, opts.now ?? new Date()).date;
+    if (occurrenceExpired()) {
+      result.outcome = { kind: 'aborted' };
+      return result;
+    }
+
     // The calendar read is the one input that can fail noisily (an expired
     // grant, a provider outage): it degrades to no section rather than
     // costing the owner the whole briefing.
@@ -1141,12 +1187,28 @@ export async function runBriefing(
         now,
       }),
     ]);
-    let openSuggestions = openSuggestionRows;
+    let openSuggestions = openSuggestionRows.flatMap((row) => {
+      if (!row.sourceRef.startsWith('booking:')) return [row];
+      const summary = bookingText(row.summary);
+      return summary ? [{ ...row, summary }] : [];
+    });
     const securityCandidates = await emailSync.listSecurityAttentionCandidates(
       agent.id,
       MAX_SECURITY_INCIDENTS,
     );
-    const { mail, pending, goalDeltas, watchHits } = inputs;
+    const { pending, goalDeltas, watchHits } = inputs;
+    const mail = inputs.mail.map((row) =>
+      row.category === 'travel' || bookingMailTitle(row.subject)
+        ? {
+            ...row,
+            fromEmail: bookingText(row.fromEmail) || 'Your booking',
+            fromName: row.fromName === null ? null : bookingSourceLabel(row.fromName),
+            subject: /\b(?:hotel|lodging|accommodation)\b/i.test(row.subject)
+              ? bookingMailSubject(row.subject)
+              : bookingText(row.subject),
+          }
+        : row,
+    );
     const life = briefingLifeContext(inputs, now, agent.timezone);
     result.personalOccasions = life.occasions.length;
     result.openCommitments = life.commitments.length;
@@ -1158,7 +1220,7 @@ export async function runBriefing(
     // one line each is enough.
     const seenMail = new Set<string>();
     const highlights = mail
-      .filter((row) => row.importance >= 4)
+      .filter((row) => row.importance >= 4 && row.subject.trim())
       .filter((row) => {
         const key =
           `${readableSender(row.fromName, row.fromEmail)}|${collapseWhitespace(row.subject)}`.toLowerCase();
@@ -1229,6 +1291,15 @@ export async function runBriefing(
     cancelledBookingProposals = cancelledBookingProposals.filter(
       (entry) => !inactiveRefs.has(entry.sourceRef),
     );
+    // Preserve the existing booking identity and deduplication keys. Only the
+    // descriptive fields cross into the digest, its draft, and new suggestions.
+    const discloseBooking = (entry: UpcomingDate): UpcomingDate[] => {
+      if (!entry.bookingKey && !bookingMailTitle(entry.what)) return [entry];
+      const what = bookingOccurrenceLabel(entry.what);
+      return what ? [{ ...entry, what, from: bookingText(entry.from) || 'your booking' }] : [];
+    };
+    upcoming = upcoming.flatMap(discloseBooking);
+    cancelledBookingProposals = cancelledBookingProposals.flatMap(discloseBooking);
     const overlaps = findConflicts(calendar?.events ?? [], agent.timezone);
     const duplicateListings = overlaps.filter((overlap) =>
       isCalendarAdvisoryRelationship(overlap.relationship),
@@ -1543,7 +1614,11 @@ export async function runBriefing(
     // A model failure must not lose the briefing: the sections below are the
     // substance, so a missing lead falls back to the deterministic headline.
     const draft = composed?.ok ? composed.object.lead : undefined;
-    result.composedFallback = isFallbackDraft(draft);
+    const hasBookingMail =
+      inputs.mail.some((row) => row.category === 'travel' || bookingMailTitle(row.subject)) ||
+      inputs.bookings.length > 0;
+    const safeDraft = draft && hasBookingMail ? bookingText(draft) : draft;
+    result.composedFallback = isFallbackDraft(safeDraft);
     if (result.composedFallback) {
       // The fallback IS the correct behavior (facts beat nothing), but it must
       // be findable: a silent degrade is how an unphrased digest once reached
@@ -1555,7 +1630,7 @@ export async function runBriefing(
         noteLines: lines.length,
       });
     }
-    let lead = result.composedFallback ? briefingHeadline(result) : (draft as string).trim();
+    let lead = result.composedFallback ? briefingHeadline(result) : (safeDraft as string).trim();
 
     const ambient = await getAmbientBlock(portable?.ownerContext ?? db, agent.id, { now }).catch(
       () => undefined,
@@ -1689,6 +1764,11 @@ export async function runBriefing(
     let conversationId: string | null = null;
     let publicationReceipt: { messageId?: string; replayed?: boolean } | null = null;
     for (let publishAttempt = 0; publishAttempt < 3; publishAttempt += 1) {
+      if (occurrenceExpired()) {
+        await settleSecurity('unknown');
+        result.outcome = { kind: 'aborted' };
+        return result;
+      }
       let publication: OwnerNoticeDecisionFenceResult;
       try {
         publication = await postOwnerNoticeWithDecisionFence(noticeStore, {
@@ -1885,6 +1965,7 @@ export function briefingHeadline(result: BriefingResult): string {
 
 /** The job registry's summary line. */
 export function briefingSummary(result: BriefingResult): string {
+  if (result.outcome?.kind === 'aborted') return 'briefing: expired scheduled occurrence';
   if (result.outcome?.kind === 'unavailable')
     return `briefing: unavailable (${result.outcome.reason})`;
   if (!result.delivered) return 'briefing: nothing to report';

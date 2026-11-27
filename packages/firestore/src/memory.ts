@@ -6,7 +6,7 @@ import {
   snapshotEmbeddingSpace,
   validateEmbedding,
 } from '@assistant/persistence';
-import { FieldValue } from '@google-cloud/firestore';
+import { FieldValue, type Transaction } from '@google-cloud/firestore';
 import { decodeMemoryRecord } from './memory-record.js';
 import { createFirestoreGenericMemoryWriteWitness } from './memory-write-witness.js';
 import { ownerFamilySourceIsRejected } from './owner-family-source-rejection.js';
@@ -59,8 +59,8 @@ export class FirestoreMemoryRepository {
   async save(
     memory: Records['memories'],
     observedPrivacyGeneration?: string | null,
+    resolveSubject?: (tx: Transaction) => Promise<string | null>,
   ): Promise<boolean> {
-    const document = memoryDocument(this.space, memory);
     const ref = this.store.doc('memories', memory.id);
     const hashRef = this.store.doc('memoryContentHashes', memory.contentHash);
     const tombstoneRef = this.store.doc('memoryTombstones', memory.contentHash);
@@ -81,7 +81,18 @@ export class FirestoreMemoryRepository {
         throw new Error('Privacy erasure changed during memory source observation');
       if (tombstone?.exists) return false;
       if (existing?.exists || hash?.exists) return false;
-      tx.create(ref, document);
+      let subjectContactId = null;
+      if (resolveSubject) subjectContactId = await resolveSubject(tx);
+      else if (memory.subjectContactId) {
+        const snapshot = await tx.get(this.store.doc('contacts', memory.subjectContactId));
+        if (
+          snapshot.exists &&
+          snapshot.get('id') === memory.subjectContactId &&
+          (snapshot.get('agentId') === undefined || snapshot.get('agentId') === memory.agentId)
+        )
+          subjectContactId = memory.subjectContactId;
+      }
+      tx.create(ref, memoryDocument(this.space, { ...memory, subjectContactId }));
       tx.create(hashRef, { memoryId: memory.id });
       return true;
     });

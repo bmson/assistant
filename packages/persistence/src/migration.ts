@@ -1,6 +1,12 @@
 import { createHash } from 'node:crypto';
+import { z } from 'zod';
 import { ExactTimestamp, parseExactTimestamp } from './exact-timestamp.js';
-import { parseGoogleCalendarConnection } from './google-calendar-connection.js';
+import {
+  parseGoogleCalendarConnection,
+  storedHouseholdCalendarSettings,
+} from './google-calendar-connection.js';
+import { homeWeatherSettings } from './home-weather.js';
+import { householdHandoffRecord } from './household-handoff.js';
 import {
   ownerCallGrantOperationMatchesSlot,
   parseOwnerCallGrantOperation,
@@ -8,10 +14,63 @@ import {
 } from './owner-call-operation-receipt.js';
 import { parseOwnerCorrection } from './owner-memory-correction.js';
 import { parseContactIdentityAuthority } from './profile-contact-identity.js';
+import { savedPlaceRecord } from './saved-places.js';
 import { toolCallReceiptKeyId } from './tool-call-receipts.js';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const FINGERPRINT = /^[a-f0-9]{64}$/;
+
+const signalId = z.string().regex(FINGERPRINT);
+const signalInstant = z.string().datetime({ precision: 3 });
+const portableSignalFields = z
+  .object({
+    version: z.literal(1),
+    id: signalId,
+    agentId: z.string().uuid(),
+    subjectPersonIds: z.array(z.string().refine((id) => Boolean(id.trim()))).min(1),
+    sourceRefs: z.tuple([z.object({ kind: z.literal('email'), id: z.string().min(1) }).strict()]),
+    billIdentity: signalId,
+    amountMinor: z.number().int().nonnegative(),
+    currency: z.literal('USD'),
+    at: signalInstant,
+    validFrom: signalInstant,
+    validTo: signalInstant.nullable(),
+    supersededBy: signalId.nullable(),
+  })
+  .strict();
+const portableSignalSchema = z.discriminatedUnion('kind', [
+  portableSignalFields.extend({ kind: z.literal('bill'), dueDate: z.iso.date() }),
+  portableSignalFields.extend({ kind: z.literal('payment'), dueDate: z.null() }),
+]);
+
+function decodedData(record: MigrationRecord): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(record.data).map(([key, value]) => [key, deserializeMigrationValue(value)]),
+  );
+}
+/** SQL keeps query fields alongside the canonical JSON. Firestore uses the JSON itself. */
+export function portableSignal(record: MigrationRecord) {
+  const data = decodedData(record);
+  const signal = portableSignalSchema.parse(data.record);
+  const expectedId = createHash('sha256')
+    .update(JSON.stringify([signal.agentId, signal.kind, signal.billIdentity]))
+    .digest('hex');
+  if (
+    signal.id !== record.id ||
+    signal.id !== data.id ||
+    signal.id !== expectedId ||
+    signal.agentId !== data.agentId ||
+    signal.kind !== data.kind ||
+    signal.at !== data.at ||
+    JSON.stringify(signal.subjectPersonIds) !== JSON.stringify(data.subjectPersonIds) ||
+    JSON.stringify(signal.subjectPersonIds) !==
+      JSON.stringify([...new Set(signal.subjectPersonIds)].sort()) ||
+    (signal.validTo === null) !== (signal.supersededBy === null) ||
+    (signal.kind === 'payment' && signal.supersededBy !== null)
+  )
+    throw new Error('Invalid signal migration identity or projection');
+  return signal;
+}
 
 /**
  * Complete installation coverage for the PostgreSQL schema. Adding a table to
@@ -25,7 +84,16 @@ export const MIGRATION_TABLES = [
     id: 'agent_id',
     scope: 'agent',
   },
+  {
+    table: 'google_household_calendar_choices',
+    collection: 'googleHouseholdCalendarChoices',
+    id: 'agent_id',
+    scope: 'agent',
+  },
+  { table: 'signals', collection: 'signals', id: 'id', scope: 'agent' },
   { table: 'agents', collection: 'agents', id: 'id', scope: 'agent' },
+  { table: 'household_handoffs', collection: 'householdHandoffs', id: 'agent_id', scope: 'agent' },
+  { table: 'saved_places', collection: 'savedPlaces', id: 'id', scope: 'agent' },
   { table: 'ambient_snapshots', collection: 'ambientSnapshots', id: 'id', scope: 'agent' },
   { table: 'anomalies', collection: 'anomalies', id: 'id', scope: 'agent' },
   {
@@ -930,10 +998,6 @@ export function validateMigrationReferences(
     )
       throw new Error(`Inconsistent ${record.table}/${record.id} parent linkage: ${field}`);
   };
-  const decodedData = (record: MigrationRecord): Record<string, unknown> =>
-    Object.fromEntries(
-      Object.entries(record.data).map(([key, value]) => [key, deserializeMigrationValue(value)]),
-    );
   const ownerCallGrantKey = (
     ownerId: string,
     approvalId: string,
@@ -980,6 +1044,7 @@ export function validateMigrationReferences(
     });
   };
   const directlyOwned = new Set<MigrationTable>([
+    'saved_places',
     'ambient_snapshots',
     'anomalies',
     'application_confirmations',
@@ -1025,6 +1090,7 @@ export function validateMigrationReferences(
     'recall_surfaces',
     'schedules',
     'self_maintenance',
+    'signals',
     'situation_packs',
     'skills',
     'suggestions',
@@ -1035,6 +1101,19 @@ export function validateMigrationReferences(
     'writing_samples',
   ]);
   for (const record of records) {
+    if (
+      record.table === 'saved_places' &&
+      savedPlaceRecord.parse(decodedData(record)).id !== record.id
+    )
+      throw new Error('Invalid saved place migration identity');
+    if (record.table === 'agents' && record.data.homeWeather != null)
+      homeWeatherSettings.parse(decodedData(record).homeWeather);
+    if (record.table === 'household_handoffs') {
+      if (record.id !== sourceAgentId || record.data.agentId !== sourceAgentId)
+        throw new Error('Invalid household handoff migration owner');
+      requireReference(record, 'agentId', 'agents', true);
+      householdHandoffRecord.parse(decodedData(record));
+    }
     if (record.table === 'google_calendar_connections') {
       if (record.id !== sourceAgentId || record.data.agentId !== sourceAgentId)
         throw new Error('Invalid Google Calendar migration owner');
@@ -1042,6 +1121,29 @@ export function validateMigrationReferences(
         parseGoogleCalendarConnection(decodedData(record).state, sourceAgentId);
       } catch {
         throw new Error('Invalid Google Calendar migration state');
+      }
+    }
+    if (record.table === 'google_household_calendar_choices') {
+      if (record.id !== sourceAgentId || record.data.agentId !== sourceAgentId)
+        throw new Error('Invalid household Calendar migration owner');
+      requireReference(record, 'agentId', 'google_calendar_connections', true);
+      storedHouseholdCalendarSettings.parse(decodedData(record).settings);
+    }
+    if (record.table === 'signals') {
+      const signal = portableSignal(record);
+      if (signal.supersededBy) {
+        const target = linked('signals', signal.supersededBy);
+        const payment = target && portableSignal(target);
+        if (
+          payment?.kind !== 'payment' ||
+          payment.agentId !== signal.agentId ||
+          payment.billIdentity !== signal.billIdentity ||
+          payment.amountMinor !== signal.amountMinor ||
+          payment.validFrom !== signal.validTo ||
+          payment.validFrom <= signal.validFrom ||
+          JSON.stringify(payment.subjectPersonIds) !== JSON.stringify(signal.subjectPersonIds)
+        )
+          throw new Error('Invalid signal migration supersession');
       }
     }
     if (record.table === 'contacts') parseContactIdentityAuthority(record.data.identityAuthority);

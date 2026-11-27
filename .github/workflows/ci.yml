@@ -130,7 +130,10 @@ jobs:
           node-version: 26
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm typecheck
+      - name: Typecheck workspace packages
+        run: pnpm exec turbo typecheck --concurrency=1 --log-order=stream
+      - name: Typecheck repository scripts
+        run: pnpm exec tsc --noEmit -p scripts/tsconfig.json --extendedDiagnostics
       - run: pnpm test
       - name: Qualify PostgreSQL native owner-editor recovery adapter
         timeout-minutes: 8

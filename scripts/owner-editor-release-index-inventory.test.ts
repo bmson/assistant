@@ -92,7 +92,10 @@ describe('compareIndexInventory', () => {
       compareIndexInventory(candidate, composites, overrides, complete, 'release-candidate'),
     ).resolves.toMatchObject({
       status: 'exact_manifest_parity',
-      compositeCount: 200,
+      compositeCount: 204,
+      fieldOverrideCount: 20,
+      explicitFieldOverrideCount: 19,
+      globalReadiness: 'not_established',
       manifestSha256: INDEX_MANIFEST_DIGEST['release-candidate'],
     });
     await expect(
@@ -107,6 +110,40 @@ describe('compareIndexInventory', () => {
     await expect(
       compareIndexInventory(candidate, composites, overrides, complete),
     ).resolves.toMatchObject({ status: 'unknown', reason: 'manifest_not_pinned' });
+    await expect(
+      compareIndexInventory(
+        candidate,
+        composites,
+        overrides,
+        complete,
+        'release-candidate-pre-signals',
+      ),
+    ).resolves.toMatchObject({ status: 'unknown', reason: 'manifest_not_pinned' });
+
+    const signals = candidateSpec.indexes.filter((index) => index.collectionGroup === 'signals');
+    const owner = { fieldPath: 'agentId', order: 'ASCENDING' };
+    const kind = { fieldPath: 'kind', order: 'ASCENDING' };
+    const person = { fieldPath: 'subjectPersonIds', arrayConfig: 'CONTAINS' };
+    const time = { fieldPath: 'at', order: 'ASCENDING' };
+    expect(signals).toEqual(
+      [
+        [owner, time],
+        [owner, kind, time],
+        [owner, person, time],
+        [owner, kind, person, time],
+      ].map((fields) => ({ collectionGroup: 'signals', queryScope: 'COLLECTION', fields })),
+    );
+    for (const { name } of composites.filter((index) => index.name.includes('/signals/indexes/'))) {
+      await expect(
+        compareIndexInventory(
+          candidate,
+          composites.filter((index) => index.name !== name),
+          overrides,
+          complete,
+          'release-candidate',
+        ),
+      ).resolves.toMatchObject({ status: 'unknown', reason: 'inventory_not_exact' });
+    }
   });
 
   it('compares the full target inventory through the canonical readiness verifier', async () => {

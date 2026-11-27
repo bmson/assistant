@@ -4,6 +4,7 @@ import {
   compositeMigrationId,
   deterministicMigrationCompare,
   ESTIMATED_COST_AUTHORITY_TABLES,
+  householdHandoffAfterTransfer,
   INSTALLATION_RUNTIME_EXCLUSIONS_V2,
   isOwnerEditorRuntimeCursorName,
   MIGRATION_TABLES,
@@ -324,6 +325,16 @@ export async function exportWorkspaceSnapshot(
           );
           // Reconnect OAuth after a cross-store move. Never export callback state or tokens.
           if (table === 'mcp_connections') delete data.oauthState;
+          if (table === 'household_handoffs') {
+            const handoff = householdHandoffAfterTransfer(
+              { agentId: row.agent_id, revision: row.revision, plan: row.plan },
+              options.agentId,
+              'export',
+              options.target,
+            );
+            data.plan = serializeMigrationValueV3(handoff.plan);
+            data.revision = handoff.revision;
+          }
           const singletonByAgent = table === 'owner_card' || table === 'ambient_snapshots';
           const migratedId =
             (singletonByAgent ? options.agentId : null) ??

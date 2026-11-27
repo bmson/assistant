@@ -13,8 +13,8 @@ export interface NotificationsConversationRepository {
 }
 
 /**
- * A background producer's dashboard copy (briefing, pulse, curiosity): the
- * owner's primary chat when there is one, otherwise their Notifications chat.
+ * A background producer can explicitly select the owner's Notifications chat.
+ * By default, notices use the primary chat when available and Notifications otherwise.
  */
 export interface OwnerNoticeRepository {
   readonly kind: 'owner-notice-repository';
@@ -29,6 +29,7 @@ export interface OwnerNoticeRepository {
     text: string;
     taskId?: string;
     extraParts?: readonly unknown[];
+    destination?: 'primary' | 'notifications';
   }): Promise<{ conversationId: string }>;
   /**
    * Append only if the exact source decisions still match at publication time.

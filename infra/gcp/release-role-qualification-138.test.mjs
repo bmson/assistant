@@ -7,15 +7,15 @@ const workflow = await readFile(
   'utf8',
 );
 const title =
-  'qualifies the schema 141 migration image, runtime readiness, and generic write compatibility';
+  'qualifies the schema 146 migration image, runtime readiness, and generic write compatibility';
 const selectedFile = 'packages/db/src/memory-witness-135-role-qualification.test.ts';
 const qualification = await readFile(new URL(`../../${selectedFile}`, import.meta.url), 'utf8');
 
-test('current schema 141 qualification binds coherent artifacts, exact test selection and role ranges', () => {
-  assert.ok(workflow.includes('name: Memory witness schema 141 qualification'));
-  assert.ok(workflow.includes("assert manifest['schemaVersion']==141"));
-  assert.ok(workflow.includes("assert manifest['components'][role]['schema']['min']==141"));
-  assert.ok(workflow.includes("assert manifest['components'][role]['schema']['max']==141"));
+test('current schema 146 qualification binds coherent artifacts, exact test selection and role ranges', () => {
+  assert.ok(workflow.includes('name: Memory witness schema 146 qualification'));
+  assert.ok(workflow.includes("assert manifest['schemaVersion']==146"));
+  assert.ok(workflow.includes("assert manifest['components'][role]['schema']['min']==146"));
+  assert.ok(workflow.includes("assert manifest['components'][role]['schema']['max']==146"));
   assert.ok(workflow.includes(`title='${title}'`));
   assert.ok(qualification.includes(`'${title}'`));
   assert.ok(workflow.includes(`pnpm test ${selectedFile}`));
@@ -23,12 +23,12 @@ test('current schema 141 qualification binds coherent artifacts, exact test sele
   assert.ok(workflow.includes("report.get('numTotalTests')==1"));
   assert.ok(workflow.includes("report.get('numPendingTests')==0"));
   assert.ok(workflow.includes('if not ok: raise SystemExit'));
-  assert.ok(workflow.includes('steps.schema141_populated_test.outcome'));
+  assert.ok(workflow.includes('steps.schema146_populated_test.outcome'));
   assert.ok(!workflow.includes('schema-135-local-image-manifest.json'));
-  assert.ok(workflow.includes('schema-141-local-image-manifest.json'));
+  assert.ok(workflow.includes('schema-146-local-image-manifest.json'));
 });
 
-test('forward qualification retains populated data through the 0135 to 0141 tail', () => {
+test('forward qualification retains populated data through the 0135 to 0146 tail', () => {
   assert.ok(qualification.includes('journal.entries.slice(0, 135)'));
   assert.ok(qualification.includes("toBe('0134_owner_memory_creation')"));
   assert.ok(qualification.includes('journal.entries.slice(135)'));
@@ -40,10 +40,26 @@ test('forward qualification retains populated data through the 0135 to 0141 tail
     '0139_research_assignment_state',
     '0140_cost_event_accounted_at',
     '0141_bill_email_evidence',
+    '0142_signal_store',
+    '0143_google_household_calendar_choices',
+    '0144_home_weather',
+    '0145_saved_places',
+    '0146_household_handoffs',
   ])
     assert.ok(qualification.includes(migration));
   assert.equal(qualification.split('await runMemoryWitnessMigrationImage(').length - 1, 2);
   assert.ok(qualification.includes('expect([...forwardLedger]).toEqual(expectedForwardLedger)'));
+  assert.ok(qualification.includes('expect([...(await ledger(client))]).toEqual(expectedLedger)'));
+  assert.ok(
+    qualification.includes('createPostgresHouseholdHandoffRepository(upgraded).read(owner)'),
+  );
+  assert.ok(
+    qualification.includes('createPostgresHomeWeatherRepository(upgraded).getHomeWeather(owner)'),
+  );
+  assert.ok(qualification.includes('createPostgresSavedPlacesRepository(upgraded).list(owner)'));
+  assert.ok(
+    qualification.includes('createPostgresSignalRepository(upgraded).get(owner, signal.id)'),
+  );
   assert.ok(qualification.includes("to_regclass('public.google_calendar_connections')"));
   assert.ok(qualification.includes('expect(calendarAfter?.state).toEqual(calendarState)'));
   assert.ok(qualification.includes('expect(legacyReservation).toEqual({'));
@@ -65,8 +81,10 @@ test('forward qualification retains populated data through the 0135 to 0141 tail
   assert.ok(qualification.includes("'estimated_cost_grants'"));
   assert.ok(qualification.includes("'estimated_cost_quote_requests'"));
   assert.ok(qualification.includes('witnessIsSqlNull: true'));
+  assert.ok(qualification.includes('legacySavedPlacesStartEmpty: legacySavedPlaces?.count === 0'));
+  assert.ok(qualification.includes('legacyHomeWeatherStartsUnconfigured: legacyHome?.isSqlNull'));
   assert.ok(qualification.includes('expect(legacyMcpConnection).toEqual({'));
   assert.ok(qualification.includes('oauthState: null'));
   assert.ok(qualification.includes('await qualifyMemoryWitnessRoleImages('));
-  assert.ok(qualification.includes('schema-141-forward-upgrade.json'));
+  assert.ok(qualification.includes('schema-146-forward-upgrade.json'));
 });

@@ -81,7 +81,7 @@ The recovery digest reads up to 500 messages received during the outage, newest 
 
 **Root cause.** `notifyOwnerOfDeliveredAnswer` (`packages/core/src/workflow/executor/notices.ts:41`) → `composeOwnerNotifiers` (`apps/agent/src/deps.ts:649`) → `dashboardOwnerNotifier` (`deps.ts:314`). That copies the reply into the primary chat whenever `shouldMirrorIntoPrimary` (`deps.ts:276`) is true. In Firestore mode a `destination: 'notifications'` post throws (`packages/core/src/chat.ts:612-628`).
 
-**Change.** Answer-ready notices (delivery key prefix `task-answer`) skip the dashboard leg, because the answer is already in its own conversation. Keep the dashboard copy for owner notices that have no conversation (briefings, alerts, approvals). Optionally add a Firestore Notifications destination.
+**Change.** Answer-ready notices (delivery key prefix `task-answer`) skip the dashboard leg, because the answer is already in its own conversation. Keep the dashboard copy for owner notices that have no conversation (briefings, alerts, approvals). Support explicit Firestore delivery to the owner's standalone Notifications chat.
 
 **Tests.** `apps/agent` tests: a task answer in a secondary chat posts nothing to the primary chat; an approval raised there still notifies; a briefing still posts.
 
@@ -214,6 +214,10 @@ The recovery digest reads up to 500 messages received during the outage, newest 
 **Goal.** The owner and the operator can see that every proactive source is fresh and every producer ran, so quiet can be trusted.
 
 **Checks.** Briefing delivered today; pulse ran in the last hour; extraction processed more than 0 in 24 hours (or ingest volume was 0); Google calendar connected; phone snapshot newer than 24 hours; weather available today; held under 25% of the daily cap; texts today within the cap.
+
+At exactly 25% held, the health card reports that the threshold has been reached. Above 25% it reports that the threshold has been exceeded. Repeated checks share the existing daily budget alert.
+
+The iPhone Noticing screen displays the server’s combined health result above the detailed checks. Older responses that omit the overall result show “Overall status unavailable.”
 
 **Where.** Extend `packages/core/src/proactive/pipeline-health.ts` (`assessProactiveHealth`) and `packages/application/src/proactive-health.ts`, with Firestore reads in `packages/firestore/src/proactive-health.ts`. Use the existing `assistant-health-monitor` schedule (`packages/core/src/workflow/health-monitor.ts`) rather than a new one, and expose the result through `GET /api/mobile/v1/workspace`. The iOS card is E5.
 

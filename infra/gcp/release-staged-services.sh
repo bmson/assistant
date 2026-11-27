@@ -408,11 +408,30 @@ release_job_image() {
   node -e 'const x=JSON.parse(process.argv[1]);const spec=x.spec?.template?.spec?.template?.spec??x.template?.template;process.stdout.write(String(spec?.containers?.[0]?.image??""))' "$1"
 }
 
+release_ordinary_worker_recovery_requested() {
+  [[ "${OWNER_ORDINARY_API3_RECOVERY:-}" == true ||
+     -n "${OWNER_API3_RECOVERY_GENERATION+x}${OWNER_API3_RECOVERY_SHA256+x}${OWNER_WORKER_BASELINE+x}" ]]
+}
+
+release_reviewed_worker_transition() {
+  local root
+  root="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)" || return 1
+  (cd "$root" && IMAGE_TAG="$TAG" pnpm exec tsx scripts/owner-worker-recovery.ts "$@")
+}
+
 release_restore_jobs() {
   # The opted-in path plans recovery from a fresh readback; never blindly
   # reverse a worker update whose response may have been lost.
   [[ -z "${OWNER_RELEASE_RESTORE_TARGET_PROOF+x}" ]] || return 1
   local job image failed=false
+  if release_ordinary_worker_recovery_requested; then
+    [[ "$basic_editor_admission_possible" == false ]] || return 1
+    while IFS='|' read -r job image; do
+      [[ -n "$job" && -n "$image" ]] || continue
+      release_reviewed_worker_transition --restore "$job" "$image" || return 1
+    done <<<"${RELEASE_CHANGED_JOBS:-}"
+    return 0
+  fi
   while IFS='|' read -r job image; do
     [[ -n "$job" && -n "$image" ]] || continue
     if ! gcloud run jobs update "$job" --project "$PROJECT" --region "$REGION" --image "$image" --quiet; then
@@ -650,6 +669,18 @@ release_staged_services_body() {
     echo '  Reviewed restore target requires the API 3 Firestore transition.' >&2
     return 1
   fi
+  if release_ordinary_worker_recovery_requested; then
+    if [[ "$basic_editor_forward_only" != true || "$bootstrap_disabled" == true ||
+          -n "${restore_journal:-}" ||
+          "$selected" != agent,web || "$RELEASE_STORAGE_DRIVER" != firestore ||
+          "$RELEASE_AGENT_API" != 3 || "$RELEASE_WEB_API" != 3 ||
+          -z "${OWNER_API3_RECOVERY_GENERATION:-}" || -z "${OWNER_API3_RECOVERY_SHA256:-}" ||
+          -z "${OWNER_WORKER_BASELINE:-}" ]] ||
+       ! release_worker_enabled browser || ! release_worker_enabled code || ! release_worker_enabled processor; then
+      release_staged_observation_required 'Reviewed ordinary API 3 worker recovery preconditions failed.'
+      return $?
+    fi
+  fi
 
   web_digest="$(release_component_digest web)" || return 1
   if [[ "$selected" == agent,web ]]; then
@@ -847,6 +878,34 @@ release_staged_services_body() {
         processor) job=assistant-processor; service_account="assistant-processor@${PROJECT}.iam.gserviceaccount.com"; digest="$processor_digest" ;;
       esac
       [[ -n "$digest" ]] || continue
+      new_image="${IMAGE_ROOT}/${worker}@${digest}"
+      if release_ordinary_worker_recovery_requested; then
+        local worker_status=0
+        if declare -F verify_database_free_template >/dev/null; then
+          verify_database_free_template job "$job" false || {
+            release_staged_observation_required 'Reviewed worker configuration could not be verified.'
+            return $?
+          }
+        fi
+        release_verify_estimated_cost_forward_profile || {
+          release_restore_jobs ||
+            { release_staged_observation_required 'Reviewed worker rollback could not be verified.'; return $?; }
+          return 1
+        }
+        release_reviewed_worker_transition --forward "$worker" "$new_image" || worker_status=$?
+        if [[ "$worker_status" == 3 ]]; then
+          # The native API denied the update and a fresh GET confirmed the prior job.
+          release_restore_jobs ||
+            { release_staged_observation_required 'Reviewed worker rollback could not be verified.'; return $?; }
+          return 1
+        fi
+        if [[ "$worker_status" != 0 ]]; then
+          release_staged_observation_required 'Reviewed worker advance could not be verified.'
+          return $?
+        fi
+        RELEASE_CHANGED_JOBS="${worker}|${new_image}"$'\n'"${RELEASE_CHANGED_JOBS}"
+        continue
+      fi
       if ! description="$(gcloud run jobs describe "$job" --project "$PROJECT" --region "$REGION" --format=json 2>/dev/null)"; then
         # These module jobs may not have been provisioned yet. They have no
         # running revision to make stale, and the deploy script reports drift.
@@ -858,7 +917,6 @@ release_staged_services_body() {
       fi
       old_image="$(release_job_image "$description")"
       [[ -n "$old_image" ]] || { release_restore_jobs || true; return 1; }
-      new_image="${IMAGE_ROOT}/${worker}@${digest}"
       release_verify_estimated_cost_forward_profile || { release_restore_jobs || true; return 1; }
       RELEASE_CHANGED_JOBS="${RELEASE_CHANGED_JOBS}${job}|${old_image}"$'\n'
       if ! gcloud run jobs update "$job" --project "$PROJECT" --region "$REGION" \
@@ -1018,25 +1076,17 @@ release_staged_services_body() {
           fi
         fi
         if [[ "$promoted_ok" == true ]]; then
-          web_resume_revision="$(node -e 'const s=JSON.parse(process.argv[1]);const rows=(s.status?.traffic??[]).filter(t=>t.tag===process.argv[2]&&t.revisionName);if(rows.length!==1)process.exit(2);process.stdout.write(rows[0].revisionName)' "$staged_resume_web_json" "$web_resume_tag")" || promoted_ok=false
+          web_resume_revision="$(node -e 'const s=JSON.parse(process.argv[1]);const rows=(s.status?.traffic??[]).filter(t=>t.tag===process.argv[2]);if(rows.length!==1||!rows[0].revisionName)process.exit(2);process.stdout.write(rows[0].revisionName)' "$staged_resume_web_json" "$web_resume_tag")" || promoted_ok=false
         fi
         if [[ "$promoted_ok" == true && "$basic_editor_forward_only" == true ]]; then
-          local resume_revision_json
-          resume_revision_json="$(release_revision_json assistant-web "$web_resume_revision")" || promoted_ok=false
-          if [[ "$promoted_ok" == true ]]; then
-            if node -e '
-              const r=JSON.parse(process.argv[1]),expected=process.argv[2],old=process.argv[4].split(",").map(x=>x.split("=")[0]);
-              const name=(r.metadata?.name??r.name??"").split("/").at(-1),container=(r.spec?.containers??r.containers??[])[0];
-              const paused=(container?.env??[]).filter(e=>e.name==="ASSISTANT_RELEASE_WRITES_PAUSED");
-              if(name!==expected||old.includes(expected)||container?.image!==process.argv[3]||paused.length!==1||paused[0].value!=="false")process.exit(2);
-            ' "$resume_revision_json" "$web_resume_revision" "${IMAGE_ROOT}/web@${web_digest}" "$web_old_traffic"; then
-              basic_editor_resume_verified=true
-            else
-              promoted_ok=false
-            fi
-          fi
-          if [[ "$promoted_ok" == true ]] &&
-             ! release_record_owned_web_tag resume "$TAG" "$manifest_path" "$manifest_sha" "$staging_tag"; then
+          # Cloud Run can expose the amd64 child in immutable revision fields.
+          # Require protected native ownership and OCI resolution for this exact alias target.
+          if [[ "$web_resume_revision" =~ ^assistant-web-[a-z0-9-]{1,63}$ &&
+                ",${web_old_traffic}," != *",${web_resume_revision}="* ]] &&
+             OWNER_TAG_EXPECTED_RESUME_REVISION="$web_resume_revision" \
+               release_record_owned_web_tag resume "$TAG" "$manifest_path" "$manifest_sha" "$staging_tag"; then
+            basic_editor_resume_verified=true
+          else
             promoted_ok=false
           fi
         fi
@@ -1056,7 +1106,7 @@ release_staged_services_body() {
               local fresh_resume_revision
               staged_resume_web_json="$(release_service_json assistant-web)" || promoted_ok=false
               if [[ "$promoted_ok" == true ]]; then
-                fresh_resume_revision="$(node -e 'const s=JSON.parse(process.argv[1]);const rows=(s.status?.traffic??[]).filter(t=>t.tag===process.argv[2]&&t.revisionName);if(rows.length!==1)process.exit(2);process.stdout.write(rows[0].revisionName)' "$staged_resume_web_json" "$web_resume_tag")" || promoted_ok=false
+                fresh_resume_revision="$(node -e 'const s=JSON.parse(process.argv[1]);const rows=(s.status?.traffic??[]).filter(t=>t.tag===process.argv[2]);if(rows.length!==1||!rows[0].revisionName)process.exit(2);process.stdout.write(rows[0].revisionName)' "$staged_resume_web_json" "$web_resume_tag")" || promoted_ok=false
                 if [[ "$promoted_ok" == true && "$fresh_resume_revision" != "$web_resume_revision" ]]; then promoted_ok=false; fi
               fi
             fi
@@ -1165,6 +1215,10 @@ release_staged_services_body() {
         return 1
       fi
     fi
+    if release_ordinary_worker_recovery_requested && ! release_restore_jobs; then
+      release_staged_observation_required 'Reviewed worker rollback could not be verified before restoring service traffic.'
+      return $?
+    fi
     if [[ "$agent_promotion_attempted" == true ]] && ! release_restore_traffic assistant-agent "$agent_old_traffic"; then rollback_failed=true; fi
     if [[ "$web_promotion_attempted" == true ]]; then
       if [[ "$basic_editor_forward_only" == true ]]; then
@@ -1173,8 +1227,12 @@ release_staged_services_body() {
         rollback_failed=true
       fi
     fi
-    if ! release_restore_jobs; then rollback_failed=true; fi
+    if ! release_ordinary_worker_recovery_requested && ! release_restore_jobs; then rollback_failed=true; fi
     if [[ "$rollback_failed" == true ]]; then
+      if release_ordinary_worker_recovery_requested; then
+        release_staged_observation_required 'Reviewed service traffic rollback could not be verified.'
+        return $?
+      fi
       echo '  CRITICAL: automatic rollback failed; inspect both services traffic immediately.' >&2
     else
       echo '  previous service traffic was restored.' >&2
