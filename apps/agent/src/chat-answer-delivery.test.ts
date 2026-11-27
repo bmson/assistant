@@ -1,7 +1,10 @@
 import { randomUUID } from 'node:crypto';
+import { getChatConversationView } from '@assistant/application/chat';
 import { loadConfig, resetConfigForTest } from '@assistant/config';
 import { executeTask, getAgent, TaskStateSchema } from '@assistant/core';
+import { postOwnerNotice } from '@assistant/core/chat';
 import { conversations, messages, notificationOutbox, tasks } from '@assistant/db';
+import { FirestoreApplicationChatPersistence } from '@assistant/firestore';
 import { notificationDeliveryKey } from '@assistant/persistence';
 import { taskFixture } from '@assistant/persistence/testing';
 import { ApnsClient } from '@assistant/tools/modules/push';
@@ -106,7 +109,7 @@ describe('secondary conversation answer delivery', () => {
   });
 
   it.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
-    'replays a Firestore final with push as the only installed module',
+    'keeps a Firestore final private on replay and reads a standalone notice from Notifications',
     async () => {
       vi.stubEnv('METADATA_SERVER_DETECTION', 'none');
       const push = fakePush();
@@ -157,6 +160,18 @@ describe('secondary conversation answer delivery', () => {
         const runtime = executorDeps(deps);
         expect(await executeTask(runtime, task.id)).toMatchObject({ outcome: 'done' });
         expect(await executeTask(runtime, task.id)).toEqual({ outcome: 'not_claimable' });
+        expect(
+          await runtime.notifyOwner?.({
+            deliveryKey: notificationDeliveryKey('task-answer', task.id),
+            taskId: task.id,
+            conversationId: secondary,
+            purpose: 'answer-ready',
+            text: 'Your reply is ready.',
+            urgency: 'ambient',
+          }),
+        ).toMatchObject({
+          legs: expect.arrayContaining([{ channel: 'push', status: 'delivered' }]),
+        });
         expectPush(push, agentId, secondary);
         const rows = await store.collection('messages').where('taskId', '==', task.id).get();
         expect(rows.docs.map((row) => [row.get('conversationId'), row.get('text')])).toEqual([
@@ -166,6 +181,36 @@ describe('secondary conversation answer delivery', () => {
         expect(receipts.docs.map((row) => [row.get('adapter'), row.get('status')])).toEqual([
           ['push', 'delivered'],
         ]);
+        const ownerNotices = deps.persistence?.ownerNotices;
+        if (!ownerNotices) throw new Error('No owner notice repository');
+        const noticeText = 'Synthetic standalone notice.';
+        const { conversationId: notificationsId } = await postOwnerNotice(ownerNotices, {
+          agentId,
+          text: noticeText,
+          destination: 'notifications',
+        });
+        const chat = new FirestoreApplicationChatPersistence(store, agentId);
+        const list = await chat.listConversations(agentId, { archived: false });
+        expect(list.conversations).toContainEqual(
+          expect.objectContaining({
+            id: notificationsId,
+            title: 'Notifications',
+            isPrimary: false,
+          }),
+        );
+        expect(await getChatConversationView(chat, notificationsId, {})).toMatchObject({
+          messages: [{ parts: [{ type: 'text', text: noticeText }] }],
+        });
+        expect(await getChatConversationView(chat, primary, {})).toMatchObject({ messages: [] });
+        expect(await getChatConversationView(chat, secondary, {})).toMatchObject({
+          messages: [
+            {
+              parts: expect.arrayContaining([
+                { type: 'text', text: 'Private synthetic final answer.' },
+              ]),
+            },
+          ],
+        });
       } finally {
         await disposeStore(store);
       }
