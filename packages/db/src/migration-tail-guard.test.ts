@@ -72,6 +72,10 @@ const expected: MigrationTailMetadata[] = [
     folderMillis: 1795146319726,
     hash: 'cb3c08c4916d391b9cde8a8e54b49a021106c9fa925cfbc2422762f8fc726ece',
   },
+  {
+    folderMillis: 1795711047896,
+    hash: '676b1049e2e167c5213fa062018282f261922be2b4d6261fdd55d40a4d831eb8',
+  },
 ];
 const applied = (count: number): AppliedMigrationTailRow[] =>
   expected.slice(0, count).map((migration) => ({
@@ -89,7 +93,7 @@ describe('owner-editor migration tail guard', () => {
     expect(shipped).toEqual(expected);
   });
 
-  it.each([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16])(
+  it.each([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17])(
     'accepts canonical strict prefix length %i',
     (count) => {
       expect(() =>
