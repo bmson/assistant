@@ -74,6 +74,24 @@ Each kind follows [target-design.md §4](target-design.md#4-moment-engine-v2): c
 | D13 | Proposed situation packs for holiday weeks, trips, birthdays with gifts                                                                                                                                                  | A holiday-week pack proposed about 10 days ahead                                                    |
 | D14 | Grounded dream anticipations become moments                                                                                                                                                                              | Shown only with source facts                                                                        |
 
+### D3 · Dormant storage and consent foundation
+
+Schema 146 adds the stored driving plan and consent service while the Settings
+and briefing entry points remain unmounted. The PostgreSQL qualification
+upgrades a populated B5 database and repeats the migration against the same data.
+
+Workspace transfer keeps the owner's selected appointments, source and settings.
+It omits the participant's saved origin and grant from the exported bundle. The
+importer also neutralizes older bundles carrying a grant, then rotates plan and
+revision identities so source invitations and pending callbacks cannot be used.
+A participant must consent again against the destination plan.
+
+Raw database backups are byte-preserving. PostgreSQL restore rehearsal runs
+inert and a managed Firestore restore leaves the new database disconnected from
+the runtime. Keep a raw restored installation fenced until its D3 grants and
+old invitation and callback identities have been reset. Raw backup reactivation
+is separate from the logical workspace transfer covered here.
+
 ## E · Delivery and iOS
 
 | ID  | Spec                                                                                         | Key code                                                                                                   | Done when                                                       |

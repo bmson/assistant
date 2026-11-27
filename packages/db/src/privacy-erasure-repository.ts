@@ -26,6 +26,7 @@ import {
   emailObserverSources,
   emailObserverWork,
   files,
+  householdHandoffs,
   importSources,
   knowledgeGraphAssertionEvidence,
   knowledgeGraphAssertions,
@@ -291,6 +292,7 @@ async function ensureActiveErasure(db: Db, agentId: string): Promise<void> {
       return;
     }
     await tx.update(agents).set({ homeWeather: null }).where(eq(agents.id, agentId));
+    await tx.delete(householdHandoffs).where(eq(householdHandoffs.agentId, agentId));
     await tx.delete(savedPlaces).where(eq(savedPlaces.agentId, agentId));
     await tx
       .delete(ambientSnapshots)

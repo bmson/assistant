@@ -3828,3 +3828,11 @@ export const savedPlaces = pgTable(
   },
   (t) => [index('saved_places_agent_idx').on(t.agentId)],
 );
+
+export const householdHandoffs = pgTable('household_handoffs', {
+  agentId: uuid('agent_id')
+    .primaryKey()
+    .references(() => agents.id, { onDelete: 'cascade' }),
+  revision: uuid('revision').notNull(),
+  plan: jsonb('plan'),
+});

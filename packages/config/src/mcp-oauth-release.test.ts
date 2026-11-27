@@ -30,9 +30,9 @@ describe('MCP OAuth release declarations', () => {
       ASSISTANT_RELEASE_WEB_API_MIN: '3',
       ASSISTANT_RELEASE_WEB_API_MAX: '3',
       ASSISTANT_RELEASE_SCHEMA_DRIVER: 'postgres',
-      ASSISTANT_RELEASE_SCHEMA_MIN: '145',
-      ASSISTANT_RELEASE_SCHEMA_MAX: '145',
-      ASSISTANT_RELEASE_SCHEMA_VERSION: '145',
+      ASSISTANT_RELEASE_SCHEMA_MIN: '146',
+      ASSISTANT_RELEASE_SCHEMA_MAX: '146',
+      ASSISTANT_RELEASE_SCHEMA_VERSION: '146',
     };
     const postgresConfig = { ...config, PERSISTENCE_DRIVER: 'postgres' as const };
     expect(mcpOAuthReleaseReady(postgresConfig, 'agent', postgres)).toBe(true);
@@ -68,7 +68,7 @@ describe('MCP OAuth release declarations', () => {
       };
       const postgresConfig = { ...config, PERSISTENCE_DRIVER: 'postgres' as const };
       expect(mcpOAuthReleaseReady(postgresConfig, role, env)).toBe(true);
-      for (const schema of ['138', '141', '142', '143', '144', '146']) {
+      for (const schema of ['138', '141', '142', '143', '144', '145', '147']) {
         expect(
           mcpOAuthReleaseReady(postgresConfig, role, {
             ...env,
@@ -79,7 +79,7 @@ describe('MCP OAuth release declarations', () => {
         ).toBe(false);
       }
       for (const key of ['ASSISTANT_RELEASE_SCHEMA_MIN', 'ASSISTANT_RELEASE_SCHEMA_MAX']) {
-        expect(mcpOAuthReleaseReady(postgresConfig, role, { ...env, [key]: '144' })).toBe(false);
+        expect(mcpOAuthReleaseReady(postgresConfig, role, { ...env, [key]: '145' })).toBe(false);
       }
     }
   });

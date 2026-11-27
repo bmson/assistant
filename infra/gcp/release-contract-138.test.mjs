@@ -16,7 +16,7 @@ const oldContract = JSON.parse(
 const roles = ['agent', 'web', 'browser', 'code', 'processor'];
 function manifest(driver, version, selected = roles) {
   return createManifest({
-    release: 'schema-145-home-weather-fixture',
+    release: 'schema-146-handoff-foundation-fixture',
     imageRoot: 'registry/test',
     selected,
     digests: Object.fromEntries(roles.map((role) => [role, `sha256:${'a'.repeat(64)}`])),
@@ -26,24 +26,25 @@ function manifest(driver, version, selected = roles) {
   });
 }
 
-test('candidate images declare exact schema 145 for the Home weather migration', () => {
-  assert.equal(deriveSchemaVersion('postgres', journal, contract), 145);
+test('candidate images declare exact schema 146 for the handoff foundation', () => {
+  assert.equal(deriveSchemaVersion('postgres', journal, contract), 146);
   assert.equal(deriveSchemaVersion('firestore', journal, contract), 1);
   assert.deepEqual(
-    journal.entries.slice(-4).map(({ tag }) => tag),
+    journal.entries.slice(-5).map(({ tag }) => tag),
     [
       '0142_signal_store',
       '0143_google_household_calendar_choices',
       '0144_home_weather',
       '0145_saved_places',
+      '0146_household_handoffs',
     ],
   );
-  assert.equal(validateManifest(manifest('postgres', 145)), true);
+  assert.equal(validateManifest(manifest('postgres', 146)), true);
   assert.equal(validateManifest(manifest('firestore', 1)), true);
   for (const role of roles) {
-    assert.deepEqual(contract.components[role].schema.postgres, { min: 145, max: 145 });
+    assert.deepEqual(contract.components[role].schema.postgres, { min: 146, max: 146 });
     assert.deepEqual(contract.components[role].schema.firestore, { min: 1, max: 1 });
-    for (const prior of [142, 143, 144, 146])
+    for (const prior of [142, 143, 144, 145, 147, 148])
       assert.throws(() => validateManifest(manifest('postgres', prior, [role])), /incompatible/);
   }
 });
@@ -67,27 +68,27 @@ test('each mixed Firestore pair fails even though both images read schema 1', ()
   assert.equal(validateManifest(webOnly, { ...liveAgent, liveAgentApi: 3 }), true);
 });
 
-test('schema 145 rejects mixed and undeclared candidate pairs', () => {
+test('schema 146 rejects mixed and undeclared candidate pairs', () => {
   for (const role of ['agent', 'web']) {
-    const mixed = manifest('postgres', 145, ['agent', 'web']);
-    mixed.components[role].schema = { min: 144, max: 144 };
-    assert.throws(() => validateManifest(mixed), /incompatible with postgres schema 145/);
+    const mixed = manifest('postgres', 146, ['agent', 'web']);
+    mixed.components[role].schema = { min: 145, max: 145 };
+    assert.throws(() => validateManifest(mixed), /incompatible with postgres schema 146/);
 
-    const undeclared = manifest('postgres', 145, ['agent', 'web']);
+    const undeclared = manifest('postgres', 146, ['agent', 'web']);
     undeclared.components[role].schema = {};
     assert.throws(() => validateManifest(undeclared), /lacks a declared postgres schema range/);
-    undeclared.components[role].schema = { min: 145, max: 145 };
+    undeclared.components[role].schema = { min: 146, max: 146 };
     delete undeclared.components[role].apiContract;
     assert.throws(() => validateManifest(undeclared), /lacks a declared service API contract/);
   }
-  const webOnly = manifest('postgres', 145, ['web']);
+  const webOnly = manifest('postgres', 146, ['web']);
   assert.throws(() => validateManifest(webOnly), /requires proven live-agent/);
   assert.throws(
     () =>
       validateManifest(webOnly, {
         liveAgentApi: 3,
-        liveAgentSchemaMin: 143,
-        liveAgentSchemaMax: 143,
+        liveAgentSchemaMin: 145,
+        liveAgentSchemaMax: 145,
       }),
     /incompatible with the live agent schema/,
   );
@@ -127,7 +128,7 @@ function preflight(driver, agentSchema, webSchema, agentApi, webApi) {
     }
     release_preflight_compatibility agent,web
   `,
-      'schema-145-preflight',
+      'schema-146-preflight',
       preflightPath,
     ],
     {
@@ -145,16 +146,16 @@ function preflight(driver, agentSchema, webSchema, agentApi, webApi) {
 
 test('ordinary release preflight requires both live roles to declare the target schema and peer API', () => {
   for (const [agentSchema, webSchema] of [
-    [144, 145],
-    [145, 144],
-    [undefined, 145],
-    [145, undefined],
+    [145, 146],
+    [146, 145],
+    [undefined, 146],
+    [146, undefined],
   ]) {
     const closed = preflight('postgres', agentSchema, webSchema, 3, 3);
     assert.equal(closed.status, 1, closed.stderr);
-    assert.match(closed.stderr, /does not declare compatibility with postgres schema 145/);
+    assert.match(closed.stderr, /does not declare compatibility with postgres schema 146/);
   }
-  const accepted = preflight('postgres', 145, 145, 3, 3);
+  const accepted = preflight('postgres', 146, 146, 3, 3);
   assert.equal(accepted.status, 0, accepted.stderr);
 
   for (const [agentApi, webApi] of [

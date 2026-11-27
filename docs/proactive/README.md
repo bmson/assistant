@@ -107,7 +107,7 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | C8  | Relationship cadence                                                   | 4     | M    | C4         | open                                                          |
 | D1  | Moment framework v2 (scoring, horizons, lead policy)                   | 3     | M    | C1         | open                                                          |
 | D2  | 14-day change detection and change digest                              | 3     | M    | D1         | open                                                          |
-| D3  | Conflict proposals                                                     | 3     | L    | C6, D1     | open                                                          |
+| D3  | Conflict proposals                                                     | 3     | L    | C6, D1     | dormant schema-146 foundation in local review                 |
 | D4  | Leave-by with live traffic                                             | 3     | M    | B5, D1     | open                                                          |
 | D5  | Weather impact on outdoor events                                       | 3     | M    | B6, D1     | open                                                          |
 | D6  | Occasions and gifts                                                    | 3     | M    | C5, D1     | open                                                          |
