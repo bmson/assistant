@@ -15,7 +15,7 @@ const MAX_CONTACTS = 5000;
 // Reserve capacity for memory documents, hashes, new subjects, occasions, and checkpoints.
 const MAX_RECONCILIATION_WRITES = 350;
 
-export async function readFirestoreMemoryPeople(
+async function readFirestoreMemoryPeople(
   tx: Transaction,
   store: InstallationStore,
   agentId: string,
@@ -40,6 +40,7 @@ export class FirestoreMemoryPeople {
   private readonly writes: Array<() => void> = [];
   private readonly redirects = new Map<string, string>();
   private singleOwner?: boolean;
+  private roster?: Promise<Contact[]>;
   private reconciledWrites = 0;
   created = 0;
 
@@ -47,8 +48,12 @@ export class FirestoreMemoryPeople {
     private readonly tx: Transaction,
     private readonly store: InstallationStore,
     private readonly agentId: string,
-    readonly contacts: Contact[],
   ) {}
+
+  contacts(): Promise<Contact[]> {
+    this.roster ??= readFirestoreMemoryPeople(this.tx, this.store, this.agentId);
+    return this.roster;
+  }
 
   resolveRedirect(id: string): string {
     return this.redirects.get(id) ?? id;
@@ -73,7 +78,8 @@ export class FirestoreMemoryPeople {
       }
       if (!this.singleOwner) return null;
     }
-    const decision = attributeMemoryPerson(this.contacts, {
+    const contacts = await this.contacts();
+    const decision = attributeMemoryPerson(contacts, {
       ...input,
       knownContactId: input.knownContactId ? this.resolveRedirect(input.knownContactId) : null,
     });
@@ -94,7 +100,7 @@ export class FirestoreMemoryPeople {
           replaceMarker: marker.exists,
         }),
       );
-      this.contacts.push({
+      contacts.push({
         id,
         name: decision.name,
         createdAt: now,
@@ -115,14 +121,14 @@ export class FirestoreMemoryPeople {
     if (
       duplicateId &&
       (input.pendingContactIds?.has(duplicateId) ||
-        !(await this.planDuplicate(duplicateId, decision.contactId, changes.aliases)))
+        !(await this.planDuplicate(contacts, duplicateId, decision.contactId, changes.aliases)))
     )
       return decision.contactId;
 
-    const index = this.contacts.findIndex((row) => row.id === decision.contactId);
-    const target = this.contacts[index];
+    const index = contacts.findIndex((row) => row.id === decision.contactId);
+    const target = contacts[index];
     if (!target) throw new Error('Memory contact attribution target is missing');
-    this.contacts[index] = { ...target, ...changes, updatedAt: now };
+    contacts[index] = { ...target, ...changes, updatedAt: now };
     this.writes.push(() =>
       this.tx.update(
         this.store.doc('contacts', decision.contactId),
@@ -133,11 +139,12 @@ export class FirestoreMemoryPeople {
   }
 
   private async planDuplicate(
+    contacts: Contact[],
     sourceId: string,
     targetId: string,
     aliases: string[],
   ): Promise<boolean> {
-    const [memories, graphEntities, graphSources, occasions, markers] = await Promise.all([
+    const [memories, graphEntities, graphSources, occasions, markers, signals] = await Promise.all([
       this.tx.get(
         this.store
           .collection('memories')
@@ -165,6 +172,13 @@ export class FirestoreMemoryPeople {
       this.tx.get(
         this.store.collection('contactNames').where('contactId', '==', sourceId).select().limit(21),
       ),
+      this.tx.get(
+        this.store
+          .collection('signals')
+          .where('subjectPersonIds', 'array-contains', sourceId)
+          .select()
+          .limit(1),
+      ),
     ]);
     const aliasMarkers = new Set(aliases.map((alias) => contactNameRef(this.store, alias).id));
     if (
@@ -172,6 +186,7 @@ export class FirestoreMemoryPeople {
       !graphEntities.empty ||
       !graphSources.empty ||
       !occasions.empty ||
+      !signals.empty ||
       markers.docs.some((doc) => !aliasMarkers.has(doc.id)) ||
       memories.size > MAX_RECONCILED_PERSON_MEMORIES ||
       memories.docs.some(
@@ -181,8 +196,8 @@ export class FirestoreMemoryPeople {
       return false;
 
     this.reconciledWrites += memories.size + markers.size + 3;
-    this.contacts.splice(
-      this.contacts.findIndex((row) => row.id === sourceId),
+    contacts.splice(
+      contacts.findIndex((row) => row.id === sourceId),
       1,
     );
     this.redirects.set(sourceId, targetId);

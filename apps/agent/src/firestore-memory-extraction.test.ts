@@ -76,7 +76,8 @@ function scriptedRouter(scripts: Record<string, Script>) {
                 content: fact.content,
                 kind: 'fact',
                 category: fact.category ?? 'knowledge',
-                subject: modelSubject(fact.subject ?? 'owner'),
+                subject:
+                  fact.subject === '' ? { type: 'none' } : modelSubject(fact.subject ?? 'owner'),
                 relationship: fact.relationship ?? '',
                 importance: 3,
                 confidence: 0.9,
@@ -236,6 +237,41 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore memory extracti
     if (!lease?.leaseToken) throw new Error('could not claim memory extraction task');
     return { taskId, lease: { taskId, leaseToken: lease.leaseToken } };
   }
+
+  it('saves a subjectless nightly fact when the People roster exceeds its lookup limit', async () => {
+    const writer = store.db.bulkWriter();
+    const createdAt = new Date();
+    for (let index = 0; index < 5000; index += 1) {
+      const id = randomUUID();
+      void writer.create(store.doc('contacts', id), {
+        id,
+        name: `Synthetic contact ${index}`,
+        createdAt,
+      });
+    }
+    await writer.close();
+
+    const conversationId = await conversation('SUBJECTLESS');
+    const content = 'The community recycling bins are collected on Mondays.';
+    const { router } = scriptedRouter({ SUBJECTLESS: { facts: [{ content, subject: '' }] } });
+    const taskId = await extractionTask();
+    const result = await executeTask(
+      {
+        db,
+        router,
+        dispatcher: unavailable('dispatcher') as ExecutorDeps['dispatcher'],
+        persistence,
+      },
+      taskId,
+    );
+
+    expect(result.outcome, result.detail).toBe('done');
+    expect(await memories()).toEqual([
+      expect.objectContaining({ content, subjectContactId: null }),
+    ]);
+    expect(await checkpoint(taskId)).toContain(`memory:${conversationId}`);
+    expect(sqlAccesses).toEqual([]);
+  }, 60_000);
 
   it('pages past fixture-created commitments before building title-resolution candidates', async () => {
     const ordinaryConversationId = await conversation('RESOLUTION_ORDINARY', { lines: 1 });
