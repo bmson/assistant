@@ -81,7 +81,7 @@ The recovery digest reads up to 500 messages received during the outage, newest 
 
 **Root cause.** `notifyOwnerOfDeliveredAnswer` (`packages/core/src/workflow/executor/notices.ts:41`) → `composeOwnerNotifiers` (`apps/agent/src/deps.ts:649`) → `dashboardOwnerNotifier` (`deps.ts:314`). That copies the reply into the primary chat whenever `shouldMirrorIntoPrimary` (`deps.ts:276`) is true. In Firestore mode a `destination: 'notifications'` post throws (`packages/core/src/chat.ts:612-628`).
 
-**Change.** Answer-ready notices (delivery key prefix `task-answer`) skip the dashboard leg, because the answer is already in its own conversation. Keep the dashboard copy for owner notices that have no conversation (briefings, alerts, approvals). Optionally add a Firestore Notifications destination.
+**Change.** Answer-ready notices (delivery key prefix `task-answer`) skip the dashboard leg, because the answer is already in its own conversation. Keep the dashboard copy for owner notices that have no conversation (briefings, alerts, approvals). Support explicit Firestore delivery to the owner's standalone Notifications chat.
 
 **Tests.** `apps/agent` tests: a task answer in a secondary chat posts nothing to the primary chat; an approval raised there still notifies; a briefing still posts.
 

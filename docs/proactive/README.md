@@ -74,7 +74,7 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | A1  | Reconcile cost holds; holds scoped to their period                     | 0     | L    | —          | in review (settlement and period-specific Costs warning)      |
 | A2  | Wake parked work when caps change; honest parked notice                | 0     | M    | —          | in review (cap-change wake and recorded spend/holds notice)   |
 | A3  | Outage watchdog and "while I was away" digest                          | 0     | M    | H4         | in review (outage alert and recovery by source receipt time)  |
-| A4  | Stop mirroring secondary-chat replies into the primary chat            | 0     | M    | —          | in review (private answer-ready push)                         |
+| A4  | Stop mirroring secondary-chat replies into the primary chat            | 0     | M    | —          | in review (private push and Firestore Notifications)          |
 | A5  | Checklist dedupe ignores trailing punctuation                          | 0     | S    | —          | in review                                                     |
 | A6  | Guard against promises without a tool call                             | 2     | M    | —          | in review (cancel and delete receipt checks)                  |
 | A7  | Self-repair cadence respects its daily limit                           | 0     | S    | —          | in review (keep follow-ups due at the daily dispatch limit)   |
