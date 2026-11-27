@@ -102,12 +102,18 @@ Each kind follows [target-design.md §4](target-design.md#4-moment-engine-v2): c
 
 ## G · Trust and privacy
 
-| ID  | Spec                                                                                                                                                            | Done when                                                    |
-| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
-| G1  | Sensitive-topic filter (health, intimate, finances) for unrelated answers and briefings (`packages/persistence/src/card-privacy.ts:12-23` filters secrets only) | A seeded sensitive fact never appears in an unrelated answer |
-| G2  | Health data minimization: on-phone summaries, explicit consent, 30-day retention, never saved to memory automatically                                           | Privacy review passed                                        |
-| G3  | Permissions live in policy, not memory: migrate permission-like memories into reviewable standing approvals, or delete them                                     | No permission-like memories                                  |
-| G4  | Household consent: spouse calendar and mail only with consent; visibility rules in Settings                                                                     | Documented and visible                                       |
+| ID  | Spec                                                                                                                                                             | Done when                                                    |
+| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| G1  | Sensitive-topic filter (health, intimate, finances) for unrelated answers and briefings (first slice: private booking lookups and mail-derived briefing entries) | A seeded sensitive fact never appears in an unrelated answer |
+| G2  | Health data minimization: on-phone summaries, explicit consent, 30-day retention, never saved to memory automatically                                            | Privacy review passed                                        |
+| G3  | Permissions live in policy, not memory: migrate permission-like memories into reviewable standing approvals, or delete them                                      | No permission-like memories                                  |
+| G4  | Household consent: spouse calendar and mail only with consent; visibility rules in Settings                                                                      | Documented and visible                                       |
+
+G1's first slice covers fresh private booking lookups and their mail-derived daily briefing entries.
+It projects booking logistics before answer or card composition, excludes older chat context for those
+lookups, and answers an explicit deposit question from one verified booking thread. The text projection
+uses a bounded set of booking and sensitive-topic patterns. Other unrelated answers, non-booking briefing
+sources, background Gmail ingestion, and historical content remain outside this slice.
 
 ## H · Evaluation
 

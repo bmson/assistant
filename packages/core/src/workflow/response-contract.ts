@@ -8,6 +8,7 @@ import {
 } from '../model-router/audit-graders.js';
 import type { PublicActivityScopeData } from './active-read-intent.js';
 import { billingAuditProjection, renderBillingAudit } from './billing-audit.js';
+import { bookingDepositFacts, bookingMailTitle } from './booking-disclosure.js';
 import type { BriefingCalendarEvent } from './briefing.js';
 import { calendarEventAnalysisResponse } from './calendar-event-analysis.js';
 import {
@@ -1376,6 +1377,42 @@ function matchingGmailThreadRows(
       record(row.result)?.complete === true
     );
   });
+}
+
+/** Show one explicitly requested deposit only from one fully read booking thread. */
+export function verifiedBookingDeposit(
+  request: PersonalReadRequest,
+  evidence: ActionEvidence[],
+): string | undefined {
+  if (request.scopeIssue || request.temporalIssue || request.kind === 'calendar') return undefined;
+  const current = currentSuccessfulEvidence(evidence);
+  const searches = matchingGmailSearchRows(request, current);
+  if (!gmailMetadataCoverageComplete(searches)) return undefined;
+
+  const candidates = new Set(
+    searches
+      .flatMap((row) => resultItems(row, 'results'))
+      .map((item) => stringField(item, 'threadId')),
+  );
+  if (candidates.size !== 1) return undefined;
+  const [threadId] = candidates;
+  if (!threadId || !/^[A-Za-z0-9_-]+$/.test(threadId)) return undefined;
+  const facts = new Set(
+    matchingGmailThreadRows(searches, current)
+      .flatMap((row) => resultItems(row, 'messages'))
+      .filter((message) => {
+        const subject = stringField(message, 'subject').toLowerCase();
+        return (
+          bookingMailTitle(subject) &&
+          request.queryTerms.length > 0 &&
+          request.queryTerms.every((term) => subject.includes(term.toLowerCase()))
+        );
+      })
+      .flatMap((message) => bookingDepositFacts(rawStringField(message, 'text')))
+      .map((fact) => fact.trim().replace(/[!.]$/, '')),
+  );
+  if (facts.size !== 1) return undefined;
+  return `${[...facts][0]}. [Booking email](https://mail.google.com/mail/u/0/#all/${threadId})`;
 }
 
 function gmailMetadataCoverageComplete(searches: ActionEvidence[]): boolean {

@@ -95,6 +95,7 @@ const files = [
   'apps/agent/src/firestore-email-extraction.test.ts',
   'apps/agent/src/firestore-anomaly-scan.test.ts',
   'apps/agent/src/firestore-briefing.test.ts',
+  'apps/agent/src/g1-booking-disclosure.test.ts',
   'apps/agent/src/firestore-skill-reflection.test.ts',
   'apps/agent/src/firestore-self-maintenance.test.ts',
   'apps/agent/src/firestore-dream.test.ts',

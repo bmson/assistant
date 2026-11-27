@@ -52,6 +52,13 @@ import {
   requestedPrivateArtifactIntent,
 } from '../artifact-intent.js';
 import { remainingBirthdaySaves, requestedBirthdaySaves } from '../birthday-import.js';
+import {
+  bookingDisclosure,
+  bookingEvidence,
+  bookingModelWindow,
+  bookingText,
+  isBookingProjectionSafe,
+} from '../booking-disclosure.js';
 import { calendarAgendaSummary } from '../calendar-agenda.js';
 import { CARD_NOT_BUILT, requestedCardIntent } from '../card-intent.js';
 import { responseCardSteps } from '../card-steps.js';
@@ -93,6 +100,7 @@ import {
   type ActionEvidence,
   enforcePersonalReadResponse,
   enforceResponseContract,
+  verifiedBookingDeposit,
   verifiedReadResponse,
 } from '../response-contract.js';
 import { createSuggestion } from '../suggestions.js';
@@ -566,6 +574,17 @@ function normalizeRecallLabel(value: string): string {
     .trim();
 }
 
+function finalBookingDisclosure(task: TaskLease, state: TaskState, window: ModelMessage[]) {
+  if (task.type !== 'chat_turn' || task.trust !== 'owner' || isForwardedIngest(task)) return;
+  const intent = latestOwnerIntent(window, {
+    trust: 'owner',
+    trigger: task.trigger,
+    clarificationContinuation: state.clarificationContinuation,
+  });
+  const disclosure = intent.separation !== 'unknown' && bookingDisclosure(intent.ownerAuthoredText);
+  if (disclosure) return { ...disclosure, ownerText: intent.ownerAuthoredText };
+}
+
 /** Persist-before-send turns the task checkpoint into a small durable outbox. */
 export async function stageFinalResponse(
   deps: ExecutorDeps,
@@ -575,6 +594,40 @@ export async function stageFinalResponse(
   pending: PendingFinal,
   options?: { verifiedCompoundTripChecklist?: boolean },
 ): Promise<ExecuteResult> {
+  const disclosure = finalBookingDisclosure(task, state, window);
+  if (disclosure) {
+    const visibleText = bookingText(pending.text);
+    if (visibleText || !pending.text.trim()) {
+      pending.text = visibleText;
+    } else {
+      pending.text = 'I could not verify the requested booking detail.';
+      pending.terminalStatus = 'needs_attention';
+      pending.outcome = 'needs_attention';
+    }
+    pending.progress = bookingText(pending.progress);
+    if (disclosure.depositRequested) {
+      const request = detectPersonalReadRequest(bookingModelWindow(window, disclosure.ownerText), {
+        now: task.createdAt,
+        timeZone: state.requestTimeZone,
+      });
+      const rows = request
+        ? await executionEvidence(deps).taskEvidence({ agentId: task.agentId, taskId: task.id })
+        : [];
+      const deposit = request && verifiedBookingDeposit(request, actionEvidence(rows, true));
+      pending.text =
+        deposit ?? 'I could not verify the deposit for this booking in the mail I checked.';
+      pending.progress = deposit
+        ? 'Verified the requested booking detail.'
+        : 'Booking detail unverified.';
+      if (!deposit) {
+        pending.terminalStatus = 'needs_attention';
+        pending.outcome = 'needs_attention';
+      }
+    }
+    if (pending.responseCards)
+      pending.responseCards = pending.responseCards.filter(isBookingProjectionSafe);
+    state.recall = undefined;
+  }
   const correctionOwnedChecklist =
     state.requestChecklist?.revision !== undefined ||
     state.requestChecklist?.revisionAudit !== undefined;
@@ -809,7 +862,9 @@ export async function stageModelFinalResponse(
   // but a leaked tag in an email or SMS final would be robot syntax in front
   // of a human — stripping here is the defense in depth. The cues themselves
   // survive only into a dashboard chat_turn's persisted parts, below.
-  const strippedFinal = stripCueTags(pending.text);
+  const disclosure = finalBookingDisclosure(task, state, window);
+  const strippedFinal = stripCueTags(disclosure ? bookingText(pending.text) : pending.text);
+  if (disclosure) window = bookingModelWindow(window, disclosure.ownerText);
   pending.text = strippedFinal.text;
   const publicScope =
     readContext?.resolvedReadIntent?.kind === 'public_activity' ||
@@ -824,7 +879,7 @@ export async function stageModelFinalResponse(
     ? allRows.filter((row) => /^web\.(?:search|fetch)$/.test(row.toolName))
     : allRows;
   const rawPriorRows =
-    !publicScope && task.conversationId
+    !publicScope && !disclosure && task.conversationId
       ? await evidenceRepository.conversationEvidence({
           agentId: task.agentId,
           conversationId: task.conversationId,
@@ -842,7 +897,10 @@ export async function stageModelFinalResponse(
       deps.persistence?.conversationSearch ?? createPostgresConversationSearchRepository(deps.db),
   });
   const safeById = new Map(safeEvidence.rows.map((row) => [row.id, row]));
-  const rows = rawRows.map((row) => safeById.get(row.id) ?? row);
+  const rows = rawRows.map((row) => {
+    const safe = safeById.get(row.id) ?? row;
+    return disclosure ? bookingEvidence(safe) : safe;
+  });
   const priorRows = rawPriorRows.map((row) => safeById.get(row.id) ?? row);
   const evidence: ActionEvidence[] = [
     ...actionEvidence(priorRows, false),
@@ -1096,7 +1154,10 @@ export async function stageModelFinalResponse(
     ...(readContext?.compoundTripExtraction
       ? { compoundTripExtraction: readContext.compoundTripExtraction }
       : {}),
-    groundingCorpus: readContext?.groundingCorpus,
+    groundingCorpus:
+      disclosure && readContext?.groundingCorpus
+        ? bookingText(readContext.groundingCorpus)
+        : readContext?.groundingCorpus,
     liveCorpus: liveLookups.length > 0 ? liveLookupCorpus(rows) : undefined,
   };
   const missingRequestedPageReceipts = requestedPublicPageReceiptFindings(
@@ -1309,7 +1370,9 @@ export async function stageModelFinalResponse(
       };
   // A reviser is another generative surface: strip companion tags a second
   // time, then re-run the same authoritative response contract before publish.
-  const reflectedText = stripCueTags(reflection.text).text;
+  const reflectedText = stripCueTags(
+    disclosure ? bookingText(reflection.text) : reflection.text,
+  ).text;
   const reflectedCheck = reflection.revised
     ? enforceResponseContract(reflectedText, evidence, contractOptions)
     : initialCheck;
@@ -1365,7 +1428,7 @@ export async function stageModelFinalResponse(
       readContext?.resolvedReadIntent?.kind === 'combined'
         ? readContext.readRequest
         : contractOptions.readRequest,
-    ambient: readContext?.groundingCorpus,
+    ambient: contractOptions.groundingCorpus,
     requestText: latestUserText(window),
     lookupOrder: liveLookups.map((lookup) => lookup.kind),
   });
@@ -1480,9 +1543,9 @@ export async function stageModelFinalResponse(
       // composer admits it as evidence in that case alone, under the same
       // verbatim rule, which is what the phone's hand-written kinds used to do
       // with a regex per fact.
-      answerText: checked.text,
+      answerText: disclosure ? bookingText(checked.text) : checked.text,
     });
-    if (generated) {
+    if (generated && (!disclosure || isBookingProjectionSafe(generated))) {
       /*
        * A card read out of this turn's own reply is a view of the answer, not
        * an object the owner acquired: "leave around 2:45" is wrong by tomorrow
