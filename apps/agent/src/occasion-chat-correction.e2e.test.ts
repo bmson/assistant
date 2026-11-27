@@ -25,8 +25,9 @@ const SPACE: EmbeddingSpace = {
   revision: '1',
 };
 const MODEL_ID = 'synthetic/f1-occasion-correction';
-const LABEL = 'pottery-club anniversary';
-const CORRECTION = 'Change Mira Vale’s saved pottery-club anniversary from April 12 to April 14.';
+const LABEL = 'Pottery Club Day';
+const CORRECTION =
+  'Change Mira Vale’s saved occasion named Pottery Club Day from April 12 to April 14.';
 const READ = 'List the upcoming saved occasions for Mira Vale and Rowan Reed.';
 const CHANGE_ARGS = {
   subject: 'Mira Vale',
@@ -517,7 +518,7 @@ describe.each(['postgres', 'firestore'] as const)(
           const duplicate = { id: randomUUID(), name: mira.name };
           await addContact(duplicate);
           const ambiguous = await turn(
-            'Change Mira Vale’s saved pottery-club anniversary from April 14 to April 15.',
+            'Change Mira Vale’s saved occasion named Pottery Club Day from April 14 to April 15.',
             'occasions.update',
             { ...CHANGE_ARGS, expectedDate: { month: 4, day: 14 }, date: { month: 4, day: 15 } },
             { allowClarification: true },
@@ -540,7 +541,7 @@ describe.each(['postgres', 'firestore'] as const)(
           const { date: savedDate, ...target } = CHANGE_ARGS;
           if (!original) throw new Error('Mira’s fixture occasion is missing');
           const stale = await turn(
-            'Change Mira Vale’s saved pottery-club anniversary from April 14 to April 15.',
+            'Change Mira Vale’s saved occasion named Pottery Club Day from April 14 to April 15.',
             'occasions.update',
             { ...target, expectedDate: savedDate, date: { month: 4, day: 15 } },
             {
@@ -561,7 +562,7 @@ describe.each(['postgres', 'firestore'] as const)(
           expect(stale.receipt?.result).toMatchObject({ ok: false, outcome: 'stale_target' });
           expect(stale.reply).toMatch(/saved occasion changed/i);
           const deletion = await turn(
-            'Delete Mira Vale’s saved pottery-club anniversary on April 14.',
+            'Remove Mira Vale’s saved occasion named Pottery Club Day on April 14.',
             'occasions.delete',
             { ...target, expectedDate: savedDate },
             { recover: 'deleted' },
