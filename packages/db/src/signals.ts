@@ -1,4 +1,5 @@
 import {
+  parseSignal,
   planSignalWrite,
   prepareBillSignal,
   type SignalRepository,
@@ -18,7 +19,7 @@ async function getSignal(db: Pick<Db, 'select'>, agentId: string, id: string) {
     .select({ record: signals.record })
     .from(signals)
     .where(and(eq(signals.agentId, agentId), eq(signals.id, id)));
-  return row?.record ?? null;
+  return row ? parseSignal(row.record) : null;
 }
 
 export function createPostgresSignalRepository(db: Db): SignalRepository {
@@ -67,7 +68,7 @@ export function createPostgresSignalRepository(db: Db): SignalRepository {
             ),
           );
         return signalsValidAt(
-          rows.map(({ record }) => record),
+          rows.map(({ record }) => parseSignal(record)),
           asOf,
         );
       }),

@@ -6,6 +6,9 @@ import {
   checksumForMigrationVersion,
   checksumV3,
   compositeMigrationId,
+  type DeliverySignal,
+  deliveryDayKey,
+  deliverySignalId,
   deterministicMigrationCompare,
   embeddingSpaceIdentityKey,
   idempotencyIdentityDigest,
@@ -40,6 +43,7 @@ import {
 } from './owner-editor-repository.js';
 import { FirestoreProfileMemoryMaintenance } from './profile-memory-maintenance.js';
 import { FirestoreScheduleRepository } from './schedules.js';
+import { createFirestoreSignalRepository } from './signals.js';
 import { decodeRecord, documentKey, type InstallationStore } from './store.js';
 import { FirestoreTaskLeaseRepository } from './tasks.js';
 import { disposeStore, emulatorStore } from './test-store.js';
@@ -3175,6 +3179,58 @@ it.skipIf(!enabled)(
         }) as Record<string, SerializedValue>,
         checksum: '',
       });
+      const billAt = '2026-11-19T12:00:00.000Z';
+      const paymentAt = '2026-11-20T12:00:00.000Z';
+      const root: DeliverySignal = {
+        version: 1,
+        id: '',
+        agentId: ownerId,
+        subjectPersonIds: [ownerId],
+        sourceRefs: [{ kind: 'email', id: randomUUID() }],
+        kind: 'delivery',
+        shipmentIdentity: '2'.repeat(64),
+        previousDeliveryDate: null,
+        deliveryDate: '2026-11-22',
+        carrier: null,
+        signatureRequired: null,
+        at: deliveryDayKey('2026-11-22'),
+        validFrom: billAt,
+        validTo: paymentAt,
+        supersededBy: null,
+        replaces: null,
+      };
+      root.id = deliverySignalId(root);
+      const moved: DeliverySignal = {
+        ...root,
+        id: '',
+        replaces: root.id,
+        previousDeliveryDate: root.deliveryDate,
+        sourceRefs: [{ kind: 'email', id: randomUUID() }],
+        deliveryDate: '2026-11-23',
+        at: deliveryDayKey('2026-11-23'),
+        validFrom: paymentAt,
+        validTo: null,
+        signatureRequired: false,
+      };
+      moved.id = deliverySignalId(moved);
+      root.supersededBy = moved.id;
+      for (const record of [root, moved]) {
+        const { id, agentId, kind, at, subjectPersonIds } = record;
+        addRecord(source, {
+          table: 'signals',
+          collection: 'signals',
+          id,
+          data: serializeMigrationValue({
+            id,
+            agentId,
+            kind,
+            at,
+            subjectPersonIds,
+            record,
+          }) as Record<string, SerializedValue>,
+          checksum: '',
+        });
+      }
       const wrongOwner = source.records.map((record) =>
         record.table === 'google_household_calendar_choices'
           ? { ...record, data: { ...record.data, agentId: randomUUID() } }
@@ -3183,12 +3239,39 @@ it.skipIf(!enabled)(
       expect(() => validateMigrationReferences(wrongOwner, ownerId)).toThrow(
         'Invalid household Calendar migration owner',
       );
+      for (const broken of [
+        source.records.filter(({ id }) => id !== root.id),
+        source.records.map((row) =>
+          row.id === root.id
+            ? { ...row, data: { ...row.data, record: { ...root, supersededBy: '3'.repeat(64) } } }
+            : row,
+        ),
+        source.records.map((row) =>
+          row.id === moved.id
+            ? {
+                ...row,
+                data: { ...row.data, record: { ...moved, previousDeliveryDate: '2026-11-25' } },
+              }
+            : row,
+        ),
+      ]) {
+        expect(() => validateMigrationReferences(broken, ownerId)).toThrow(/Invalid .*migration/);
+      }
       const result = await importWorkspaceBundle(store, source, {
         sourceAgentId: ownerId,
         target,
         mode: 'write',
       });
       expect(result.verified).toBe(true);
+      const signals = createFirestoreSignalRepository(store);
+      expect(await signals.get(ownerId, root.id)).toEqual(root);
+      expect(
+        await signals.list({ agentId: ownerId, kind: 'delivery', asOf: new Date(billAt) }),
+      ).toEqual([root]);
+      expect(
+        await signals.list({ agentId: ownerId, kind: 'delivery', asOf: new Date(paymentAt) }),
+      ).toEqual([moved]);
+
       const repo = createFirestoreGoogleCalendarConnectionRepository(store);
       const restored = await repo.get(ownerId);
       expect(restored).toMatchObject({
