@@ -10,7 +10,7 @@ if len(sys.argv) != 2 or sys.argv[1] not in {'run', 'cleanup'}:
     raise SystemExit('Expected run or cleanup')
 
 if sys.argv[1] == 'run':
-    import os, sys, json, re, time, signal, selectors, subprocess, hashlib, plistlib
+    import os, sys, json, re, time, signal, selectors, subprocess, hashlib, plistlib, stat
     from pathlib import Path
     root = Path(os.environ['RUNNER_TEMP']) / 'native-controls-evidence'
     root.mkdir(mode=0o700, exist_ok=False)
@@ -23,6 +23,17 @@ if sys.argv[1] == 'run':
     main_deadline = time.monotonic() + 2100 - elapsed
     def save(name, value):
         (root / name).write_text(json.dumps(value, indent=2) + '\n')
+    def live_evidence_bytes(directory):
+        total = 0
+        for path in directory.rglob('*'):
+            try:
+                details = path.stat()
+            except FileNotFoundError:
+                # XCTest may remove a temporary result file during this scan.
+                continue
+            if stat.S_ISREG(details.st_mode):
+                total += details.st_size
+        return total
     def observe_group(pid, timeout_seconds):
         # Signal 0 asks the kernel about this owned process group without
         # sending a signal or spawning a potentially stalled ps process.
@@ -83,7 +94,7 @@ if sys.argv[1] == 'run':
             log=(root/(name+'.log')).open('wb')
             while selector.get_map():
                 if time.monotonic()>=deadline: raise TimeoutError(name+' deadline')
-                if name=='test' and sum(p.stat().st_size for p in root.rglob('*') if p.is_file())>128*1024*1024: raise RuntimeError('Total evidence cap exceeded')
+                if name=='test' and live_evidence_bytes(root)>128*1024*1024: raise RuntimeError('Total evidence cap exceeded')
                 for key,_ in selector.select(.2):
                     chunk=os.read(key.fd,65536)
                     if not chunk: selector.unregister(key.fileobj);continue
