@@ -1703,8 +1703,33 @@ describe('reviewed zero-tag disabled capture adapter', () => {
     expect(state.phase).toBe('attachedR');
     expect(f.writes()).toBe(3);
     state = await nativeWebTrafficFixtureClient(f.deps).execute(state, 'promoteR', stamp);
+    const paused = f.native[p.revision]!;
+    const healthy = copy(paused.conditions);
+    const retired = [
+      { type: 'Ready', state: 'CONDITION_SUCCEEDED', revisionReason: 'RETIRED' },
+      { type: 'Active', state: 'CONDITION_FAILED', revisionReason: 'RETIRED' },
+      { type: 'ResourcesAvailable', state: 'CONDITION_RECONCILING', revisionReason: 'RETIRED' },
+    ];
+    paused.conditions = retired;
+    // The zero-percent P alias still routes requests until closeP takes effect.
+    expect(() => projectNativeWebSnapshot(f.service, f.native, f.context)).toThrow(
+      'Native release validation held',
+    );
+    paused.conditions = healthy;
+    f.setInitialReply((op) => {
+      paused.conditions = retired;
+      f.service.urls = [...serviceEndpoints];
+      return reply(op);
+    });
     state = await nativeWebTrafficFixtureClient(f.deps).execute(state, 'closeP', stamp);
     expect(state.phase).toBe('complete');
+    paused.conditions = [
+      { type: 'Ready', state: 'CONDITION_SUCCEEDED', revisionReason: 'RETIRED' },
+      { type: 'Active', state: 'CONDITION_FAILED', revisionReason: 'HEALTH_CHECK_SKIPPED' },
+    ];
+    expect(() => projectNativeWebSnapshot(f.service, f.native, f.context)).toThrow(
+      'Native release validation held',
+    );
     expect(state.snapshot.tagUris).toEqual({ [r.tag]: expect.any(String) });
     expect(state.retiredTags).toContain(p.tag);
     expect(f.writes()).toBe(5);
