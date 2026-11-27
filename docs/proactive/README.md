@@ -53,7 +53,7 @@ Critical paths: A1 → A11 → C2 → D7 (money) and B2 → C6 → D3 (conflict 
 
 The Phase 0 gate requires seven actual days of evidence covering daily briefing delivery, chat isolation, cost holds under 25% of the daily cap, extraction on days with eligible mail, and zero texts for routine replies. Record owner and household opt-ins before using their optional sources or delivery channels.
 
-H1 covers five of 28 synthetic scenarios on PostgreSQL and Firestore. The seven on-time replay deliveries per driver include both D7 bill reminders. Production recall remains unmeasured. [H1 replay](https://github.com/bmson/assistant/pull/972), [D7 bill timing](https://github.com/bmson/assistant/pull/974), [scorecard and coverage](golden-signals.md#running-the-replay).
+The local H1 replay at `2dda415724793cb713f7489baabbcd8fea8fd400` covered six of 28 synthetic scenarios on both PostgreSQL and Firestore. Five passed, and S08 recorded a missing revised-date stack item. Each driver measured 7/8 recall, 7/7 precision, and zero quiet violations. The remaining 22 scenarios are unimplemented. Production recall remains unmeasured. [H1 replay](https://github.com/bmson/assistant/pull/972), [D7 bill timing](https://github.com/bmson/assistant/pull/974), [scorecard and coverage](golden-signals.md#running-the-replay).
 
 ## Status board
 
@@ -129,7 +129,7 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | G2  | Health data minimization                                               | 4     | M    | —          | open                                                          |
 | G3  | Permissions live in policy, not memory                                 | 5     | S    | —          | open                                                          |
 | G4  | Household consent and visibility                                       | 5     | S    | B2         | open                                                          |
-| H1  | Golden-signal benchmark harness                                        | 3     | L    | —          | in progress (S13, S14, S16, S17, S24 on both drivers)         |
+| H1  | Golden-signal benchmark harness                                        | 3     | L    | —          | in progress (6 of 28 measured on both drivers)                |
 | H2  | Weekly missed-signal audit                                             | 5     | M    | H1         | open                                                          |
 | H3  | Proactive telemetry                                                    | 5     | M    | —          | open                                                          |
 | H4  | Daily canary                                                           | 0     | S    | —          | in review (25% alert and overall iPhone health status)        |
