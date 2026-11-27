@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type {
   ApplicationConfirmationNoticeFence,
   EmailObserverEffectFence,
@@ -9,12 +9,16 @@ import type {
   Records,
 } from '@assistant/persistence';
 import {
+  briefingDeliveryFromSource,
   briefingMessageKey,
   matchesApplicationConfirmationNoticeLineage,
   matchesPreparedEmailObserverClaim,
+  parseSignal,
+  sameBriefingDelivery,
   securityIncidentId,
 } from '@assistant/persistence';
 import { type DocumentSnapshot, Timestamp, type Transaction } from '@google-cloud/firestore';
+import { readFirestoreDeliveryText } from './briefing.js';
 import { readFirestoreSavedBriefing } from './briefing-watchdog.js';
 import { conversationDocument } from './conversation-document.js';
 import { messageRecord } from './messages.js';
@@ -558,11 +562,62 @@ export class FirestoreOwnerNoticeRepository implements NotificationsConversation
           });
         }
       }
-      if (inactiveSuggestionSourceRefs.length || inactiveSecurityIncidents.length)
+      const inactiveDeliveryKeys: string[] = [];
+      const deliveryMoments: Records['proactiveMoments'][] = [];
+      for (const delivery of input.deliveries ?? []) {
+        const { momentKey } = delivery;
+        const id = `pulse-moment:${createHash('sha256')
+          .update(JSON.stringify([this.agentId, momentKey]))
+          .digest('hex')}`;
+        const [signal, source, existing] = await Promise.all([
+          tx.get(this.store.doc('signals', delivery.signalId)),
+          tx.get(this.store.doc('emailIngest', delivery.ingestId)),
+          tx.get(this.store.doc('proactiveMoments', id)),
+        ]);
+        const currentSignal = signal.exists ? parseSignal(decodeRecord(signal.data())) : null;
+        const ingest = source.exists ? decodeRecord<Records['emailIngest']>(source.data()) : null;
+        if (existing.exists || !currentSignal || !ingest) {
+          inactiveDeliveryKeys.push(momentKey);
+          continue;
+        }
+        const text = await readFirestoreDeliveryText(this.store, this.agentId, ingest, tx);
+        if (
+          text === null ||
+          !sameBriefingDelivery(
+            briefingDeliveryFromSource(
+              currentSignal,
+              ingest,
+              text,
+              this.agentId,
+              delivery.deliveryDate,
+              input.now,
+            ),
+            delivery,
+          )
+        ) {
+          inactiveDeliveryKeys.push(momentKey);
+          continue;
+        }
+        deliveryMoments.push({
+          id,
+          agentId: this.agentId,
+          kind: 'delivery-today',
+          momentKey,
+          summary: 'Delivery expected today',
+          pinged: false,
+          deliveredAt: input.now,
+        });
+      }
+      if (
+        inactiveSuggestionSourceRefs.length ||
+        inactiveSecurityIncidents.length ||
+        inactiveDeliveryKeys.length
+      )
         return {
           status: 'stale',
           inactiveSuggestionSourceRefs,
           inactiveSecurityIncidents,
+          ...(inactiveDeliveryKeys.length ? { inactiveDeliveryKeys } : {}),
         };
 
       const destination = await this.prepareNoticeInTransaction(tx, input.taskId);
@@ -595,6 +650,8 @@ export class FirestoreOwnerNoticeRepository implements NotificationsConversation
       });
       for (const attention of attentionToAccept)
         tx.update(attention.ref, { deliveryStatus: 'accepted', updatedAt: publicationNow });
+      for (const moment of deliveryMoments)
+        tx.create(this.store.doc('proactiveMoments', moment.id), encodeRecord(moment));
       return { status: 'posted', conversationId, messageId };
     });
   }

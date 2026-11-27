@@ -113,7 +113,7 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | D6  | Occasions and gifts                                                    | 3     | M    | C5, D1     | open                                                          |
 | D7  | Money: bills, renewals, unusual charges                                | 3     | M    | C2, C3     | in progress (owner-local bill timing and payment evidence)    |
 | D8  | School: early dismissal, closures, breaks, forms                       | 3     | M    | C6, C7     | open                                                          |
-| D9  | Home and car: deliveries, maintenance                                  | 3     | S    | C2         | delivery admission in review                                  |
+| D9  | Home and car: deliveries, maintenance                                  | 3     | S    | C2         | delivery briefing and durable source recheck in review         |
 | D10 | Weekly reconnect suggestions                                           | 4     | S    | C8         | open                                                          |
 | D11 | Personal news digest                                                   | 4     | M    | B7         | open                                                          |
 | D12 | Sleep-aware delivery                                                   | 4     | M    | B8         | open                                                          |
