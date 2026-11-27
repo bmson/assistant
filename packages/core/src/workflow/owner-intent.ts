@@ -26,6 +26,8 @@ export type OwnerIntentScope =
   | 'workspace_write'
   | 'personal_write'
   | 'watch_create'
+  | 'digest_schedule'
+  | 'digest_manage'
   | 'private_write'
   | 'memory_write'
   | 'feedback_write';
@@ -46,6 +48,7 @@ export interface OwnerIntent {
   sourceActor: 'owner' | 'assistant' | 'third_party' | 'mixed' | 'unknown';
   requestKind: OwnerIntentKind;
   ownerAuthoredText: string;
+  clarificationAnswer?: { question: string; text: string; originalRequest: string };
   externalText: string;
   authorizedScopes: OwnerIntentScope[];
   separation: 'clear' | 'none' | 'unknown';
@@ -438,6 +441,101 @@ function hasUnmatchedQuote(text: string): boolean {
   return curlyOpen !== curlyClose || straight % 2 !== 0;
 }
 
+/** Explicit, unambiguous wall-clock time for a recurring digest. */
+export function recurringDigestLocalTime(text: string): string | null {
+  const times = new Set<string>();
+  const pattern =
+    /\b(?:(1[0-2]|0?[1-9])(?::([0-5]\d))?\s*([ap])\.?m\.?\b|([01]?\d|2[0-3]):([0-5]\d)\b|noon\b|midnight\b)/gi;
+  for (const match of text.matchAll(pattern)) {
+    const [, hour12, minute12, meridiem, hour24, minute24] = match;
+    if (hour12) {
+      const hour = (Number(hour12) % 12) + (meridiem?.toLowerCase() === 'p' ? 12 : 0);
+      times.add(`${String(hour).padStart(2, '0')}:${minute12 ?? '00'}`);
+    } else if (hour24) {
+      times.add(`${hour24.padStart(2, '0')}:${minute24}`);
+    } else {
+      times.add(match[0].toLowerCase() === 'noon' ? '12:00' : '00:00');
+    }
+  }
+  return times.size === 1 ? ([...times][0] ?? null) : null;
+}
+
+const DIGEST_WEEKDAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
+
+/** Bind the requested weekdays before any recurring schedule is written. */
+export function recurringDigestDays(text: string): number[] | null {
+  if (
+    /\b(?:or|either)\b[^.!?;\n]{0,25}\b(?:Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday)s?\b/i.test(
+      text,
+    )
+  ) {
+    return null;
+  }
+  if (/\b(?:every|each)\s+(?:day|morning|evening)|\bdaily\b/i.test(text))
+    return [0, 1, 2, 3, 4, 5, 6];
+  if (/\b(?:every|each|on)\s+weekdays\b/i.test(text)) return [1, 2, 3, 4, 5];
+  const names = [
+    ...text.matchAll(/\b(?:Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday)s?\b/gi),
+  ];
+  const days = names.map(([name]) => DIGEST_WEEKDAYS.indexOf(name.slice(0, 3).toLowerCase()));
+  return days.length ? [...new Set(days)].sort((a, b) => a - b) : null;
+}
+
+export const DIGEST_TOPIC_QUESTION = 'What topic should the recurring digest cover?';
+
+/** Extract the topic from the authorized request or its bound clarification answer. */
+export function recurringDigestTopic(intent: OwnerIntent): string | null {
+  const answer = intent.clarificationAnswer;
+  const authored = answer?.originalRequest ?? intent.ownerAuthoredText;
+  const match =
+    /\b(?:summari[sz]e\s+|(?:digest|summary|roundup|recap)\s+(?:of|about|on|for)\s+)([^\n!?]+)/i.exec(
+      authored,
+    );
+  const candidate = answer?.question.includes(DIGEST_TOPIC_QUESTION)
+    ? answer.text.replace(/^\s*(?:about|on)\s+/i, '')
+    : (match?.[1] ?? '');
+  const topic = candidate
+    .split(
+      /\s+(?:for\s+me\b|(?:right\s+)?here\b|in\s+this\s+(?:chat|thread|conversation)\b|at\s+(?:\d|noon\b|midnight\b)|on\s+(?:weekdays|Sundays?|Mondays?|Tuesdays?|Wednesdays?|Thursdays?|Fridays?|Saturdays?)\b|(?:every|each)\s+(?:day|week|morning|evening|Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday)\b|(?:daily|weekly)\s*$)/i,
+      1,
+    )[0]
+    ?.trim()
+    .replace(/^[“"']+|[.!?,;:“”"']+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (
+    !topic ||
+    topic.length < 3 ||
+    topic.length > 240 ||
+    /^(?:it|this|that|the above|the same(?: thing| topic)?|this topic|that topic|whatever|anything|something|please)$/i.test(
+      topic,
+    ) ||
+    /[!?]/.test(topic)
+  )
+    return null;
+  return topic;
+}
+
+/** Only a current affirmative owner command can authorize a digest change. */
+export function recurringDigestChange(
+  text: string,
+): { action: 'move' } | { action: 'cancel' | 'delete'; name: string } | null {
+  if (
+    /^\s*(?:yes[, ]+)?(?:please\s+)?move\s+(?:it|(?:the|that)\s+digest)\s+(?:right\s+)?here[.!]?\s*$/i.test(
+      text,
+    )
+  ) {
+    return { action: 'move' };
+  }
+  const named =
+    /^\s*(?:(?:could|can|would) you\s+)?(?:please\s+)?(cancel|delete)\s+(?:(?:the|my)\s+)?(.+?)\s+(?:recurring\s+)?digest[.!?]?\s*$/i.exec(
+      text,
+    );
+  const name = named?.[2]?.trim();
+  if (!name) return null;
+  return { action: named?.[1]?.toLowerCase() === 'delete' ? 'delete' : 'cancel', name };
+}
+
 function affirmativeAction(text: string, requestedAction: string): boolean {
   const pattern = new RegExp(
     `(?:^|[.!?;\\n]|\\band\\s+)\\s*(?:please\\s+)?(?:(?:(?:can|could|would)\\s+you\\s+(?:please\\s+)?)?${requestedAction})\\b|\\b(?:I want|I need|I'd like|I would like) you to\\s+${requestedAction}\\b|\\bgo ahead and\\s+${requestedAction}\\b`,
@@ -667,6 +765,14 @@ function scopesFor(text: string): OwnerIntentScope[] {
     )
   )
     scopes.add('personal_write');
+  if (recurringDigestChange(text)) scopes.add('digest_manage');
+  const digestCadence =
+    /\b(?:every\s+(?:day|morning|evening|week|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)|daily|weekly|each\s+(?:day|week|morning|evening|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)|on\s+(?:weekdays|Mondays|Tuesdays|Wednesdays|Thursdays|Fridays|Saturdays|Sundays))\b/i;
+  const digestAction = String.raw`(?:summari[sz]e|(?:give|show|bring|prepare|write|make|create|schedule|set up|post)\b[^!?;\n]{0,100}\b(?:digest|summary|roundup|recap))`;
+  const cadenceFirst = String.raw`(?:every|each|on|daily|weekly)\b[^!?;\n]{0,65}?(?:,\s*|\s+)(?:please\s+)?`;
+  if (digestCadence.test(text) && affirmativeAction(text, `(?:${cadenceFirst})?${digestAction}`)) {
+    scopes.add('digest_schedule');
+  }
   // Registering a confirmation watch is a personal scheduling action. A
   // positively requested application may include the watch after its portal
   // receipt; registration still requires exact approval of every future write.
@@ -901,6 +1007,11 @@ export function latestOwnerIntent(
   return {
     ...current,
     requestKind: 'new_request',
+    clarificationAnswer: {
+      question: continuation.question,
+      text: current.ownerAuthoredText,
+      originalRequest: continuation.ownerAuthoredText,
+    },
     ownerAuthoredText:
       `${continuation.ownerAuthoredText}\nOwner clarification answer: ${current.ownerAuthoredText}`.trim(),
     authorizedScopes: [...new Set([...continuation.authorizedScopes, ...current.authorizedScopes])],

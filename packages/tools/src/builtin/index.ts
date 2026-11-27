@@ -52,6 +52,7 @@ export {
   registerPortableWebWorkspaceTools,
   registerPortableWorkspaceTools,
 } from './portable-web-workspace.js';
+export { registerRecurringDigestTools } from './recurring-digests.js';
 export { registerSportsTools } from './sports.js';
 export { registerPortableTaskTools } from './task-schedule.js';
 export * from './weather.js';

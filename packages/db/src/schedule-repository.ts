@@ -1,11 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import type {
+  DigestScheduleRepository,
   ScheduleOccurrence,
   ScheduleRecord,
-  ScheduleRepository,
   TaskCreateResult,
 } from '@assistant/persistence';
 import {
+  digestLifecycle,
+  digestSchedulePatch,
   GOAL_SUPERSEDED_PROGRESS,
   GOAL_TASK_TERMINAL,
   goalOccurrenceIsCurrent,
@@ -57,7 +59,7 @@ async function commitSerializable<T>(db: Db, commit: (tx: Tx) => Promise<T>): Pr
   }
 }
 
-export function createPostgresScheduleRepository(db: Db): ScheduleRepository {
+export function createPostgresScheduleRepository(db: Db): DigestScheduleRepository {
   return {
     kind: 'schedule-repository',
 
@@ -141,11 +143,32 @@ export function createPostgresScheduleRepository(db: Db): ScheduleRepository {
       return row ?? null;
     },
 
+    async changeDigest(input) {
+      return db.transaction(async (tx) => {
+        await lockSchedule(tx, input.scheduleId);
+        const current = await lockedSchedule(tx, input.scheduleId);
+        const patch = current && digestSchedulePatch(current, input);
+        if (!patch) return null;
+        if (!Object.keys(patch).length) return current;
+        const [updated] = await tx
+          .update(schedules)
+          .set(patch)
+          .where(eq(schedules.id, input.scheduleId))
+          .returning();
+        return updated ?? null;
+      });
+    },
+
     async setOwnerEnabled(agentId, scheduleId, enabled) {
       return db.transaction(async (tx) => {
         await lockSchedule(tx, scheduleId);
         const current = await lockedSchedule(tx, scheduleId);
-        if (!current || current.agentId !== agentId || current.name.startsWith('reminder:'))
+        if (
+          !current ||
+          current.agentId !== agentId ||
+          current.name.startsWith('reminder:') ||
+          digestLifecycle(current)
+        )
           return false;
         const taskTemplate = reactivatedBriefingTemplate(current, enabled, new Date());
         const [updated] = await tx

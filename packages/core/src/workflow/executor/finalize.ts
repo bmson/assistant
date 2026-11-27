@@ -167,7 +167,7 @@ function calendarSkillNextStepOutput(projection: string, nextStep: string): stri
  * system will keep, and which the response contract then has to blank out.
  */
 export const SCHEDULE_DIRECTIVE =
-  '\nThis turn defers work to the future. Before you finish, call task.schedule with a concrete time and a self-contained instruction (or mission.update if this belongs to a mission). Do not promise to continue, watch, or keep updating anything unless that call succeeded — if you cannot schedule it, say so plainly and do the part you can do now.';
+  '\nThis turn defers work to the future. Before you finish, call task.schedule for a one-time follow-up, digest.schedule for an explicitly requested recurring digest in owner chat, or mission.update if this belongs to a mission. Do not promise to continue, watch, or keep updating anything unless that call succeeded — if you cannot schedule it, say so plainly and do the part you can do now.';
 
 function executionEvidence(deps: ExecutorDeps): ExecutionEvidenceRepository {
   return deps.persistence?.executionEvidence ?? createPostgresExecutionEvidenceRepository(deps.db);
@@ -875,6 +875,124 @@ async function recordQualitySignals(
  * response contract still refuses to let prior-turn rows authorise a new
  * send, submission, or booking.
  */
+const digestReceiptSchema = z.object({
+  scheduleId: z.uuid(),
+  conversationId: z.uuid(),
+  inCurrentChat: z.boolean(),
+  topic: z.string(),
+  timezone: z.string(),
+  localTime: z.string(),
+  cadence: z.discriminatedUnion('kind', [
+    z.object({ kind: z.literal('daily') }),
+    z.object({ kind: z.literal('weekly'), days: z.array(z.number().int().min(0).max(6)) }),
+  ]),
+  enabled: z.boolean(),
+  nextRunAt: z.iso.datetime().nullable(),
+  status: z.enum(['saved', 'destination_conflict', 'moved', 'cancelled', 'deleted']).optional(),
+  lifecycle: z.enum(['cancelled', 'deleted']).nullable().optional(),
+});
+
+function describeDigestReceipt(receipt: z.infer<typeof digestReceiptSchema>): string {
+  const topic = receipt.topic.replace(/[`*_[\]<>]/g, '\\$&');
+  if (receipt.lifecycle) {
+    const action = receipt.lifecycle === 'deleted' ? 'Deleted' : 'Cancelled';
+    return `${action} the “${topic}” digest. It has no future runs. Schedule ID ${receipt.scheduleId}.`;
+  }
+  const destination = receipt.inCurrentChat
+    ? 'this chat'
+    : `[the original chat](/chat/${receipt.conversationId})`;
+  const week = [
+    'Sundays',
+    'Mondays',
+    'Tuesdays',
+    'Wednesdays',
+    'Thursdays',
+    'Fridays',
+    'Saturdays',
+  ];
+  const days =
+    receipt.cadence.kind === 'daily'
+      ? 'daily'
+      : new Intl.ListFormat('en-US').format(receipt.cadence.days.map((day) => week[day] ?? ''));
+  const timing = !receipt.enabled
+    ? 'This schedule is disabled.'
+    : receipt.nextRunAt
+      ? `Next run ${new Intl.DateTimeFormat('en-US', { dateStyle: 'medium', timeStyle: 'short', timeZone: receipt.timezone }).format(new Date(receipt.nextRunAt))}.`
+      : 'The next run is pending.';
+  const saved = `“${topic}” is set to post in ${destination} ${days} at ${receipt.localTime} (${receipt.timezone}). ${timing} Schedule ID ${receipt.scheduleId}.`;
+  if (receipt.status === 'moved') return `Moved the digest here. ${saved}`;
+  return receipt.status === 'destination_conflict'
+    ? `${saved} Do you want to keep that destination or move the digest here?`
+    : saved;
+}
+
+function digestReceiptText(rows: ExecutionEvidenceRecord[], draft: string): string | undefined {
+  const results = rows.filter((row) => row.status === 'succeeded');
+  const schedules = results.filter(
+    (row) => row.toolName === 'digest.schedule' || row.toolName === 'digest.manage',
+  );
+  // Preserve the other parts of compound replies and their saved IDs.
+  if (
+    rows.some(
+      (row) =>
+        row.toolName !== 'digest.schedule' &&
+        row.toolName !== 'digest.list' &&
+        row.toolName !== 'digest.manage',
+    )
+  ) {
+    const receipts = new Map<string, string>();
+    for (const row of schedules) {
+      const receipt = digestReceiptSchema.safeParse(row.result);
+      if (receipt.success && !draft.includes(receipt.data.scheduleId)) {
+        receipts.set(receipt.data.scheduleId, describeDigestReceipt(receipt.data));
+      }
+    }
+    return receipts.size ? [draft, ...receipts.values()].join('\n\n') : undefined;
+  }
+  // For a standalone digest turn the stored receipt controls the destination,
+  // even when the model draft describes a different chat.
+  const schedule = schedules.at(-1);
+  if (schedule) {
+    const receipt = digestReceiptSchema.safeParse(schedule.result);
+    if (receipt.success) return describeDigestReceipt(receipt.data);
+    const unresolved = z
+      .object({
+        status: z.enum(['ambiguous', 'move_requires_offer', 'not_found', 'stale_or_unavailable']),
+        matches: z.array(digestReceiptSchema).optional(),
+      })
+      .safeParse(schedule.result);
+    if (unresolved.success) {
+      switch (unresolved.data.status) {
+        case 'ambiguous':
+          return `Which digest do you mean?\n\n${unresolved.data.matches?.map(describeDigestReceipt).join('\n\n') ?? ''}`;
+        case 'move_requires_offer':
+          return 'To move a digest, first ask for that digest here so I can show you its current destination.';
+        case 'not_found':
+          return 'I couldn’t find a digest with that name in your schedules.';
+        case 'stale_or_unavailable':
+          return 'The digest changed before I could update it. Check your saved digests and try again.';
+      }
+    }
+    const rejected = z
+      .object({ status: z.enum(['topic_required', 'topic_mismatch']) })
+      .safeParse(schedule.result);
+    if (rejected.success) {
+      return rejected.data.status === 'topic_required'
+        ? 'What topic should the recurring digest cover?'
+        : 'I couldn’t save the digest with the requested topic. Please restate what it should cover.';
+    }
+    return;
+  }
+  const list = results.findLast((row) => row.toolName === 'digest.list');
+  if (!list) return;
+  const entries = z.object({ digests: z.array(digestReceiptSchema) }).safeParse(list.result);
+  if (!entries.success) return;
+  return (
+    entries.data.digests.map(describeDigestReceipt).join('\n\n') ||
+    'You have no saved recurring digests.'
+  );
+}
+
 export async function stageModelFinalResponse(
   deps: ExecutorDeps,
   task: TaskLease,
@@ -1791,9 +1909,10 @@ export async function stageModelFinalResponse(
       contractNotice: checked.blocked || undefined,
     });
   }
+  const finalText = digestReceiptText(rows, text) ?? text;
   // A known contact's plain answer would otherwise dead-end in the dashboard;
   // propose it back to them (owner-approved) so the thread does not go silent.
-  await maybeEnqueueKnownSenderReply(deps, task, text);
+  await maybeEnqueueKnownSenderReply(deps, task, finalText);
   return stageFinalResponse(
     deps,
     task,
@@ -1801,8 +1920,8 @@ export async function stageModelFinalResponse(
     window,
     {
       ...pending,
-      text,
-      progress: text.slice(0, 200),
+      text: finalText,
+      progress: finalText.slice(0, 200),
       contractNotice: checked.blocked || undefined,
     },
     {

@@ -1,6 +1,7 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { loadConfig, parseFirestoreEmbeddingSpace, resetConfigForTest } from '@assistant/config';
-import { createInstallationStore } from '@assistant/firestore';
+import { extractOwnerIntent } from '@assistant/core/workflow/owner-intent';
+import { createInstallationStore, FirestoreApplicationChatPersistence } from '@assistant/firestore';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const createDb = vi.hoisted(() =>
@@ -61,6 +62,9 @@ const PORTABLE_TOOLS = [
   'contacts.lookup',
   'conversations.search',
   'conversations.context',
+  'digest.list',
+  'digest.manage',
+  'digest.schedule',
   'docs.append',
   'docs.create',
   'docs.get',
@@ -213,6 +217,99 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
       expect(errors.filter((line) => line.includes('PostgreSQL access is unavailable'))).toEqual(
         [],
       );
+      expect(createDb).not.toHaveBeenCalled();
+    });
+
+    it('runs the registered digest tools against Firestore with SQL unavailable', async () => {
+      const deps = composeFirestoreAgent(productionConfig());
+      expect(() => deps.db.select).toThrow('PostgreSQL access is unavailable');
+      const chat = new FirestoreApplicationChatPersistence(store, agentId);
+      const conversation = await chat.createConversation(agentId);
+      const now = new Date('2026-11-26T15:00:00.000Z');
+
+      async function run(name: string, text: string, args: Record<string, unknown> = {}) {
+        const admission = await chat.admitChatTurn({
+          agentId,
+          conversationId: conversation.id,
+          clientOperationId: randomUUID(),
+          requestHash: createHash('sha256').update(text).digest('hex'),
+          text,
+          autonomous: false,
+          force: false,
+          spoken: false,
+        });
+        if (admission.kind !== 'admitted') throw new Error('Expected an admitted owner turn');
+        const tool = deps.registry.get(name)?.tool;
+        if (!tool) throw new Error(`${name} is missing from the Firestore registry`);
+        return tool.execute(tool.inputSchema.parse(args), {
+          agentId,
+          taskId: admission.task.id,
+          conversationId: conversation.id,
+          trust: 'owner',
+          tainted: false,
+          ownerIntent: extractOwnerIntent({
+            text,
+            trust: 'owner',
+            trigger: admission.task.trigger,
+          }),
+          db: deps.db,
+          now: () => now,
+          signal: new AbortController().signal,
+          log: async () => {},
+        });
+      }
+
+      const scheduled = await run(
+        'digest.schedule',
+        'Every Friday at 9 a.m., summarize new library events for me.',
+        { topic: 'new library events', localTime: '09:00', cadence: { kind: 'weekly', days: [5] } },
+      );
+      expect(scheduled).toMatchObject({
+        status: 'saved',
+        conversationId: conversation.id,
+        enabled: true,
+        nextRunAt: '2026-11-27T09:00:00.000Z',
+      });
+      if (
+        !scheduled ||
+        typeof scheduled !== 'object' ||
+        !('scheduleId' in scheduled) ||
+        typeof scheduled.scheduleId !== 'string'
+      ) {
+        throw new Error('Expected a saved schedule ID');
+      }
+      const { scheduleId } = scheduled;
+      const snapshot = store.doc('schedules', scheduleId);
+      expect((await snapshot.get()).data()).toMatchObject({
+        id: scheduleId,
+        agentId,
+        enabled: true,
+        cron: '0 9 * * 5',
+        taskTemplate: { conversationId: conversation.id },
+      });
+      await expect(
+        run('digest.list', 'Which recurring digests are scheduled?'),
+      ).resolves.toMatchObject({
+        digests: [{ scheduleId, conversationId: conversation.id, enabled: true }],
+      });
+      await expect(
+        run('digest.manage', 'Cancel the new library events digest.'),
+      ).resolves.toMatchObject({
+        status: 'cancelled',
+        scheduleId,
+        enabled: false,
+        nextRunAt: null,
+      });
+      expect((await snapshot.get()).data()).toMatchObject({
+        id: scheduleId,
+        agentId,
+        enabled: false,
+        nextRunAt: null,
+        taskTemplate: { digestLifecycle: 'cancelled' },
+      });
+      await expect(run('digest.list', 'List my recurring digests.')).resolves.toMatchObject({
+        digests: [{ scheduleId, lifecycle: 'cancelled', enabled: false }],
+      });
       expect(createDb).not.toHaveBeenCalled();
     });
 

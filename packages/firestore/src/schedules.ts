@@ -1,6 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
   ASSISTANT_HEALTH_MONITOR_SCHEDULE,
+  type DigestChange,
+  type DigestScheduleRepository,
+  digestLifecycle,
+  digestSchedulePatch,
   existingTaskResult,
   GOAL_SUPERSEDED_PROGRESS,
   GOAL_TASK_TERMINAL,
@@ -14,7 +18,6 @@ import {
   type ScheduleCreateInput,
   type ScheduleOccurrence,
   type ScheduleRecord,
-  type ScheduleRepository,
   scheduleBatch,
   scheduleCanRun,
   scheduleMatches,
@@ -63,7 +66,7 @@ function ambiguousName(): Error {
 }
 
 /** Firestore adapter for durable recurring schedules and their task firings. */
-export class FirestoreScheduleRepository implements ScheduleRepository {
+export class FirestoreScheduleRepository implements DigestScheduleRepository {
   readonly kind = 'schedule-repository' as const;
 
   constructor(readonly store: InstallationStore) {}
@@ -293,6 +296,21 @@ export class FirestoreScheduleRepository implements ScheduleRepository {
     });
   }
 
+  async changeDigest(input: DigestChange): Promise<ScheduleRecord | null> {
+    const ref = this.store.doc('schedules', input.scheduleId);
+    return this.store.db.runTransaction(async (tx) => {
+      const snapshot = await tx.get(ref);
+      if (!snapshot.exists) return null;
+      const current = decodeSchedule(snapshot.data());
+      const patch = digestSchedulePatch(current, input);
+      if (!patch) return null;
+      if (!Object.keys(patch).length) return current;
+      await assertPrivacyErasureInactiveInTransaction(tx, this.store, input.agentId);
+      tx.update(ref, encodeRecord(patch));
+      return { ...current, ...patch };
+    });
+  }
+
   async setOwnerEnabled(agentId: string, scheduleId: string, enabled: boolean): Promise<boolean> {
     const ref = this.store.doc('schedules', scheduleId);
     return this.store.db.runTransaction(async (tx) => {
@@ -300,7 +318,12 @@ export class FirestoreScheduleRepository implements ScheduleRepository {
       await assertPrivacyErasureInactiveInTransaction(tx, this.store, agentId);
       if (!snapshot.exists) return false;
       const row = decodeSchedule(snapshot.data());
-      if (row.id !== scheduleId || row.agentId !== agentId || row.name.startsWith('reminder:'))
+      if (
+        row.id !== scheduleId ||
+        row.agentId !== agentId ||
+        row.name.startsWith('reminder:') ||
+        digestLifecycle(row)
+      )
         return false;
       const now = this.store.now();
       const taskTemplate = reactivatedBriefingTemplate(row, enabled, now);

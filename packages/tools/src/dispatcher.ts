@@ -368,7 +368,11 @@ function requiredOwnerIntentScopes(
   if (flags.writesWorkspace === true) required.add('workspace_write');
   if (flags.writesMemory === true) required.add('memory_write');
   if (flags.privateWrite === true) {
-    if (toolName === 'watch.create' || toolName === 'watch.web') {
+    if (toolName === 'digest.schedule') {
+      required.add('digest_schedule');
+    } else if (toolName === 'digest.manage') {
+      required.add('digest_manage');
+    } else if (toolName === 'watch.create' || toolName === 'watch.web') {
       required.add('watch_create');
     } else if (
       /^(?:calendar|reminder|reminders|watches|goals|tasks)\./.test(toolName) ||
