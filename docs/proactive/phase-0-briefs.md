@@ -49,6 +49,8 @@ Shared rules for every brief:
 
 **Change.** On any cap change, run one re-admission pass over parked tasks, oldest first, within the new headroom. Reword the notice as "Paused: $X spent and $Y held against today's $Z limit", with a link the iOS app routes to its Costs screen.
 
+A task paused by a daily or monthly limit shows the recorded spend and outstanding holds for that period. If the ledger cannot be read, the notice says so. The web and iPhone notices open Costs. Other pauses keep their recorded reason.
+
 **Tests.** Raising the cap resumes parked tasks within one sweep, in both drivers. A snapshot test for the notice text.
 
 **Done when.** A raised cap resumes parked work within 1 minute.

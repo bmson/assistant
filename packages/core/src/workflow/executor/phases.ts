@@ -63,9 +63,9 @@ import {
 } from './context-helpers.js';
 import { maybeEnqueueKnownSenderReply, stageFinalResponse } from './finalize.js';
 import {
-  noticeParts,
   notifyAttention,
   notifyOwnerAndConversation,
+  postBudgetPauseNotice,
   postConversationNotice,
   recordGoalBlocked,
   taskBudgetPermissionRequest,
@@ -716,12 +716,7 @@ export async function resumePendingApprovals(rc: RunContext): Promise<ExecuteRes
             outcome.budgetRetry,
           );
           if (!parked) return LOST_LEASE;
-          await postConversationNotice(
-            deps.persistence?.messages ?? db,
-            task,
-            `I'm pausing here — the approved action doesn't fit the remaining budget (${outcome.reason}). It resumes automatically when the budget resets.`,
-            noticeParts('parked'),
-          );
+          await postBudgetPauseNotice(deps, task, { ...outcome, approvedAction: true });
           return { outcome: 'parked', detail: outcome.reason };
         }
         if (outcome.kind === 'executed' && isJobPending(outcome.result)) {
@@ -924,6 +919,7 @@ export async function runDirectDocumentRead(rc: RunContext): Promise<ExecuteResu
         outcome.budgetRetry,
       );
       if (!parked) return LOST_LEASE;
+      await postBudgetPauseNotice(deps, task, outcome);
       return { outcome: 'parked', detail: outcome.reason };
     }
     if (outcome.kind === 'awaiting_approval') {
@@ -1379,12 +1375,7 @@ export async function runPlanPhase(rc: RunContext): Promise<ExecuteResult | { pl
           decision.budgetRetry,
         );
         if (!parked) return LOST_LEASE;
-        await postConversationNotice(
-          deps.persistence?.messages ?? db,
-          task,
-          `I'm pausing here — ${decision.reason}. This resumes automatically when the budget resets; you can also raise the caps on the Costs page.`,
-          noticeParts('parked'),
-        );
+        await postBudgetPauseNotice(deps, task, decision);
         return { outcome: 'parked', detail: decision.reason };
       }
       if (decision?.mode === 'park') {

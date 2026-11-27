@@ -1008,7 +1008,8 @@ struct MessageBubble: View {
             )
         }
         let shape = RoundedRectangle(cornerRadius: AssistantTheme.chatCardCornerRadius, style: .continuous)
-        let diagnostics = kind == .responseContract ? [] : (compact?.diagnostics ?? (text == presentation.summary ? [] : [text]))
+        let isBudgetPause = kind == .parked && text.hasSuffix("[Costs](/costs).")
+        let diagnostics = kind == .responseContract || isBudgetPause ? [] : (compact?.diagnostics ?? (text == presentation.summary ? [] : [text]))
         return Group {
             if kind == .turnFailed || kind == .providerFailed {
                 recoveryNoticeCard(kind, headline: compact?.headline ?? presentation.headline,
@@ -1039,8 +1040,12 @@ struct MessageBubble: View {
                         Text(presentation.summary)
                             .font(.subheadline)
                             .foregroundStyle(AssistantTheme.inkMuted(for: colorScheme))
-                            .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
+                            .lineLimit(dynamicTypeSize.isAccessibilitySize || isBudgetPause ? nil : 2)
                             .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if isBudgetPause, let costsURL = URL(string: "/costs") {
+                        Link("Open Costs", destination: costsURL)
+                            .buttonStyle(AssistantActionButtonStyle(kind: .secondary, compact: true))
                     }
                     if let facts = compact?.facts?.prefix(3), !facts.isEmpty {
                         AssistantFlowLayout(spacing: 8) {
