@@ -33,17 +33,32 @@ import { createIsolatedTestDatabase } from './isolated-test-database.fixture.js'
 const SPACE = { provider: 'synthetic', model: 'booking-fixture', dimensions: 1536, revision: '1' };
 const SUBJECT = 'Lantern Hotel booking confirmation';
 const HEALTH = 'Medical diagnosis: G1-health-marker.';
+const HEALTH_CONTEXT = 'The hotel stay follows an asthma operation.';
+const HOTEL_MENTION = 'The hotel lobby ceiling is painted with g1-violets.';
 const INTIMATE = 'Intimate preference: G1-intimate-marker.';
 const FINANCE = 'Bank loan balance: $968.17.';
 const HISTORY = 'Prescription from an old conversation: G1-old-marker.';
 const DEPOSIT = 'Deposit: $113.28';
 const LOGISTICS = 'Lantern Hotel check-in is October 24, 2027 at 3:00 PM.';
+const CHECKOUT = 'Check-out: October 27, 2027 at noon.';
 const THREAD = 'g1-lantern-thread';
 const MESSAGE = 'g1-lantern-message';
 const UNLABELLED = 'G1-unlabelled-marker.';
-const BODY = [LOGISTICS, HEALTH, UNLABELLED, INTIMATE, FINANCE, DEPOSIT].join('\n');
+const BODY = [
+  LOGISTICS,
+  CHECKOUT,
+  HEALTH,
+  HEALTH_CONTEXT,
+  HOTEL_MENTION,
+  UNLABELLED,
+  INTIMATE,
+  FINANCE,
+  DEPOSIT,
+].join('\n');
 const FORBIDDEN = [
   'G1-health-marker',
+  'asthma operation',
+  'g1-violets',
   'G1-intimate-marker',
   '968.17',
   'G1-old-marker',
@@ -165,8 +180,8 @@ function dispatcher(
                   threadId: THREAD,
                   messageId: MESSAGE,
                   from: 'desk@example.invalid',
-                  subject: SUBJECT,
-                  snippet: `${LOGISTICS}\n${HEALTH}\n${FINANCE}\nDeposit: $692.77`,
+                  subject: `${SUBJECT}\n${HEALTH_CONTEXT}`,
+                  snippet: `${LOGISTICS} ${HEALTH_CONTEXT} ${HOTEL_MENTION}\n${HEALTH}\n${FINANCE}\nDeposit: $692.77`,
                   date: '2027-10-24',
                 },
               ],
@@ -183,7 +198,7 @@ function dispatcher(
                 {
                   messageId: MESSAGE,
                   from: 'desk@example.invalid',
-                  subject: SUBJECT,
+                  subject: `${SUBJECT}\n${HEALTH_CONTEXT}`,
                   text: messageBody(),
                   date: '2027-10-24',
                   sourceLength: messageBody().length,
@@ -249,7 +264,7 @@ describe.each([
       let mailBody = BODY;
       const inputs: unknown[] = [];
       const previews: unknown[] = [];
-      let briefingLead = 'Your Lantern Hotel check-in is coming up.';
+      let briefingLead = `Your Lantern Hotel check-in is coming up. ${HEALTH_CONTEXT}`;
       const router = {
         async object(role: string, input: unknown) {
           inputs.push(input);
@@ -273,7 +288,7 @@ describe.each([
           return {
             ok: true,
             modelId: 'synthetic/g1',
-            text: `${LOGISTICS}\n${HEALTH}`,
+            text: `${LOGISTICS}\n${HEALTH_CONTEXT}`,
             toolCalls: [],
             finishReason: 'stop',
             degraded: false,
@@ -358,6 +373,7 @@ describe.each([
         if (!cardPart?.data) throw new Error('Generated card identity was not saved in the reply');
         const savedCard = await persistence.generatedCards?.get(agentId, cardPart.data.id);
         expect(JSON.stringify(savedCard?.revision.spec)).toContain(LOGISTICS);
+        expect(JSON.stringify(savedCard?.revision.spec)).toContain(CHECKOUT);
         expectWithheld(savedCard);
         const explicit = await ask(
           'Read the Lantern Hotel confirmation email and tell me the deposit amount.',
@@ -372,6 +388,14 @@ describe.each([
         expect(noDeposit?.text).toContain('could not verify the deposit');
         expectWithheld(noDeposit);
         expect(inputs.some((input) => JSON.stringify(input).includes(LOGISTICS))).toBe(true);
+        expect(
+          inputs.some((input) => {
+            const payload = JSON.stringify(input);
+            return (
+              payload.includes(THREAD) && payload.includes(MESSAGE) && payload.includes(LOGISTICS)
+            );
+          }),
+        ).toBe(true);
         expectWithheld(inputs);
 
         const now = new Date();
@@ -383,7 +407,7 @@ describe.each([
           channelMessageId: MESSAGE,
           fromEmail: 'desk@example.invalid',
           fromName: 'Lantern Hotel',
-          subject: `${SUBJECT}\n${FINANCE}`,
+          subject: `${SUBJECT}\n${HEALTH_CONTEXT}\n${FINANCE}`,
           category: 'travel',
           importance: 5,
           contentTrust: 'known',
@@ -404,7 +428,7 @@ describe.each([
           dates: [
             {
               iso: checkIn.toISOString(),
-              what: `Lantern Hotel check-in\n${INTIMATE}\n${DEPOSIT}`,
+              what: `Lantern Hotel check-in\n${HEALTH_CONTEXT}\n${INTIMATE}\n${DEPOSIT}`,
               dateRole: 'event_start',
               lifecycle: 'confirmed',
               bookingIdentity: 'G1LANTERN',
@@ -414,7 +438,7 @@ describe.each([
           updatedAt: now,
         });
         for (const composedFallback of [false, true]) {
-          if (composedFallback) briefingLead = HEALTH;
+          if (composedFallback) briefingLead = HEALTH_CONTEXT;
           const { task } = await persistence.tasks.createTask({
             agentId,
             type: 'scheduled',

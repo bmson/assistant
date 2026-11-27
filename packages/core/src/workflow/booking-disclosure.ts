@@ -8,11 +8,19 @@ const OWNER_BOOKING =
   /\b(?:my|our)\b[^.!?\n]{0,100}\b(?:bookings?|reservations?|hotel|lodging|accommodation|check[- ]?in|check[- ]?out|itinerary|inbox|email)\b/i;
 const NAMED_MAIL_READ =
   /\b(?:read|open|find|check|search|look up)\b[^.!?\n]{0,100}\b(?:confirmation|booking|reservation)\s+(?:e-?mail|message|thread)\b/i;
-const LOGISTICS =
-  /\b(?:hotel|lodging|accommodation|bookings?|reservations?|check[- ]?in|check[- ]?out|itinerary|flight|departure|arrival|departs?|arrives?|gate|terminal|address|confirmation|duration|nights?|cancell?ed|rescheduled)\b/i;
+// Require a booking field, a date/time tied to a booking event, or a booking
+// heading. A property name or a travel noun alone is not evidence of logistics.
+const LOGISTICS_FIELD =
+  /^(?:[-*]\s+)?(?:hotel(?: name)?|property|accommodation|(?:hotel |property )?address|room type|(?:booking|reservation|confirmation) (?:reference|number|code|id)|flight(?: number)?|gate|terminal)\s*:\s*\S/i;
+const LOGISTICS_TIME =
+  /\b(?:check[- ]?(?:in|out)|departure|arrival|departs?|arrives?)\s*(?:(?:is|starts|opens|closes)\s+)?(?:(?:at|on|from|by|until|after)\s+|[:–—-]\s*)?(?:\d|noon\b|midnight\b|(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d)/i;
+const BOOKING_HEADING =
+  /^(?:[\p{L}\p{N}'’&(), -]{1,100}\s+)?(?:(?:booking|reservation) (?:confirmation|confirmed|cancelled|canceled|rescheduled)|itinerary)(?:\s*[:#]\s*[\w-]+)?[.!]?$/iu;
+const BOOKING_CONTEXT =
+  /\b(?:follows?|precedes?|because|due to|in connection with)\b|\b(?:after|before)\s+(?:the|an?|my|our|your)\b/i;
 const LODGING = /\b(?:hotel|lodging|accommodation)\b/i;
 const HEALTH =
-  /\b(?:health|medical|diagnos(?:is|ed)|prescriptions?|medication|therapy|therapist|patient|clinic|doctor|pregnan\w*|fertility|allerg\w*|HIV|A1c|oncology|chemotherapy|disabilit\w*)\b/i;
+  /\b(?:health|medical|diagnos(?:is|ed)|prescriptions?|medication|therapy|therapist|patient|clinic|doctor|pregnan\w*|fertility|allerg\w*|HIV|A1c|oncology|chemotherapy|asthma|surger(?:y|ies)|surgical|disabilit\w*)\b/i;
 const INTIMATE =
   /\b(?:intimate|sexual\w*|affairs?|mistress|sex|libido|bedroom preference|dating history|relationship counselling|relationship counseling|private partner)\b/i;
 const FINANCES =
@@ -89,8 +97,13 @@ export function bookingMailTitle(value: string): boolean {
   return BOOKING.test(value) || LODGING.test(value);
 }
 
-function isPrivateBookingClause(clause: string): boolean {
-  return HEALTH.test(clause) || INTIMATE.test(clause) || FINANCES.test(clause);
+function withholdBookingClause(clause: string): boolean {
+  return (
+    HEALTH.test(clause) ||
+    INTIMATE.test(clause) ||
+    FINANCES.test(clause) ||
+    (bookingMailTitle(clause) && BOOKING_CONTEXT.test(clause))
+  );
 }
 
 export function bookingDepositFacts(value: string): string[] {
@@ -103,7 +116,7 @@ function bookingClauses(value: string): string[] {
 
 export function bookingText(value: string): string {
   const clauses = bookingClauses(value);
-  const kept = clauses.filter((clause) => !isPrivateBookingClause(clause));
+  const kept = clauses.filter((clause) => !withholdBookingClause(clause));
   return kept.length === clauses.length ? value : kept.join('\n').trim();
 }
 
@@ -122,9 +135,15 @@ function bookingFields(value: unknown, mail = false, field?: string): unknown {
       // Mail can contain unlabelled notes and continuations. Project booking
       // lines only, even when a line has no recognized sensitive vocabulary.
       return bookingClauses(value)
-        .filter((clause) => LOGISTICS.test(clause) && !isPrivateBookingClause(clause))
-        .join('\n')
-        .trim();
+        .map((clause) => clause.trim())
+        .filter(
+          (clause) =>
+            !withholdBookingClause(clause) &&
+            (LOGISTICS_FIELD.test(clause) ||
+              LOGISTICS_TIME.test(clause) ||
+              BOOKING_HEADING.test(clause)),
+        )
+        .join('\n');
     }
     return bookingText(value);
   }
