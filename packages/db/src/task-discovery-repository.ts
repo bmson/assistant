@@ -2,6 +2,7 @@ import {
   estimatedCostOperationLocator,
   needsYouTaskStatuses,
   type TaskDiscoveryRepository,
+  taskActivityDiagnostics,
 } from '@assistant/persistence';
 import { and, count, desc, eq, inArray, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
 import { notChatAdmissionCancellationSql } from './chat-admission-projection.js';
@@ -72,10 +73,14 @@ export function createPostgresTaskDiscoveryRepository(db: Db): TaskDiscoveryRepo
         )
         .orderBy(desc(tasks.updatedAt), tasks.id)
         .limit(input.limit + 1);
-      const selected = rows.slice(0, input.limit).map(({ state, ...row }) => ({
-        ...row,
-        estimatedCostOperationId: estimatedCostOperationLocator(row.status, state),
-      }));
+      const selected = rows.slice(0, input.limit).map(({ state, ...row }) => {
+        const diagnostics = taskActivityDiagnostics(state);
+        return {
+          ...row,
+          ...(diagnostics.length ? { diagnostics } : {}),
+          estimatedCostOperationId: estimatedCostOperationLocator(row.status, state),
+        };
+      });
       const waiting = selected
         .filter((row) => row.status === 'waiting_approval' || row.status === 'needs_attention')
         .map((row) => row.id);

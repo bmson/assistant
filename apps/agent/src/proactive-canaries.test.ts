@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { loadConfig } from '@assistant/config';
+import { type Config, loadConfig, resetConfigForTest } from '@assistant/config';
 import { type ExecutorDeps, executeTask } from '@assistant/core';
 import {
   assessProactiveCanaries,
@@ -9,12 +9,14 @@ import {
   agents,
   ambientSnapshots,
   assertPostgresInstallationOwner,
+  conversations,
   createPostgresExecutionPersistence,
   createPostgresScheduleRepository,
   type Db,
   emailIngest,
   googleCalendarConnections,
   locationPings,
+  messages,
   notificationPrefs,
 } from '@assistant/db';
 import {
@@ -32,8 +34,8 @@ import {
   type ScheduleRepository,
 } from '@assistant/persistence';
 import type { ApnsClient } from '@assistant/tools/modules/push';
-import { eq } from 'drizzle-orm';
-import { describe, expect, it, vi } from 'vitest';
+import { and, eq } from 'drizzle-orm';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { runAssistantHealthMonitor } from '../../../packages/core/src/workflow/health-monitor.js';
 import {
   disposeStore,
@@ -50,7 +52,7 @@ import { createIsolatedTestDatabase } from './isolated-test-database.fixture.js'
 
 const HOUR = 60 * 60_000;
 const FIX = new Date('2026-11-18T08:00:00.000Z');
-const config = loadConfig({
+const fixtureEnvironment = {
   ASSISTANT_MODULES: 'calendar,sms',
   GOOGLE_OAUTH_CLIENT_ID: 'fixture-id',
   GOOGLE_OAUTH_CLIENT_SECRET: 'fixture-secret',
@@ -60,7 +62,14 @@ const config = loadConfig({
   TWILIO_AUTH_TOKEN: 'fixture-token',
   TWILIO_FROM_NUMBER: '+15550101111',
   OWNER_PHONE: '+15550102222',
+};
+
+let config: Config;
+beforeEach(() => {
+  resetConfigForTest();
+  config = loadConfig(fixtureEnvironment);
 });
+afterEach(resetConfigForTest);
 
 const source = { lat: '10.0', lng: '20.0', accuracyM: 30, source: 'shortcut', capturedAt: FIX };
 const cachedWeather = {
@@ -82,6 +91,7 @@ interface Fixture {
   mail(at: Date): Promise<() => Promise<unknown>>;
   prefs(start: number | null, end: number | null, cap: number | null): Promise<unknown>;
   google(state: GoogleCalendarConnectionState): Promise<void>;
+  notificationTexts(): Promise<string[]>;
   close(): Promise<void>;
 }
 
@@ -126,6 +136,14 @@ async function postgres(): Promise<Fixture> {
           target: googleCalendarConnections.agentId,
           set: { state },
         });
+    },
+    async notificationTexts() {
+      const rows = await db
+        .select({ text: messages.text })
+        .from(messages)
+        .innerJoin(conversations, eq(messages.conversationId, conversations.id))
+        .where(and(eq(conversations.agentId, owner), eq(conversations.title, 'Notifications')));
+      return rows.map((row) => row.text);
     },
   };
 }
@@ -180,7 +198,37 @@ async function firestore(): Promise<Fixture> {
     async google(state) {
       await store.doc('googleCalendarConnections', owner).set({ id: owner, agentId: owner, state });
     },
+    async notificationTexts() {
+      const notices = await store
+        .collection('conversations')
+        .where('agentId', '==', owner)
+        .where('title', '==', 'Notifications')
+        .limit(1)
+        .get();
+      const conversation = notices.docs[0];
+      if (!conversation) return [];
+      const rows = await store
+        .collection('messages')
+        .where('conversationId', '==', conversation.get('id'))
+        .get();
+      return rows.docs.map((row) => String(row.get('text')));
+    },
     close: () => disposeStore(store),
+  };
+}
+
+function calendarConnection() {
+  return {
+    id: randomUUID(),
+    credentialVersion: 1,
+    accessTokenEncrypted: null,
+    accessTokenExpiresAt: null,
+    refreshLease: null,
+    account: { subject: 'synthetic', email: 'owner@example.test' },
+    refreshTokenEncrypted: 'sealed',
+    scopes: [GOOGLE_CALENDAR_READ_SCOPE],
+    status: 'connected' as const,
+    connectedAt: FIX.toISOString(),
   };
 }
 
@@ -251,6 +299,93 @@ for (const [driver, fixture] of [
 ] as const) {
   describe(driver, () => {
     it.skipIf(driver === 'Firestore' && !process.env.FIRESTORE_EMULATOR_HOST)(
+      'saves one actionable reconnect notice per Calendar grant across outages and lost receipts',
+      async () => {
+        const f = await fixture();
+        try {
+          const canaries = f.persistence.proactiveCanaries;
+          const google = f.persistence.googleCalendarConnection;
+          if (!canaries || !google) throw new Error('Missing Calendar repositories');
+          const saveRevokedGrant = () =>
+            f.google({
+              version: 1,
+              adopted: true,
+              ownerId: f.owner,
+              revision: 1,
+              flow: null,
+              connection: { ...calendarConnection(), status: 'reconnect_required' },
+            });
+          const run = async (persistence = f.persistence) => {
+            const { task } = await persistence.tasks.createTask({
+              agentId: f.owner,
+              title: 'Synthetic health check',
+              type: 'scheduled',
+              trust: 'assistant',
+              trigger: { source: 'schedule', payload: { job: 'health.monitor' } },
+            });
+            return (
+              await executeTask(
+                {
+                  db: f.db,
+                  persistence,
+                  router: {} as ExecutorDeps['router'],
+                  dispatcher: {} as ExecutorDeps['dispatcher'],
+                },
+                task.id,
+              )
+            ).outcome;
+          };
+          const warning = 'Google Calendar access expired. Reconnect in Google Calendar settings.';
+          await saveRevokedGrant();
+          expect(
+            await run({
+              ...f.persistence,
+              proactiveCanaries: {
+                ...canaries,
+                google: {
+                  get: async () => {
+                    throw new Error('Synthetic reader outage');
+                  },
+                },
+              },
+            }),
+          ).toBe('done');
+          expect(await f.notificationTexts()).toEqual([]);
+
+          for (const alreadySaved of [false, true]) {
+            expect(
+              await run({
+                ...f.persistence,
+                messages: {
+                  kind: 'message-repository',
+                  async append(input) {
+                    if (input.text !== warning) return f.persistence.messages.append(input);
+                    if (alreadySaved) await f.persistence.messages.append(input);
+                    throw new Error('Synthetic write or acknowledgement failure');
+                  },
+                },
+              }),
+            ).toBe('failed');
+            expect(await f.notificationTexts()).toEqual(alreadySaved ? [warning] : []);
+          }
+          expect(await Promise.all([run(), run()])).toEqual(['done', 'done']);
+          expect(await f.notificationTexts()).toEqual([warning]);
+
+          await google.disconnect(f.owner);
+          expect((await google.get(f.owner))?.connection).toBeNull();
+          expect(await run()).toBe('done');
+          expect(await f.notificationTexts()).toEqual([warning]);
+          await saveRevokedGrant();
+          expect(await run()).toBe('done');
+          expect(await f.notificationTexts()).toEqual([warning, warning]);
+        } finally {
+          await f.close();
+        }
+      },
+      90_000,
+    );
+
+    it.skipIf(driver === 'Firestore' && !process.env.FIRESTORE_EMULATOR_HOST)(
       'checks the local connection, phone and weather freshness and the reserved SMS quota',
       async () => {
         const f = await fixture();
@@ -289,18 +424,7 @@ for (const [driver, fixture] of [
           });
           const phone = await seedPhone(f);
           await f.weather();
-          const connection = {
-            id: randomUUID(),
-            credentialVersion: 1,
-            accessTokenEncrypted: null,
-            accessTokenExpiresAt: null,
-            refreshLease: null,
-            account: { subject: 'synthetic', email: 'owner@example.test' },
-            refreshTokenEncrypted: 'sealed',
-            scopes: [GOOGLE_CALENDAR_READ_SCOPE],
-            status: 'connected' as const,
-            connectedAt: FIX.toISOString(),
-          };
+          const connection = calendarConnection();
           const google = {
             version: 1 as const,
             adopted: true,

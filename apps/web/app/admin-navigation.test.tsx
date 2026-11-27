@@ -25,6 +25,13 @@ describe('owner browser navigation', () => {
     expect(html).not.toContain('href="/security"');
   });
 
+  it('opens Activity and marks its run details as active', () => {
+    path.value = '/tasks/00000000-0000-4000-8000-000000000001';
+    const html = renderToStaticMarkup(createElement(AdminNavigation, { passkey: false }));
+    expect(html).toMatch(/href="\/tasks" aria-current="page"[^>]*>Activity<\/a>/);
+    path.value = '/chat';
+  });
+
   it('keeps passkey security visible alongside Chat', () => {
     const html = renderToStaticMarkup(createElement(AdminNavigation, { passkey: true }));
     expect(html).toContain('href="/chat"');

@@ -21,6 +21,69 @@ export function isActivityCanary(trigger: unknown): boolean {
   return value === true || value === 'true';
 }
 
+export interface TaskActivityDiagnostic {
+  id: string;
+  text: string;
+}
+
+const MAX_DIAGNOSTICS = 32;
+const MAX_DIAGNOSTIC_TEXT = 3_000;
+const EXHAUSTED_RETRIES_TEXT =
+  'This scheduled run exhausted its retries. You can retry it in Activity on your iPhone.';
+const LEGACY_EXHAUSTED_RETRIES_TEXT =
+  'This scheduled run exhausted its retries. You can retry it from Activity.';
+
+export function taskActivityDiagnostics(state: unknown): TaskActivityDiagnostic[] {
+  const records = (state as { activityDiagnostics?: unknown } | null)?.activityDiagnostics;
+  if (!Array.isArray(records)) return [];
+  return records.slice(-MAX_DIAGNOSTICS).flatMap((record) => {
+    if (!record || typeof record.id !== 'string' || typeof record.text !== 'string') return [];
+    const text =
+      record.id.startsWith('retries-exhausted:') && record.text === LEGACY_EXHAUSTED_RETRIES_TEXT
+        ? EXHAUSTED_RETRIES_TEXT
+        : record.text;
+    return [{ id: record.id, text: text.slice(0, MAX_DIAGNOSTIC_TEXT) }];
+  });
+}
+
+export function recordTaskActivityDiagnostic(
+  state: unknown,
+  diagnostic: TaskActivityDiagnostic,
+): Record<string, unknown> | null {
+  const records = taskActivityDiagnostics(state);
+  if (records.some(({ id }) => id === diagnostic.id)) return null;
+  return {
+    ...(state && typeof state === 'object' && !Array.isArray(state) ? state : {}),
+    activityDiagnostics: [
+      ...records.slice(1 - MAX_DIAGNOSTICS),
+      { id: diagnostic.id, text: diagnostic.text.slice(0, MAX_DIAGNOSTIC_TEXT) },
+    ],
+  };
+}
+
+export function isActivityDiagnosticJob(
+  task: Pick<Records['tasks'], 'trigger' | 'trust' | 'conversationId'>,
+): boolean {
+  if (task.trust !== 'assistant' || task.conversationId) return false;
+  const trigger = task.trigger as { source?: unknown; payload?: { job?: unknown } } | null;
+  if (trigger?.source !== 'schedule') return false;
+  const job = trigger.payload?.job;
+  return job === 'self.repair' || job === 'health.monitor' || job === 'dream.run';
+}
+
+export function activityRetriesExhaustedDiagnostic(
+  queueGeneration: number,
+): TaskActivityDiagnostic {
+  return {
+    id: `retries-exhausted:${queueGeneration}`,
+    text: EXHAUSTED_RETRIES_TEXT,
+  };
+}
+
+export function activityDiagnosticDeduplicationKey(agentId: string, id: string): string | null {
+  return id.startsWith('self-repair:') ? `activity-diagnostic:${agentId}:${id}` : null;
+}
+
 export type ActivityTaskRecord = Pick<
   Records['tasks'],
   | 'id'

@@ -275,6 +275,7 @@ export class FirestoreTaskActivityRepository
         'progress',
         'progressPercent',
         'plan',
+        'state.activityDiagnostics',
         'state.requestChecklist',
         'archivedAt',
         'autonomyGrant',

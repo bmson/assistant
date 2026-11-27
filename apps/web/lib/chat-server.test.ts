@@ -225,7 +225,7 @@ describe.skipIf(!localEmulator)('Firestore web chat routes with PostgreSQL offli
     ).toBe(404);
   }, 30_000);
 
-  it('closes unsupported web surfaces while leaving chat and auth reachable', async () => {
+  it('closes unsupported web surfaces while leaving chat, Activity reads, and auth reachable', async () => {
     const { proxy } = await import('../proxy.js');
     const request = (path: string, method = 'GET') =>
       new NextRequest(`http://localhost${path}`, { method });
@@ -251,7 +251,8 @@ describe.skipIf(!localEmulator)('Firestore web chat routes with PostgreSQL offli
       expect(response.headers.get('location')).toBe('http://localhost/settings');
       expect(proxy(request(path, 'POST')).status).toBe(410);
     }
-    expect(proxy(request('/tasks')).status).toBe(307);
+    expect(proxy(request('/tasks')).headers.get('x-middleware-next')).toBe('1');
+    expect(proxy(request('/tasks', 'POST')).status).toBe(410);
     expect(proxy(request('/api/mobile/v1/chats', 'POST')).status).toBe(200);
     expect(proxy(request('/api/chat', 'POST')).status).toBe(200);
     expect(proxy(request('/api/mobile/v1/chat/status')).status).toBe(200);

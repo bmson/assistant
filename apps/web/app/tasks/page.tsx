@@ -1,6 +1,5 @@
-import { type ActivityFilter, terminalTaskStatuses } from '@assistant/application/tasks';
+import type { ActivityFilter } from '@assistant/application/tasks';
 import {
-  Archive,
   CalendarClock,
   CircleCheck,
   CircleX,
@@ -27,9 +26,7 @@ import {
   segmentedItemActiveClass,
   segmentedItemClass,
 } from '@/lib/ui';
-import { SubmitButton } from '@/lib/ui-client';
 import { displayTaskStatus, StatusChip, taskTypeLabel, trustLabel } from '@/lib/views';
-import { archiveOldTasks, archiveTask, restoreTask } from './actions';
 import { SecurityNoticeReview } from './security-notice-review';
 import { SpendingActivityReview } from './spending-activity-review';
 
@@ -83,26 +80,10 @@ export default async function TasksPage({
   searchParams: Promise<{
     view?: string;
     filter?: string;
-    archiveOperation?: string;
-    archivedTotal?: string;
-    archiveComplete?: string;
   }>;
 }) {
   await requireOwner();
-  const {
-    view,
-    filter: rawFilter,
-    archiveOperation: rawArchiveOperation,
-    archivedTotal: rawArchivedTotal,
-    archiveComplete,
-  } = await searchParams;
-  const archiveOperation =
-    rawArchiveOperation && /^[0-9a-f-]{36}$/i.test(rawArchiveOperation)
-      ? rawArchiveOperation
-      : undefined;
-  const archivedTotalValue = Number(rawArchivedTotal);
-  const archivedTotal =
-    Number.isSafeInteger(archivedTotalValue) && archivedTotalValue >= 0 ? archivedTotalValue : null;
+  const { view, filter: rawFilter } = await searchParams;
   const archived = view === 'archived';
   const filter = FILTERS.some((item) => item.value === rawFilter)
     ? (rawFilter as ActivityFilter)
@@ -138,48 +119,13 @@ export default async function TasksPage({
             <Link href="/tasks" className={btn.outline}>
               Current activity
             </Link>
-          ) : (
-            <>
-              {archivedCount > 0 ? (
-                <Link href="/tasks?view=archived" className={btn.outline}>
-                  Archived ({archivedCount})
-                </Link>
-              ) : null}
-              <form action={archiveOldTasks}>
-                {filter === 'needs-you' ? (
-                  <input type="hidden" name="scope" value="stale-attention" />
-                ) : null}
-                {archiveOperation ? (
-                  <input type="hidden" name="operationId" value={archiveOperation} />
-                ) : null}
-                <SubmitButton pendingLabel="Archiving…">
-                  <Archive className="size-3.5" aria-hidden="true" />
-                  {archiveOperation
-                    ? `Continue archiving (${archivedTotal ?? 0})`
-                    : filter === 'needs-you'
-                      ? 'Clear stale'
-                      : 'Archive old'}
-                </SubmitButton>
-              </form>
-            </>
-          )
+          ) : archivedCount > 0 ? (
+            <Link href="/tasks?view=archived" className={btn.outline}>
+              Archived ({archivedCount})
+            </Link>
+          ) : null
         }
       />
-
-      {!archived && filter === 'needs-you' ? (
-        <p className="mt-4 text-sm text-muted-foreground">
-          Clear stale archives items that have needed attention for over 30 days and have no pending
-          approval.
-        </p>
-      ) : null}
-
-      {archivedTotal !== null ? (
-        <p className="mt-4 text-sm text-muted-foreground" role="status">
-          {archiveComplete === 'false'
-            ? `Archived ${archivedTotal} older tasks so far. Continue to process the next bounded batch.`
-            : `Archived ${archivedTotal} older ${archivedTotal === 1 ? 'task' : 'tasks'}.`}
-        </p>
-      ) : null}
 
       {!archived ? (
         <nav aria-label="Filter activity" className={`${segmentedControlClass} mt-6`}>
@@ -230,10 +176,7 @@ export default async function TasksPage({
               <div className={cardShellClass}>
                 {group.items.map((task, index) => {
                   const Icon = taskIcon[task.status as keyof typeof taskIcon] ?? Clock3;
-                  const terminal = terminalTaskStatuses.includes(
-                    task.status as (typeof terminalTaskStatuses)[number],
-                  );
-                  const shownStatus = displayTaskStatus(task.status, task.hasPendingApproval);
+                  const shownStatus = displayTaskStatus(task.status, !task.stuckWaiting);
                   const spendingOperationId =
                     'estimatedCostOperationId' in task &&
                     typeof task.estimatedCostOperationId === 'string' &&
@@ -246,7 +189,7 @@ export default async function TasksPage({
                     // like a list you can move through, not a static table.
                     <article
                       key={task.id}
-                      className={`grid grid-cols-[2rem_minmax(0,1fr)] gap-3 px-4 py-4 motion-safe:transition-colors hover:bg-sunken/40 sm:grid-cols-[2rem_minmax(0,1fr)_auto] sm:items-center sm:px-5 ${
+                      className={`grid grid-cols-[2rem_minmax(0,1fr)] gap-3 px-4 py-4 motion-safe:transition-colors hover:bg-sunken/40 sm:items-center sm:px-5 ${
                         index > 0 ? 'border-t border-edge' : ''
                       }`}
                     >
@@ -286,28 +229,6 @@ export default async function TasksPage({
                           ]}
                         />
                       </div>
-                      {/* The title already opens the task — a per-row "Open"
-                          button restated the link as chrome. Only a real
-                          state change earns a button here. */}
-                      {archived ||
-                      terminal ||
-                      (task.status === 'needs_attention' && !task.hasPendingApproval) ? (
-                        <div className="col-start-2 flex items-center gap-2 sm:col-start-auto sm:justify-end">
-                          {archived ? (
-                            <form action={restoreTask.bind(null, task.id)}>
-                              <SubmitButton size="sm" pendingLabel="Restoring…">
-                                Restore
-                              </SubmitButton>
-                            </form>
-                          ) : (
-                            <form action={archiveTask.bind(null, task.id)}>
-                              <SubmitButton size="sm" pendingLabel="Archiving…">
-                                Archive
-                              </SubmitButton>
-                            </form>
-                          )}
-                        </div>
-                      ) : null}
                     </article>
                   );
                 })}
