@@ -1,15 +1,15 @@
-# Workflow filename retained for existing branch checks; this run qualifies the current 143 candidate.
-# Credential-free qualification of the exact schema-143 candidate images.
+# Workflow filename retained for existing branch checks; this run qualifies the current 145 candidate.
+# Credential-free qualification of the exact schema-145 candidate images.
 # Images are built locally, never pushed; migration and service checks use only
 # an allocator-owned local PostgreSQL fixture.
-name: Memory witness schema 143 qualification
+name: Memory witness schema 145 qualification
 # Bound: build step <=150m (six 24m builds, <=1m total kill grace, 5m
 # wrapper); image inspection/probes <=12m (eight probes at <=75s each, six
 # image inspections at <=5s each, plus <=90s wrapper/kill grace); exact lease
 # drain <=4m; manifest <=1m; image archive <=8m; checkout/setup/builder init
 # <=11m; builder teardown/proof staging/artifact uploads <=9m; job margin <=5m. Sum: 200m.
 concurrency:
-  group: memory-witness-143-${{ github.event.pull_request.number }}
+  group: memory-witness-145-${{ github.event.pull_request.number }}
   cancel-in-progress: false
 on:
   pull_request:
@@ -72,13 +72,13 @@ jobs:
       contents: read
     env:
       SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
-      BUILDER: memory-witness-143-${{ github.run_id }}-${{ github.run_attempt }}
+      BUILDER: memory-witness-145-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Initialize runner-derived private paths
         timeout-minutes: 1
         env:
           DOCKER_CONFIG: ${{ runner.temp }}/memory-witness-docker
-          PROOF: ${{ runner.temp }}/memory-witness-143-proof
+          PROOF: ${{ runner.temp }}/memory-witness-145-proof
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -355,7 +355,7 @@ jobs:
           with open(receipt,'w') as f: json.dump(value,f,sort_keys=True);f.write('\n')
           if not value['allRegisteredAbsent']: raise SystemExit('registered owned probe cleanup is incomplete or unknown')
           PY
-      - name: Admit exact local image IDs to the schema 143 manifest
+      - name: Admit exact local image IDs to the schema 145 manifest
         timeout-minutes: 1
         shell: bash
         run: |
@@ -366,18 +366,18 @@ jobs:
           for role in ['agent','web','browser','code','processor']: print(x[role])
           PY
           )
-          node infra/gcp/release-manifest.mjs create "$PROOF/schema-143-local-image-manifest.json" \
-            "memory-witness-143-${SOURCE_SHA:0:12}" local.invalid/assistant agent,web,browser,code,processor postgres "${ids[@]}"
-          node infra/gcp/release-manifest.mjs validate "$PROOF/schema-143-local-image-manifest.json"
-          python3 - "$PROOF/schema-143-local-image-manifest.json" "$PROOF/role-images.json" <<'PY'
+          node infra/gcp/release-manifest.mjs create "$PROOF/schema-145-local-image-manifest.json" \
+            "memory-witness-145-${SOURCE_SHA:0:12}" local.invalid/assistant agent,web,browser,code,processor postgres "${ids[@]}"
+          node infra/gcp/release-manifest.mjs validate "$PROOF/schema-145-local-image-manifest.json"
+          python3 - "$PROOF/schema-145-local-image-manifest.json" "$PROOF/role-images.json" <<'PY'
           import json,sys
           manifest,receipt=map(lambda p:json.load(open(p)),sys.argv[1:])
-          assert manifest['schemaVersion']==143
+          assert manifest['schemaVersion']==145
           assert manifest['selected']==['agent','web','browser','code','processor']
           for role in manifest['selected']:
               assert manifest['components'][role]['digest']==receipt['images'][role]
-              assert manifest['components'][role]['schema']['min']==143
-              assert manifest['components'][role]['schema']['max']==143
+              assert manifest['components'][role]['schema']['min']==145
+              assert manifest['components'][role]['schema']['max']==145
               if role in ('agent','web'):
                   assert manifest['components'][role]['apiContract']==3
                   assert manifest['components'][role]['peerApi']=={'min':3,'max':3}
@@ -408,7 +408,7 @@ jobs:
         shell: bash
         run: |
           python3 -B infra/ci/retain-builder-small-proof.py \
-            --proof "$PROOF" --output "$RUNNER_TEMP/memory-witness-143-builder-proof" \
+            --proof "$PROOF" --output "$RUNNER_TEMP/memory-witness-145-builder-proof" \
             --source-sha "$SOURCE_SHA" --run-id "$GITHUB_RUN_ID" \
             --run-attempt "$GITHUB_RUN_ATTEMPT" --job-key "$GITHUB_JOB"
       - name: Retain mandatory small builder proof
@@ -416,20 +416,20 @@ jobs:
         if: always()
         timeout-minutes: 3
         with:
-          name: memory-witness-143-builder-proof-${{ github.event.pull_request.head.sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/memory-witness-143-builder-proof/
+          name: memory-witness-145-builder-proof-${{ github.event.pull_request.head.sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/memory-witness-145-builder-proof/
           retention-days: 7
           if-no-files-found: error
       - name: Identify this build's image archive
         id: image-artifact
         if: always()
-        run: echo "name=memory-witness-143-images-${SOURCE_SHA}-run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+        run: echo "name=memory-witness-145-images-${SOURCE_SHA}-run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808
         if: always()
         timeout-minutes: 3
         with:
           name: ${{ steps.image-artifact.outputs.name }}
-          path: ${{ runner.temp }}/memory-witness-143-proof/
+          path: ${{ runner.temp }}/memory-witness-145-proof/
           retention-days: 7
           if-no-files-found: error
 
@@ -450,7 +450,7 @@ jobs:
         timeout-minutes: 1
         env:
           DOCKER_CONFIG: ${{ runner.temp }}/memory-witness-db-docker
-          PROOF: ${{ runner.temp }}/memory-witness-143-db-proof
+          PROOF: ${{ runner.temp }}/memory-witness-145-db-proof
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -465,7 +465,7 @@ jobs:
         timeout-minutes: 3
         with:
           name: ${{ needs.build.outputs.image-artifact }}
-          path: ${{ runner.temp }}/memory-witness-143-images
+          path: ${{ runner.temp }}/memory-witness-145-images
       - name: Load immutable local role image IDs
         timeout-minutes: 4
         shell: bash
@@ -479,11 +479,11 @@ jobs:
           echo "$RUNNER_TEMP/memory-witness-db-bin" >> "$GITHUB_PATH"
           export PATH="$RUNNER_TEMP/memory-witness-db-bin:$PATH"
           timeout --signal=TERM --kill-after=2s 10s docker version --format '{{json .Server}}' > "$PROOF/docker-server.json"
-          cd "$RUNNER_TEMP/memory-witness-143-images"
+          cd "$RUNNER_TEMP/memory-witness-145-images"
           sha256sum -c role-images.tar.gz.sha256
           timeout --signal=TERM --kill-after=10s 3m docker load -i role-images.tar.gz > "$PROOF/docker-load.log"
           cp role-images.json "$PROOF/role-images.json"
-          cp schema-143-local-image-manifest.json "$PROOF/schema-143-local-image-manifest.json"
+          cp schema-145-local-image-manifest.json "$PROOF/schema-145-local-image-manifest.json"
           cd "$GITHUB_WORKSPACE"
           python3 - "$PROOF/role-images.json" "$SOURCE_SHA" <<'PY'
           import hashlib,json,subprocess,sys
@@ -543,17 +543,17 @@ jobs:
           PY
       - run: pnpm install --frozen-lockfile
         timeout-minutes: 8
-      - name: Run the populated 0134 to 0135 to 0136 to 0137 to 0138 to 0139 to 0140 to 0141 to 0142 to 0143 upgrade through the migration image and both runtime roles
-        id: schema143_populated_test
+      - name: Run the populated 0134 to 0135 to 0136 to 0137 to 0138 to 0139 to 0140 to 0141 to 0142 to 0143 to 0144 to 0145 upgrade through the migration image and both runtime roles
+        id: schema145_populated_test
         timeout-minutes: 28
         env:
-          ASSISTANT_MEMORY_WITNESS_IMAGE_RECEIPT: ${{ runner.temp }}/memory-witness-143-db-proof/role-images.json
-          ASSISTANT_MEMORY_WITNESS_PROOF_DIR: ${{ runner.temp }}/memory-witness-143-db-proof
+          ASSISTANT_MEMORY_WITNESS_IMAGE_RECEIPT: ${{ runner.temp }}/memory-witness-145-db-proof/role-images.json
+          ASSISTANT_MEMORY_WITNESS_PROOF_DIR: ${{ runner.temp }}/memory-witness-145-db-proof
           ASSISTANT_MEMORY_WITNESS_EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
           ASSISTANT_TEST_NO_EXTERNAL_CREDENTIALS: "1"
         run: |
           set -Eeuo pipefail
-          title='qualifies the schema 143 migration image, runtime readiness, and generic write compatibility'
+          title='qualifies the schema 145 migration image, runtime readiness, and generic write compatibility'
           set +e
           timeout --signal=TERM --kill-after=10s 24m pnpm test packages/db/src/memory-witness-135-role-qualification.test.ts \
             -t "^${title}$" --reporter=json --outputFile.json="$PROOF/vitest-result.json" \
@@ -591,7 +591,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           mkdir -p -m 700 "$PROOF"
-          python3 - "$PROOF/owned-runtime-containers.json" "$PROOF/role-images.json" "$PROOF/runtime-container-cleanup.json" "$SOURCE_SHA" "${{ steps.schema143_populated_test.outcome }}" <<'PY'
+          python3 - "$PROOF/owned-runtime-containers.json" "$PROOF/role-images.json" "$PROOF/runtime-container-cleanup.json" "$SOURCE_SHA" "${{ steps.schema145_populated_test.outcome }}" <<'PY'
           import json,os,re,subprocess,sys
           registry_path,images_path,receipt_path,source_sha,test_outcome=sys.argv[1:]
           registry=json.load(open(registry_path)) if os.path.isfile(registry_path) else {'containers':[]}
@@ -666,7 +666,7 @@ jobs:
         if: always()
         timeout-minutes: 2
         with:
-          name: memory-witness-143-populated-upgrade-${{ github.event.pull_request.head.sha }}
-          path: ${{ runner.temp }}/memory-witness-143-db-proof/
+          name: memory-witness-145-populated-upgrade-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/memory-witness-145-db-proof/
           retention-days: 7
           if-no-files-found: warn

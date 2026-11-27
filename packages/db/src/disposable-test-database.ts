@@ -6,6 +6,7 @@ import { allocateTestTarget, assertAllocatedTestTarget } from './test-target.js'
 
 export async function withDisposableTestDatabase<T>(
   run: (client: postgres.Sql, databaseUrl: string) => Promise<T>,
+  options: { migrationsFolder?: string } = {},
 ): Promise<T> {
   assertAllocatedTestTarget({
     databaseUrl: process.env.DATABASE_URL,
@@ -29,7 +30,8 @@ export async function withDisposableTestDatabase<T>(
     );
     client = postgres(target.databaseUrl, { max: 1, onnotice: () => {} });
     await migrate(drizzle(client), {
-      migrationsFolder: fileURLToPath(new URL('../drizzle/', import.meta.url)),
+      migrationsFolder:
+        options.migrationsFolder ?? fileURLToPath(new URL('../drizzle/', import.meta.url)),
     });
     result = { value: await run(client, target.databaseUrl) };
   } catch (error) {

@@ -159,6 +159,7 @@ import {
   createPostgresEstimatedCostTurnParking,
   createPostgresGeneratedCardRepository,
   createPostgresGoogleCalendarConnectionRepository,
+  createPostgresHomeWeatherRepository,
   createPostgresMcpOAuthRepository,
   createPostgresModelCatalogRepository,
   createPostgresModelConnectionRepository,
@@ -166,6 +167,7 @@ import {
   createPostgresProactiveCanaryRepository,
   createPostgresRecallSurfacingRepository,
   createPostgresResearchAssignmentRepository,
+  createPostgresSavedPlacesRepository,
   createPostgresSelfRepairRepository,
   createPostgresTaskDiscoveryRepository,
   createPostgresToolExecutionRepository,
@@ -191,6 +193,7 @@ import {
   createFirestoreMcpOAuthRepository,
   createFirestoreProactiveCanaryRepository,
   createFirestoreProfileMemoryCommandPersistence,
+  createFirestoreSavedPlacesRepository,
   createFirestoreSettingsPersistence,
   createInstallationStore,
   FirestoreActiveJobLookup,
@@ -210,6 +213,7 @@ import {
   FirestoreMcpConnectionReadRepository,
   FirestoreModelCatalogRepository,
   FirestoreModelConnectionRepository,
+  FirestoreOwnerContextRepository,
   FirestoreOwnerKnowledgeGraphFactRepository,
   FirestoreProactiveHealthRepository,
   FirestoreRecallFeedbackRepository,
@@ -692,6 +696,44 @@ export const getAgentIdentity = cache(
     return getAssistantIdentity(getDb());
   },
 );
+
+/** Compose the private Home preference against the configured owner. */
+export async function homeWeatherSettingsPorts() {
+  const config = loadConfig();
+  if (config.PERSISTENCE_DRIVER === 'firestore') {
+    const problems = validateAgentPersistenceConfig(config);
+    if (problems.length) throw new Error(problems.join('; '));
+    return {
+      agentId: config.FIRESTORE_AGENT_ID,
+      repository: new FirestoreOwnerContextRepository(getFirestoreInstallationStore()),
+    };
+  }
+  const db = getDb();
+  return {
+    agentId: await assertPostgresInstallationOwner(db),
+    repository: createPostgresHomeWeatherRepository(db),
+  };
+}
+
+/** Compose the private address book against the configured owner. */
+export async function savedPlacesSettingsPorts() {
+  const config = loadConfig();
+  if (config.PERSISTENCE_DRIVER === 'firestore') {
+    const problems = validateAgentPersistenceConfig(config);
+    if (problems.length) throw new Error(problems.join('; '));
+    const store = getFirestoreInstallationStore();
+    await assertFirestoreInstallationOwner(store, config.FIRESTORE_AGENT_ID);
+    return {
+      agentId: config.FIRESTORE_AGENT_ID,
+      repository: createFirestoreSavedPlacesRepository(store),
+    };
+  }
+  const db = getDb();
+  return {
+    agentId: await assertPostgresInstallationOwner(db),
+    repository: createPostgresSavedPlacesRepository(db),
+  };
+}
 
 /** Owner-scoped recall hide/allow controls for web and mobile transports. */
 export async function getRecallSurfacingPorts(): Promise<{

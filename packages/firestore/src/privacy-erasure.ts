@@ -197,7 +197,8 @@ export class FirestorePrivacyErasureRepository implements PrivacyErasureReposito
         documentKey(agentId) !== ownerQuery.docs[0]?.id
       )
         throw new Error('Privacy erasure owner changed');
-      const [jobSnapshot, card] = await tx.getAll(jobRef, cardRef);
+      const ambientRef = this.store.doc('ambientSnapshots', agentId);
+      const [jobSnapshot, card, ambient] = await tx.getAll(jobRef, cardRef, ambientRef);
       const epochRef = this.store.doc('maintenanceCursors', `owner-editor-epoch:${agentId}`);
       const epochSnapshot = await tx.get(epochRef);
       if (card?.exists && card.get('agentId') !== agentId)
@@ -230,6 +231,9 @@ export class FirestorePrivacyErasureRepository implements PrivacyErasureReposito
           updatedAt: now,
         });
       }
+      const owner = ownerQuery.docs[0];
+      if (owner?.get('homeWeather') != null) tx.update(owner.ref, { homeWeather: null });
+      if (ambient?.get('agentId') === agentId && ambient.get('sources.home')) tx.delete(ambientRef);
       tx.set(jobRef, encodeRecord({ ...job, updatedAt: now }));
       tx.set(cardRef, encodeRecord({ agentId, content: '', compiledAt: now, invalidatedAt: now }));
       return job;
@@ -1446,6 +1450,7 @@ export class FirestorePrivacyErasureRepository implements PrivacyErasureReposito
     await this.deleteOwned(agentId, job.generation, 'watchFireEffects');
     await this.deleteOwned(agentId, job.generation, 'watchFires');
     await this.deleteOwned(agentId, job.generation, 'signals');
+    await this.deleteOwned(agentId, job.generation, 'savedPlaces');
     await this.eraseSecurityEvidence(agentId, job.generation);
     await this.eraseEmailAttachmentCustodies(agentId, job.generation);
     await this.eraseEmailObservers(agentId, job.generation);

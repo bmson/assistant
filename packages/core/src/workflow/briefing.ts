@@ -24,6 +24,7 @@ import {
   type CalendarOccurrenceIdentity,
   type CalendarOwnerParticipation,
   type CalendarPurpose,
+  DAILY_BRIEFING,
   type ExecutionPersistence,
   type OwnerNoticeDecisionFenceResult,
   resolveBookingLocalDateTime,
@@ -89,6 +90,7 @@ import {
   verifiedOwnerParticipation,
 } from './calendar-relationship.js';
 import { weatherResponseCards } from './response-cards.js';
+import { zonedParts } from './schedule-time.js';
 import {
   createSuggestion,
   inactiveSuggestionSourceRefs,
@@ -1044,6 +1046,33 @@ type BriefingPersistence = Pick<
   'executionContext' | 'ownerContext' | 'briefing' | 'suggestions' | 'ownerNotices' | 'emailSync'
 >;
 
+/** The schedule records the original occurrence independently of worker start time. */
+function briefingOccurrenceDate(trigger: unknown, timeZone: string): string | undefined {
+  const event = trigger as {
+    source?: unknown;
+    externalEventId?: unknown;
+    payload?: { schedule?: unknown; job?: unknown; scheduleId?: unknown; occurrenceId?: unknown };
+  } | null;
+  const payload = event?.payload;
+  if (
+    event?.source !== 'schedule' ||
+    payload?.schedule !== DAILY_BRIEFING ||
+    payload.job !== 'briefing.compose' ||
+    typeof payload.scheduleId !== 'string' ||
+    typeof payload.occurrenceId !== 'string' ||
+    payload.occurrenceId !== event.externalEventId
+  )
+    return;
+  const prefix = `schedule:${payload.scheduleId}:`;
+  if (!payload.occurrenceId.startsWith(prefix)) return;
+  const occurrence = payload.occurrenceId.slice(prefix.length);
+  const wake = /^wake:(\d{4}-\d{2}-\d{2})$/.exec(occurrence);
+  if (wake) return wake[1];
+  const due = new Date(occurrence);
+  if (Number.isFinite(due.getTime()) && due.toISOString() === occurrence)
+    return zonedParts(timeZone, due).date;
+}
+
 export async function runBriefing(
   deps: {
     db: Db;
@@ -1054,7 +1083,7 @@ export async function runBriefing(
     heartbeat?: () => Promise<void>;
     persistence?: BriefingPersistence;
   },
-  opts: { taskId?: string; now?: Date; agentId?: string } = {},
+  opts: { taskId?: string; now?: Date; agentId?: string; trigger?: unknown } = {},
 ): Promise<BriefingResult> {
   const { db, router } = deps;
   const now = opts.now ?? new Date();
@@ -1114,6 +1143,15 @@ export async function runBriefing(
         result.outcome = { kind: 'delivered', messageId: saved.messageId };
         return result;
       }
+    }
+
+    const intendedDate = briefingOccurrenceDate(opts.trigger, agent.timezone);
+    const occurrenceExpired = () =>
+      intendedDate !== undefined &&
+      intendedDate !== zonedParts(agent.timezone, opts.now ?? new Date()).date;
+    if (occurrenceExpired()) {
+      result.outcome = { kind: 'aborted' };
+      return result;
     }
 
     // The calendar read is the one input that can fail noisily (an expired
@@ -1726,6 +1764,11 @@ export async function runBriefing(
     let conversationId: string | null = null;
     let publicationReceipt: { messageId?: string; replayed?: boolean } | null = null;
     for (let publishAttempt = 0; publishAttempt < 3; publishAttempt += 1) {
+      if (occurrenceExpired()) {
+        await settleSecurity('unknown');
+        result.outcome = { kind: 'aborted' };
+        return result;
+      }
       let publication: OwnerNoticeDecisionFenceResult;
       try {
         publication = await postOwnerNoticeWithDecisionFence(noticeStore, {
@@ -1922,6 +1965,7 @@ export function briefingHeadline(result: BriefingResult): string {
 
 /** The job registry's summary line. */
 export function briefingSummary(result: BriefingResult): string {
+  if (result.outcome?.kind === 'aborted') return 'briefing: expired scheduled occurrence';
   if (result.outcome?.kind === 'unavailable')
     return `briefing: unavailable (${result.outcome.reason})`;
   if (!result.delivered) return 'briefing: nothing to report';

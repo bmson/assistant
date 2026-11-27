@@ -6,11 +6,19 @@ import type { ComponentProps } from 'react';
 import { SecurityClient } from '@/app/security/security-client';
 import { authMode, requireOwner } from '@/auth';
 import { getMobileAccessToken, hasMobileTokenRotationCapability } from '@/lib/mobile-access-token';
-import { getWorkspaceSettings, isMcpOAuthConfigured, listOwnerMcpConnections } from '@/lib/server';
+import {
+  getWorkspaceSettings,
+  homeWeatherSettingsPorts,
+  isMcpOAuthConfigured,
+  listOwnerMcpConnections,
+  savedPlacesSettingsPorts,
+} from '@/lib/server';
 import { projectStandingApprovalPolicy } from '@/lib/standing-approval-view';
 import { btn, Card, PageHeader, PageShell, SectionHeading } from '@/lib/ui';
+import { HomeWeatherForm } from './home-weather-form';
 import { McpConnectionsPanel } from './mcp-connections';
 import { MobileTokenPanel } from './mobile-token';
+import { SavedPlacesPanel } from './saved-places-panel';
 import { StandingApprovals } from './standing-approvals';
 
 export const metadata = { title: 'Settings' };
@@ -24,7 +32,18 @@ export default async function SettingsPage() {
   const proto = requestHeaders.get('x-forwarded-proto') ?? 'http';
   const serverUrl = host ? `${proto}://${host}` : config.AUTH_URL;
   const token = authMode === 'passkey' ? '' : await getMobileAccessToken();
-  const settings = await getWorkspaceSettings();
+  const [settings, homeWeather, savedPlaces] = await Promise.all([
+    getWorkspaceSettings(),
+    homeWeatherSettingsPorts()
+      .then(async ({ repository, agentId }) => {
+        const choice = await repository.getHomeWeather(agentId);
+        return choice ? { city: choice.city, enabled: choice.enabled } : null;
+      })
+      .catch(() => undefined),
+    savedPlacesSettingsPorts()
+      .then(({ repository, agentId }) => repository.list(agentId))
+      .catch(() => undefined),
+  ]);
   let mcpConnections: ComponentProps<typeof McpConnectionsPanel>['connections'] | null = null;
   try {
     mcpConnections = await listOwnerMcpConnections();
@@ -80,6 +99,8 @@ export default async function SettingsPage() {
           </p>
         )}
       </section>
+      <SavedPlacesPanel initial={savedPlaces} />
+      <HomeWeatherForm choice={homeWeather} />
       <StandingApprovals policies={standingPolicies} />
     </PageShell>
   );

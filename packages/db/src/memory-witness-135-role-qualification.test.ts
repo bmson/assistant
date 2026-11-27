@@ -54,7 +54,7 @@ async function dropOwnedDatabase(
 }
 
 it.skipIf(!imagesReceipt)(
-  'qualifies the schema 143 migration image, runtime readiness, and generic write compatibility',
+  'qualifies the schema 145 migration image, runtime readiness, and generic write compatibility',
   async () => {
     assertAllocatedTestTarget({
       databaseUrl: process.env.DATABASE_URL,
@@ -82,7 +82,7 @@ it.skipIf(!imagesReceipt)(
       | undefined;
     try {
       await admin`SET statement_timeout = '15s'`;
-      prefixDir = await mkdtemp(join(tmpdir(), 'assistant-memory-witness-role-143-'));
+      prefixDir = await mkdtemp(join(tmpdir(), 'assistant-memory-witness-role-145-'));
       await admin.unsafe(`CREATE DATABASE "${target.databaseName}"`);
       created = true;
       await admin.unsafe(
@@ -96,7 +96,7 @@ it.skipIf(!imagesReceipt)(
       await client`SET statement_timeout = '30s'`;
 
       // The populated historical 0134 prefix remains unchanged. The current
-      // schema 143 image must apply the witness, Calendar, cost, MCP OAuth, bill evidence, signals and household Calendar migrations.
+      // schema 145 image must apply the witness, Calendar, cost, MCP OAuth, bill evidence, signals, household Calendar, Home weather and Saved places migrations.
       const forwardEntries = journal.entries.slice(135);
       expect(forwardEntries.map((entry: { tag: string }) => entry.tag)).toEqual([
         '0135_memory_write_witness',
@@ -108,6 +108,8 @@ it.skipIf(!imagesReceipt)(
         '0141_bill_email_evidence',
         '0142_signal_store',
         '0143_google_household_calendar_choices',
+        '0144_home_weather',
+        '0145_saved_places',
       ]);
       const expectedForwardLedger = await Promise.all(
         forwardEntries.map(async (entry: { tag: string; when: number }) => ({
@@ -185,12 +187,19 @@ it.skipIf(!imagesReceipt)(
       });
       await client`SET statement_timeout = '15s'`;
       const firstForward = expectedForwardLedger[0];
-      if (!firstForward) throw new Error('Schema 143 forward migration tail is missing.');
+      if (!firstForward) throw new Error('Schema 145 forward migration tail is missing.');
       const forwardLedger = await client`
         SELECT hash,created_at::text AS "createdAt" FROM drizzle.__drizzle_migrations
         WHERE created_at >= ${firstForward.createdAt}
         ORDER BY created_at,id`;
       expect([...forwardLedger]).toEqual(expectedForwardLedger);
+      const [legacyHome] = await client`
+        SELECT home_weather AS choice, home_weather IS NULL AS "isSqlNull"
+        FROM agents WHERE id=${owner}`;
+      expect(legacyHome).toEqual({ choice: null, isSqlNull: true });
+      const [legacySavedPlaces] = await client`
+        SELECT count(*)::int AS count FROM saved_places WHERE agent_id=${owner}`;
+      expect(legacySavedPlaces?.count).toBe(0);
       const [calendarTable] = await client`
         SELECT to_regclass('public.google_calendar_connections')::text AS "tableName"`;
       expect(calendarTable?.tableName).toBe('google_calendar_connections');
@@ -290,7 +299,7 @@ it.skipIf(!imagesReceipt)(
       const proofDirectory = process.env.ASSISTANT_MEMORY_WITNESS_PROOF_DIR;
       if (proofDirectory) {
         await writeFile(
-          join(proofDirectory, 'schema-143-forward-upgrade.json'),
+          join(proofDirectory, 'schema-145-forward-upgrade.json'),
           `${JSON.stringify(
             {
               prefixLastMigration: prefixEntries.at(-1)?.tag,
@@ -302,6 +311,8 @@ it.skipIf(!imagesReceipt)(
               estimatedCostTables: budgetTables.map((row) => row.tableName),
               historicalUnknownReservationReadback: legacyReservation,
               legacyCostEventReadback: legacyCostEvent,
+              legacySavedPlacesStartEmpty: legacySavedPlaces?.count === 0,
+              legacyHomeWeatherStartsUnconfigured: legacyHome?.isSqlNull,
               legacyMcpRecordPreserved: legacyMcpConnection?.oauthState === null,
               legacyMemoryWitnessRemainsSqlNull: legacyAfter?.witnessIsSqlNull,
             },
