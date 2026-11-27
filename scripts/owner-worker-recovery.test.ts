@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  nativeWorkers,
   preflightWorkers,
   transitionWorker,
   verifyWorkerGraph,
@@ -25,6 +26,9 @@ function job(role: Role) {
     generation: '10',
     observedGeneration: '10',
     terminalCondition: { state: 'CONDITION_SUCCEEDED' },
+    launchStage: 'GA',
+    client: 'synthetic-cli' as string | undefined,
+    clientVersion: '1' as string | undefined,
     labels: { preserved: 'yes' },
     template: {
       taskCount: 1,
@@ -49,6 +53,8 @@ function fixture() {
       generation,
       observedGeneration: generation,
       etag: `etag-${generation}`,
+      client: undefined,
+      clientVersion: undefined,
     };
     return 200;
   });
@@ -115,6 +121,9 @@ describe('qualified ordinary API 3 worker recovery', () => {
     await expect(preflightWorkers(native, images, pullable)).rejects.toThrow('blob missing');
     state.processor.observedGeneration = '9';
     await expect(preflightWorkers(native, images, pullable)).rejects.toThrow();
+    state.processor.observedGeneration = '10';
+    state.processor.launchStage = 'BETA';
+    await expect(preflightWorkers(native, images, pullable)).rejects.toThrow();
     expect(native.patch).not.toHaveBeenCalled();
   });
 
@@ -135,7 +144,8 @@ describe('qualified ordinary API 3 worker recovery', () => {
     expect(native.patch).toHaveBeenNthCalledWith(
       1,
       'browser',
-      expect.objectContaining({
+      {
+        name: `${root}browser`,
         etag: 'fresh-etag',
         labels: { preserved: 'yes' },
         template: {
@@ -145,7 +155,8 @@ describe('qualified ordinary API 3 worker recovery', () => {
             containers: [{ image: 'candidate', args: ['preserved'] }],
           },
         },
-      }),
+      },
+      'uid-browser',
     );
     await transitionWorker(
       native,
@@ -158,11 +169,88 @@ describe('qualified ordinary API 3 worker recovery', () => {
     );
     expect(state.browser.template.template.containers[0]?.image).toBe('recovery-browser');
     expect(state.browser.generation).toBe('12');
+    expect(state.browser.client).toBeUndefined();
     expect(state.code).toEqual(job('code'));
     await expect(
       transitionWorker(native, 'code', baseline.code, 'candidate', 'recovery-code', true, wait),
     ).rejects.toThrow();
     expect(native.patch).toHaveBeenCalledTimes(2);
+  });
+
+  it('follows the exact native PATCH operation and then confirms the ready job', async () => {
+    const before = job('browser');
+    const after = {
+      ...before,
+      etag: 'etag-next',
+      generation: '11',
+      observedGeneration: '11',
+      client: undefined,
+      clientVersion: undefined,
+      template: {
+        ...before.template,
+        template: {
+          ...before.template.template,
+          containers: [{ image: 'candidate', args: ['preserved'] }],
+        },
+      },
+    };
+    const operation = 'projects/bmson-assistant/locations/us-west1/operations/worker-update';
+    const metadata = { name: before.name, uid: before.uid };
+    const request = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json(before))
+      .mockResolvedValueOnce(Response.json({ name: operation, metadata }))
+      .mockResolvedValueOnce(
+        Response.json({ name: operation, metadata, done: true, response: after }),
+      )
+      .mockResolvedValueOnce(Response.json(after));
+    const native = nativeWorkers('a'.repeat(32), request, wait);
+    const { native: fixtures, pullable } = fixture();
+    const baseline = await preflightWorkers(fixtures, images, pullable);
+    await expect(
+      transitionWorker(
+        native,
+        'browser',
+        baseline.browser,
+        'old-browser',
+        'candidate',
+        false,
+        wait,
+      ),
+    ).resolves.toEqual({ beforeGeneration: '10', observedGeneration: '11' });
+    expect(request.mock.calls.map(([url, init]) => [url, init?.method])).toEqual([
+      [`https://run.googleapis.com/v2/${before.name}`, 'GET'],
+      [`https://run.googleapis.com/v2/${before.name}`, 'PATCH'],
+      [`https://run.googleapis.com/v2/${operation}`, 'GET'],
+      [`https://run.googleapis.com/v2/${before.name}`, 'GET'],
+    ]);
+  });
+
+  it('holds if the exact PATCH operation finishes with an error or another job identity', async () => {
+    const before = job('browser');
+    const operation = 'projects/bmson-assistant/locations/us-west1/operations/worker-update';
+    const { native: fixtures, pullable } = fixture();
+    const baseline = await preflightWorkers(fixtures, images, pullable);
+    for (const outcome of [{ error: { code: 9 } }, { response: job('code') }]) {
+      const request = vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(Response.json(before))
+        .mockResolvedValueOnce(Response.json({ name: operation }))
+        .mockResolvedValueOnce(Response.json({ name: operation, done: true, ...outcome }));
+      const native = nativeWorkers('a'.repeat(32), request, wait);
+      await expect(
+        transitionWorker(
+          native,
+          'browser',
+          baseline.browser,
+          'old-browser',
+          'candidate',
+          false,
+          wait,
+        ),
+      ).rejects.toBeInstanceOf(WorkerObservationRequired);
+      expect(request.mock.calls.map(([, init]) => init?.method)).toEqual(['GET', 'PATCH', 'GET']);
+    }
   });
 
   it('allows a denial to trigger rollback only after confirming the job still has its prior configuration', async () => {

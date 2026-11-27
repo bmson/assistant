@@ -9,7 +9,9 @@ import { loadQualifiedWorkerRecovery } from './owner-api3-recovery-intake.js';
 import { bootstrapDigest, object, RUN_ROOT } from './owner-release-current-snapshot.js';
 import { validateImageResolution } from './owner-release-image-resolution.js';
 import { loadRetainedServingImageEvidence } from './owner-serving-image-evidence.js';
+import { boundedResponseJson } from './owner-web-release-operator-hold.js';
 import { protectedWebTagCredential } from './owner-web-tag-cloud.js';
+import { operationName } from './owner-web-tag-native.js';
 
 const registry = 'us-west1-docker.pkg.dev';
 const project = 'bmson-assistant';
@@ -201,7 +203,7 @@ type Baseline = { uid: string; generation: string; configuration: string };
 type Images = ReturnType<typeof workerImages>;
 type Native = {
   read(role: Role): Promise<unknown>;
-  patch(role: Role, body: unknown): Promise<number>;
+  patch(role: Role, body: unknown, uid: string): Promise<number>;
 };
 
 function jobName(role: Role) {
@@ -224,8 +226,6 @@ function observe(raw: unknown, role: Role) {
     launchStage,
     deleteTime,
     expireTime,
-    client,
-    clientVersion,
   } = object(raw);
   requireWorker(
     name === jobName(role) &&
@@ -237,6 +237,12 @@ function observe(raw: unknown, role: Role) {
       etag.length > 0 &&
       typeof generation === 'string' &&
       /^[1-9][0-9]*$/.test(generation),
+  );
+  // The isolated PATCH exercised GA jobs with no extra top-level policy fields.
+  requireWorker(
+    (launchStage === 'GA' || launchStage === undefined) &&
+      annotations === undefined &&
+      binaryAuthorization === undefined,
   );
   const execution = object(template);
   const task = object(execution.template);
@@ -253,8 +259,6 @@ function observe(raw: unknown, role: Role) {
     annotations,
     binaryAuthorization,
     launchStage,
-    client,
-    clientVersion,
     template: { ...execution, template: { ...task, containers: [container] } },
   });
   const ready =
@@ -266,11 +270,6 @@ function observe(raw: unknown, role: Role) {
     name,
     etag,
     labels,
-    annotations,
-    binaryAuthorization,
-    launchStage,
-    client,
-    clientVersion,
     template: {
       ...execution,
       template: { ...task, containers: [{ ...container, image: target }] },
@@ -321,7 +320,7 @@ export async function transitionWorker(
   // Submit exactly once. A concurrent write can match our target by coincidence.
   let status: number;
   try {
-    status = await native.patch(role, before.patch(to));
+    status = await native.patch(role, before.patch(to), before.uid);
   } catch {
     throw new WorkerObservationRequired();
   }
@@ -352,19 +351,72 @@ export async function transitionWorker(
   throw new WorkerObservationRequired();
 }
 
-function nativeWorkers(token: string): Native {
-  const read = estimatedCostMetadataRead(token, Date.now() + 215_000);
+export function nativeWorkers(
+  token: string,
+  request: typeof fetch = fetch,
+  wait: () => Promise<void> = () => delay(3000),
+): Native {
+  const read = estimatedCostMetadataRead(token, Date.now() + 225_000, request);
+  const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+  const readOperation = (response: Response, timeout = 15_000) =>
+    boundedResponseJson(response, maxObjectBytes, timeout);
+  async function awaitOperation(raw: unknown, job: string, uid: string) {
+    const name = operationName(raw);
+    let operation = object(raw);
+    const deadline = Date.now() + 180_000;
+    for (let i = 0; i <= 60; i++) {
+      requireWorker(operationName(operation) === name && operation.error === undefined);
+      if (operation.metadata !== undefined) {
+        const metadata = object(operation.metadata);
+        requireWorker(
+          (metadata.target === undefined || metadata.target === job) &&
+            (metadata.name === undefined || metadata.name === job) &&
+            (metadata.uid === undefined || metadata.uid === uid),
+        );
+      }
+      if (operation.done === true) {
+        const result = object(operation.response);
+        requireWorker(result.name === job && result.uid === uid);
+        return;
+      }
+      requireWorker(
+        i < 60 &&
+          deadline - Date.now() > 3000 &&
+          (operation.done === undefined || operation.done === false),
+      );
+      await wait();
+      const remaining = Math.min(15_000, deadline - Date.now());
+      requireWorker(remaining > 0);
+      operation = object(
+        await readOperation(
+          await request(RUN_ROOT + name, {
+            method: 'GET',
+            headers,
+            redirect: 'error',
+            signal: AbortSignal.timeout(remaining),
+          }),
+          remaining,
+        ),
+      );
+    }
+    throw new WorkerObservationRequired();
+  }
   return {
     read: (role) => read(RUN_ROOT + jobName(role)),
-    async patch(role, body) {
-      const response = await fetch(RUN_ROOT + jobName(role), {
+    async patch(role, body, uid) {
+      const job = jobName(role);
+      const response = await request(RUN_ROOT + job, {
         method: 'PATCH',
         redirect: 'error',
         signal: AbortSignal.timeout(15_000),
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify(body),
       });
-      if (response.body) void response.body.cancel().catch(() => undefined);
+      if (response.ok) {
+        await awaitOperation(await readOperation(response), job, uid);
+      } else {
+        void response.body?.cancel().catch(() => undefined);
+      }
       return response.status;
     },
   };
