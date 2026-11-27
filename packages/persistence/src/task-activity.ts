@@ -21,6 +21,61 @@ export function isActivityCanary(trigger: unknown): boolean {
   return value === true || value === 'true';
 }
 
+export interface TaskActivityDiagnostic {
+  id: string;
+  text: string;
+}
+
+const MAX_DIAGNOSTICS = 32;
+const MAX_DIAGNOSTIC_TEXT = 3_000;
+
+export function taskActivityDiagnostics(state: unknown): TaskActivityDiagnostic[] {
+  const records = (state as { activityDiagnostics?: unknown } | null)?.activityDiagnostics;
+  if (!Array.isArray(records)) return [];
+  return records.slice(-MAX_DIAGNOSTICS).flatMap((record) => {
+    if (!record || typeof record.id !== 'string' || typeof record.text !== 'string') return [];
+    return [{ id: record.id, text: record.text.slice(0, MAX_DIAGNOSTIC_TEXT) }];
+  });
+}
+
+export function recordTaskActivityDiagnostic(
+  state: unknown,
+  diagnostic: TaskActivityDiagnostic,
+): Record<string, unknown> | null {
+  const records = taskActivityDiagnostics(state);
+  if (records.some(({ id }) => id === diagnostic.id)) return null;
+  return {
+    ...(state && typeof state === 'object' && !Array.isArray(state) ? state : {}),
+    activityDiagnostics: [
+      ...records.slice(1 - MAX_DIAGNOSTICS),
+      { id: diagnostic.id, text: diagnostic.text.slice(0, MAX_DIAGNOSTIC_TEXT) },
+    ],
+  };
+}
+
+export function isActivityDiagnosticJob(
+  task: Pick<Records['tasks'], 'trigger' | 'trust' | 'conversationId'>,
+): boolean {
+  if (task.trust !== 'assistant' || task.conversationId) return false;
+  const trigger = task.trigger as { source?: unknown; payload?: { job?: unknown } } | null;
+  if (trigger?.source !== 'schedule') return false;
+  const job = trigger.payload?.job;
+  return job === 'self.repair' || job === 'health.monitor' || job === 'dream.run';
+}
+
+export function activityRetriesExhaustedDiagnostic(
+  queueGeneration: number,
+): TaskActivityDiagnostic {
+  return {
+    id: `retries-exhausted:${queueGeneration}`,
+    text: 'This scheduled run exhausted its retries. You can retry it from Activity.',
+  };
+}
+
+export function activityDiagnosticDeduplicationKey(agentId: string, id: string): string | null {
+  return id.startsWith('self-repair:') ? `activity-diagnostic:${agentId}:${id}` : null;
+}
+
 export type ActivityTaskRecord = Pick<
   Records['tasks'],
   | 'id'

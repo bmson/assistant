@@ -318,6 +318,7 @@ const RecallSourceSchema = z.object({
 });
 
 export const TaskStateSchema = z.object({
+  activityDiagnostics: z.array(z.object({ id: z.string(), text: z.string() })).optional(),
   /** Keep the original grant identity across every executor checkpoint. */
   estimatedCostApproval: z
     .object({

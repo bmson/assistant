@@ -7,8 +7,6 @@ import type {
   Records,
 } from '@assistant/persistence';
 import type { DocumentSnapshot, QueryDocumentSnapshot } from '@google-cloud/firestore';
-import { FirestoreMessageRepository } from './messages.js';
-import { FirestoreOwnerNoticeRepository } from './owner-notices.js';
 import { FirestoreProactiveHealthRepository } from './proactive-health.js';
 import { decodeRecord, encodeRecord, type InstallationStore } from './store.js';
 
@@ -37,16 +35,11 @@ function alertKey(agentId: string, kind: string): string {
  */
 export class FirestoreAssistantHealthRepository implements AssistantHealthRepository {
   readonly kind = 'assistant-health-repository' as const;
-  private readonly notices: FirestoreOwnerNoticeRepository;
-  private readonly messages: FirestoreMessageRepository;
 
   constructor(
     readonly store: InstallationStore,
     readonly configuredAgentId: string,
-  ) {
-    this.notices = new FirestoreOwnerNoticeRepository(store, configuredAgentId);
-    this.messages = new FirestoreMessageRepository(store);
-  }
+  ) {}
 
   private scope(agentId: string): void {
     if (!agentId || agentId !== this.configuredAgentId)
@@ -233,19 +226,6 @@ export class FirestoreAssistantHealthRepository implements AssistantHealthReposi
         if (wanted.has(row.kind) && row.lastNotifiedAt?.getTime() === claimedAt.getTime())
           tx.update(doc.ref, { lastNotifiedAt: null, updatedAt: this.store.now() });
       }
-    });
-  }
-
-  async notify({ agentId, text, taskId }: { agentId: string; text: string; taskId?: string }) {
-    this.scope(agentId);
-    const conversationId = await this.notices.notificationsConversationId();
-    await this.messages.append({
-      conversationId,
-      ...(taskId ? { taskId } : {}),
-      role: 'assistant',
-      origin: 'assistant',
-      parts: [{ type: 'text', text }],
-      text,
     });
   }
 }

@@ -32,7 +32,6 @@ import {
   proactiveCanaryProblems,
   sqlMailHealthCounts,
 } from '../proactive/pipeline-health.js';
-import { notifyOwnerInNotifications } from './anomaly.js';
 
 /** A completed graph extraction may hold a five-minute lease; ten minutes is actionable. */
 const STALE_GRAPH_PENDING_MS = 10 * 60 * 1000;
@@ -188,6 +187,7 @@ export async function runAssistantHealthMonitor(
     canaries?: ProactiveCanaryRepository;
     readTotals?: CostRepository['totals'];
     ownerTimeZone?: () => Promise<string>;
+    saveDiagnostic?: (id: string, text: string) => Promise<void>;
     notifyOwner?: ProactiveNotifier;
   },
   opts: { agentId: string; taskId?: string; now?: Date },
@@ -329,18 +329,20 @@ export async function runAssistantHealthMonitor(
   });
   if (notify.length) {
     try {
-      await health.notify({
-        agentId: opts.agentId,
-        text: [
-          '⚠️ Assistant health needs attention:',
-          ...notify.map((signal) => `• ${signal.detail}`),
-          'These are deterministic checks; no configuration was changed automatically.',
-        ].join('\n'),
-        ...(opts.taskId ? { taskId: opts.taskId } : {}),
-      });
+      const text = [
+        '⚠️ Assistant health needs attention:',
+        ...notify.map((signal) => `• ${signal.detail}`),
+        'These are deterministic checks; no configuration was changed automatically.',
+      ].join('\n');
+      await deps.saveDiagnostic?.(
+        `assistant-health:${notify
+          .map(({ kind }) => kind)
+          .sort()
+          .join(',')}`,
+        text,
+      );
     } catch (error) {
-      // The alert is not considered delivered until the durable owner message
-      // exists. Releasing just this claim lets the normal task retry report it.
+      // Releasing the claim after a failed Activity write lets the next attempt report it.
       await health.release({
         agentId: opts.agentId,
         kinds: notify.map((signal) => signal.kind),
@@ -394,7 +396,6 @@ function postgresAssistantHealth(db: Db): AssistantHealthRepository {
           ),
         );
     },
-    notify: ({ agentId, text, taskId }) => notifyOwnerInNotifications(db, agentId, text, taskId),
   };
 }
 

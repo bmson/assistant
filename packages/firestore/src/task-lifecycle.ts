@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type {
+  AppendActivityDiagnosticInput,
   Records,
   ScheduledFollowUpInput,
   TaskBudgetIncrease,
@@ -10,10 +11,14 @@ import type {
   TaskRepository,
 } from '@assistant/persistence';
 import {
+  activityDiagnosticDeduplicationKey,
+  activityRetriesExhaustedDiagnostic,
+  isActivityDiagnosticJob,
   missionTaskTerminalReport,
   newTaskRecord,
   normalizeTaskBudget,
   pulseCompletionFor,
+  recordTaskActivityDiagnostic,
   redactTerminalArrivalTask,
 } from '@assistant/persistence';
 import { Filter } from '@google-cloud/firestore';
@@ -397,6 +402,38 @@ export class FirestoreTaskRepository
       ),
     );
   }
+  async appendActivityDiagnostic(input: AppendActivityDiagnosticInput): Promise<boolean> {
+    return this.store.db.runTransaction(async (tx) => {
+      const ref = this.store.doc('tasks', input.taskId);
+      const snapshot = await tx.get(ref);
+      if (!snapshot.exists) return false;
+      const task = decodeRecord<Task>(snapshot.data());
+      if (
+        task.id !== input.taskId ||
+        task.agentId !== input.agentId ||
+        !isActivityDiagnosticJob(task)
+      )
+        return false;
+      if (
+        input.leaseToken &&
+        (task.status !== 'running' ||
+          task.leaseToken !== input.leaseToken ||
+          !task.lockedUntil ||
+          task.lockedUntil <= this.store.now())
+      )
+        return false;
+      const state = recordTaskActivityDiagnostic(task.state, input.diagnostic);
+      if (!state) return true;
+      const name = activityDiagnosticDeduplicationKey(input.agentId, input.diagnostic.id);
+      if (name) {
+        const receipt = this.store.doc('maintenanceCursors', name);
+        if ((await tx.get(receipt)).exists) return true;
+        tx.create(receipt, encodeRecord({ name, cursor: task.id, updatedAt: this.store.now() }));
+      }
+      tx.update(ref, encodeRecord({ state }));
+      return true;
+    });
+  }
   async markAttentionNotified(taskId: string) {
     return Boolean(
       await this.change(taskId, (row, now) =>
@@ -430,6 +467,13 @@ export class FirestoreTaskRepository
 
       const attempt = row.attempt + 1;
       const deadLetter = attempt >= MAX_ATTEMPTS;
+      const diagnosticsOnly = deadLetter && isActivityDiagnosticJob(row);
+      const state = diagnosticsOnly
+        ? recordTaskActivityDiagnostic(
+            row.state,
+            activityRetriesExhaustedDiagnostic(row.queueGeneration + 1),
+          )
+        : null;
       const runAfter = deadLetter
         ? null
         : new Date(now.getTime() + Math.min(300, 5 * 2 ** row.attempt) * 1000);
@@ -465,7 +509,8 @@ export class FirestoreTaskRepository
           runAfter,
           lockedUntil: null,
           leaseToken: null,
-          attentionNotifiedAt: null,
+          ...(state ? { state } : {}),
+          attentionNotifiedAt: diagnosticsOnly ? now : null,
           queueGeneration: row.queueGeneration + 1,
           updatedAt: now,
         }),

@@ -91,6 +91,10 @@ export function proxy(request: NextRequest) {
   // retain their existing persistence and authentication boundaries below.
   const adminPage = ['/settings', '/security', '/signin', '/setup'].includes(path);
   // Reach only the existing owner-checked Costs page and cap Server Action.
+  const activityPage =
+    path === '/tasks' ||
+    /^\/tasks\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(path);
+  const ownerActivityRead = activityPage && ['GET', 'HEAD'].includes(request.method);
   const costsPage = path === '/costs' && ['GET', 'POST'].includes(request.method);
   // The review page authenticates the owner before rendering. Its separate
   // API handlers enforce authorization for reads and decisions.
@@ -150,6 +154,7 @@ export function proxy(request: NextRequest) {
         !spendingRequestPage &&
         !auditPage &&
         !localChatPage &&
+        !ownerActivityRead &&
         !ownerChatPage &&
         !memoryBrowseRead)
     ) {
@@ -281,11 +286,7 @@ export function proxy(request: NextRequest) {
       path,
     ) &&
       ['GET', 'POST'].includes(request.method)) ||
-    // Activity pages and their Server Actions enforce owner authentication
-    // before reading or changing task records.
-    (path === '/tasks' && ['GET', 'POST'].includes(request.method)) ||
-    (/^\/tasks\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(path) &&
-      ['GET', 'POST'].includes(request.method)) ||
+    ownerActivityRead ||
     (chatPage && ['GET', 'HEAD', 'POST'].includes(request.method)) ||
     (['/icon.svg', '/apple-icon.png', '/favicon.ico', '/manifest.webmanifest'].includes(path) &&
       request.method === 'GET') ||

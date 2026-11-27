@@ -88,6 +88,7 @@ const files = [
   'apps/agent/src/sweep-recovery.test.ts',
   'apps/agent/src/firestore-maintenance-parity.test.ts',
   'apps/agent/src/firestore-job-callbacks.test.ts',
+  'apps/agent/src/activity-diagnostics.e2e.test.ts',
   'apps/agent/src/firestore-health-monitor.test.ts',
   'apps/agent/src/firestore-reminder-delivery.test.ts',
   'apps/agent/src/firestore-ambient-refresh.test.ts',

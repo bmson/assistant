@@ -1831,6 +1831,20 @@ struct ActivityView: View {
                     .lineLimit(usesAccessibilityLayout ? nil : 3)
             }
 
+            if let diagnostics = item.diagnostics, !diagnostics.isEmpty {
+                DisclosureGroup("Diagnostics") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(diagnostics) { diagnostic in
+                            Text(diagnostic.text)
+                                .font(.subheadline)
+                                .textSelection(.enabled)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .accessibilityIdentifier("activity-diagnostics-\(item.id)")
+            }
+
             checklistCorrectionEntry(item)
 
             Divider()

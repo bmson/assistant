@@ -2,6 +2,7 @@ import {
   createPostgresAuditInvestigationRepository,
   createPostgresMessageRepository,
   createPostgresSelfRepairRepository,
+  createPostgresTaskRepository,
   type Db,
   type ScheduleRow,
   schedules,
@@ -14,6 +15,7 @@ import type {
   ImportJobRepository,
   ReminderEventDependency,
 } from '@assistant/persistence';
+import { repairNoticeNeedsOwner } from '@assistant/persistence';
 import { and, eq, sql } from 'drizzle-orm';
 import { getOrCreateNotificationsConversation, persistMessage } from '../chat.js';
 import { loadConfig } from '../config.js';
@@ -290,6 +292,17 @@ export async function runCodeJob(
         ? { briefingOutcome: { kind: 'unavailable', reason: 'job_unavailable' } as const }
         : {}),
     };
+  async function saveDiagnostic(id: string, text: string) {
+    const repository = deps.persistence?.tasks ?? createPostgresTaskRepository(deps.db);
+    const saved = await repository.appendActivityDiagnostic({
+      agentId: task.agentId,
+      taskId: task.id,
+      diagnostic: { id, text },
+      ...(task.leaseToken ? { leaseToken: task.leaseToken } : {}),
+    });
+    if (!saved) throw new Error('Activity diagnostic task is unavailable');
+  }
+
   switch (job) {
     case 'reminder.notify': {
       const payload = (
@@ -777,12 +790,15 @@ export async function runCodeJob(
     }
     case 'dream.run': {
       await deps.heartbeat?.();
-      const r = await runDream(deps, {
-        agentId: task.agentId,
-        taskId: task.id,
-        // Read at commit: every heartbeat renewal rotates the lease token.
-        lease: () => ({ taskId: task.id, leaseToken: task.leaseToken ?? '' }),
-      });
+      const r = await runDream(
+        { ...deps, saveDiagnostic },
+        {
+          agentId: task.agentId,
+          taskId: task.id,
+          // Read at commit: every heartbeat renewal rotates the lease token.
+          lease: () => ({ taskId: task.id, leaseToken: task.leaseToken ?? '' }),
+        },
+      );
       return {
         done: true,
         summary: `dream: ${r.footnotes} footnote(s), ${r.hypotheses} hypothesis(es), ${r.anticipations} anticipation(s)`,
@@ -850,14 +866,15 @@ export async function runCodeJob(
           },
           heartbeat: deps.heartbeat,
           notify: async (issue, text) => {
+            const key = `self-repair:${issue.id}:${issue.status}:${issue.data.history.at(-1)?.at ?? issue.updatedAt.toISOString()}`;
+            if (!repairNoticeNeedsOwner(issue)) {
+              await saveDiagnostic(key, text);
+              return;
+            }
             const conversationId = deps.persistence
               ? await deps.persistence.notifications.getOrCreate(task.agentId)
               : await getOrCreateNotificationsConversation(deps.db, task.agentId);
             const messages = deps.persistence?.messages ?? createPostgresMessageRepository(deps.db);
-            // Repair progress is a log, not a conversation: it lives in
-            // Notifications and on the Improvements page. It is deliberately
-            // not mirrored into the owner's chat or sent to their phone — a
-            // single failing fix once produced a message every few minutes.
             await messages.append({
               conversationId,
               taskId: task.id,
@@ -865,7 +882,7 @@ export async function runCodeJob(
               origin: 'assistant',
               parts: [{ type: 'text', text }],
               text,
-              channelMessageId: `self-repair:${issue.id}:${issue.status}:${issue.data.history.at(-1)?.at ?? issue.updatedAt.toISOString()}`,
+              channelMessageId: key,
             });
           },
         },
@@ -910,13 +927,14 @@ export async function runCodeJob(
               }
             : undefined,
           notifyOwner: deps.notifyOwner,
+          saveDiagnostic,
         },
         { agentId: task.agentId, taskId: task.id },
       );
       return {
         done: true,
         summary: r.notified
-          ? `health monitor: notified owner about ${r.signals.length} signal(s)`
+          ? `health monitor: recorded ${r.signals.length} signal(s)`
           : r.signals.length
             ? `health monitor: ${r.signals.length} active signal(s), already reported`
             : 'health monitor: no active signals',

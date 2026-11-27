@@ -5,6 +5,7 @@ import {
   type Records,
   type TaskDiscoveryRepository,
   type TaskDiscoveryRow,
+  taskActivityDiagnostics,
 } from '@assistant/persistence';
 import { FieldPath } from '@google-cloud/firestore';
 import { assertPrivacyErasureFenceUnchanged, readPrivacyErasureFence } from './privacy-erasure.js';
@@ -81,8 +82,10 @@ export class FirestoreTaskDiscoveryRepository implements TaskDiscoveryRepository
       )
         throw new Error('Invalid owner activity task');
       const trigger = task.trigger as { source?: unknown; payload?: { canary?: unknown } } | null;
+      const diagnostics = taskActivityDiagnostics(task.state);
       rows.push({
         id: task.id,
+        ...(diagnostics.length ? { diagnostics } : {}),
         estimatedCostOperationId: estimatedCostOperationLocator(task.status, task.state),
         suppressed: isChatAdmissionCancellationProjection(task),
         agentId,
