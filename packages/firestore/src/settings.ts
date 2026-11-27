@@ -1,11 +1,15 @@
 import type {
   NotificationPreferenceSettings,
   OwnerSettings,
+  QuietHoursWindow,
   Records,
   SettingsRepository,
 } from '@assistant/persistence';
 import { Timestamp } from '@google-cloud/firestore';
-import { privacyErasureIsActive } from './privacy-erasure.js';
+import {
+  assertPrivacyErasureInactiveInTransaction,
+  privacyErasureIsActive,
+} from './privacy-erasure.js';
 import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from './store.js';
 
 const PAGE_SIZE = 500;
@@ -129,6 +133,39 @@ export class FirestoreSettingsRepository implements SettingsRepository {
           agentId,
           ...input,
           createdAt: existing?.exists ? existing.get('createdAt') : now,
+          updatedAt: now,
+        }),
+        { merge: true },
+      );
+      return true;
+    });
+  }
+
+  async updateQuietHours(
+    agentId: string,
+    { quietStartMin, quietEndMin }: QuietHoursWindow,
+  ): Promise<boolean> {
+    if (this.configuredAgentId && agentId !== this.configuredAgentId) return false;
+    const prefsRef = this.store.doc('notificationPrefs', agentId);
+    return this.store.db.runTransaction(async (tx) => {
+      const owners = await tx.get(this.store.collection('agents').limit(2));
+      if (
+        owners.size !== 1 ||
+        owners.docs[0]?.id !== this.store.doc('agents', agentId).id ||
+        owners.docs[0]?.get('id') !== agentId
+      )
+        return false;
+      await assertPrivacyErasureInactiveInTransaction(tx, this.store, agentId);
+      const existing = await tx.get(prefsRef);
+      if (existing.exists && existing.get('agentId') !== agentId) return false;
+      const now = this.store.now();
+      tx.set(
+        prefsRef,
+        encodeRecord({
+          agentId,
+          quietStartMin,
+          quietEndMin,
+          ...(!existing.exists ? { createdAt: now, ambientDailyCap: null } : {}),
           updatedAt: now,
         }),
         { merge: true },

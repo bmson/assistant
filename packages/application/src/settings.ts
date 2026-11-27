@@ -15,7 +15,11 @@ import type { ApprovalPolicyRepository } from '@assistant/persistence';
 import { createSettingsFacade, type SettingsPersistence } from './settings-port.js';
 
 export type { NotificationPrefsView, SettingsOverview } from './settings-port.js';
-export { createSettingsFacade, type SettingsPersistence } from './settings-port.js';
+export {
+  createSettingsFacade,
+  parseQuietHoursWindow,
+  type SettingsPersistence,
+} from './settings-port.js';
 
 export function createPostgresSettingsPersistence(db: Db): SettingsPersistence {
   return {

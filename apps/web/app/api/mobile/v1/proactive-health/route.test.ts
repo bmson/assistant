@@ -53,7 +53,8 @@ it('returns the authenticated owner’s health view without caching it', async (
     healthy: true,
     dailyBudgetHolds: 'within_limit' as const,
     momentsDelivered24h: 0,
-    pingsHeld24h: 0,
+    pingsHeld24h: 2,
+    quietHoursHeld24h: 1,
     pingsDelivered24h: 0,
   };
   const briefing = { ok: false, state: 'stale', ageMs: 27 * 3600_000 } as const;

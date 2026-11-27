@@ -633,7 +633,7 @@ function firestoreDashboardOwnerNotifier(deps: AgentDeps): OwnerNotifier {
  * leg, which is composed separately and never gated. Approvals bypass the
  * policy entirely: the owner is the one waiting on them.
  */
-function policyGatedOutOfBand(
+export function policyGatedOutOfBand(
   policy: Db | NudgePolicyRepository,
   owner: () => Promise<{ id: string; timezone: string }>,
   inner: OwnerNotifier,

@@ -1645,6 +1645,7 @@ struct NoticingHealthView: View {
 
     var body: some View {
         AssistantSettingsList {
+            QuietHoursSection(heldCount: health?.quietHoursHeld24h)
             if let health {
                 Section {
                     if let healthy = health.healthy {
@@ -1754,6 +1755,140 @@ struct NoticingHealthView: View {
             guard !Task.isCancelled else { return }
             health = nil
             loadFailed = true
+        }
+    }
+}
+
+private struct QuietHoursSection: View {
+    @Environment(AppModel.self) private var model
+    let heldCount: Int?
+
+    @State private var settings: QuietHoursSettings?
+    @State private var enabled = false
+    @State private var start = 22 * 60
+    @State private var end = 7 * 60
+    @State private var loadFailed = false
+    @State private var saving = false
+    @State private var saveMessage: String?
+    @State private var saved = false
+
+    private var draft: QuietHoursWindow {
+        QuietHoursWindow(quietStartMin: enabled ? start : nil, quietEndMin: enabled ? end : nil)
+    }
+
+    var body: some View {
+        Section {
+            if let settings {
+                Toggle("Quiet hours", isOn: $enabled)
+                    .disabled(saving)
+                if enabled {
+                    // These values are wall-clock times. Use a fixed offset in
+                    // the picker so DST and the phone's zone cannot shift them.
+                    DatePicker("Starts", selection: clockTime($start), displayedComponents: .hourAndMinute)
+                        .environment(\.timeZone, .gmt)
+                        .disabled(saving)
+                    DatePicker("Ends", selection: clockTime($end), displayedComponents: .hourAndMinute)
+                        .environment(\.timeZone, .gmt)
+                        .disabled(saving)
+                    if start > end {
+                        Text("Ends the next day.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    } else if start == end {
+                        Text("Choose different start and end times.")
+                            .font(.footnote)
+                    }
+                }
+                LabeledContent("Time zone", value: settings.timezone.localizedName(
+                    for: .generic, locale: .current
+                ) ?? settings.timezone.identifier)
+                Button {
+                    Task { await save() }
+                } label: {
+                    if saving {
+                        ProgressView("Saving quiet hours")
+                    } else {
+                        Text("Save quiet hours")
+                    }
+                }
+                .disabled(saving || draft == settings.window || (enabled && start == end))
+                if let saveMessage {
+                    Text(saveMessage)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .accessibilityAddTraits(.updatesFrequently)
+                } else if saved {
+                    Text("Quiet hours saved.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .accessibilityAddTraits(.updatesFrequently)
+                }
+            } else if loadFailed {
+                Text("Couldn’t load quiet hours.")
+                Button("Try again") { Task { await load() } }
+            } else {
+                ProgressView("Loading quiet hours")
+            }
+            if let heldCount {
+                LabeledContent("Alerts held by quiet hours (last 24 hours)", value: String(heldCount))
+            }
+        } footer: {
+            Text("Quiet hours use your assistant’s time zone. Routine alerts can still appear in the app.")
+        }
+        .task { await load() }
+        .onChange(of: draft) {
+            if !saving {
+                saved = false
+                saveMessage = nil
+            }
+        }
+    }
+
+    private func clockTime(_ minutes: Binding<Int>) -> Binding<Date> {
+        Binding {
+            Date(timeIntervalSince1970: TimeInterval(minutes.wrappedValue * 60))
+        } set: { value in
+            let seconds = Int(value.timeIntervalSince1970.rounded())
+            minutes.wrappedValue = ((seconds % 86400 + 86400) % 86400) / 60
+        }
+    }
+
+    @MainActor private func load() async {
+        loadFailed = false
+        do {
+            let result = try await model.loadQuietHours()
+            guard !Task.isCancelled else { return }
+            enabled = result.window.quietStartMin != nil
+            if let startMin = result.window.quietStartMin, let endMin = result.window.quietEndMin {
+                start = startMin
+                end = endMin
+            }
+            settings = result
+        } catch {
+            guard !Task.isCancelled else { return }
+            loadFailed = true
+        }
+    }
+
+    @MainActor private func save() async {
+        guard !saving, let settings, draft != settings.window, !enabled || start != end else { return }
+        let submitted = draft
+        saving = true
+        saved = false
+        saveMessage = nil
+        defer { saving = false }
+        do {
+            let result = try await model.saveQuietHours(submitted)
+            guard result.window == submitted else {
+                saveMessage = "The server returned different quiet hours. Review your times and try again."
+                return
+            }
+            self.settings = result
+            saved = true
+        } catch let APIError.server(status, _) where (400..<500).contains(status) {
+            saveMessage = "The server rejected the change. You can try again."
+        } catch {
+            saveMessage = "Save couldn’t be confirmed. You can try again."
         }
     }
 }

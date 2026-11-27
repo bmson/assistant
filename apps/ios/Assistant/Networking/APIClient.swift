@@ -235,6 +235,18 @@ struct APIClient: Sendable, GoogleCalendarConnectionService, McpSignInOptionsSer
         catch { throw APIError.decodeFailure(error, as: PhoneCalendarSharingMutationResult.self) }
     }
 
+    func quietHoursSettings() async throws -> QuietHoursSettings {
+        try await get("api/mobile/v1/settings/quiet-hours")
+    }
+
+    func updateQuietHours(_ window: QuietHoursWindow) async throws -> QuietHoursSettings {
+        var request = makeRequest(url: configuration.baseURL.appending(path: "api/mobile/v1/settings/quiet-hours"))
+        request.httpMethod = "PATCH"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(window)
+        return try await perform(request, as: QuietHoursSettings.self)
+    }
+
     func proactiveHealth() async throws -> NoticingHealth {
         try await get("api/mobile/v1/proactive-health")
     }

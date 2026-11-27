@@ -24,6 +24,11 @@ export interface NotificationPreferenceSettings {
   ambientDailyCap: number | null;
 }
 
+export type QuietHoursWindow = Pick<
+  NotificationPreferenceSettings,
+  'quietStartMin' | 'quietEndMin'
+>;
+
 export interface HeldPingCounts {
   quietHours: number;
   dailyCap: number;
@@ -35,6 +40,7 @@ export interface SettingsRepository {
   getNotificationPrefs(agentId: string): Promise<NotificationPreferenceSettings | null>;
   countHeldPings(agentId: string, since: Date): Promise<HeldPingCounts>;
   updateNotificationPrefs(agentId: string, input: NotificationPreferenceSettings): Promise<boolean>;
+  updateQuietHours(agentId: string, window: QuietHoursWindow): Promise<boolean>;
   updateOwner(
     agentId: string,
     input: { timezone: string; locale: string; signature: string },

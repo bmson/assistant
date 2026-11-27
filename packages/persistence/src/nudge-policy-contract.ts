@@ -80,21 +80,18 @@ export function nudgePolicyContract(
       ]);
     });
 
-    it('holds ambient pings inside an overnight quiet window, end exclusive', async () => {
+    it('holds ambient pings from the owner-local overnight start up to the exclusive end', async () => {
       await f.setPrefs({ quietStartMin: 22 * 60, quietEndMin: 7 * 60 });
-      const evaluate = (now: Date) =>
-        f.repository.evaluate(utcOwner(), { urgency: 'ambient', now });
-      expect(await evaluate(LATE_NIGHT)).toEqual({ deliver: false, reason: 'quiet-hours' });
-      expect(await evaluate(new Date('2026-08-25T22:00:00Z'))).toEqual({
-        deliver: false,
-        reason: 'quiet-hours',
-      });
-      expect(await evaluate(new Date('2026-08-26T06:59:00Z'))).toEqual({
-        deliver: false,
-        reason: 'quiet-hours',
-      });
-      expect(await evaluate(new Date('2026-08-26T07:00:00Z'))).toEqual({ deliver: true });
-      expect(await evaluate(MIDDAY)).toEqual({ deliver: true });
+      const owner = { id: f.agentId, timezone: 'America/Los_Angeles' };
+      const evaluate = (iso: string) =>
+        f.repository.evaluate(owner, { urgency: 'ambient', now: new Date(iso) });
+      // In PDT these are 21:59, 22:00, 00:30, 06:59, and 07:00.
+      expect(await evaluate('2026-08-26T04:59:00Z')).toEqual({ deliver: true });
+      const held = { deliver: false, reason: 'quiet-hours' };
+      expect(await evaluate('2026-08-26T05:00:00Z')).toEqual(held);
+      expect(await evaluate('2026-08-26T07:30:00Z')).toEqual(held);
+      expect(await evaluate('2026-08-26T13:59:00Z')).toEqual(held);
+      expect(await evaluate('2026-08-26T14:00:00Z')).toEqual({ deliver: true });
     });
 
     it('applies a same-day window in the owner’s own zone', async () => {

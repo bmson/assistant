@@ -3336,6 +3336,22 @@ final class AppModel {
         }
     }
 
+    func loadQuietHours() async throws -> QuietHoursSettings {
+        guard let client else { throw APIError.invalidServerURL }
+        let version = connectionVersion
+        let result = try await client.quietHoursSettings()
+        guard connectionIsCurrent(client, version: version) else { throw CancellationError() }
+        return result
+    }
+
+    func saveQuietHours(_ window: QuietHoursWindow) async throws -> QuietHoursSettings {
+        guard let client else { throw APIError.invalidServerURL }
+        let version = connectionVersion
+        let result = try await client.updateQuietHours(window)
+        guard connectionIsCurrent(client, version: version) else { throw CancellationError() }
+        return result
+    }
+
     func loadNoticingHealth() async throws -> NoticingHealth {
         guard let client else { throw APIError.invalidServerURL }
         let version = connectionVersion

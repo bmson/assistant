@@ -54,6 +54,18 @@ export function createPostgresSettingsRepository(db: Db): SettingsRepository {
         });
       return true;
     },
+    async updateQuietHours(agentId, { quietStartMin, quietEndMin }) {
+      const [owner] = await db.select({ id: agents.id }).from(agents).where(eq(agents.id, agentId));
+      if (!owner) return false;
+      await db
+        .insert(notificationPrefs)
+        .values({ agentId, quietStartMin, quietEndMin })
+        .onConflictDoUpdate({
+          target: notificationPrefs.agentId,
+          set: { quietStartMin, quietEndMin, updatedAt: sql`now()` },
+        });
+      return true;
+    },
     async updateOwner(agentId, input) {
       const [updated] = await db
         .update(agents)

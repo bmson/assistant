@@ -4160,6 +4160,50 @@ struct OwnerCallGrantReceipt: Codable, Sendable {
 }
 
 
+struct QuietHoursWindow: Encodable, Equatable, Sendable {
+    let quietStartMin: Int?
+    let quietEndMin: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case quietStartMin, quietEndMin
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(quietStartMin, forKey: .quietStartMin)
+        try values.encode(quietEndMin, forKey: .quietEndMin)
+    }
+}
+
+struct QuietHoursSettings: Decodable, Sendable {
+    let timezone: TimeZone
+    let window: QuietHoursWindow
+
+    private enum CodingKeys: String, CodingKey {
+        case timezone, quietStartMin, quietEndMin
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        let identifier = try values.decode(String.self, forKey: .timezone)
+        let start = try values.decode(Int?.self, forKey: .quietStartMin)
+        let end = try values.decode(Int?.self, forKey: .quietEndMin)
+        guard let zone = TimeZone(identifier: identifier) else {
+            throw DecodingError.dataCorruptedError(forKey: .timezone, in: values, debugDescription: "Unknown owner timezone")
+        }
+        switch (start, end) {
+        case (nil, nil):
+            break
+        case let (start?, end?) where (0..<1440).contains(start) && (0..<1440).contains(end) && start != end:
+            break
+        default:
+            throw DecodingError.dataCorruptedError(forKey: .quietStartMin, in: values, debugDescription: "Invalid quiet hours")
+        }
+        timezone = zone
+        window = QuietHoursWindow(quietStartMin: start, quietEndMin: end)
+    }
+}
+
 struct NoticingHealth: Decodable, Sendable {
     struct Briefing: Decodable, Sendable {
         let state: String
@@ -4230,6 +4274,7 @@ struct NoticingHealth: Decodable, Sendable {
     let mailAwaitingAdmissionOver6h7d: Int?
     let momentsDelivered24h: Int
     let pingsHeld24h: Int
+    let quietHoursHeld24h: Int?
     let pushDevices: Int
     let warnings: [String]
 

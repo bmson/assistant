@@ -391,6 +391,8 @@ export function proxy(request: NextRequest) {
       isSecurityIncidentId(path.slice('/api/mobile/v1/security-reviews/'.length)) &&
       request.method === 'POST') ||
     (path === '/api/mobile/v1/settings' && request.method === 'PATCH') ||
+    (path === '/api/mobile/v1/settings/quiet-hours' &&
+      (request.method === 'GET' || request.method === 'PATCH')) ||
     (/^\/api\/mobile\/v1\/settings\/reminders\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
       path,
     ) &&
