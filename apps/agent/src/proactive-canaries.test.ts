@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { loadConfig, resetConfigForTest } from '@assistant/config';
+import { type Config, loadConfig, resetConfigForTest } from '@assistant/config';
 import { type ExecutorDeps, executeTask } from '@assistant/core';
 import {
   assessProactiveCanaries,
@@ -35,7 +35,7 @@ import {
 } from '@assistant/persistence';
 import type { ApnsClient } from '@assistant/tools/modules/push';
 import { and, eq } from 'drizzle-orm';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { runAssistantHealthMonitor } from '../../../packages/core/src/workflow/health-monitor.js';
 import {
   disposeStore,
@@ -52,7 +52,7 @@ import { createIsolatedTestDatabase } from './isolated-test-database.fixture.js'
 
 const HOUR = 60 * 60_000;
 const FIX = new Date('2026-11-18T08:00:00.000Z');
-const config = loadConfig({
+const fixtureEnvironment = {
   ASSISTANT_MODULES: 'calendar,sms',
   GOOGLE_OAUTH_CLIENT_ID: 'fixture-id',
   GOOGLE_OAUTH_CLIENT_SECRET: 'fixture-secret',
@@ -62,7 +62,14 @@ const config = loadConfig({
   TWILIO_AUTH_TOKEN: 'fixture-token',
   TWILIO_FROM_NUMBER: '+15550101111',
   OWNER_PHONE: '+15550102222',
+};
+
+let config: Config;
+beforeEach(() => {
+  resetConfigForTest();
+  config = loadConfig(fixtureEnvironment);
 });
+afterEach(resetConfigForTest);
 
 const source = { lat: '10.0', lng: '20.0', accuracyM: 30, source: 'shortcut', capturedAt: FIX };
 const cachedWeather = {
@@ -296,15 +303,6 @@ for (const [driver, fixture] of [
       async () => {
         const f = await fixture();
         try {
-          vi.stubEnv('ASSISTANT_MODULES', 'calendar');
-          vi.stubEnv('GOOGLE_OAUTH_CLIENT_ID', config.GOOGLE_OAUTH_CLIENT_ID);
-          vi.stubEnv('GOOGLE_OAUTH_CLIENT_SECRET', config.GOOGLE_OAUTH_CLIENT_SECRET);
-          vi.stubEnv(
-            'GOOGLE_CALENDAR_OAUTH_CALLBACK_URL',
-            config.GOOGLE_CALENDAR_OAUTH_CALLBACK_URL,
-          );
-          vi.stubEnv('MCP_ENC_KEY', config.MCP_ENC_KEY);
-          resetConfigForTest();
           const canaries = f.persistence.proactiveCanaries;
           const google = f.persistence.googleCalendarConnection;
           if (!canaries || !google) throw new Error('Missing Calendar repositories');
@@ -381,8 +379,6 @@ for (const [driver, fixture] of [
           expect(await run()).toBe('done');
           expect(await f.notificationTexts()).toEqual([warning, warning]);
         } finally {
-          vi.unstubAllEnvs();
-          resetConfigForTest();
           await f.close();
         }
       },
