@@ -6,21 +6,28 @@ import type { ActionEvidence } from './response-contract.js';
 const command = String.raw`(?:(?:please\s+|(?:can|could|would)\s+you\s+)(?:please\s+)?)?(?:correct|change|move|edit|update|fix)\s+`;
 const occasion = String.raw`\b(?:birthday|anniversary|occasion)\b`;
 const ownerSubject = String.raw`(?!(?:the|my|our|a|an|this|that)\s)(?![^'’\n]{0,120}\bfor\s)[^;!?\n]{1,120}?`;
+const namedOccasion = 'saved occasion named';
+const legacyTarget = String.raw`(?:saved [^;!?\n]{0,120}?)?${occasion}`;
 const correctionRequest = new RegExp(
-  String.raw`^${command}${ownerSubject}['’]s (?:saved [^;!?\n]{0,120})?${occasion}`,
-  'i',
-);
-const exactCorrection = new RegExp(
-  `^${command}(${ownerSubject})['’]s (?:saved )?(.{1,120}?) from (.{1,40}?) to (.{1,40}?)[.!?]?$`,
+  String.raw`^${command}${ownerSubject}['’]s (?:${namedOccasion}\b|${legacyTarget}(?=\s+(?:from|to)\b|[.!?]?$))`,
   'i',
 );
 const deleteCommand = String.raw`(?:(?:please\s+|(?:can|could|would)\s+you\s+)(?:please\s+)?)?(?:delete|remove)\s+`;
 const deleteRequest = new RegExp(
-  String.raw`^${deleteCommand}${ownerSubject}['’]s (?:saved [^;!?\n]{0,120}${occasion}|${occasion}(?=\s+on\b|[.!?]?$))`,
+  String.raw`^${deleteCommand}${ownerSubject}['’]s (?:${namedOccasion}\b|${legacyTarget}(?=\s+on\b|[.!?]?$))`,
+  'i',
+);
+const isoDate = /^(\d{4})-(\d{2})-(\d{2})$/;
+const spelledDate =
+  /^([a-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s+(\d{4})|\s+(with no year|without a year))?$/i;
+const dateText = String.raw`(?:\d{4}-\d{2}-\d{2}|[a-z]+\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s+\d{4}|\s+(?:with no year|without a year))?)`;
+const targetText = `((?:${namedOccasion} .{1,122}?|(?:saved )?.{1,120}?))`;
+const exactCorrection = new RegExp(
+  `^${command}(${ownerSubject})['’]s ${targetText} from (${dateText}) to (${dateText})[.!?]?$`,
   'i',
 );
 const exactDelete = new RegExp(
-  `^${deleteCommand}(${ownerSubject})['’]s (?:saved )?(.{1,120}?) on (.{1,40}?)[.!?]?$`,
+  `^${deleteCommand}(${ownerSubject})['’]s ${targetText} on (${dateText})[.!?]?$`,
   'i',
 );
 
@@ -64,12 +71,9 @@ export function isOccasionCorrectionRequest(text: string): boolean {
 }
 
 function parseDate(value: string): OccasionCorrectionDate | undefined {
-  const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  const iso = isoDate.exec(value);
   if (iso) return { month: Number(iso[2]), day: Number(iso[3]), year: Number(iso[1]) };
-  const spelled =
-    /^([a-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s+(\d{4})|\s+(with no year|without a year))?$/i.exec(
-      value,
-    );
+  const spelled = spelledDate.exec(value);
   if (!spelled?.[1]) return undefined;
   const name = spelled[1].toLowerCase();
   const month =
@@ -82,6 +86,24 @@ function parseDate(value: string): OccasionCorrectionDate | undefined {
   };
 }
 
+function parseTargetIdentity(
+  target: string,
+): Pick<OccasionCorrectionInput, 'kind' | 'label'> | undefined {
+  const trimmed = target.trim();
+  const prefix = trimmed.slice(0, namedOccasion.length).toLowerCase();
+  if (prefix === namedOccasion) {
+    const label = trimmed.slice(namedOccasion.length).trim();
+    const quoted = /^(?:"(.+)"|“(.+)”)$/.exec(label);
+    const value = quoted ? (quoted[1] ?? quoted[2]) : label;
+    return value && value.length <= 120 ? { kind: 'custom', label: value } : undefined;
+  }
+  const label = target.replace(/^saved /i, '').trim();
+  const kind = label.toLowerCase();
+  if (kind === 'birthday' || kind === 'anniversary') return { kind };
+  if (kind === 'occasion') return undefined;
+  return { kind: 'custom', label };
+}
+
 /** Parse only dates and identity supplied by the owner in this turn. */
 export function parseOccasionCorrection(
   request: string,
@@ -89,14 +111,14 @@ export function parseOccasionCorrection(
   if (!isOccasionCorrectionRequest(request)) return undefined;
   const match = exactCorrection.exec(request.trim());
   if (!match?.[1] || !match[2] || !match[3] || !match[4]) return undefined;
-  const label = match[2].trim();
-  const kind = label.toLowerCase();
+  const identity = parseTargetIdentity(match[2]);
+  if (!identity) return undefined;
   const expectedDate = parseDate(match[3]);
   const date = parseDate(match[4]);
   if (!expectedDate || !date) return undefined;
   return {
     subject: match[1].trim(),
-    ...(kind === 'birthday' || kind === 'anniversary' ? { kind } : { kind: 'custom', label }),
+    ...identity,
     expectedDate,
     date,
   };
@@ -108,13 +130,13 @@ export function parseOccasionDeletion(request: string): OccasionTarget | undefin
   if (occasionMutationTool(request) !== 'occasions.delete') return undefined;
   const match = exactDelete.exec(request.trim());
   if (!match?.[1] || !match[2] || !match[3]) return undefined;
-  const label = match[2].trim();
-  const kind = label.toLowerCase();
+  const identity = parseTargetIdentity(match[2]);
+  if (!identity) return undefined;
   const expectedDate = parseDate(match[3]);
   if (!expectedDate) return undefined;
   return {
     subject: match[1].trim(),
-    ...(kind === 'birthday' || kind === 'anniversary' ? { kind } : { kind: 'custom', label }),
+    ...identity,
     expectedDate,
   };
 }
@@ -154,7 +176,7 @@ const correctionMessages = {
   occasion_not_found:
     'I couldn’t find a saved occasion matching that old date. What date is currently saved in People?',
   owner_details_required:
-    'Tell me the full saved name and occasion, the old date, and the corrected date. For example, “Change Ada’s birthday from May 7 to May 9.”',
+    'Tell me the full saved name and occasion, the old date, and the corrected date. For example, “Change Ada’s saved occasion named Pottery Club Day from May 7 to May 9.”',
   owner_action_mismatch:
     'The requested change could not be matched to the proposed update. No date was changed.',
   owner_request_required: 'I couldn’t confirm an owner request for that change.',
@@ -230,7 +252,7 @@ export function occasionCorrectionReply(
             : outcome === 'contact_not_found' || outcome === 'stale_target'
               ? correctionMessages[outcome]
               : !owner
-                ? 'Tell me the full saved name, occasion, and its saved date.'
+                ? 'Tell me the full saved name, occasion, and its saved date. For example, “Remove Ada’s saved occasion named Pottery Club Day on May 7.”'
                 : !isOccasionCorrectionDate(owner.expectedDate)
                   ? 'What valid date is saved for that occasion?'
                   : 'I couldn’t confirm that the saved occasion was deleted. Check the occasion in People.';

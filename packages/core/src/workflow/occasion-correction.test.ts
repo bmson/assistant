@@ -57,6 +57,52 @@ describe('owner-chat occasion correction evidence', () => {
     }
   });
 
+  it('recognizes an explicitly named custom occasion and preserves its entire label', () => {
+    const target = {
+      subject: 'Mira Vale',
+      kind: 'custom',
+      label: 'Pottery Club Day',
+      expectedDate: { month: 5, day: 7 },
+    };
+    expect(
+      parseOccasionCorrection(
+        'Change Mira Vale’s saved occasion named Pottery Club Day from May 7 to May 9.',
+      ),
+    ).toEqual({ ...target, date: { month: 5, day: 9 } });
+    expect(
+      parseOccasionDeletion('Remove Mira Vale’s saved occasion named “Pottery Club Day” on May 7.'),
+    ).toEqual(target);
+    expect(
+      parseOccasionCorrection(
+        'Change Mira Vale’s saved occasion named Gifts from Studio on Main from May 7 to 2027-05-09.',
+      ),
+    ).toEqual({
+      ...target,
+      label: 'Gifts from Studio on Main',
+      date: { month: 5, day: 9, year: 2027 },
+    });
+    expect(
+      parseOccasionDeletion('Remove Mira Vale’s saved occasion named Birthday on May 7.'),
+    ).toEqual({ ...target, label: 'Birthday' });
+    expect(
+      parseOccasionDeletion('Remove Mira Vale’s saved occasion named on May 7.'),
+    ).toBeUndefined();
+    expect(parseOccasionDeletion('Remove Mira Vale’s saved occasion on May 7.')).toBeUndefined();
+  });
+
+  it('keeps neighboring requests and explicit tool opt-outs out of occasion mutation', () => {
+    for (const request of [
+      'Remove Mira Vale’s Pottery Club Day on May 7.',
+      'Remove Mira Vale’s saved reminder named Pottery Club Day on May 7.',
+      'Remove Mira Vale’s saved birthday reminder on May 7.',
+      'Change Mira Vale’s saved birthday invitation from May 7 to May 9.',
+      'Remove Mira Vale’s saved occasion named Pottery Club Day on May 7. Do not use tools.',
+      'Change Mira Vale’s saved occasion named Pottery Club Day from May 7 to May 9. Do not use tools.',
+    ]) {
+      expect(occasionMutationTool(request)).toBeUndefined();
+    }
+  });
+
   it('confirms only durable evidence from the current turn', () => {
     const row = {
       status: 'succeeded',
