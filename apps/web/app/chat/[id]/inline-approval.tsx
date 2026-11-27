@@ -79,7 +79,7 @@ export function ApprovalRow({
   return (
     <div className="py-2">
       <div className="flex flex-wrap items-start gap-x-3 gap-y-1">
-        <p className="min-w-0 flex-[1_1_12rem] break-words text-sm font-medium [overflow-wrap:anywhere]">
+        <p className="min-w-0 flex-[1_1_12rem] break-words whitespace-pre-wrap text-sm font-medium [overflow-wrap:anywhere]">
           {part.summary}
         </p>
         <span

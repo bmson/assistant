@@ -192,3 +192,5 @@ export function registerGitHubAppTools(registry: ToolRegistry, deps: GitHubAppTo
   );
   return registry;
 }
+
+export { registerGitHubAppIssueTools } from './github-app-issue-tools.js';

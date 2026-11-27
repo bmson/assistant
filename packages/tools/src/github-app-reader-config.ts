@@ -10,7 +10,7 @@ const MAX_CONFIG_VALUE_LENGTH = 4096;
 
 type Reader = ReturnType<typeof createGitHubAppReader>;
 
-interface Selection {
+export interface GitHubAppSelection {
   readonly appClientId: string;
   readonly installationId: number;
   readonly selectedRepositoryIds: readonly number[];
@@ -28,7 +28,7 @@ function positiveId(value: string | undefined) {
   return Number.isSafeInteger(id) ? id : null;
 }
 
-function readConfiguration(env: NodeJS.ProcessEnv) {
+export function readGitHubAppConfiguration(env: NodeJS.ProcessEnv) {
   const appClientId = env.ASSISTANT_GITHUB_APP_CLIENT_ID;
   const installationId = positiveId(env.ASSISTANT_GITHUB_APP_INSTALLATION_ID);
   const keyFile = env.ASSISTANT_GITHUB_APP_PRIVATE_KEY_FILE;
@@ -62,9 +62,9 @@ function readConfiguration(env: NodeJS.ProcessEnv) {
   return { appClientId, installationId, keyFile, selectedRepositoryIds };
 }
 
-type Configuration = NonNullable<ReturnType<typeof readConfiguration>>;
+type Configuration = NonNullable<ReturnType<typeof readGitHubAppConfiguration>>;
 
-function publicSelection(config: Configuration): Selection {
+export function publicGitHubAppSelection(config: Configuration): GitHubAppSelection {
   return Object.freeze({
     appClientId: config.appClientId,
     installationId: config.installationId,
@@ -75,9 +75,9 @@ function publicSelection(config: Configuration): Selection {
 /** Validate local configuration and return only the app, installation and selected IDs. */
 export function configuredGitHubAppSelection(
   env: NodeJS.ProcessEnv = process.env,
-): Selection | null {
-  const config = readConfiguration(env);
-  return config ? publicSelection(config) : null;
+): GitHubAppSelection | null {
+  const config = readGitHubAppConfiguration(env);
+  return config ? publicGitHubAppSelection(config) : null;
 }
 
 function fileVersion(stat: Stats) {
@@ -92,7 +92,7 @@ function fileVersion(stat: Stats) {
   ]);
 }
 
-async function inspectKeyFile<T>(
+export async function inspectGitHubAppKeyFile<T>(
   keyFile: string,
   inspect: (file: FileHandle, version: string, size: number) => T | Promise<T>,
 ): Promise<T | null> {
@@ -127,8 +127,11 @@ async function inspectKeyFile<T>(
   }
 }
 
-async function loadKey(keyFile: string, previous?: LoadedKey): Promise<LoadedKey | null> {
-  return inspectKeyFile(keyFile, async (file, version, expectedSize) => {
+export async function loadGitHubAppKey(
+  keyFile: string,
+  previous?: LoadedKey,
+): Promise<LoadedKey | null> {
+  return inspectGitHubAppKeyFile(keyFile, async (file, version, expectedSize) => {
     if (previous?.path === keyFile && previous.version === version) return previous;
     const bytes = Buffer.alloc(expectedSize + 1);
     try {
@@ -157,17 +160,17 @@ async function loadKey(keyFile: string, previous?: LoadedKey): Promise<LoadedKey
 /** Optional server configuration pinned to the initial app and installation identity. */
 export async function configuredGitHubAppReader(
   env: NodeJS.ProcessEnv = process.env,
-): Promise<(Reader & { readonly selection: Selection }) | null> {
-  const configured = readConfiguration(env);
+): Promise<(Reader & { readonly selection: GitHubAppSelection }) | null> {
+  const configured = readGitHubAppConfiguration(env);
   if (!configured) return null;
-  const initialKey = await loadKey(configured.keyFile);
+  const initialKey = await loadGitHubAppKey(configured.keyFile);
   if (!initialKey) return null;
-  const selection = publicSelection(configured);
+  const selection = publicGitHubAppSelection(configured);
   let signingKey = initialKey;
 
   function currentConfiguration(repoId: number, signal?: AbortSignal, expectedKeyFile?: string) {
     if (signal?.aborted) throw new GitHubAppReadError('request_failed');
-    const config = readConfiguration(env);
+    const config = readGitHubAppConfiguration(env);
     if (
       !config ||
       config.appClientId !== selection.appClientId ||
@@ -191,7 +194,7 @@ export async function configuredGitHubAppReader(
       throw new GitHubAppReadError('invalid_input');
     }
     const config = currentConfiguration(repoId, signal);
-    const key = await loadKey(config.keyFile, signingKey);
+    const key = await loadGitHubAppKey(config.keyFile, signingKey);
     if (!key) throw new GitHubAppReadError('invalid_configuration');
     signingKey = key;
     const latest = currentConfiguration(repoId, signal, config.keyFile);
@@ -203,7 +206,7 @@ export async function configuredGitHubAppReader(
     });
     const result = await operation(reader);
     currentConfiguration(repoId, signal, config.keyFile);
-    const keyStillCurrent = await inspectKeyFile(
+    const keyStillCurrent = await inspectGitHubAppKeyFile(
       config.keyFile,
       (_file, version) => version === key.version,
     );

@@ -27,6 +27,8 @@
     "./mcp-oauth": "./src/mcp-oauth.ts",
     "./mcp-oauth-registration": "./src/mcp-oauth-registration.ts",
     "./mcp-oauth-service": "./src/mcp-oauth-service.ts",
+    "./github-app-issue-creator": "./src/github-app-issue-creator.ts",
+    "./github-app-issue-creator-config": "./src/github-app-issue-creator-config.ts",
     "./github-app-reader": "./src/github-app-reader.ts",
     "./github-app-tools": "./src/github-app-tools.ts",
     "./github-app-reader-config": "./src/github-app-reader-config.ts"
