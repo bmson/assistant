@@ -3,7 +3,10 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { replayCases } from '../apps/agent/src/proactive-replay-cases.js';
-import type { ScoredReplayCase } from '../apps/agent/src/proactive-replay-score.js';
+import {
+  type ScoredReplayCase,
+  scoreReplayKinds,
+} from '../apps/agent/src/proactive-replay-score.js';
 
 const host = process.env.FIRESTORE_EMULATOR_HOST;
 if (!host || !/^(127\.0\.0\.1|localhost):\d+$/.test(host))
@@ -93,6 +96,7 @@ try {
         precision: delivered ? matched / delivered : null,
         quietViolations: sum('quietViolations'),
       },
+      perKind: scoreReplayKinds(benchmark),
       cases,
     };
   });
@@ -129,7 +133,7 @@ try {
     join(outputDir, 'benchmark-result.json'),
     `${JSON.stringify(
       {
-        version: 3,
+        version: 4,
         source,
         scope,
         replayValidated: validated,
@@ -155,7 +159,9 @@ try {
           : ' (local edits or revision change).')
       : 'Source revision unavailable.',
     '',
-    'The channel score reflects the fake push acknowledgment and its durable ledger flag. The S13 same-day control, S14 due setup, and generic control are excluded from the executed subset’s precision and recall.',
+    'Recall divides on-time credit by expected deliveries. Precision divides that credit by observed deliveries. An on-time exact-source match with a durable, grounded card earns one point on the expected channel and half for a channel mismatch. Stack expects no push. Push expects a single call and matching fake and durable acknowledgments. Unknown kind covers excess notices or push calls without ledger entries.',
+    '',
+    'The S13 same-day control, S14 due setup, and generic control are excluded from the executed subset’s precision and recall.',
     '',
     `Replay validation: ${validated ? 'complete' : 'failed'}. Executed product scenarios: ${passed ? 'all passed' : 'one or more failed or lack validated evidence'}.`,
     '',
@@ -184,6 +190,63 @@ try {
       `## ${adapter.adapter === 'postgres' ? 'PostgreSQL' : 'Firestore'}`,
       '',
       `On-time recall ${adapter.score.matched}/${adapter.score.expected} (${percent(adapter.score.recall)}) · Precision ${adapter.score.matched}/${adapter.score.delivered} (${percent(adapter.score.precision)}) · Quiet violations ${adapter.score.quietViolations}`,
+      '',
+      '| Kind | On-time recall | Precision | Misses | False positives |',
+      '| --- | ---: | ---: | ---: | ---: |',
+    );
+    for (const row of adapter.perKind) {
+      markdown.push(
+        `| ${row.kind ?? 'Unknown (notice or push only)'} | ${row.matched}/${row.expected} (${percent(row.recall)}) | ${row.matched}/${row.delivered} (${percent(row.precision)}) | ${row.misses} | ${row.falsePositives} |`,
+      );
+    }
+    if (!adapter.perKind.length) markdown.push('| — | — | — | — | — |');
+    const benchmark = adapter.cases.filter(({ id }) => implementedIds.has(id));
+    markdown.push(
+      '',
+      '### Timing by kind',
+      '',
+      '| Kind | Case and tick | Channel | Expected window (min) | Ledger delivery times (min) | On-time credit |',
+      '| --- | --- | --- | ---: | --- | ---: |',
+    );
+    for (const row of adapter.perKind) {
+      const sameTick = (a: { caseId: string; tick: string }, b: { caseId: string; tick: string }) =>
+        a.caseId === b.caseId && a.tick === b.tick;
+      for (const check of row.expectations) {
+        const minutes = row.observedTiming
+          .filter((observation) => sameTick(check, observation))
+          .map(({ elapsedMinutes }) => elapsedMinutes);
+        markdown.push(
+          `| ${row.kind} | ${check.caseId} · ${check.tick} | ${check.channel} | ${check.earliestMinutes}–${check.latestMinutes} | ${minutes.join(', ') || '—'} | ${check.credit} |`,
+        );
+      }
+      for (const observation of row.observedTiming) {
+        if (row.expectations.some((check) => sameTick(check, observation))) continue;
+        markdown.push(
+          `| ${row.kind} | ${observation.caseId} · ${observation.tick} | — | — | ${observation.elapsedMinutes} | 0 |`,
+        );
+      }
+    }
+    if (!adapter.perKind.some((row) => row.expectations.length || row.observedTiming.length))
+      markdown.push('| — | Evidence unavailable | — | — | — | — |');
+    markdown.push(
+      '',
+      '### Required silence',
+      '',
+      '| Case and tick | Expected phase and reason | Observations | Violations |',
+      '| --- | --- | ---: | ---: |',
+    );
+    for (const row of benchmark) {
+      for (const check of row.quietChecks) {
+        markdown.push(
+          `| ${row.id} · ${check.tick} | ${check.phase} · ${check.reason} | ${check.observations} | ${check.violations} |`,
+        );
+      }
+    }
+    if (!benchmark.some((row) => row.quietChecks.length))
+      markdown.push('| — | Evidence unavailable | — | — |');
+    markdown.push(
+      '',
+      '### Replay cases',
       '',
       '| Case | Result | Deliveries outside setup | Setup deliveries | Fake push calls | Timing including setup |',
       '| --- | --- | ---: | ---: | ---: | --- |',

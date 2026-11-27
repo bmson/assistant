@@ -4251,6 +4251,7 @@ struct NoticingHealth: Decodable, Sendable {
     }
     let canaries: Canaries?
     let briefing: Briefing?
+    let healthy: Bool?
     let dailyBudgetHolds: String?
     let lastMailAt: String?
     let mailEligibleIntake24h: Int?
@@ -4281,7 +4282,8 @@ struct NoticingHealth: Decodable, Sendable {
 
     var dailyBudgetHoldsLabel: String {
         switch dailyBudgetHolds {
-        case "within_limit": return "At or below 25% of daily cap"
+        case "within_limit": return "Within daily holds target"
+        case "at_threshold": return "At 25% of daily cap"
         case "above_threshold": return "Over 25% of daily cap"
         case "paused": return "Daily spending cap is zero"
         case "uncapped": return "No daily cap"

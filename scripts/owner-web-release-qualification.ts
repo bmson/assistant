@@ -15,6 +15,7 @@ import {
   QUALIFICATION_MANIFEST as PIN,
   verifyQualificationManifest,
 } from './owner-web-release-qualification-manifest.js';
+import { PROTECTED_GITHUB_TOKEN_PATTERN } from './owner-web-tag-artifact.js';
 import { HISTORICAL_WEB_TAGS, WEB_SERVICE } from './owner-web-tag-retirement.js';
 import { planWebTrafficReconciliation } from './owner-web-traffic-reconciliation-model.js';
 
@@ -169,7 +170,11 @@ export function qualificationContext(env: NodeJS.ProcessEnv, head: string) {
       /^[A-Za-z0-9._~-]{1,16384}$/,
       'ctx_oidc_request_token_shape',
     ),
-    githubToken: contextString(env.GH_TOKEN, /^[A-Za-z0-9_]{1,4096}$/, 'ctx_github_token_shape'),
+    githubToken: contextString(
+      env.GH_TOKEN,
+      PROTECTED_GITHUB_TOKEN_PATTERN,
+      'ctx_github_token_shape',
+    ),
   };
 }
 export interface QualificationDependencies extends QualificationClock {

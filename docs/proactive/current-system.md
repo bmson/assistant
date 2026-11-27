@@ -65,7 +65,7 @@ There is no news source. `web.search` is registered as `autonomous` (`packages/t
 
 - `refreshAmbientSnapshot` (`packages/core/src/memory/ambient.ts:489-507`) needs a fresh location ping inside `LOCATION_RETENTION_DAYS`. Without one it clears the snapshot, and the job reports `ambient: no fresh location — snapshot cleared` (`packages/core/src/memory/jobs.ts:729-747`). On Nov 18, 4 of 11 runs produced weather.
 - Weather is Open-Meteo for "now and today at the last location". There is no forecast for an event's place and time.
-- WMO codes map to words with no plausibility check (`ambient.ts:37-62`): code 75 became "heavy snow" in a coastal city at 8–13 °C (A16).
+- In the Nov 18 audit, WMO code 75 produced “heavy snow” with a daily range of 8–13 °C. The weather parser now checks unrounded temperatures. A daily minimum above 3 °C makes a snow code uncertain in that day’s forecast, current conditions and hourly detail. An uncorroborated snow code produces one diagnostic per provider response (A16).
 
 ### 3.5 Device
 

@@ -12,8 +12,17 @@ import type { OwnerEditorOperationRecord } from './owner-editor.js';
 import type { OwnerCorrection } from './owner-memory-correction.js';
 import type { OwnerMemoryWriteWitness } from './owner-memory-write-witness.js';
 import type { OwnerCallActionGrantUsage } from './phone-call-owner-action-grant.js';
+import type { Signal } from './signals.js';
 
 export interface Records {
+  signals: {
+    id: string;
+    agentId: string;
+    kind: Signal['kind'];
+    at: string;
+    subjectPersonIds: string[];
+    record: Signal;
+  };
   googleCalendarConnections: { agentId: string; state: unknown; updatedAt: Date };
   ownerEditorOperations: OwnerEditorOperationRecord;
   ownerCallGrantOperations: OwnerCallGrantOperation;

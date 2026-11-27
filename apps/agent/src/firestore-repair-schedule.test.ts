@@ -221,6 +221,33 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('repair schedule provision
     await store.doc('privacyErasureJobs', agentId).set({ agentId, status: 'active' });
     await expect(ensureRepairSchedule(store, agentId)).rejects.toThrow('Privacy erasure');
   });
+  it('keeps merged follow-ups due while queued work waits for dispatch allowance', async () => {
+    const lastRun = new Date('2026-06-01T00:00:00.000Z');
+    const nextPoll = new Date(lastRun.getTime() + 15 * 60_000);
+    const clock = vi.spyOn(store, 'now').mockReturnValue(lastRun);
+    await ensureRepairSchedule(store, agentId, 1);
+    const schedule = await new FirestoreScheduleRepository(store).getByName(agentId, 'self-repair');
+    if (!schedule) throw new Error('Missing repair schedule');
+    const repairs = new FirestoreSelfRepairRepository(store, agentId);
+    const report = {
+      fingerprint: 'checked',
+      source: 'feedback' as const,
+      title: 'Synthetic repair',
+      summary: 'Follow-up after a dispatch',
+    };
+    const issue = await repairs.report(agentId, report);
+    const dispatched = await repairs.update(issue, 'fixing', {}, lastRun);
+    if (!dispatched) throw new Error('Missing dispatch');
+    await repairs.update(dispatched, 'merged', {}, lastRun);
+    await repairs.report(agentId, { ...report, fingerprint: 'waiting' });
+    const ref = store.doc('schedules', schedule.id);
+    await ref.update({ lastRunAt: lastRun, nextRunAt: nextPoll });
+
+    clock.mockReturnValue(new Date(lastRun.getTime() + 60_000));
+    await ensureRepairSchedule(store, agentId, 1);
+    expect((await ref.get()).get('nextRunAt').toMillis()).toBe(nextPoll.getTime());
+    expect(await repairs.claim(agentId, nextPoll, 1)).toBeNull();
+  });
   it.each(['fixing', 'testing', 'pr_open', 'merged'] as const)(
     'polls %s on its normal cadence even with no daily allowance',
     async (status) => {

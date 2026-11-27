@@ -1076,25 +1076,17 @@ release_staged_services_body() {
           fi
         fi
         if [[ "$promoted_ok" == true ]]; then
-          web_resume_revision="$(node -e 'const s=JSON.parse(process.argv[1]);const rows=(s.status?.traffic??[]).filter(t=>t.tag===process.argv[2]&&t.revisionName);if(rows.length!==1)process.exit(2);process.stdout.write(rows[0].revisionName)' "$staged_resume_web_json" "$web_resume_tag")" || promoted_ok=false
+          web_resume_revision="$(node -e 'const s=JSON.parse(process.argv[1]);const rows=(s.status?.traffic??[]).filter(t=>t.tag===process.argv[2]);if(rows.length!==1||!rows[0].revisionName)process.exit(2);process.stdout.write(rows[0].revisionName)' "$staged_resume_web_json" "$web_resume_tag")" || promoted_ok=false
         fi
         if [[ "$promoted_ok" == true && "$basic_editor_forward_only" == true ]]; then
-          local resume_revision_json
-          resume_revision_json="$(release_revision_json assistant-web "$web_resume_revision")" || promoted_ok=false
-          if [[ "$promoted_ok" == true ]]; then
-            if node -e '
-              const r=JSON.parse(process.argv[1]),expected=process.argv[2],old=process.argv[4].split(",").map(x=>x.split("=")[0]);
-              const name=(r.metadata?.name??r.name??"").split("/").at(-1),container=(r.spec?.containers??r.containers??[])[0];
-              const paused=(container?.env??[]).filter(e=>e.name==="ASSISTANT_RELEASE_WRITES_PAUSED");
-              if(name!==expected||old.includes(expected)||container?.image!==process.argv[3]||paused.length!==1||paused[0].value!=="false")process.exit(2);
-            ' "$resume_revision_json" "$web_resume_revision" "${IMAGE_ROOT}/web@${web_digest}" "$web_old_traffic"; then
-              basic_editor_resume_verified=true
-            else
-              promoted_ok=false
-            fi
-          fi
-          if [[ "$promoted_ok" == true ]] &&
-             ! release_record_owned_web_tag resume "$TAG" "$manifest_path" "$manifest_sha" "$staging_tag"; then
+          # Cloud Run can expose the amd64 child in immutable revision fields.
+          # Require protected native ownership and OCI resolution for this exact alias target.
+          if [[ "$web_resume_revision" =~ ^assistant-web-[a-z0-9-]{1,63}$ &&
+                ",${web_old_traffic}," != *",${web_resume_revision}="* ]] &&
+             OWNER_TAG_EXPECTED_RESUME_REVISION="$web_resume_revision" \
+               release_record_owned_web_tag resume "$TAG" "$manifest_path" "$manifest_sha" "$staging_tag"; then
+            basic_editor_resume_verified=true
+          else
             promoted_ok=false
           fi
         fi
@@ -1114,7 +1106,7 @@ release_staged_services_body() {
               local fresh_resume_revision
               staged_resume_web_json="$(release_service_json assistant-web)" || promoted_ok=false
               if [[ "$promoted_ok" == true ]]; then
-                fresh_resume_revision="$(node -e 'const s=JSON.parse(process.argv[1]);const rows=(s.status?.traffic??[]).filter(t=>t.tag===process.argv[2]&&t.revisionName);if(rows.length!==1)process.exit(2);process.stdout.write(rows[0].revisionName)' "$staged_resume_web_json" "$web_resume_tag")" || promoted_ok=false
+                fresh_resume_revision="$(node -e 'const s=JSON.parse(process.argv[1]);const rows=(s.status?.traffic??[]).filter(t=>t.tag===process.argv[2]);if(rows.length!==1||!rows[0].revisionName)process.exit(2);process.stdout.write(rows[0].revisionName)' "$staged_resume_web_json" "$web_resume_tag")" || promoted_ok=false
                 if [[ "$promoted_ok" == true && "$fresh_resume_revision" != "$web_resume_revision" ]]; then promoted_ok=false; fi
               fi
             fi

@@ -301,13 +301,15 @@ export async function runAssistantHealthMonitor(
   }
 
   const canaryReminderBefore = new Date(now.getTime() - MAIL_ALERT_RENOTIFY_MS);
-  if (budget === 'above_threshold' || budget === 'unavailable') {
+  const budgetProblem = {
+    at_threshold: 'Budget holds reached 25% of the daily spending cap.',
+    above_threshold: 'Budget holds exceed 25% of the daily spending cap.',
+    unavailable: 'Daily budget holds could not be checked.',
+  };
+  if (budget === 'at_threshold' || budget === 'above_threshold' || budget === 'unavailable') {
     signals.push({
       kind: 'proactive_canary_budget',
-      detail:
-        budget === 'above_threshold'
-          ? 'Budget holds exceed 25% of the daily spending cap.'
-          : 'Daily budget holds could not be checked.',
+      detail: budgetProblem[budget],
       notificationDueBefore: canaryReminderBefore,
     });
   }

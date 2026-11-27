@@ -127,7 +127,20 @@ function environment(
   requireNative(!requireMcpOff || result.MCP_OAUTH_ENABLED === 'false');
   return result;
 }
-function revisionProof(raw: unknown, name: string, c: Context): NativeProof {
+function retiredUnroutedCondition(c: Obj) {
+  return (
+    c.reason === undefined &&
+    c.revisionReason === 'RETIRED' &&
+    ((c.type === 'Ready' && c.state === 'CONDITION_SUCCEEDED') ||
+      retiredCurrentRevisionCondition(c))
+  );
+}
+function revisionProof(
+  raw: unknown,
+  name: string,
+  c: Context,
+  retiredUnrouted: boolean,
+): NativeProof {
   const r = nativeObject(raw);
   const conditions = r.conditions;
   requireNative(Array.isArray(conditions) && conditions.length > 0 && conditions.length <= 16);
@@ -138,22 +151,28 @@ function revisionProof(raw: unknown, name: string, c: Context): NativeProof {
       const v = nativeObject(condition);
       return (
         v.state === 'CONDITION_SUCCEEDED' ||
-        (reviewedCurrent?.preclosed && retiredCurrentRevisionCondition(v))
+        (reviewedCurrent?.preclosed && retiredCurrentRevisionCondition(v)) ||
+        (retiredUnrouted && retiredUnroutedCondition(v))
       );
     }),
   );
-  if (name !== c.canonical)
+  if (name !== c.canonical || c.currentBinding?.ordinaryRecoverySha256 !== undefined)
     requireNative(
       conditions
         .map(nativeObject)
-        .every((v) => v.reason === undefined && v.revisionReason === undefined),
+        .every(
+          (v) =>
+            (v.reason === undefined && v.revisionReason === undefined) ||
+            (retiredUnrouted && retiredUnroutedCondition(v)),
+        ),
     );
   requireNative(
     r.name === `${WEB_SERVICE}/revisions/${name}` &&
       (r.service === WEB_SERVICE || r.service === 'assistant-web') &&
       ready.length === 1 &&
       (ready[0]?.state === 'CONDITION_SUCCEEDED' ||
-        (reviewedCurrent?.preclosed && retiredCurrentRevisionCondition(ready[0] as Obj))) &&
+        (reviewedCurrent?.preclosed && retiredCurrentRevisionCondition(ready[0] as Obj)) ||
+        (retiredUnrouted && retiredUnroutedCondition(ready[0] as Obj))) &&
       (r.reconciling === undefined || r.reconciling === false),
   );
   const uid = text(r.uid, /^[A-Za-z0-9-]{1,128}$/),
@@ -395,12 +414,29 @@ function projectSnapshot(raw: unknown, native: Record<string, unknown>, c: Conte
       addressed.length <= 3 &&
       addressed.every(([name]) => known.includes(name)),
   );
+  const ordinaryRecovery = c.currentBinding?.ordinaryRecoverySha256 !== undefined;
+  const pausedBootstrapCandidate = c.currentBinding?.preclosed
+    ? releaseIdentity(c, 'P').revision
+    : undefined;
+  const routed = new Set([...desired, ...observed].map(({ revision }) => revision));
   const revisions = Object.fromEntries(
-    addressed.map(([name, value]) => [name, revisionProof(value, name, c)]),
+    addressed.map(([name, value]) => [
+      name,
+      // Cloud Run can retire P as soon as closeP removes its final route.
+      revisionProof(
+        value,
+        name,
+        c,
+        (ordinaryRecovery || name === pausedBootstrapCandidate) &&
+          name !== latestReady &&
+          !routed.has(name),
+      ),
+    ]),
   );
   requireNative(Array.isArray(s.urls) && s.urls.length <= 9);
   const urls = s.urls.map((v) => tagHash(uri(v)));
-  if (c.currentBinding?.preclosed) {
+  const hasReviewedRouting = c.currentBinding?.preclosed || ordinaryRecovery;
+  if (hasReviewedRouting) {
     // Cloud Run can list only the service endpoints in urls. For this release's
     // own targets, the settled traffic status also supplies the verified tag URI.
     requireNative(new Set(urls).size === urls.length);
@@ -437,8 +473,8 @@ function projectSnapshot(raw: unknown, native: Record<string, unknown>, c: Conte
     reconciling: false,
     succeeded: nativeObject(s.terminalCondition).state === 'CONDITION_SUCCEEDED',
     ...(c.currentBinding?.preclosed && disabled(s) ? { admissionDisabled: true as const } : {}),
-    desired: c.currentBinding?.preclosed ? normalizedTrafficRows(desired) : desired,
-    observed: c.currentBinding?.preclosed ? normalizedTrafficRows(observed) : observed,
+    desired: hasReviewedRouting ? normalizedTrafficRows(desired) : desired,
+    observed: hasReviewedRouting ? normalizedTrafficRows(observed) : observed,
     latestReady,
     latestCreated,
     template: t,
