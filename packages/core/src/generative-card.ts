@@ -4,12 +4,15 @@ import { CardFormSchema } from '@assistant/persistence/card-form';
 import { z } from 'zod';
 import { containsCardSecret, isSensitiveCardFact, publicCardText } from './card-privacy.js';
 import type { ModelRouter } from './model-router/index.js';
-import { bookingEvidence } from './workflow/booking-disclosure.js';
+import { bookingEvidence, bookingStayTime } from './workflow/booking-disclosure.js';
 import type { ActionEvidence } from './workflow/response-contract.js';
+
+const MAX_CARD_FACT_VALUE = 500;
+const MAX_FACTS_PER_BLOCK = 8;
 
 const FactSchema = z.object({
   id: z.string().regex(/^[a-z0-9_-]{1,40}$/),
-  value: z.string().trim().min(1).max(500),
+  value: z.string().trim().min(1).max(MAX_CARD_FACT_VALUE),
   label: z.string().trim().min(1).max(60).optional(),
   source: z.string().trim().min(1).max(80),
   sensitive: z.boolean().default(false),
@@ -28,7 +31,10 @@ const AuthoredLabel = z.string().trim().min(1).max(60);
  */
 const LEAF_BLOCKS = [
   z.object({ type: z.literal('hero'), titleFact: z.string(), subtitleFact: z.string().optional() }),
-  z.object({ type: z.literal('facts'), factIds: z.array(z.string()).min(1).max(8) }),
+  z.object({
+    type: z.literal('facts'),
+    factIds: z.array(z.string()).min(1).max(MAX_FACTS_PER_BLOCK),
+  }),
   z.object({ type: z.literal('timeline'), factIds: z.array(z.string()).min(1).max(8) }),
   z.object({
     type: z.literal('score'),
@@ -745,6 +751,53 @@ function worthTrying(
   return answerText ? answerLooksCardShaped(answerText) : false;
 }
 
+function projectedHotelFacts(source: string): FactSpec[] {
+  type StayTime = NonNullable<ReturnType<typeof bookingStayTime>>;
+  const times = new Map<StayTime['kind'], { time: StayTime; value: string }>();
+  const otherFacts = new Map<string, string>();
+  const covers = (more: StayTime, less: StayTime) =>
+    more.bound === less.bound &&
+    (['property', 'date', 'clock', 'zone'] as const).every(
+      (key) => !less.keys[key] || more.keys[key] === less.keys[key],
+    );
+  for (const value of source.split('\n')) {
+    if (!value || value.length > MAX_CARD_FACT_VALUE || containsCardSecret(value)) continue;
+    const time = bookingStayTime(value);
+    if (!time) {
+      const key = normalized(value);
+      if (!otherFacts.has(key)) otherFacts.set(key, value);
+      continue;
+    }
+    const existing = times.get(time.kind);
+    if (existing) {
+      if (covers(existing.time, time)) continue;
+      if (!covers(time, existing.time)) return [];
+    }
+    times.set(time.kind, { time, value });
+  }
+  if (!times.has('check-in')) return [];
+  const addresses = [...otherFacts.values()].filter((value) =>
+    /^(?:(?:hotel|property) )?address\s*:/i.test(value),
+  );
+  if (addresses.length > 1) return [];
+  const facts = [
+    ...[...times.values()].map(({ time, value }) => ({
+      id: time.kind,
+      label: time.kind === 'check-in' ? 'Check-in' : 'Check-out',
+      value,
+    })),
+    ...addresses.map((value) => ({ id: 'address', label: 'Address', value })),
+    ...[...otherFacts.values()]
+      .filter((value) => !addresses.includes(value))
+      .map((value, index) => ({ id: `detail-${index + 1}`, label: 'Booking detail', value })),
+  ];
+  return facts.slice(0, MAX_FACTS_PER_BLOCK).map((fact) => ({
+    ...fact,
+    source: 'gmail.read_thread',
+    sensitive: false,
+  }));
+}
+
 export async function generateEvidenceCardOutcome(input: {
   router: ModelRouter;
   /** The task paying for the call; absent for work no task owns (mail). */
@@ -777,16 +830,34 @@ export async function generateEvidenceCardOutcome(input: {
     const threadMessages = sourceEvidence
       .filter(
         (row) =>
-          row.fromCurrentTask !== false &&
+          (bookingRequest ? row.fromCurrentTask === true : row.fromCurrentTask !== false) &&
           row.status === 'succeeded' &&
           row.toolName === 'gmail.read_thread',
       )
       .flatMap((row) => {
+        const args = row.args as { startMessageIndex?: number; startMessageOffset?: number } | null;
+        if (
+          bookingRequest &&
+          ((args?.startMessageIndex ?? 0) !== 0 || (args?.startMessageOffset ?? 0) !== 0)
+        )
+          return [];
         const result = row.result as {
           error?: unknown;
-          messages?: Array<{ text?: unknown }>;
+          complete?: boolean;
+          hasMore?: boolean;
+          truncated?: boolean;
+          messages?: Array<{ text?: unknown; truncated?: boolean }>;
         } | null;
-        return !result?.error && Array.isArray(result?.messages) ? result.messages : [];
+        if (!result || result.error || !Array.isArray(result.messages)) return [];
+        if (
+          bookingRequest &&
+          (result.complete !== true ||
+            result.hasMore ||
+            result.truncated ||
+            result.messages.some((message) => message.truncated))
+        )
+          return [];
+        return result.messages;
       });
     const searchedMail = input.evidence.some(
       (row) => row.fromCurrentTask !== false && row.toolName === 'gmail.search',
@@ -798,7 +869,7 @@ export async function generateEvidenceCardOutcome(input: {
       return { kind: 'no_op' };
     const confirmations = threadMessages.flatMap((message) =>
       typeof message.text === 'string' &&
-      message.text.trim().length <= 500 &&
+      (bookingRequest || message.text.trim().length <= MAX_CARD_FACT_VALUE) &&
       /\bcheck[ -]?in\b/i.test(message.text)
         ? [message.text.trim()]
         : [],
@@ -807,35 +878,35 @@ export async function generateEvidenceCardOutcome(input: {
       const original = confirmations[0];
       // Do not promote a complete email body to a public "details" fact.
       // Retain safe check-in sentences when the confirmation contains secrets.
-      const details = bookingRequest
+      const details = containsCardSecret(original)
         ? original
-            .split('\n')
-            .filter((line) => !containsCardSecret(line))
-            .join('\n')
-        : containsCardSecret(original)
-          ? original
-              .split(/(?<=[.!?])\s+|\n+/)
-              .filter(
-                (sentence) => /\bcheck[ -]?in\b/i.test(sentence) && !containsCardSecret(sentence),
-              )
-              .join(' ')
-          : original;
-      if (!details) return { kind: 'no_op' };
+            .split(/(?<=[.!?])\s+|\n+/)
+            .filter(
+              (sentence) => /\bcheck[ -]?in\b/i.test(sentence) && !containsCardSecret(sentence),
+            )
+            .join(' ')
+        : original;
+      const facts = bookingRequest
+        ? projectedHotelFacts(original)
+        : details
+          ? [
+              {
+                id: 'details',
+                label: 'Reservation details',
+                value: details,
+                source: 'gmail.read_thread',
+              },
+            ]
+          : [];
+      if (!facts.length) return { kind: 'no_op' };
       const spec = GenerativeCardSpecV1Schema.parse({
         version: 1,
         title: 'Hotel reservation',
         icon: 'calendar',
         accessibilityLabel: 'Hotel reservation from the email confirmation',
         sourceLabel: 'Email confirmation',
-        facts: [
-          {
-            id: 'details',
-            label: 'Reservation details',
-            value: details,
-            source: 'gmail.read_thread',
-          },
-        ],
-        blocks: [{ type: 'facts', factIds: ['details'] }],
+        facts,
+        blocks: [{ type: 'facts', factIds: facts.map((fact) => fact.id) }],
       });
       const validated = validateGroundedCard(spec, original);
       if (!validated) return { kind: 'no_op' };
@@ -847,7 +918,9 @@ export async function generateEvidenceCardOutcome(input: {
           revisionId: randomUUID(),
           spec: validated,
           sourceFingerprint: createHash('sha256')
-            .update(input.sourceKey ?? `gmail.read_thread\n${details}`)
+            .update(
+              input.sourceKey ?? `gmail.read_thread\n${facts.map((fact) => fact.value).join('\n')}`,
+            )
             .digest('hex'),
           grounding: 'evidence',
         },

@@ -14,9 +14,9 @@ const MONTH = `(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?
 const DATE = String.raw`(?:\d{4}-\d{2}-\d{2}|${MONTH}\.?\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s+\d{4})?|\d{1,2}\s+${MONTH}\.?\s+\d{4})`;
 const CLOCK = String.raw`(?:(?:0?[1-9]|1[0-2])(?::[0-5]\d)?\s*(?:a\.?m\.?|p\.?m\.?)|(?:[01]?\d|2[0-3]):[0-5]\d|noon|midnight)`;
 const ZONE = String.raw`(?:[+-]\d{2}:\d{2}|Z\b|\s+(?:UTC|GMT|[ECMP][DS]T)\b)`;
-const DATE_TIME = String.raw`(?:${DATE}(?:(?:\s+at\s+|\s+|T)${CLOCK})?|${CLOCK})(?:${ZONE})?(?![\p{L}\p{N}:])`;
+const DATE_TIME = String.raw`(?:(?<date>${DATE})(?:(?:\s+at\s+|\s+|T)(?<datedClock>${CLOCK}))?|(?<clock>${CLOCK}))(?<zone>${ZONE})?(?![\p{L}\p{N}:])`;
 const TIME_FIELD = new RegExp(
-  String.raw`\b(?:check[- ]?(?:in|out)|departure|arrival|departs?|arrives?)\s*(?:(?:is|starts|opens|closes)\s+)?(?:(?:at|on|from|by|until|after)\s+|[:–—-]\s*)?${DATE_TIME}`,
+  String.raw`\b(?<event>check[- ]?(?:in|out)|departure|arrival|departs?|arrives?)\s*(?:(?:is|starts|opens|closes)\s+)?(?:(?:at|on)\s+|(?<bound>from|by|until|after)\s+|[:–—-]\s*)?${DATE_TIME}`,
   'iu',
 );
 const PROPERTY_NAME =
@@ -214,6 +214,37 @@ function projectBookingClause(clause: string): string {
   if (!heading || heading.index + heading[0].length !== text.replace(/\.$/, '').length) return '';
   const prefix = text.slice(0, heading.index).trim();
   return !prefix || PROPERTY_NAME.test(prefix) ? text : '';
+}
+
+/** Comparison keys only. Owner-visible values stay verbatim. */
+export function bookingStayTime(line: string) {
+  const time = TIME_FIELD.exec(line);
+  const event = time?.groups?.event?.toLowerCase();
+  if (!time || !event?.startsWith('check')) return undefined;
+  const { date, datedClock, clock, zone, bound } = time.groups ?? {};
+  return {
+    kind: event.endsWith('in') ? ('check-in' as const) : ('check-out' as const),
+    bound: bound?.toLowerCase() ?? '',
+    keys: {
+      property: line.slice(0, time.index).trim().toLowerCase(),
+      date: date?.toLowerCase().replaceAll(',', '').replace(/\s+/g, ' '),
+      clock: bookingClockKey(datedClock ?? clock),
+      zone: zone?.trim().toLowerCase(),
+    },
+  };
+}
+
+function bookingClockKey(clock: string | undefined): string | undefined {
+  if (!clock) return undefined;
+  const value = clock.toLowerCase().replace(/[.\s]/g, '');
+  if (value === 'noon') return '720';
+  if (value === 'midnight') return '0';
+  const parts = /^(\d{1,2})(?::(\d{2}))?([ap]m)?$/.exec(value);
+  if (!parts) return undefined;
+  const hour = Number(parts[1]);
+  const minutes = Number(parts[2] ?? 0);
+  const meridiem = parts[3];
+  return String((meridiem ? (hour % 12) + (meridiem === 'pm' ? 12 : 0) : hour) * 60 + minutes);
 }
 
 function bookingLogistics(value: string): string {

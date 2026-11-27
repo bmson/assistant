@@ -43,6 +43,7 @@ const LOGISTICS = 'Lantern Hotel check-in is October 24, 2027 at 3:00 PM.';
 const CHECKOUT = 'Check-out: October 27, 2027 at noon.';
 const TIMED_FIELD = 'Check-in: 3 PM';
 const MIXED_FIELD = `${TIMED_FIELD}, and I carry an insulin pump.`;
+const DUPLICATE_FIELD = `${TIMED_FIELD}, with my glucose monitor packed for the journey.`;
 const ADDRESS = 'Address: 14 Lantern Avenue';
 const MIXED_ADDRESS = `${ADDRESS} because my partner keeps g1-saffron journals there.`;
 const MIXED_SUBJECT = `${SUBJECT} g1-twilight arrangement is underway`;
@@ -59,6 +60,7 @@ const BODY = [
   MIXED_ADDRESS,
   MIXED_REFERENCE,
   HEALTH,
+  DUPLICATE_FIELD,
   HEALTH_CONTEXT,
   HOTEL_MENTION,
   UNLABELLED,
@@ -70,6 +72,7 @@ const FORBIDDEN = [
   'G1-health-marker',
   'asthma operation',
   'insulin pump',
+  'glucose monitor',
   'g1-saffron',
   'g1-twilight',
   'g1-orchid',
@@ -170,6 +173,7 @@ async function fixture(driver: 'postgres' | 'firestore') {
 function dispatcher(
   persistence: ExecutionPersistence,
   messageBody: () => string,
+  completeRead: () => boolean,
 ): ExecutorDeps['dispatcher'] {
   return {
     toolDefs: () =>
@@ -207,8 +211,8 @@ function dispatcher(
             }
           : {
               threadId: THREAD,
-              complete: true,
-              truncated: false,
+              complete: completeRead(),
+              truncated: !completeRead(),
               totalMessages: 1,
               messages: [
                 {
@@ -278,6 +282,7 @@ describe.each([
         addBooking,
       } = await fixture(driver);
       let mailBody = BODY;
+      let readComplete = true;
       const inputs: unknown[] = [];
       const previews: unknown[] = [];
       let briefingLead = `Your Lantern Hotel check-in is coming up. ${HEALTH_CONTEXT}`;
@@ -317,7 +322,16 @@ describe.each([
           return texts.map(() => Array(1536).fill(0.01));
         },
       } as unknown as ExecutorDeps['router'];
-      const deps = { db, persistence, router, dispatcher: dispatcher(persistence, () => mailBody) };
+      const deps = {
+        db,
+        persistence,
+        router,
+        dispatcher: dispatcher(
+          persistence,
+          () => mailBody,
+          () => readComplete,
+        ),
+      };
       try {
         await persistence.messages.append({
           conversationId,
@@ -379,7 +393,8 @@ describe.each([
         expect(ordinary?.text).toMatch(/Lantern Hotel/);
         expect(ordinary?.text).toMatch(/3:00 PM/);
         expectWithheld(ordinary);
-        const card = await ask('Save a card for my hotel booking in my inbox under G1LANTERN');
+        const saveRequest = 'Save a card for my hotel booking in my inbox under G1LANTERN';
+        const card = await ask(saveRequest);
         expect(JSON.stringify(card?.parts)).toContain('generated-card');
         expect(JSON.stringify(card?.parts)).toContain(LOGISTICS);
         expectWithheld(card);
@@ -390,9 +405,51 @@ describe.each([
         const savedCard = await persistence.generatedCards?.get(agentId, cardPart.data.id);
         expect(JSON.stringify(savedCard?.revision.spec)).toContain(LOGISTICS);
         expect(JSON.stringify(savedCard?.revision.spec)).toContain(CHECKOUT);
-        expect(JSON.stringify(savedCard?.revision.spec)).toContain(TIMED_FIELD);
+        const spec = savedCard?.revision.spec as
+          | { facts: Array<{ id: string; value: string }> }
+          | undefined;
+        expect(
+          spec?.facts.filter((fact) => fact.id === 'check-in').map((fact) => fact.value),
+        ).toEqual([LOGISTICS]);
         expect(JSON.stringify(savedCard?.revision.spec)).toContain(ADDRESS);
         expectWithheld(savedCard);
+
+        const locationFields = Array.from(
+          { length: 10 },
+          (_, index) => `Location: Lantern Annex ${index}`,
+        );
+        mailBody = [BODY, ...locationFields, ...Array<string>(40).fill(DUPLICATE_FIELD)].join('\n');
+        const longCard = await ask(saveRequest);
+        expect(JSON.stringify(longCard?.parts)).toContain('generated-card');
+        expect(JSON.stringify(longCard?.parts)).toContain(LOGISTICS);
+        expect(JSON.stringify(longCard?.parts)).toContain(CHECKOUT);
+        expect(JSON.stringify(longCard?.parts)).toContain(ADDRESS);
+        expectWithheld(longCard);
+        const longCardPart = (
+          (longCard?.parts ?? []) as Array<{
+            data?: {
+              kind?: string;
+              spec?: { facts: Array<{ value: string }>; blocks: Array<{ factIds: string[] }> };
+            };
+          }>
+        ).find((part) => part.data?.kind === 'generated-card');
+        expect(longCardPart?.data?.spec?.blocks[0]?.factIds).toHaveLength(8);
+        expect(longCardPart?.data?.spec?.facts.every((fact) => fact.value.length <= 500)).toBe(
+          true,
+        );
+
+        mailBody = `${BODY}\nCheck-in: 4 PM`;
+        const conflictingCard = await ask(saveRequest);
+        expect(conflictingCard?.text).toMatch(/couldn't create and save/);
+        expect(JSON.stringify(conflictingCard?.parts)).not.toContain('generated-card');
+        expectWithheld(conflictingCard);
+
+        mailBody = BODY;
+        readComplete = false;
+        const incompleteCard = await ask(saveRequest);
+        expect(JSON.stringify(incompleteCard?.parts)).not.toContain('generated-card');
+        expectWithheld(incompleteCard);
+        readComplete = true;
         const explicit = await ask(
           'Read the Lantern Hotel confirmation email and tell me the deposit amount.',
         );
