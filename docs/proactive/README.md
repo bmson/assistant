@@ -90,7 +90,7 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | C1  | Typed `signals` store                                                  | 2     | L    | —          | invoice/payment contract in review                            |
 | C2  | Email taxonomy v2 and extractors                                       | 2     | L    | A11, C1    | in review (#910, plus authenticated practice-change evidence) |
 | C3  | Close obligations by evidence                                          | 2     | M    | C1, C2     | open                                                          |
-| C4  | People cleanup                                                         | 1     | M    | —          | open                                                          |
+| C4  | People cleanup                                                         | 1     | M    | —          | in review (chat and extraction identity safeguards)           |
 | C5  | Rebuild occasions                                                      | 1     | M    | C4         | open (#910: only confirmed occasions surface)                 |
 | C6  | Household model and who-an-event-is-for                                | 2     | L    | B2         | open                                                          |
 | C7  | Time-off and coverage model                                            | 2     | M    | C6         | open                                                          |

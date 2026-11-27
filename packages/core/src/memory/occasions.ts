@@ -275,7 +275,7 @@ export async function saveOccasion(
   });
 }
 
-async function saveOccasionInTransaction(
+export async function saveOccasionInTransaction(
   db: Db,
   input: SaveOccasionInput,
 ): Promise<{ saved: boolean; occasion: OccasionRow }> {

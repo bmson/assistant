@@ -128,6 +128,7 @@ export * from './owner-knowledge-graph-fact.js';
 export * from './owner-memory-correction.js';
 export * from './owner-memory-provenance.js';
 export * from './owner-memory-write-witness.js';
+export * from './person-evidence.js';
 export * from './phone-calendar-compatibility.js';
 export * from './phone-calendar-sharing.js';
 export * from './phone-calendars.js';

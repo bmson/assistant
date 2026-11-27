@@ -16,11 +16,10 @@ function namePrefixMatch(left: string, right: string): boolean {
 async function ownedContacts(
   store: InstallationStore,
   agentId: string,
+  tx?: Transaction,
 ): Promise<Records['contacts'][]> {
-  const page = await store
-    .collection('contacts')
-    .limit(CONTACT_SCAN_LIMIT + 1)
-    .get();
+  const query = store.collection('contacts').limit(CONTACT_SCAN_LIMIT + 1);
+  const page = tx ? await tx.get(query) : await query.get();
   if (page.size > CONTACT_SCAN_LIMIT) throw new Error('Firestore contact scan exceeded bound');
   return page.docs.flatMap((doc) => {
     const row = decodeRecord<Records['contacts'] & { agentId?: unknown }>(doc.data());
@@ -133,7 +132,6 @@ export async function resolveFirestoreSubjectContact(
 ): Promise<string | null> {
   const matched = matchSubjectContact(await ownedContacts(store, agentId), subject);
   if (!matched || 'contactId' in matched) return matched?.contactId ?? null;
-  const keyRef = contactNameRef(store, matched.create);
   return store.db.runTransaction(async (tx) => {
     if (observedPrivacyGeneration !== undefined)
       await assertPrivacyErasureGenerationInTransaction(
@@ -142,7 +140,10 @@ export async function resolveFirestoreSubjectContact(
         agentId,
         observedPrivacyGeneration,
       );
-    const existing = await tx.get(keyRef);
+    // An alias or contact can have been added after the optimistic scan.
+    const current = matchSubjectContact(await ownedContacts(store, agentId, tx), subject);
+    if (!current || 'contactId' in current) return current?.contactId ?? null;
+    const existing = await tx.get(contactNameRef(store, current.create));
     if (existing.exists) {
       const contactId = existing.get('contactId');
       const target =
@@ -156,13 +157,13 @@ export async function resolveFirestoreSubjectContact(
           ...(Array.isArray(target.get('aliases')) ? target.get('aliases') : []),
         ].some(
           (name) =>
-            typeof name === 'string' && name.trim().toLowerCase() === matched.create.toLowerCase(),
+            typeof name === 'string' && name.trim().toLowerCase() === current.create.toLowerCase(),
         )
       )
         return contactId;
     }
     return stageNewContact(tx, store, {
-      name: matched.create,
+      name: current.create,
       relationship,
       now: store.now(),
       replaceMarker: existing.exists,

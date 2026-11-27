@@ -3,9 +3,13 @@ import {
   type CodeJobLease,
   type CommitmentExtractionApplied,
   type EmbeddingSpace,
+  type ExtractedMemoryFact,
   type ExtractionConversation,
   type ExtractionMessage,
+  isCurrentMemoryPersonEvidence,
+  isDirectOwnerPersonMessage,
   isOwnerTaskMemoryEphemeral,
+  MEMORY_EXTRACTION_VERSION,
   type MemoryExtractionApplied,
   type MemoryExtractionRepository,
   type PreparedMemoryExtraction,
@@ -27,8 +31,9 @@ import {
   readCodeJobSteps,
   recordCodeJobStep,
 } from './code-job-checkpoints.js';
-import { contactNameRef, matchSubjectContact, stageNewContact } from './contact-lookup.js';
+import { matchSubjectContact } from './contact-lookup.js';
 import { embeddingSpaceKey as exactEmbeddingSpaceKey, memoryDocument } from './memory.js';
+import { FirestoreMemoryPeople, readFirestoreMemoryPeople } from './memory-person.js';
 import { occasionDateKey, resolveOccasionIdentity } from './occasion-identity.js';
 import { FirestoreOwnerContextRepository } from './owner-context.js';
 import {
@@ -51,12 +56,10 @@ const ACTIVITY_SCAN_LIMIT = 5000;
 /** Contacts are the attribution vocabulary; beyond this the read fails loudly. */
 const CONTACT_LIMIT = 5000;
 const ACTIVE_STATUSES = ['open', 'snoozed'];
-const PREPARED_VERSION = 'memory-extraction-v3';
 
 type Contact = Records['contacts'];
 type Occasion = Records['occasions'];
 type Commitment = Records['commitments'];
-type SubjectMatch = ReturnType<typeof matchSubjectContact>;
 
 function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
@@ -102,26 +105,39 @@ export class FirestoreMemoryExtractionRepository implements MemoryExtractionRepo
     return page.docs.map((doc) => decodeRecord<Contact>(doc.data()));
   }
 
-  private async ephemeralTaskIds(
+  private async messageTasks(
     rows: Array<Records['messages']>,
     agentId: string,
-  ): Promise<Set<string>> {
+  ): Promise<Map<string, Records['tasks']>> {
     const ids = [...new Set(rows.flatMap((row) => (row.taskId ? [row.taskId] : [])))];
-    if (ids.length === 0) return new Set();
-    const snapshots = await this.store.db.getAll(...ids.map((id) => this.store.doc('tasks', id)));
-    const ephemeral = new Set<string>();
+    const snapshots = ids.length
+      ? await this.store.db.getAll(...ids.map((id) => this.store.doc('tasks', id)))
+      : [];
+    const result = new Map<string, Records['tasks']>();
     for (const snapshot of snapshots) {
       if (!snapshot.exists) continue;
       const task = decodeRecord<Records['tasks']>(snapshot.data());
-      const linkedMessages = rows.filter((row) => row.taskId === task.id);
       if (
+        typeof task.id === 'string' &&
         documentKey(task.id) === snapshot.id &&
-        task.agentId === agentId &&
+        task.agentId === agentId
+      )
+        result.set(task.id, task);
+    }
+    return result;
+  }
+
+  private ephemeralTaskIds(
+    rows: Array<Records['messages']>,
+    tasks: Map<string, Records['tasks']>,
+  ): Set<string> {
+    const ephemeral = new Set<string>();
+    for (const row of rows) {
+      const task = row.taskId ? tasks.get(row.taskId) : undefined;
+      if (
+        task?.conversationId === row.conversationId &&
         task.type === 'chat_turn' &&
-        linkedMessages.some(
-          (row) =>
-            row.conversationId === task.conversationId && isOwnerTaskMemoryEphemeral(task.trigger),
-        )
+        isOwnerTaskMemoryEphemeral(task.trigger)
       )
         ephemeral.add(task.id);
     }
@@ -185,9 +201,10 @@ export class FirestoreMemoryExtractionRepository implements MemoryExtractionRepo
       if (cursor) query = query.startAfter(cursor);
       const page = await query.get();
       scanned += page.size;
-      const ephemeralTaskIds = await this.ephemeralTaskIds(
-        page.docs.map((doc) => decodeRecord<Records['messages']>(doc.data())),
-        input.agentId,
+      const rows = page.docs.map((doc) => decodeRecord<Records['messages']>(doc.data()));
+      const ephemeralTaskIds = this.ephemeralTaskIds(
+        rows,
+        await this.messageTasks(rows, input.agentId),
       );
       const order: string[] = [];
       for (const doc of page.docs) {
@@ -213,6 +230,7 @@ export class FirestoreMemoryExtractionRepository implements MemoryExtractionRepo
     for (const conversation of selected) {
       const messages: ExtractionMessage[] = [];
       let read = 0;
+      let sawUser = false;
       let after: QueryDocumentSnapshot | undefined;
       // Newest first, skipping short lines, until the transcript is full. The
       // read is capped so a thread of one-word replies cannot turn into a scan.
@@ -228,17 +246,24 @@ export class FirestoreMemoryExtractionRepository implements MemoryExtractionRepo
         if (after) query = query.startAfter(after);
         const page = await query.get();
         read += page.size;
-        const ephemeralTaskIds = await this.ephemeralTaskIds(
-          page.docs.map((doc) => decodeRecord<Records['messages']>(doc.data())),
-          input.agentId,
-        );
-        for (const doc of page.docs) {
-          const row = decodeRecord<Records['messages']>(doc.data());
-          if (row.conversationId !== conversation.id || !qualifies(row, ephemeralTaskIds)) continue;
+        const rows = page.docs.map((doc) => decodeRecord<Records['messages']>(doc.data()));
+        const tasks = await this.messageTasks(rows, input.agentId);
+        const ephemeralTaskIds = this.ephemeralTaskIds(rows, tasks);
+        for (const row of rows) {
+          if (row.conversationId !== conversation.id) continue;
+          const latestUser = row.role === 'user' && !sawUser;
+          sawUser ||= row.role === 'user';
+          if (!qualifies(row, ephemeralTaskIds)) continue;
           if (messages.length < input.maxMessages)
             messages.push({
               id: row.id,
               role: row.role as ExtractionMessage['role'],
+              ...(latestUser && isDirectOwnerPersonMessage(tasks.get(row.taskId ?? ''), row)
+                ? { directOwnerChat: true }
+                : {}),
+              ...(latestUser && row.origin === 'owner' && !row.taskId
+                ? { legacyOwnerAuthored: true }
+                : {}),
               text: row.text,
               createdAt: row.createdAt,
             });
@@ -320,7 +345,7 @@ export class FirestoreMemoryExtractionRepository implements MemoryExtractionRepo
   async savePrepared(input: PreparedMemoryExtraction & { lease: CodeJobLease }): Promise<void> {
     if (
       !/^[a-f0-9]{64}$/.test(input.sourceHash) ||
-      input.extractionVersion !== PREPARED_VERSION ||
+      input.extractionVersion !== MEMORY_EXTRACTION_VERSION ||
       input.payload === null ||
       typeof input.payload !== 'object'
     )
@@ -387,23 +412,6 @@ export class FirestoreMemoryExtractionRepository implements MemoryExtractionRepo
         throw new Error('Extracted memory embedding space changed');
     }
     await this.owner(input.agentId);
-    // Attribution is decided against the contact list outside the transaction,
-    // as the memory tool does; new names converge through their marker below.
-    const contacts = await this.contacts();
-    const factMatches = input.facts.map((fact) => {
-      if (fact.subjectContactId)
-        return contacts.some((contact) => contact.id === fact.subjectContactId)
-          ? { contactId: fact.subjectContactId }
-          : null;
-      return matchSubjectContact(contacts, fact.subject);
-    });
-    const occasionMatches = input.occasions.map((occasion) => {
-      if (occasion.contactId)
-        return contacts.some((contact) => contact.id === occasion.contactId)
-          ? { contactId: occasion.contactId }
-          : null;
-      return matchSubjectContact(contacts, occasion.subject);
-    });
     const hashes = [...new Set(input.facts.map((fact) => fact.contentHash))];
     const preparedRef = input.prepared
       ? this.store.doc(
@@ -440,27 +448,6 @@ export class FirestoreMemoryExtractionRepository implements MemoryExtractionRepo
         return null;
       }
 
-      const referencedContactIds = [
-        ...new Set(
-          [...factMatches, ...occasionMatches].flatMap((match) =>
-            match && 'contactId' in match ? [match.contactId] : [],
-          ),
-        ),
-      ];
-      const contactSnapshots = referencedContactIds.length
-        ? await tx.getAll(...referencedContactIds.map((id) => this.store.doc('contacts', id)))
-        : [];
-      const verifiedContactIds = new Set<string>();
-      referencedContactIds.forEach((id, index) => {
-        const snapshot = contactSnapshots[index];
-        if (
-          snapshot?.exists &&
-          snapshot.get('id') === id &&
-          (snapshot.get('agentId') === undefined || snapshot.get('agentId') === input.agentId)
-        )
-          verifiedContactIds.add(id);
-      });
-
       const hashChecks = hashes.length
         ? await tx.getAll(
             ...hashes.flatMap((hash) => [
@@ -476,56 +463,112 @@ export class FirestoreMemoryExtractionRepository implements MemoryExtractionRepo
         if (hashChecks[index * 2 + 1]?.exists) tombstoned.add(hash);
       });
 
-      // A tombstoned fact names nobody: PostgreSQL checks the tombstone before
-      // it resolves (and possibly creates) the fact's subject.
-      const newNames = new Map<string, { name: string; relationship?: string }>();
-      const want = (match: SubjectMatch, relationship?: string) => {
-        if (!match || !('create' in match)) return;
-        const key = match.create.toLowerCase();
-        if (!newNames.has(key)) newNames.set(key, { name: match.create, relationship });
-      };
-      const acceptedFactHashes = new Set<string>();
-      input.facts.forEach((fact, index) => {
+      // Resolve facts against the same transactional snapshot as reconciliation.
+      // Already retained or forgotten content contributes no identity writes.
+      const people = new FirestoreMemoryPeople(
+        tx,
+        this.store,
+        input.agentId,
+        await readFirestoreMemoryPeople(tx, this.store, input.agentId),
+      );
+      const evidenceSnapshot =
+        input.prepared &&
+        input.originTrust === 'owner' &&
+        !input.quarantined &&
+        [...input.facts, ...input.occasions].some((record) => record.personEvidence)
+          ? (
+              await tx.get(
+                this.store
+                  .collection('messages')
+                  .where('conversationId', '==', input.prepared.conversationId)
+                  .where('role', '==', 'user')
+                  .orderBy('createdAt', 'desc')
+                  .orderBy('id', 'desc')
+                  .limit(1),
+              )
+            ).docs[0]
+          : undefined;
+      const evidenceSource = evidenceSnapshot
+        ? decodeRecord<Records['messages']>(evidenceSnapshot.data())
+        : undefined;
+      const evidenceTaskSnapshot = evidenceSource?.taskId
+        ? await tx.get(this.store.doc('tasks', evidenceSource.taskId))
+        : undefined;
+      const evidenceTask = evidenceTaskSnapshot?.exists
+        ? decodeRecord<Records['tasks']>(evidenceTaskSnapshot.data())
+        : undefined;
+      const admittedSource =
+        evidenceTask?.agentId === input.agentId &&
+        evidenceSource &&
+        evidenceTask.id === evidenceSource.taskId &&
+        isDirectOwnerPersonMessage(evidenceTask, evidenceSource);
+      const currentEvidence = (evidence: ExtractedMemoryFact['personEvidence']) =>
+        evidence &&
+        evidenceSource &&
+        isCurrentMemoryPersonEvidence(evidence, evidenceSource) &&
+        (admittedSource || (evidence.reference && !evidenceSource.taskId))
+          ? evidence
+          : evidence === undefined
+            ? undefined
+            : null;
+      const pendingContactIds = new Set(
+        [
+          ...input.facts.map((fact) => fact.subjectContactId),
+          ...input.occasions.map((occasion) => occasion.contactId),
+        ].filter((id): id is string => Boolean(id)),
+      );
+      const subjectsByHash = new Map<string, string | null>();
+      for (const fact of input.facts) {
         if (
           tombstoned.has(fact.contentHash) ||
           existingHash.has(fact.contentHash) ||
-          acceptedFactHashes.has(fact.contentHash)
+          subjectsByHash.has(fact.contentHash)
         )
-          return;
-        acceptedFactHashes.add(fact.contentHash);
-        want(factMatches[index] ?? null, fact.relationship);
-      });
-      input.occasions.forEach((occasion, index) => {
+          continue;
+        subjectsByHash.set(
+          fact.contentHash,
+          await people.resolve({
+            subject: fact.subject,
+            content: fact.content,
+            knownContactId: fact.subjectContactId,
+            relationship: fact.relationship,
+            pendingContactIds,
+            evidence: currentEvidence(fact.personEvidence),
+          }),
+        );
+      }
+      const occasionContacts: Array<string | null> = [];
+      for (const occasion of input.occasions) {
         if (
-          Number.isInteger(occasion.month) &&
-          occasion.month >= 1 &&
-          occasion.month <= 12 &&
-          Number.isInteger(occasion.day) &&
-          occasion.day >= 1 &&
-          occasion.day <= 31
-        )
-          want(occasionMatches[index] ?? null);
-      });
-      const names = [...newNames.entries()];
-      const markers = names.length
-        ? await tx.getAll(...names.map(([, entry]) => contactNameRef(this.store, entry.name)))
-        : [];
-      const marked = new Map<string, string>();
-      const pendingContacts = new Map<
-        string,
-        { name: string; relationship?: string; id: string }
-      >();
-      names.forEach(([key], index) => {
-        const marker = markers[index];
-        if (marker?.exists) marked.set(key, String(marker.get('contactId')));
-        else {
-          const entry = newNames.get(key);
-          if (!entry) return;
-          const id = randomUUID();
-          marked.set(key, id);
-          pendingContacts.set(key, { ...entry, id });
+          !Number.isInteger(occasion.month) ||
+          occasion.month < 1 ||
+          occasion.month > 12 ||
+          !Number.isInteger(occasion.day) ||
+          occasion.day < 1 ||
+          occasion.day > 31
+        ) {
+          occasionContacts.push(null);
+          continue;
         }
-      });
+        if (!input.prepared && occasion.personEvidence === undefined) {
+          // Direct adapter callers can reference an existing contact. Only
+          // source-backed nightly writes can create a contact for a date.
+          const contactId = occasion.contactId && people.resolveRedirect(occasion.contactId);
+          const match = contactId
+            ? people.contacts.find((person) => person.id === contactId) && { contactId }
+            : matchSubjectContact(people.contacts, occasion.subject);
+          occasionContacts.push(match && 'contactId' in match ? match.contactId : null);
+          continue;
+        }
+        occasionContacts.push(
+          await people.resolve({
+            subject: occasion.subject,
+            content: '',
+            knownContactId: occasion.contactId,
+            evidence: currentEvidence(occasion.personEvidence),
+          }),
+        );
+      }
 
       // Query only proposed occasion identities. A 2-row bound detects legacy
       // random-ID duplicates without scanning or rejecting a person's history.
@@ -540,13 +583,7 @@ export class FirestoreMemoryExtractionRepository implements MemoryExtractionRepo
         { contactId: string; kind: string; month: number; day: number }
       >();
       input.occasions.forEach((occasion, index) => {
-        const match = occasionMatches[index];
-        const contactId =
-          match && 'contactId' in match
-            ? match.contactId
-            : match && 'create' in match
-              ? marked.get(match.create.toLowerCase())
-              : undefined;
+        const contactId = occasionContacts[index];
         if (
           !contactId ||
           !Number.isInteger(occasion.month) ||
@@ -582,32 +619,19 @@ export class FirestoreMemoryExtractionRepository implements MemoryExtractionRepo
       }
 
       // Every read is done; stage the writes.
+      people.stageWrites();
       const now = this.store.now();
       const result: MemoryExtractionApplied = {
         saved: 0,
         quarantined: 0,
         duplicates: 0,
         tombstoned: 0,
-        contactsCreated: 0,
+        contactsCreated: people.created,
         occasionsSaved: 0,
         occasionsRejected: 0,
       };
-      for (const pending of pendingContacts.values()) {
-        stageNewContact(tx, this.store, { ...pending, now });
-        result.contactsCreated += 1;
-      }
-      const contactIdFor = (match: SubjectMatch): string | null => {
-        if (!match) return null;
-        if ('contactId' in match)
-          return verifiedContactIds.has(match.contactId) ? match.contactId : null;
-        const key = match.create.toLowerCase();
-        const known = marked.get(key);
-        if (known) return known;
-        return null;
-      };
-
       const written = new Set<string>();
-      input.facts.forEach((fact, index) => {
+      input.facts.forEach((fact) => {
         if (tombstoned.has(fact.contentHash)) {
           result.tombstoned += 1;
           return;
@@ -617,7 +641,8 @@ export class FirestoreMemoryExtractionRepository implements MemoryExtractionRepo
           return;
         }
         written.add(fact.contentHash);
-        const subjectContactId = contactIdFor(factMatches[index] ?? null);
+        const resolved = subjectsByHash.get(fact.contentHash);
+        const subjectContactId = resolved ? people.resolveRedirect(resolved) : null;
         const id = randomUUID();
         const memory: Records['memories'] = {
           id,
@@ -678,7 +703,7 @@ export class FirestoreMemoryExtractionRepository implements MemoryExtractionRepo
           result.occasionsRejected += 1;
           return;
         }
-        const contactId = contactIdFor(occasionMatches[index] ?? null);
+        const contactId = occasionContacts[index];
         if (!contactId) {
           result.occasionsRejected += 1;
           return;

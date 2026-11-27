@@ -31,6 +31,8 @@ export interface ToolContext {
   tainted: boolean;
   /** Typed owner-authored intent; external text never contributes authorized scopes. */
   ownerIntent?: OwnerIntent;
+  /** Current owner chat text with direct authorship verified by the executor. */
+  directOwnerMemorySource?: { id: string; text: string };
   /** Server-derived admission provenance used only by the C policy matcher. */
   ownerCallRequest?: import('@assistant/persistence').DirectOwnerCallRequestBinding;
   /** Exact current owner-authored call action, parsed from the persisted trigger. */
