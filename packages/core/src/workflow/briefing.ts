@@ -63,12 +63,10 @@ import { isFlightLikeCalendarEvent } from '../proactive/flight-calendar.js';
 import { briefingLifeContext } from '../proactive/life-context.js';
 import { type ProactiveNotifier, pingOwner } from '../proactive/notify.js';
 import {
-  bookingMailSubject,
+  bookingDisclosure,
   bookingMailTitle,
   bookingOccurrenceLabel,
   bookingReference,
-  bookingSourceLabel,
-  bookingText,
 } from './booking-disclosure.js';
 import {
   agendaSection,
@@ -354,8 +352,6 @@ function calendarHasExactBooking(
   events: readonly BriefingCalendarEvent[],
   ownerEmail: string,
 ): boolean {
-  if (!entry.bookingIdentity) return false;
-  const identity = collapseWhitespace(entry.bookingIdentity).toLocaleLowerCase();
   return events.some((event) => {
     const calendarId = event.calendarId?.toLocaleLowerCase();
     if (
@@ -364,11 +360,17 @@ function calendarHasExactBooking(
       event.status === 'cancelled'
     )
       return false;
-    if (!calendarTextHasBookingIdentity(`${event.summary}\n${event.description ?? ''}`, identity))
-      return false;
-    if (entry.allDay) return event.allDay && event.start.slice(0, 10) === entry.civilDate;
-    return !event.allDay && Date.parse(event.start) === Date.parse(entry.iso);
+    return matchesBookingOccurrence(entry, event);
   });
+}
+
+function matchesBookingOccurrence(entry: UpcomingDate, event: BriefingCalendarEvent): boolean {
+  if (!entry.bookingIdentity) return false;
+  const identity = collapseWhitespace(entry.bookingIdentity).toLocaleLowerCase();
+  if (!calendarTextHasBookingIdentity(`${event.summary}\n${event.description ?? ''}`, identity))
+    return false;
+  if (entry.allDay) return event.allDay && event.start.slice(0, 10) === entry.civilDate;
+  return !event.allDay && Date.parse(event.start) === Date.parse(entry.iso);
 }
 
 function calendarTextHasBookingIdentity(sourceText: string, identity: string): boolean {
@@ -673,6 +675,10 @@ function localDateTime(value: string, timeZone: string): string {
   }).format(date);
 }
 
+function isBriefingBookingMail(row: { category: string; subject: string }): boolean {
+  return row.category === 'travel' || bookingMailTitle(row.subject);
+}
+
 /**
  * Dates the scorer already pulled out of ingested mail, filtered to what is
  * still ahead. Parsed defensively: the model produced these strings, so an
@@ -688,6 +694,7 @@ function upcomingFrom(
     authenticated: boolean;
   }>,
   bookings: ReadonlyArray<BriefingInputs['bookings'][number]>,
+  bookingMailIds: ReadonlySet<string>,
   now: Date,
 ): UpcomingDate[] {
   const found: UpcomingDate[] = [];
@@ -779,6 +786,7 @@ function upcomingFrom(
   for (const row of rows) {
     if (!row.authenticated || !PAYABLE.has(row.category)) continue;
     if (!Array.isArray(row.dates)) continue;
+    const bookingMail = bookingMailIds.has(row.channelMessageId);
     for (const entry of row.dates) {
       const date = entry as Record<string, unknown>;
       const iso = date?.iso;
@@ -808,8 +816,8 @@ function upcomingFrom(
         ...(civilDate ? { civilDate } : {}),
         ...(sourceTimeZone ? { sourceTimeZone } : {}),
         ...(!dateOnly && !/(?:Z|[+-]\d{2}:\d{2})$/i.test(iso) ? { sourceLocalTime: iso } : {}),
-        what,
-        from: readableSender(row.fromName, row.fromEmail),
+        what: bookingMail ? 'Booking payment' : what,
+        from: bookingMail ? 'your booking' : readableSender(row.fromName, row.fromEmail),
         category: row.category,
         dateRole: 'payment_due',
         sourceRef: `${row.channelMessageId}:payment_due:${civilDate ?? iso}:${collapseWhitespace(what).toLowerCase()}`,
@@ -1187,34 +1195,43 @@ export async function runBriefing(
         now,
       }),
     ]);
-    let openSuggestions = openSuggestionRows.flatMap((row) => {
-      if (!row.sourceRef.startsWith('booking:')) return [row];
-      const summary = bookingText(row.summary);
-      return summary ? [{ ...row, summary }] : [];
-    });
+    const { mail, pending, goalDeltas, watchHits } = inputs;
+    const bookingMailIds = new Set([
+      ...inputs.bookings.map((row) => row.sourceChannelMessageId),
+      ...mail.filter(isBriefingBookingMail).map((row) => row.channelMessageId),
+    ]);
+    const isBookingSuggestion = (row: (typeof openSuggestionRows)[number]) =>
+      row.sourceRef.startsWith('booking:') ||
+      bookingMailIds.has(row.sourceRef.split(':payment_due:', 1)[0] ?? '');
+    const hasBookingSuggestion = openSuggestionRows.some(isBookingSuggestion);
+    let openSuggestions = openSuggestionRows.map((row) =>
+      isBookingSuggestion(row)
+        ? {
+            ...row,
+            summary: row.bookingCancellation
+              ? 'Review a booking cancellation'
+              : row.sourceRef.startsWith('booking:')
+                ? 'Review a booking calendar suggestion'
+                : 'Review a booking payment reminder',
+          }
+        : row,
+    );
     const securityCandidates = await emailSync.listSecurityAttentionCandidates(
       agent.id,
       MAX_SECURITY_INCIDENTS,
-    );
-    const { pending, goalDeltas, watchHits } = inputs;
-    const mail = inputs.mail.map((row) =>
-      row.category === 'travel' || bookingMailTitle(row.subject)
-        ? {
-            ...row,
-            fromEmail: bookingText(row.fromEmail) || 'Your booking',
-            fromName: row.fromName === null ? null : bookingSourceLabel(row.fromName),
-            subject: /\b(?:hotel|lodging|accommodation)\b/i.test(row.subject)
-              ? bookingMailSubject(row.subject)
-              : bookingText(row.subject),
-          }
-        : row,
     );
     const life = briefingLifeContext(inputs, now, agent.timezone);
     result.personalOccasions = life.occasions.length;
     result.openCommitments = life.commitments.length;
     // Only work the owner would recognise. A stalled scheduled job or an
     // internal maintenance task is listed on Activity, not in their morning.
-    const attention = inputs.attention.filter((row) => isOwnerFacingTask(row.title));
+    const visibleTasks = inputs.attention.filter((row) => isOwnerFacingTask(row.title));
+    const hasBookingTask = visibleTasks.some((row) => bookingDisclosure(row.title ?? ''));
+    const attention = visibleTasks.map((row) =>
+      bookingDisclosure(row.title ?? '')
+        ? { title: 'Review a booking request', progress: '' }
+        : row,
+    );
 
     // The same notice often arrives twice (a forwarded copy, a reminder resent);
     // one line each is enough.
@@ -1228,8 +1245,13 @@ export async function runBriefing(
         seenMail.add(key);
         return true;
       })
-      .slice(0, MAX_HIGHLIGHTS);
-    let upcoming = upcomingFrom(mail, inputs.bookings, now);
+      .slice(0, MAX_HIGHLIGHTS)
+      .map((row) =>
+        bookingMailIds.has(row.channelMessageId)
+          ? { ...row, fromEmail: 'Your booking', fromName: null, subject: 'Booking update' }
+          : row,
+      );
+    let upcoming = upcomingFrom(mail, inputs.bookings, bookingMailIds, now);
     const cancelledBookings = deps.calendarCancellationEnabled
       ? cancelledBookingDates(inputs.bookings, now)
       : [];
@@ -1256,6 +1278,26 @@ export async function runBriefing(
         calendarHasExactBooking(entry, proposalCalendar.events, loadConfig().OWNER_EMAIL),
     );
     const exactCalendarMatches = new Set(exactCalendarBookings.map((entry) => entry.sourceRef));
+    const calendarBookingInstances = [
+      ...upcoming.filter((entry) => entry.bookingKey),
+      ...cancelledBookings,
+    ];
+    const bookingCalendarEvents = new Set(
+      (calendar?.events ?? []).filter((event) =>
+        calendarBookingInstances.some((entry) => matchesBookingOccurrence(entry, event)),
+      ),
+    );
+    const displayCalendarEvent = (event: BriefingCalendarEvent): BriefingCalendarEvent =>
+      bookingCalendarEvents.has(event)
+        ? {
+            ...event,
+            summary: bookingOccurrenceLabel(event.summary),
+            calendar: 'Calendar',
+            location: undefined,
+          }
+        : event;
+    const isBookingSecurityCandidate = (candidate: SecurityIncidentAttentionCandidate) =>
+      bookingMailIds.has(candidate.channelMessageId) || isBriefingBookingMail(candidate);
     upcoming = upcoming.filter((entry) => !exactCalendarMatches.has(entry.sourceRef));
     const proposalCalendarComplete = proposalCalendar?.complete === true;
     let cancelledBookingProposals: UpcomingDate[] = [];
@@ -1293,18 +1335,30 @@ export async function runBriefing(
     );
     // Preserve the existing booking identity and deduplication keys. Only the
     // descriptive fields cross into the digest, its draft, and new suggestions.
-    const discloseBooking = (entry: UpcomingDate): UpcomingDate[] => {
-      if (!entry.bookingKey && !bookingMailTitle(entry.what)) return [entry];
-      const what = bookingOccurrenceLabel(entry.what);
-      return what ? [{ ...entry, what, from: bookingText(entry.from) || 'your booking' }] : [];
-    };
-    upcoming = upcoming.flatMap(discloseBooking);
-    cancelledBookingProposals = cancelledBookingProposals.flatMap(discloseBooking);
+    const discloseBooking = (entry: UpcomingDate): UpcomingDate =>
+      entry.bookingKey || bookingMailTitle(entry.what)
+        ? { ...entry, what: bookingOccurrenceLabel(entry.what), from: 'your booking' }
+        : entry;
+    const hasPrivateBooking =
+      bookingMailIds.size > 0 ||
+      hasBookingTask ||
+      hasBookingSuggestion ||
+      cancelledBookingProposals.length > 0 ||
+      bookingCalendarEvents.size > 0 ||
+      securityCandidates.some(isBookingSecurityCandidate) ||
+      upcoming.some((entry) => entry.bookingKey || bookingMailTitle(entry.what));
+    upcoming = upcoming.map(discloseBooking);
+    cancelledBookingProposals = cancelledBookingProposals.map(discloseBooking);
     const overlaps = findConflicts(calendar?.events ?? [], agent.timezone);
-    const duplicateListings = overlaps.filter((overlap) =>
+    const displayOverlaps = overlaps.map((overlap) => ({
+      ...overlap,
+      a: overlap.a.map(displayCalendarEvent),
+      b: overlap.b.map(displayCalendarEvent),
+    }));
+    const duplicateListings = displayOverlaps.filter((overlap) =>
       isCalendarAdvisoryRelationship(overlap.relationship),
     );
-    const conflicts = overlaps.filter(
+    const conflicts = displayOverlaps.filter(
       (overlap) => !isCalendarAdvisoryRelationship(overlap.relationship),
     );
     // Salience is judged against the owner's own addresses so an unanswered
@@ -1314,30 +1368,40 @@ export async function runBriefing(
       (entry) => !inactiveRefs.has(entry.sourceRef),
     );
     const ownerEmail = loadConfig().OWNER_EMAIL;
-    const salient: EventSalience[] = calendar
-      ? salientEvents(calendar.events, {
-          timeZone: agent.timezone,
-          selfEmails: [ownerEmail, agent.email],
-        }).filter((scored) => {
-          if (!isFlightLikeCalendarEvent(scored.event)) return true;
-          // Flight times may lead the briefing only when a complete calendar
-          // read and a current confirmed booking agree on exact start +
-          // booking identity. The original event still appears in the agenda.
-          return (
-            calendar.complete &&
-            proposalCalendar?.complete === true &&
-            verifiedFlightBookingEntries.some((entry) =>
-              calendarHasExactBooking(entry, [scored.event], ownerEmail),
-            )
-          );
-        })
-      : [];
+    const salient: EventSalience[] = (
+      calendar
+        ? salientEvents(calendar.events, {
+            timeZone: agent.timezone,
+            selfEmails: [ownerEmail, agent.email],
+          }).filter((scored) => {
+            if (!isFlightLikeCalendarEvent(scored.event)) return true;
+            // Flight times may lead the briefing only when a complete calendar
+            // read and a current confirmed booking agree on exact start +
+            // booking identity. The original event still appears in the agenda.
+            return (
+              calendar.complete &&
+              proposalCalendar?.complete === true &&
+              verifiedFlightBookingEntries.some((entry) =>
+                calendarHasExactBooking(entry, [scored.event], ownerEmail),
+              )
+            );
+          })
+        : []
+    ).map((scored) =>
+      bookingCalendarEvents.has(scored.event)
+        ? {
+            ...scored,
+            reasons: ['associated with a booking'],
+          }
+        : scored,
+    );
     const briefingAgenda = calendar
       ? agendaSection({
           events: calendar.events,
           complete: calendar.complete,
           conflicts: overlaps,
           salient,
+          displayEvent: displayCalendarEvent,
           timeZone: agent.timezone,
           now,
         })
@@ -1419,7 +1483,14 @@ export async function runBriefing(
         `${lines.length ? '\n' : ''}Events worth a second look:`,
         // describeSalience takes the owner's zone so an unanswered-invitation
         // line renders local time, not whatever the provider sent.
-        ...salient.slice(0, MAX_SALIENT).map((scored) => describeSalience(scored, agent.timezone)),
+        ...salient
+          .slice(0, MAX_SALIENT)
+          .map((scored) =>
+            describeSalience(
+              { ...scored, event: displayCalendarEvent(scored.event) },
+              agent.timezone,
+            ),
+          ),
       );
     }
     const calendarPromptLines = briefingCalendarPromptLines(
@@ -1527,6 +1598,7 @@ export async function runBriefing(
       lines.push(
         `${lines.length ? '\n' : ''}Security notices requiring review:`,
         ...claimedSecurity.map((candidate) => {
+          if (isBookingSecurityCandidate(candidate)) return '- Booking-related notice to review';
           const sender = candidate.fromName ? collapseWhitespace(candidate.fromName) : 'a sender';
           const reason = candidate.materialChangeReason
             ? ` ${collapseWhitespace(candidate.materialChangeReason)}`
@@ -1614,11 +1686,9 @@ export async function runBriefing(
     // A model failure must not lose the briefing: the sections below are the
     // substance, so a missing lead falls back to the deterministic headline.
     const draft = composed?.ok ? composed.object.lead : undefined;
-    const hasBookingMail =
-      inputs.mail.some((row) => row.category === 'travel' || bookingMailTitle(row.subject)) ||
-      inputs.bookings.length > 0;
-    const safeDraft = draft && hasBookingMail ? bookingText(draft) : draft;
-    result.composedFallback = isFallbackDraft(safeDraft);
+    // Booking briefings use a deterministic lead so model phrasing cannot
+    // reintroduce free-form private details into the inbox or phone preview.
+    result.composedFallback = isFallbackDraft(draft);
     if (result.composedFallback) {
       // The fallback IS the correct behavior (facts beat nothing), but it must
       // be findable: a silent degrade is how an unphrased digest once reached
@@ -1630,7 +1700,10 @@ export async function runBriefing(
         noteLines: lines.length,
       });
     }
-    let lead = result.composedFallback ? briefingHeadline(result) : (safeDraft as string).trim();
+    let lead =
+      hasPrivateBooking || result.composedFallback
+        ? briefingHeadline(result)
+        : (draft as string).trim();
 
     const ambient = await getAmbientBlock(portable?.ownerContext ?? db, agent.id, { now }).catch(
       () => undefined,

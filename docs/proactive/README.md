@@ -135,7 +135,7 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | F5  | Follow-up context and spoken register                                  | 5     | M    | A15        | open                                                          |
 | F6  | Model evaluation for proactive jobs                                    | 4     | M    | H1         | open                                                          |
 | F7  | Relative dates in every calendar and mail path                         | 2     | S    | —          | in review (spelled day and week intervals)                    |
-| G1  | Sensitive-topic filter                                                 | 4     | M    | —          | in review (booking lookup and briefing candidate)             |
+| G1  | Sensitive-topic filter                                                 | 4     | M    | —          | booking lookup and routine briefing privacy implemented             |
 | G2  | Health data minimization                                               | 4     | M    | —          | open                                                          |
 | G3  | Permissions live in policy, not memory                                 | 5     | S    | —          | open                                                          |
 | G4  | Household consent and visibility                                       | 5     | S    | B2         | open                                                          |

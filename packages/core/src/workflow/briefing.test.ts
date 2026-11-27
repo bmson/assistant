@@ -475,7 +475,8 @@ describe('runBriefing', () => {
       ?.split('Security notices requiring review:')[1]
       ?.split('\n\n')[0];
     expect(securitySection?.match(/^- /gmu)).toHaveLength(1);
-    expect(prompts[0]).toContain(`${MARKER} existing appointment`);
+    expect(prompts[0]).toContain('Booking');
+    expect(prompts[0]).not.toContain(`${MARKER} existing appointment`);
     expect(prompts[0]).toContain(`${MARKER} invoice`);
     expect(prompts[0]).not.toContain(`${MARKER} receipt for a completed purchase`);
     expect(prompts[0]).not.toContain(`${MARKER} evening practice`);
@@ -645,8 +646,9 @@ describe('runBriefing', () => {
     const prompt = prompts[0] ?? '';
     // Everything the model sees is a row we assembled — it is asked to write
     // notes up, never to decide what matters.
-    expect(prompt).toContain(`${MARKER} Your itinerary`);
-    expect(prompt).toContain('flight departs');
+    expect(prompt).toContain('Booking update');
+    expect(prompt).toContain('Flight (from your booking)');
+    expect(prompt).not.toContain(`${MARKER} Your itinerary`);
     // Routine mail is counted but not itemised.
     expect(prompt).not.toContain(`${MARKER} Summer sale`);
     // These notes are not only the model's input: they are delivered verbatim
@@ -669,18 +671,13 @@ describe('runBriefing', () => {
     flightSuggestionId = suggestion.id;
     createdSuggestionIds.push(suggestion.id);
 
+    const messageId = result.outcome?.kind === 'delivered' ? result.outcome.messageId : '';
     const [posted] = await db
-      .select({ parts: messages.parts })
+      .select({ text: messages.text, parts: messages.parts })
       .from(messages)
-      .where(like(messages.text, `${MARKER} composed digest%`));
+      .where(eq(messages.id, messageId));
     const parts = (posted?.parts ?? []) as Array<{ type?: string; suggestionId?: string }>;
-    // The message leads with the model's one-line lead and lists the rows
-    // under bold labels, so it stays scannable even where the card is unknown.
-    const [text] = await db
-      .select({ text: messages.text })
-      .from(messages)
-      .where(like(messages.text, `${MARKER} composed digest%`));
-    expect(text?.text).toMatch(/\*\*Mail worth reading[^*]*\*\*\n- .*Your itinerary/);
+    expect(posted?.text).toMatch(/\*\*Mail worth reading[^*]*\*\*\n- .*Booking update/);
     expect(parts).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -1369,12 +1366,12 @@ describe('runBriefing', () => {
     const result = await runBriefing({ db, router: failing });
     expect(result.delivered).toBe(true);
 
-    const posted = await db
+    const messageId = result.outcome?.kind === 'delivered' ? result.outcome.messageId : '';
+    const [posted] = await db
       .select({ text: messages.text })
       .from(messages)
-      .where(like(messages.text, `%${MARKER} Your itinerary%`));
-    // The raw notes went out, carrying the same items the composed version had.
-    expect(posted.length).toBeGreaterThanOrEqual(1);
+      .where(eq(messages.id, messageId));
+    expect(posted?.text).toContain('Booking update');
   });
 });
 
@@ -1461,10 +1458,11 @@ describe('runBriefing — richer inputs', () => {
       'Calendar overlaps in the next day or two (1 distinct conflict pair; showing 1 detail):',
     );
     expect(prompt).toContain('On the calendar (2 schedule items shown in the next 36h):');
+    const messageId = result.outcome?.kind === 'delivered' ? result.outcome.messageId : '';
     const [posted] = await db
       .select({ parts: messages.parts })
       .from(messages)
-      .where(like(messages.text, `${digest}%`));
+      .where(eq(messages.id, messageId));
     const cards = (posted?.parts ?? []) as Array<{
       type?: string;
       data?: Record<string, unknown>;
@@ -1478,7 +1476,7 @@ describe('runBriefing — richer inputs', () => {
       lead: string;
       sections: Array<{ type: string; title?: string; items?: Array<Record<string, unknown>> }>;
     };
-    expect(briefing.lead).toBe(digest);
+    expect(briefing.lead).toMatch(/^Briefing: 1 calendar conflict/);
     const agenda = briefing.sections.find((section) => section.type === 'agenda');
     const overlaps = briefing.sections.find(
       (section) => section.title === 'Possible calendar overlaps',
@@ -1981,7 +1979,8 @@ describe('runBriefing — richer inputs', () => {
     expect(prompt).not.toContain('Events worth a second look:');
     expect(prompt).toContain('On the calendar');
     expect(prompt).toContain('SFO → BER flight (United)');
-    expect(prompt).toContain('KLM flight SFO to AMS');
+    expect(prompt).toMatch(/: Flight \(from your booking\)/);
+    expect(prompt).not.toContain('KLM flight SFO to AMS');
   });
 
   it('keeps a flight time salient when a complete calendar row matches its confirmed booking', async (ctx) => {
@@ -2118,10 +2117,11 @@ describe('runBriefing — richer inputs', () => {
     expect(prompts[0] ?? '').toContain(
       'Calendar coverage is partial; no activities were returned in the next 36h.',
     );
+    const messageId = result.outcome?.kind === 'delivered' ? result.outcome.messageId : '';
     const [posted] = await db
       .select({ parts: messages.parts })
       .from(messages)
-      .where(like(messages.text, `${digest}%`));
+      .where(eq(messages.id, messageId));
     const briefing = ((posted?.parts ?? []) as Array<{ data?: Record<string, unknown> }>).find(
       (part) => part.data?.kind === 'briefing',
     )?.data as { sections: Array<{ type: string; title?: string; items?: unknown[] }> } | undefined;
