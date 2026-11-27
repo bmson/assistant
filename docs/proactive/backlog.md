@@ -136,7 +136,9 @@ bounded source spans. The deterministic booking card validates each displayed sp
 matching check-in or checkout. Conflicting times or incomplete reads leave the card unsaved. A request for hotel details or a card
 can include a single verified reservation total from the current booking. The total stays out of
 model inputs, narrow lookups, and briefings. Explicit trip and history reads keep their own
-source contracts. Other unrelated answers, non-booking briefing sources,
+source contracts. Routine briefings use fixed labels for booking mail, date labels, booking tasks
+and suggestions, and calendar occurrences matched to a booking. They use a deterministic headline
+when displaying booking information. Other unrelated answers, non-booking briefing sources,
 background Gmail ingestion, and historical content remain outside this slice.
 
 ## H · Evaluation

@@ -103,7 +103,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore daily briefing 
     await put('emailIngest', {
       id: randomUUID(),
       agentId,
-      channelMessageId: 'mail-dentist',
+      channelMessageId: bookingSource,
       category: 'appointment',
       importance: 4,
       fromEmail: 'front-desk@dentist.test',
@@ -277,7 +277,8 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore daily briefing 
         '1 goal delta(s)',
     );
     const prompt = prompts[0] ?? '';
-    expect(prompt).toContain('Dentist: "Your cleaning appointment"');
+    expect(prompt).toContain('Your booking: "Booking update"');
+    expect(prompt).not.toContain('Your cleaning appointment');
     expect(prompt).toContain('- Learn to sail (active) — next: Book a lesson');
     expect(prompt).toContain('- Concert tickets: Tickets went on sale');
     expect(prompt).toContain('- Book flights: Stopped: Book flights needs a decision');
@@ -295,7 +296,9 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore daily briefing 
       expect(prompt).not.toContain(excluded);
 
     const [notice] = await notices();
-    expect(notice?.text).toContain('A dentist visit is coming up and one approval is waiting.');
+    expect(notice?.text).toMatch(/^Briefing: /);
+    expect(notice?.text).not.toContain('A dentist visit is coming up');
+    expect(notice?.text).toContain('Booking — from your booking');
     const parts = (notice?.parts ?? []) as Array<{ type: string; suggestionId?: string }>;
     const suggestionPart = parts.find((part) => part.type === 'suggestion');
     const bookingSourceRef = `booking:${emailBookingKey(agentId, 'dentist-cleaning-appointment')}:1:event_start:${new Date(now + 48 * HOUR).toISOString().slice(0, 10)}`;

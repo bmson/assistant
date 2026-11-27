@@ -144,10 +144,12 @@ export function agendaSection(input: {
   complete: boolean;
   conflicts: CalendarConflict[];
   salient: EventSalience[];
+  displayEvent?: (event: BriefingCalendarEvent) => BriefingCalendarEvent;
   timeZone: string;
   now: Date;
 }): BriefingSection | undefined {
   if (!input.events.length && input.complete) return undefined;
+  const displayEvent = input.displayEvent ?? ((event) => event);
   const conflicting = new Set(
     input.conflicts
       .filter((conflict) => !isCalendarAdvisoryRelationship(conflict.relationship))
@@ -186,11 +188,13 @@ export function agendaSection(input: {
       ...new Set(
         events.map(
           (event) =>
-            `${tidy(event.calendar) || 'Calendar'} ${ownerTime(event.start, input.timeZone)}${new Set(events.map((source) => Date.parse(source.end))).size > 1 ? `–${ownerTime(event.end, input.timeZone)}` : ''}`,
+            `${tidy(displayEvent(event).calendar) || 'Calendar'} ${ownerTime(event.start, input.timeZone)}${new Set(events.map((source) => Date.parse(source.end))).size > 1 ? `–${ownerTime(event.end, input.timeZone)}` : ''}`,
         ),
       ),
     ];
-    const locations = [...new Set(events.map((event) => tidy(event.location)).filter(Boolean))];
+    const locations = [
+      ...new Set(events.map((event) => tidy(displayEvent(event).location)).filter(Boolean)),
+    ];
     addConflictNote(
       representative,
       `Likely the same event: ${sourceTimes.join('; ')}${locations.length > 1 ? '; source locations differ' : ''}.`,
@@ -230,6 +234,7 @@ export function agendaSection(input: {
     ...(omittedCount > 0 ? { omittedCount } : {}),
     items: selected.map(({ events, representative }) => {
       const key = eventKey(representative);
+      const display = displayEvent(representative);
       const note =
         conflictNotes.get(key) ?? events.map((event) => notes.get(eventKey(event))).find(Boolean);
       const flag = events.some((event) => conflicting.has(eventKey(event)))
@@ -245,8 +250,8 @@ export function agendaSection(input: {
         day: eventDay(representative, input.timeZone, input.now),
         time: eventTime({ ...representative, end }, input.timeZone, input.now),
         ...(!representative.allDay ? { start: representative.start, end } : {}),
-        title: tidy(representative.summary) || 'Untitled event',
-        ...(representative.location ? { location: tidy(representative.location) } : {}),
+        title: tidy(display.summary) || 'Untitled event',
+        ...(display.location ? { location: tidy(display.location) } : {}),
         ...(flag ? { flag } : {}),
         ...(note ? { note: truncateAtBoundary(note, DETAIL_LIMIT) } : {}),
       };

@@ -50,6 +50,10 @@ const DUPLICATE_FIELD = `${TIMED_FIELD}, with my glucose monitor packed for the 
 const ADDRESS = 'Address: 14 Lantern Avenue';
 const MIXED_ADDRESS = `${ADDRESS} because my partner keeps g1-saffron journals there.`;
 const MIXED_SUBJECT = `${SUBJECT} g1-twilight arrangement is underway`;
+const PRIVATE_BOOKING_SUBJECT = 'Reservation confirmed for my abortion';
+const PRIVATE_BRIEFING_LEAD = 'I tested positive for syphilis.';
+const PRIVATE_BOOKING_SENDER = 'Aubergine Quartz Society';
+const PRIVATE_BOOKING_PLACE = 'Violet Fern Suite';
 const REFERENCE = 'Booking reference: G1LANTERN';
 const MIXED_REFERENCE = `${REFERENCE}, I keep g1-silver reminders.`;
 const MIXED_DATE_LABEL = 'Lantern Hotel check-in requires g1-orchid supplies.';
@@ -90,6 +94,10 @@ const FORBIDDEN = [
   'G1-old-marker',
   'G1-unlabelled-marker',
   '692.77',
+  PRIVATE_BOOKING_SUBJECT,
+  PRIVATE_BRIEFING_LEAD,
+  PRIVATE_BOOKING_SENDER,
+  PRIVATE_BOOKING_PLACE,
 ];
 
 const noSql = new Proxy(
@@ -292,7 +300,7 @@ describe.each([
       let readComplete = true;
       const inputs: unknown[] = [];
       const previews: unknown[] = [];
-      let briefingLead = `Your Lantern Hotel check-in is coming up. ${HEALTH_CONTEXT}`;
+      let briefingLead = PRIVATE_BRIEFING_LEAD;
       const router = {
         async object(role: string, input: unknown) {
           inputs.push(input);
@@ -519,8 +527,8 @@ describe.each([
           conversationId,
           channelMessageId: MESSAGE,
           fromEmail: 'desk@example.invalid',
-          fromName: 'Lantern Hotel',
-          subject: `${MIXED_SUBJECT}\n${HEALTH_CONTEXT}\n${FINANCE}`,
+          fromName: PRIVATE_BOOKING_SENDER,
+          subject: PRIVATE_BOOKING_SUBJECT,
           category: 'travel',
           importance: 5,
           contentTrust: 'known',
@@ -551,7 +559,7 @@ describe.each([
           updatedAt: now,
         });
         for (const composedFallback of [false, true]) {
-          if (composedFallback) briefingLead = HEALTH_CONTEXT;
+          if (composedFallback) briefingLead = '';
           const { task } = await persistence.tasks.createTask({
             agentId,
             type: 'scheduled',
@@ -561,7 +569,24 @@ describe.each([
           const result = await runBriefing(
             {
               ...deps,
-              calendarReader: async () => ({ events: [], complete: true }),
+              calendarReader: async () => ({
+                events: composedFallback
+                  ? [
+                      {
+                        summary: `Lantern Hotel check-in — ${PRIVATE_BOOKING_PLACE}`,
+                        start: checkIn.toISOString(),
+                        end: new Date(checkIn.getTime() + 60 * 60 * 1000).toISOString(),
+                        calendar: PRIVATE_BOOKING_PLACE,
+                        location: PRIVATE_BOOKING_PLACE,
+                        description: REFERENCE,
+                        calendarId: 'primary',
+                        eventId: MESSAGE,
+                        allDay: false,
+                      },
+                    ]
+                  : [],
+                complete: true,
+              }),
               notifyOwner: vi.fn(async (input) => {
                 previews.push(input);
                 return notificationLeg('phone', 'skipped', 'synthetic-preview');
@@ -572,12 +597,14 @@ describe.each([
           expect(result).toMatchObject({
             delivered: true,
             composedFallback,
-            upcoming: 1,
+            upcoming: composedFallback ? 0 : 1,
             highlights: 1,
           });
           const briefings = await saved(task.id);
           expect(briefings).toHaveLength(1);
-          expect(briefings[0]?.text).toContain('Lantern Hotel check-in');
+          expect(briefings[0]?.text).toContain('Hotel check-in');
+          expect(briefings[0]?.text).toContain('Booking update');
+          expect(JSON.stringify(briefings)).not.toContain('Lantern Hotel');
           expect(JSON.stringify(briefings[0]?.parts)).toContain('"kind":"briefing"');
           expectWithheld(briefings);
           expect(JSON.stringify(briefings)).not.toContain('234.56');

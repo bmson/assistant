@@ -250,12 +250,15 @@ export function bookingMailSubject(value: string): string {
   return [name, heading[0]].filter(Boolean).join(' ');
 }
 
+/** A background booking occurrence exposes only a fixed event kind. */
 export function bookingOccurrenceLabel(value: string): string {
-  const label = bookingSourceLabel(value);
-  const event = EVENT_LABEL.exec(label);
-  if (!event) return label;
-  const name = label.slice(0, event.index).trim();
-  return [PROPERTY_NAME.test(name) ? name : '', event[0]].filter(Boolean).join(' ');
+  const event = EVENT_LABEL.exec(value)?.[0].toLowerCase().replace(' ', '-');
+  if (event === 'check-in' || event === 'checkin') return 'Hotel check-in';
+  if (event === 'check-out' || event === 'checkout') return 'Hotel check-out';
+  if (/\bflight\b/i.test(value)) return 'Flight';
+  if (event === 'departure') return 'Booking departure';
+  if (event === 'arrival') return 'Booking arrival';
+  return 'Booking';
 }
 
 function projectBookingClause(clause: string): string {
