@@ -67,7 +67,7 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | A4  | Stop mirroring secondary-chat replies into the primary chat            | 0     | M    | —          | in review (private answer-ready push)                         |
 | A5  | Checklist dedupe ignores trailing punctuation                          | 0     | S    | —          | in review                                                     |
 | A6  | Guard against promises without a tool call                             | 2     | M    | —          | in review (cancel and delete receipt checks)                  |
-| A7  | Self-repair cadence respects its daily limit                           | 0     | S    | —          | in review                                                     |
+| A7  | Self-repair cadence respects its daily limit                           | 0     | S    | —          | in review (keep follow-ups due at the daily dispatch limit)   |
 | A8  | Truthful "Needs you" count; archive needs_attention in Firestore       | 1     | M    | —          | in review (consistent counts and attention archival)          |
 | A9  | Firestore parity for every route the phone calls                       | 1     | M    | —          | in review (native route and method checks)                    |
 | A10 | Retire `morning-brief` in Firestore                                    | 0     | S    | —          | in review                                                     |

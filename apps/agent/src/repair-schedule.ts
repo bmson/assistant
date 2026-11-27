@@ -54,12 +54,12 @@ export async function ensureRepairSchedule(
         followUp && schedule.get('cron') === '*/15 * * * *'
           ? Math.min(next?.getTime() ?? Infinity, now.getTime() + REPAIR_POLL_INTERVAL_MS)
           : undefined;
+      // Checking an existing repair does not require allowance for a new dispatch.
       const requested = repairQueueReady(issues, now, dailyLimit)
         ? now.getTime()
-        : (eligibleAt?.getTime() ?? poll);
-      const nextRunAt =
-        requested === undefined ? undefined : new Date(Math.max(earliest, requested));
-      if (nextRunAt) {
+        : Math.min(eligibleAt?.getTime() ?? Infinity, poll ?? Infinity);
+      if (Number.isFinite(requested)) {
+        const nextRunAt = new Date(Math.max(earliest, requested));
         if (!next || Math.abs(next.getTime() - nextRunAt.getTime()) > 1000)
           tx.update(schedule.ref, { nextRunAt, updatedAt: now });
       }
