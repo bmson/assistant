@@ -168,6 +168,7 @@ export * from './self-repair.js';
 export * from './settings.js';
 export * from './shell-presence.js';
 export * from './shell-status.js';
+export * from './signals.js';
 export type { SituationDecisionContext } from './situations-schema.js';
 export * from './skill-context.js';
 export * from './skill-library.js';

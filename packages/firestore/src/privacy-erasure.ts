@@ -463,6 +463,7 @@ export class FirestorePrivacyErasureRepository implements PrivacyErasureReposito
           )
             throw new Error('Security evidence ownership or identity mismatch');
           if (
+            doc.get('billEvidence') != null ||
             doc.get('securityEvidence') != null ||
             doc.get('securityIncidentId') != null ||
             doc.get('preparedExtraction') != null ||
@@ -473,6 +474,7 @@ export class FirestorePrivacyErasureRepository implements PrivacyErasureReposito
             doc.get('classificationClaimToken') != null
           )
             tx.update(doc.ref, {
+              billEvidence: null,
               securityEvidence: null,
               securityIncidentId: null,
               preparedExtraction: null,
@@ -1443,6 +1445,7 @@ export class FirestorePrivacyErasureRepository implements PrivacyErasureReposito
     }
     await this.deleteOwned(agentId, job.generation, 'watchFireEffects');
     await this.deleteOwned(agentId, job.generation, 'watchFires');
+    await this.deleteOwned(agentId, job.generation, 'signals');
     await this.eraseSecurityEvidence(agentId, job.generation);
     await this.eraseEmailAttachmentCustodies(agentId, job.generation);
     await this.eraseEmailObservers(agentId, job.generation);

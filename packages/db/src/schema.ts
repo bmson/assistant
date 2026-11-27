@@ -13,6 +13,7 @@ import type {
   OwnerEditorTerminalResult,
   OwnerMemoryWriteWitness,
   Records,
+  Signal,
 } from '@assistant/persistence';
 import { sql } from 'drizzle-orm';
 import {
@@ -3785,3 +3786,22 @@ export const googleCalendarConnections = pgTable('google_calendar_connections', 
   state: jsonb('state').notNull(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
+
+export const signals = pgTable(
+  'signals',
+  {
+    id: text().primaryKey(),
+    agentId: uuid('agent_id')
+      .notNull()
+      .references(() => agents.id, { onDelete: 'cascade' }),
+    kind: text().$type<Signal['kind']>().notNull(),
+    at: text().notNull(),
+    subjectPersonIds: text('subject_person_ids').array().notNull(),
+    record: jsonb().$type<Signal>().notNull(),
+  },
+  (t) => [
+    index('signals_agent_at_idx').on(t.agentId, t.at),
+    index('signals_agent_kind_at_idx').on(t.agentId, t.kind, t.at),
+    index('signals_subject_person_ids_idx').using('gin', t.subjectPersonIds),
+  ],
+);
