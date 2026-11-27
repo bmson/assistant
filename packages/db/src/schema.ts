@@ -3805,3 +3805,10 @@ export const signals = pgTable(
     index('signals_subject_person_ids_idx').using('gin', t.subjectPersonIds),
   ],
 );
+/** Owner choices scoped to the current personal Calendar grant. */
+export const googleHouseholdCalendarChoices = pgTable('google_household_calendar_choices', {
+  agentId: uuid('agent_id')
+    .primaryKey()
+    .references(() => googleCalendarConnections.agentId, { onDelete: 'cascade' }),
+  settings: jsonb('settings').notNull(),
+});

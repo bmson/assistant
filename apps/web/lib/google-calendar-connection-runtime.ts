@@ -1,1 +1,1 @@
-export { getGoogleCalendarConnectionService } from './server';
+export { getGoogleCalendarConnectionService, getGoogleHouseholdCalendarService } from './server';

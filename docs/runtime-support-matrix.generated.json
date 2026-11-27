@@ -2,16 +2,16 @@
   "format": 1,
   "purpose": "Source composition and route drift evidence only; not a deployment or configured-runtime receipt.",
   "runtimeSources": {
-    "packages/config/src/index.ts": "4b5e869fdc45b6630930827b97b8480fa19d6fa567abc18cee7ea5f11fea68b1",
+    "packages/config/src/index.ts": "5a0cf4e452a404f48f2a0b9c3bbd3dcd5627244931a1b5370990570e8879136c",
     "apps/agent/src/deps.ts": "6218d3d687329c914c07683f1c882763e0db5d77d0fd912dc106eca35ac2b5c2",
     "apps/agent/src/index.ts": "bc65b1a16ba83c6351a74e2c071189fb4288d5d3ec2c4425accc185da77fe6ab",
-    "apps/web/lib/server.ts": "bd24d03d7dbe4fef6c74e907a14a4ff7445aac65389614b3c01770693e2b7c5f",
-    "apps/web/proxy.ts": "146fa8521907b79699ead76875ed2a79e1377c50eec22c4db3a4c3c0563402d6",
-    "packages/db/drizzle/meta/_journal.json": "4e97d063f2c1f91338c5d89e9f3b278305ac3d74b849006db21c09437f77d754",
-    "infra/gcp/release-contracts.json": "cd059f14fc48f19ee35ea53369494958fcd0bbbd829819dc5cde9d7bf4892099"
+    "apps/web/lib/server.ts": "44898de9d12ea90ba06de971f0c46482288ded323bb4c0c4a6f30b0d5d58d342",
+    "apps/web/proxy.ts": "8deda76cb944ee0e0eb081374fea0010855916ec786d59cd927f8c408eb98d7c",
+    "packages/db/drizzle/meta/_journal.json": "701932d10b67c3ee7bb1025044c5d86467de166288ad542134309e244eec8fbd",
+    "infra/gcp/release-contracts.json": "9b702961545227dabefe65c3ca652a632aa8dee3d55d36da3fd6b7851b30156f"
   },
-  "latestPostgresMigration": "0142_signal_store",
-  "postgresSchemaVersion": 142,
+  "latestPostgresMigration": "0143_google_household_calendar_choices",
+  "postgresSchemaVersion": 143,
   "releaseContracts": {
     "agent": {
       "apiContract": 3,
@@ -20,8 +20,8 @@
         "max": 3
       },
       "postgresSchema": {
-        "min": 142,
-        "max": 142
+        "min": 143,
+        "max": 143
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -32,8 +32,8 @@
         "max": 3
       },
       "postgresSchema": {
-        "min": 142,
-        "max": 142
+        "min": 143,
+        "max": 143
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -44,8 +44,8 @@
         "max": 1
       },
       "postgresSchema": {
-        "min": 142,
-        "max": 142
+        "min": 143,
+        "max": 143
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -56,8 +56,8 @@
         "max": 1
       },
       "postgresSchema": {
-        "min": 142,
-        "max": 142
+        "min": 143,
+        "max": 143
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -68,14 +68,14 @@
         "max": 1
       },
       "postgresSchema": {
-        "min": 142,
-        "max": 142
+        "min": 143,
+        "max": 143
       },
       "currentPostgresSchemaCompatible": true
     }
   },
   "agentWebSchemaCompatible": true,
-  "webApiRouteCount": 120,
+  "webApiRouteCount": 121,
   "routes": {
     "apps/web/app/api/audit/[id]/route.ts": {
       "methods": ["GET"],
@@ -236,6 +236,10 @@
     "apps/web/app/api/mobile/v1/connections/google-calendar/flow/route.ts": {
       "methods": ["DELETE", "GET"],
       "sha256": "e29a3f9f6fb10222e7b12d174d6a2ec96f034e849e597d571bae9d2d4b942c0a"
+    },
+    "apps/web/app/api/mobile/v1/connections/google-calendar/household/route.ts": {
+      "methods": ["GET", "PUT"],
+      "sha256": "64bfb424fc5c337402da91faeeca815ccfbbfeaab0f1000fd2ba0b6d8143e59a"
     },
     "apps/web/app/api/mobile/v1/connections/google-calendar/route.ts": {
       "methods": ["DELETE", "GET"],

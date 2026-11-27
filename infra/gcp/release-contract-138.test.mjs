@@ -14,7 +14,7 @@ const oldContract = JSON.parse(
 const roles = ['agent', 'web', 'browser', 'code', 'processor'];
 function manifest(driver, version, selected = roles) {
   return createManifest({
-    release: 'schema-142-signal-store-fixture',
+    release: 'schema-143-signal-and-household-calendar-fixture',
     imageRoot: 'registry/test',
     selected,
     digests: Object.fromEntries(roles.map((role) => [role, `sha256:${'a'.repeat(64)}`])),
@@ -24,16 +24,20 @@ function manifest(driver, version, selected = roles) {
   });
 }
 
-test('current images declare the additive signal store migration on PostgreSQL', () => {
-  assert.equal(deriveSchemaVersion('postgres', journal, contract), 142);
+test('current images declare the signal and household Calendar migrations on PostgreSQL', () => {
+  assert.equal(deriveSchemaVersion('postgres', journal, contract), 143);
   assert.equal(deriveSchemaVersion('firestore', journal, contract), 1);
-  assert.equal(journal.entries.at(-1).tag, '0142_signal_store');
-  assert.equal(validateManifest(manifest('postgres', 142)), true);
+  assert.deepEqual(
+    journal.entries.slice(-2).map(({ tag }) => tag),
+    ['0142_signal_store', '0143_google_household_calendar_choices'],
+  );
+  assert.equal(validateManifest(manifest('postgres', 143)), true);
   assert.equal(validateManifest(manifest('firestore', 1)), true);
   for (const role of roles) {
-    assert.deepEqual(contract.components[role].schema.postgres, { min: 142, max: 142 });
+    assert.deepEqual(contract.components[role].schema.postgres, { min: 143, max: 143 });
     assert.deepEqual(contract.components[role].schema.firestore, { min: 1, max: 1 });
-    assert.throws(() => validateManifest(manifest('postgres', 141, [role])), /incompatible/);
+    for (const prior of [141, 142])
+      assert.throws(() => validateManifest(manifest('postgres', prior, [role])), /incompatible/);
   }
 });
 

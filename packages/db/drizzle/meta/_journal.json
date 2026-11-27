@@ -1002,6 +1002,13 @@
       "when": 1795126823025,
       "tag": "0142_signal_store",
       "breakpoints": true
+    },
+    {
+      "idx": 143,
+      "version": "7",
+      "when": 1795128160098,
+      "tag": "0143_google_household_calendar_choices",
+      "breakpoints": true
     }
   ]
 }

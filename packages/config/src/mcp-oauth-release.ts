@@ -17,7 +17,7 @@ export function mcpOAuthReleaseReady(
 ): boolean {
   const driver = config.PERSISTENCE_DRIVER;
   // Match the reviewed runtime schema, not the migration that first added OAuth.
-  const schema = driver === 'postgres' ? '142' : '1';
+  const schema = driver === 'postgres' ? '143' : '1';
   const peer = role === 'web' ? 'AGENT' : 'WEB';
   return (
     config.MCP_OAUTH_ENABLED &&

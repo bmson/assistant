@@ -1,29 +1,52 @@
 #!/usr/bin/env python3
-"""Bounded synthetic iOS fixture checks after the ordinary iOS suite succeeds.
+"""Bounded synthetic fixture runs after the ordinary iOS suite succeeds.
 
 The GitHub-hosted job owns the runner; this phase owns only its fixture bundles
 and subprocess groups. It never creates, boots, shuts down or deletes a device.
 """
 import sys
 
-if len(sys.argv) != 2 or sys.argv[1] not in {'run', 'cleanup', 'run-noticing', 'cleanup-noticing'}:
-    raise SystemExit('Expected run, cleanup, run-noticing or cleanup-noticing')
+modes = {'run', 'cleanup', 'run-calendar', 'cleanup-calendar', 'run-noticing', 'cleanup-noticing'}
+if len(sys.argv) != 2 or sys.argv[1] not in modes:
+    raise SystemExit('Expected one of ' + ', '.join(sorted(modes)))
 
-noticing = sys.argv[1].endswith('-noticing')
-evidence_name = 'noticing-smoke' if noticing else 'native-controls'
+action, _, phase = sys.argv[1].partition('-')
+smoke = bool(phase)
+if phase == 'calendar':
+    evidence_name = 'household-calendar-smoke'
+    expected_methods = ['HouseholdCalendarUITests/testHouseholdCalendarChoicesReopenAndPreview']
+    result_name = 'household-calendar.xcresult'
+    scope = 'synthetic household calendar picker smoke only'
+    qualification = 'synthetic calendar picker simulator smoke'
+    build_seconds, test_seconds, allowance = 350, 300, '240'
+elif phase == 'noticing':
+    evidence_name = 'noticing-smoke'
+    expected_methods = ['MobileControlsUITests/testNoticingShowsOverallHealthFromTheServer']
+    result_name = 'Noticing.xcresult'
+    scope = 'synthetic Noticing status smoke only'
+    qualification = 'synthetic Noticing status smoke; no physical-device or live push acceptance'
+    build_seconds, test_seconds, allowance = 405, 150, '120'
+else:
+    evidence_name = 'native-controls'
+    expected_methods = [
+        'MobileControlsUITests/testNativeControlsCapability',
+        'MobileControlsUITests/testAccessibleControlsMatrix',
+    ]
+    result_name = 'capability.xcresult'
+    scope = 'synthetic capability and 20-case accessibility matrix only'
+    qualification = 'synthetic capability and 20-case native simulator matrix; no physical-device, VoiceOver or persistence acceptance'
+    build_seconds, test_seconds, allowance = 480, 1020, '900'
 
-if sys.argv[1] in {'run', 'run-noticing'}:
+if action == 'run':
     import os, sys, json, re, time, signal, selectors, subprocess, hashlib, plistlib
     from pathlib import Path
     root = Path(os.environ['RUNNER_TEMP']) / (evidence_name + '-evidence')
     root.mkdir(mode=0o700, exist_ok=False)
-    # The ordinary app uses this cache even when qualification is skipped.
-    # Each phase still builds its own test specification and owns its result.
     build = Path(os.environ['RUNNER_TEMP']) / 'Assistant-build'
     env = {k:v for k,v in os.environ.items() if k in {'HOME','USER','LOGNAME','SHELL','TMPDIR','LANG','LC_ALL'}}
     env['PATH'] = '/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin'
     log_bytes = 0
-    budget = 600 if noticing else 2100
+    budget = 600 if smoke else 2100
     elapsed = time.time() - float((Path(os.environ['RUNNER_TEMP'])/(evidence_name+'-start')).read_text())
     if not 0 <= elapsed < budget: raise RuntimeError('Job budget unavailable')
     main_deadline = time.monotonic() + budget - elapsed
@@ -146,23 +169,37 @@ if sys.argv[1] in {'run', 'run-noticing'}:
             raise RuntimeError(name+' failed: '+str(record))
         return (root/(name+'.log')).read_text(errors='replace')
     try:
-        if not noticing and os.environ['GITHUB_RUN_ATTEMPT'] != '1': raise RuntimeError('No rerun authority')
+        if not smoke and os.environ['GITHUB_RUN_ATTEMPT'] != '1': raise RuntimeError('No rerun authority')
         head = run('source-head', ['git','rev-parse','HEAD'], 10).strip()
         if head != os.environ['EXPECTED_HEAD']: raise RuntimeError('Checkout pin mismatch')
         paths = sorted(set(Path('apps/ios').rglob('*.swift')) | {Path('apps/ios/Assistant.xcodeproj/project.pbxproj'), Path('infra/ios-native-controls.py'), Path('infra/ios-detect-changes.sh'), Path('infra/ios-detect-changes.test.sh'), Path('.github/workflows/ios.yml'), Path('apps/ios/Assistant.xcodeproj/xcshareddata/xcschemes/AssistantUIFixtures.xcscheme')})
         pins = {str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
-        scope = 'synthetic Noticing status smoke only' if noticing else 'synthetic capability and 20-case accessibility matrix only'
         save('source.json', {'head':head,'pullRequestHead':os.environ['PR_HEAD'],'pins':pins,'qualificationVersion':3,'scope':scope})
         if os.environ.get('RUNNER_ENVIRONMENT') != 'github-hosted': raise RuntimeError('Fixture ownership requires the disposable hosted job')
         udid = os.environ['DESTINATION_UDID']
         if not re.fullmatch(r'[A-Fa-f0-9]{8}(?:-[A-Fa-f0-9]{4}){3}-[A-Fa-f0-9]{12}',udid): raise RuntimeError('Invalid ordinary CI destination')
         save('lease.json', {'mode':'hosted-job-fixture','udid':udid,'createdByRun':os.environ['GITHUB_RUN_ID'],
-            'ownership':'This phase owns fixture targets until its cleanup completes on the disposable hosted job; ordinary app uses distinct bundle IDs'})
+            'ownership':'This phase owns fixture bundles until cleanup; the ordinary app uses distinct bundle IDs'})
         run('xcode-version', ['xcodebuild','-version'], 10)
         # The preceding ordinary app build/tests already qualified this destination.
         # Do not cold-boot, create, delete or inventory simulators here.
-        if main_deadline-time.monotonic()<(540 if noticing else 1800): raise RuntimeError('Insufficient admitted build/test/cleanup reserve')
-        run('build', ['xcodebuild','-project','apps/ios/Assistant.xcodeproj','-scheme','AssistantUIFixtures','-configuration','Debug','-destination','id='+udid,'-derivedDataPath',str(build),'CODE_SIGNING_ALLOWED=NO','CODE_SIGNING_REQUIRED=NO','CODE_SIGN_IDENTITY=','build-for-testing'], 405 if noticing else 480)
+        approval_evidence = root.with_name('native-controls-evidence')
+        reuse = phase == 'calendar' and (approval_evidence / 'binary-pins.json').is_file()
+        if reuse:
+            prior_source = json.loads((approval_evidence / 'source.json').read_text())
+            prior_cleanup = json.loads((approval_evidence / 'cleanup.json').read_text())
+            if prior_source['head'] != head or prior_source['pins'] != pins:
+                raise RuntimeError('Approval fixture build source mismatch')
+            if (prior_cleanup['errors'] or prior_cleanup['deadlineExceeded']
+                    or prior_cleanup.get('jobDestination') != udid
+                    or not prior_cleanup.get('retainedProcessGroup', {}).get('closed')
+                    or not prior_cleanup.get('fixtureBundlesAbsent')
+                    or not prior_cleanup.get('fixtureProcessesAbsent')):
+                raise RuntimeError('Approval fixture cleanup is incomplete')
+        else:
+            if main_deadline-time.monotonic()<(540 if smoke else 1800):
+                raise RuntimeError('Insufficient admitted build/test/cleanup reserve')
+            run('build', ['xcodebuild','-project','apps/ios/Assistant.xcodeproj','-scheme','AssistantUIFixtures','-configuration','Debug','-destination','id='+udid,'-derivedDataPath',str(build),'CODE_SIGNING_ALLOWED=NO','CODE_SIGNING_REQUIRED=NO','CODE_SIGN_IDENTITY=','build-for-testing'], build_seconds)
         products = build / 'Build/Products'
         runs = list(products.glob('AssistantUIFixtures_*.xctestrun'))
         if len(runs) != 1: raise RuntimeError('Expected exactly one built xctestrun')
@@ -174,28 +211,30 @@ if sys.argv[1] in {'run', 'run-noticing'}:
         # explicit screenshots/native trees remain keepAlways in the tests.
         specification['AssistantUITests']['SystemAttachmentLifetime'] = 'keepNever'
         specification['AssistantUITests']['UserAttachmentLifetime'] = 'keepAlways'
-        runs[0].write_bytes(plistlib.dumps(specification))
+        if not reuse:
+            runs[0].write_bytes(plistlib.dumps(specification))
         save('attachment-policy.json', {'system':'keepNever','custom':'keepAlways','verboseDiagnostics':'never','customPNGLimitBytes':64*1024*1024})
         binaries = {}
         for bundle in ['AssistantUITestHost.app','AssistantUITests-Runner.app']:
             folder = products / 'Debug-iphonesimulator' / bundle
             if not folder.is_dir(): raise RuntimeError('Missing built bundle '+bundle)
             binaries[bundle] = {str(p.relative_to(folder)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(folder.rglob('*')) if p.is_file() and not p.is_symlink()}
-        save('binary-pins.json', {'xctestrunSHA':hashlib.sha256(runs[0].read_bytes()).hexdigest(),'bundles':binaries})
+        binary_pins = {'xctestrunSHA':hashlib.sha256(runs[0].read_bytes()).hexdigest(),'bundles':binaries}
+        if reuse and json.loads((approval_evidence / 'binary-pins.json').read_text()) != binary_pins:
+            raise RuntimeError('Reused fixture build changed')
+        save('binary-pins.json', binary_pins)
+        if phase == 'calendar':
+            save('build-origin.json', {'reusedApprovalBuild':reuse,'sourceHead':head})
         if any(hashlib.sha256(Path(p).read_bytes()).hexdigest()!=h for p,h in pins.items()): raise RuntimeError('Source drift')
-        methods = ('testNoticingShowsOverallHealthFromTheServer',) if noticing else (
-            'testNativeControlsCapability', 'testAccessibleControlsMatrix',
-        )
-        named_tests = ['AssistantUITests/MobileControlsUITests/'+method for method in methods]
-        result = root / ('Noticing.xcresult' if noticing else 'capability.xcresult')
-        allowance = '120' if noticing else '900'
-        output = run('test', ['xcodebuild','test-without-building','-xctestrun',str(runs[0]),'-destination','id='+udid,'-destination-timeout','30','-collect-test-diagnostics','never','-parallel-testing-enabled','NO','-maximum-concurrent-test-simulator-destinations','1','-test-timeouts-enabled','YES','-default-test-execution-time-allowance',allowance,'-maximum-test-execution-time-allowance',allowance,*['-only-testing:'+name for name in named_tests],'-resultBundlePath',str(result)], 150 if noticing else 1020)
-        # Hosted runners can take longer to start xcresulttool than to read the
-        # result. Both commands remain bounded by the overall phase deadline.
-        metadata_seconds = 30 if noticing else 60
+        selection = ['-only-testing:AssistantUITests/' + method for method in expected_methods]
+        result = root / result_name
+        output = run('test', ['xcodebuild','test-without-building','-xctestrun',str(runs[0]),'-destination','id='+udid,'-destination-timeout','30','-collect-test-diagnostics','never','-parallel-testing-enabled','NO','-maximum-concurrent-test-simulator-destinations','1','-test-timeouts-enabled','YES','-default-test-execution-time-allowance',allowance,'-maximum-test-execution-time-allowance',allowance,*selection,'-resultBundlePath',str(result)], test_seconds)
+        # Hosted runners can take longer to start the result reader than to read the bundle.
+        metadata_seconds = 30 if smoke else 60
         summary = json.loads(run('summary', ['xcrun','xcresulttool','get','test-results','summary','--path',str(result)], metadata_seconds))
         tests = json.loads(run('named-tests', ['xcrun','xcresulttool','get','test-results','tests','--path',str(result)], metadata_seconds))
-        named = re.search(r'MobileControlsUITests[^\n]{0,160}'+methods[0]+r'[^\n]{0,80}\bpassed\b', output, re.I)
+        test_class, test_method = expected_methods[0].split('/')
+        named = re.search(re.escape(test_class)+r'[^\n]{0,160}'+re.escape(test_method)+r'[^\n]{0,80}\bpassed\b', output, re.I)
         cases = []
         def visit(node, bundle=False):
             bundle = bundle or (node.get('nodeType')=='UI test bundle' and node.get('name','').removesuffix('.xctest')=='AssistantUITests')
@@ -203,11 +242,11 @@ if sys.argv[1] in {'run', 'run-noticing'}:
             for child in node.get('children',[]): visit(child,bundle)
         for node in tests.get('testNodes',[]): visit(node)
         identities = {node.get('nodeIdentifier','').removesuffix('()').removeprefix('AssistantUITests/') for node, _ in cases}
-        count = len(methods)
-        structured = len(cases)==count and identities == {name.removeprefix('AssistantUITests/') for name in named_tests} and all(bundle and node.get('result')=='Passed' for node,bundle in cases)
-        if not structured or not named or [summary.get(k) for k in ['totalTestCount','passedTests','failedTests','skippedTests']] != [count,count,0,0]: raise RuntimeError('Missing exact named PASS/zero-skip evidence')
-        qualification = 'synthetic Noticing status smoke; no physical-device or live push acceptance' if noticing else 'synthetic capability and 20-case native simulator matrix; no physical-device, VoiceOver or persistence acceptance'
-        save('outcome.json', {'result':'PASS','namedTests':named_tests,'summary':summary,'sourceHead':head,'pullRequestHead':os.environ['PR_HEAD'],'qualification':qualification})
+        count = len(expected_methods)
+        structured = len(cases)==count and identities == set(expected_methods) and all(bundle and node.get('result')=='Passed' for node,bundle in cases)
+        if not structured or not named or [summary.get(k) for k in ['totalTestCount','passedTests','failedTests','skippedTests']] != [count,count,0,0]:
+            raise RuntimeError('Missing exact named PASS/zero-skip evidence')
+        save('outcome.json', {'result':'PASS','namedTests':['AssistantUITests/'+method for method in expected_methods],'summary':summary,'sourceHead':head,'pullRequestHead':os.environ['PR_HEAD'],'qualification':qualification})
     except BaseException as error:
         save('failure.json', {'result':'HOLD','error':repr(error)})
         raise
