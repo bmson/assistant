@@ -62,6 +62,14 @@ import { isFlightLikeCalendarEvent } from '../proactive/flight-calendar.js';
 import { briefingLifeContext } from '../proactive/life-context.js';
 import { type ProactiveNotifier, pingOwner } from '../proactive/notify.js';
 import {
+  bookingMailSubject,
+  bookingMailTitle,
+  bookingOccurrenceLabel,
+  bookingReference,
+  bookingSourceLabel,
+  bookingText,
+} from './booking-disclosure.js';
+import {
   agendaSection,
   type BriefingCard,
   type BriefingListItem,
@@ -724,7 +732,7 @@ function upcomingFrom(
         typeof date.iso !== 'string' ||
         typeof date.what !== 'string' ||
         typeof date.bookingIdentity !== 'string' ||
-        !date.bookingIdentity.trim()
+        !bookingReference(date.bookingIdentity.trim())
       )
         continue;
       const declaredCivilDate = typeof date.civilDate === 'string' ? date.civilDate : undefined;
@@ -839,7 +847,7 @@ function cancelledBookingDates(
         date.lifecycle !== 'cancelled' ||
         typeof date.what !== 'string' ||
         typeof date.bookingIdentity !== 'string' ||
-        !date.bookingIdentity.trim() ||
+        !bookingReference(date.bookingIdentity.trim()) ||
         typeof date.iso !== 'string'
       )
         continue;
@@ -1141,12 +1149,28 @@ export async function runBriefing(
         now,
       }),
     ]);
-    let openSuggestions = openSuggestionRows;
+    let openSuggestions = openSuggestionRows.flatMap((row) => {
+      if (!row.sourceRef.startsWith('booking:')) return [row];
+      const summary = bookingText(row.summary);
+      return summary ? [{ ...row, summary }] : [];
+    });
     const securityCandidates = await emailSync.listSecurityAttentionCandidates(
       agent.id,
       MAX_SECURITY_INCIDENTS,
     );
-    const { mail, pending, goalDeltas, watchHits } = inputs;
+    const { pending, goalDeltas, watchHits } = inputs;
+    const mail = inputs.mail.map((row) =>
+      row.category === 'travel' || bookingMailTitle(row.subject)
+        ? {
+            ...row,
+            fromEmail: bookingText(row.fromEmail) || 'Your booking',
+            fromName: row.fromName === null ? null : bookingSourceLabel(row.fromName),
+            subject: /\b(?:hotel|lodging|accommodation)\b/i.test(row.subject)
+              ? bookingMailSubject(row.subject)
+              : bookingText(row.subject),
+          }
+        : row,
+    );
     const life = briefingLifeContext(inputs, now, agent.timezone);
     result.personalOccasions = life.occasions.length;
     result.openCommitments = life.commitments.length;
@@ -1158,7 +1182,7 @@ export async function runBriefing(
     // one line each is enough.
     const seenMail = new Set<string>();
     const highlights = mail
-      .filter((row) => row.importance >= 4)
+      .filter((row) => row.importance >= 4 && row.subject.trim())
       .filter((row) => {
         const key =
           `${readableSender(row.fromName, row.fromEmail)}|${collapseWhitespace(row.subject)}`.toLowerCase();
@@ -1229,6 +1253,15 @@ export async function runBriefing(
     cancelledBookingProposals = cancelledBookingProposals.filter(
       (entry) => !inactiveRefs.has(entry.sourceRef),
     );
+    // Preserve the existing booking identity and deduplication keys. Only the
+    // descriptive fields cross into the digest, its draft, and new suggestions.
+    const discloseBooking = (entry: UpcomingDate): UpcomingDate[] => {
+      if (!entry.bookingKey && !bookingMailTitle(entry.what)) return [entry];
+      const what = bookingOccurrenceLabel(entry.what);
+      return what ? [{ ...entry, what, from: bookingText(entry.from) || 'your booking' }] : [];
+    };
+    upcoming = upcoming.flatMap(discloseBooking);
+    cancelledBookingProposals = cancelledBookingProposals.flatMap(discloseBooking);
     const overlaps = findConflicts(calendar?.events ?? [], agent.timezone);
     const duplicateListings = overlaps.filter((overlap) =>
       isCalendarAdvisoryRelationship(overlap.relationship),
@@ -1543,7 +1576,11 @@ export async function runBriefing(
     // A model failure must not lose the briefing: the sections below are the
     // substance, so a missing lead falls back to the deterministic headline.
     const draft = composed?.ok ? composed.object.lead : undefined;
-    result.composedFallback = isFallbackDraft(draft);
+    const hasBookingMail =
+      inputs.mail.some((row) => row.category === 'travel' || bookingMailTitle(row.subject)) ||
+      inputs.bookings.length > 0;
+    const safeDraft = draft && hasBookingMail ? bookingText(draft) : draft;
+    result.composedFallback = isFallbackDraft(safeDraft);
     if (result.composedFallback) {
       // The fallback IS the correct behavior (facts beat nothing), but it must
       // be findable: a silent degrade is how an unphrased digest once reached
@@ -1555,7 +1592,7 @@ export async function runBriefing(
         noteLines: lines.length,
       });
     }
-    let lead = result.composedFallback ? briefingHeadline(result) : (draft as string).trim();
+    let lead = result.composedFallback ? briefingHeadline(result) : (safeDraft as string).trim();
 
     const ambient = await getAmbientBlock(portable?.ownerContext ?? db, agent.id, { now }).catch(
       () => undefined,
