@@ -15,7 +15,7 @@ import {
   snapshotEmbeddingSpace,
 } from '@assistant/persistence';
 import { FirestoreMemoryRepository } from './memory.js';
-import { FirestoreMemoryPeople, readFirestoreMemoryPeople } from './memory-person.js';
+import { FirestoreMemoryPeople } from './memory-person.js';
 import {
   assertPrivacyErasureFenceUnchanged,
   assertPrivacyErasureInactiveInTransaction,
@@ -140,12 +140,7 @@ export class FirestoreMemoryToolRepository implements MemoryToolRepository {
             const source = latestUser
               ? decodeRecord<Records['messages']>(latestUser.data())
               : undefined;
-            const people = new FirestoreMemoryPeople(
-              tx,
-              this.store,
-              input.agentId,
-              await readFirestoreMemoryPeople(tx, this.store, input.agentId),
-            );
+            const people = new FirestoreMemoryPeople(tx, this.store, input.agentId);
             const subjectContactId = await people.resolve({
               subject: input.subject ?? '',
               content: input.content,

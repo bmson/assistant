@@ -33,7 +33,7 @@ import {
 } from './code-job-checkpoints.js';
 import { matchSubjectContact } from './contact-lookup.js';
 import { embeddingSpaceKey as exactEmbeddingSpaceKey, memoryDocument } from './memory.js';
-import { FirestoreMemoryPeople, readFirestoreMemoryPeople } from './memory-person.js';
+import { FirestoreMemoryPeople } from './memory-person.js';
 import { occasionDateKey, resolveOccasionIdentity } from './occasion-identity.js';
 import { FirestoreOwnerContextRepository } from './owner-context.js';
 import {
@@ -96,13 +96,15 @@ export class FirestoreMemoryExtractionRepository implements MemoryExtractionRepo
       throw new Error('Memory extraction agent is missing');
   }
 
-  private async contacts(): Promise<Contact[]> {
+  private async contacts(): Promise<Pick<Contact, 'id' | 'name'>[]> {
     const page = await this.store
       .collection('contacts')
+      .select('id', 'name')
       .limit(CONTACT_LIMIT + 1)
       .get();
-    if (page.size > CONTACT_LIMIT) throw new Error('Contact list exceeds the extraction bound');
-    return page.docs.map((doc) => decodeRecord<Contact>(doc.data()));
+    // Prompt choices are optional. A partial roster could mislead attribution.
+    if (page.size > CONTACT_LIMIT) return [];
+    return page.docs.map((doc) => decodeRecord<Pick<Contact, 'id' | 'name'>>(doc.data()));
   }
 
   private async messageTasks(
@@ -465,12 +467,7 @@ export class FirestoreMemoryExtractionRepository implements MemoryExtractionRepo
 
       // Resolve facts against the same transactional snapshot as reconciliation.
       // Already retained or forgotten content contributes no identity writes.
-      const people = new FirestoreMemoryPeople(
-        tx,
-        this.store,
-        input.agentId,
-        await readFirestoreMemoryPeople(tx, this.store, input.agentId),
-      );
+      const people = new FirestoreMemoryPeople(tx, this.store, input.agentId);
       const evidenceSnapshot =
         input.prepared &&
         input.originTrust === 'owner' &&
@@ -554,9 +551,14 @@ export class FirestoreMemoryExtractionRepository implements MemoryExtractionRepo
           // Direct adapter callers can reference an existing contact. Only
           // source-backed nightly writes can create a contact for a date.
           const contactId = occasion.contactId && people.resolveRedirect(occasion.contactId);
+          if (!contactId && !occasion.subject) {
+            occasionContacts.push(null);
+            continue;
+          }
+          const contacts = await people.contacts();
           const match = contactId
-            ? people.contacts.find((person) => person.id === contactId) && { contactId }
-            : matchSubjectContact(people.contacts, occasion.subject);
+            ? contacts.find((person) => person.id === contactId) && { contactId }
+            : matchSubjectContact(contacts, occasion.subject);
           occasionContacts.push(match && 'contactId' in match ? match.contactId : null);
           continue;
         }

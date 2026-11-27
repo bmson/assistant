@@ -15,19 +15,23 @@ import {
   createPostgresApplicationChatPersistence,
   createPostgresExecutionPersistence,
   createPostgresMemoryToolRepository,
+  createPostgresSignalRepository,
   type Db,
+  emailIngest,
   knowledgeGraphEntities,
   knowledgeGraphRelations,
   memories,
   messages,
   occasions,
   recallSurfaces,
+  signals,
   tasks,
   toolCalls,
 } from '@assistant/db';
 import { assertAllocatedTestTarget } from '@assistant/db/test-target';
 import {
   createFirestoreExecutionPersistence,
+  createFirestoreSignalRepository,
   FirestoreApplicationChatPersistence,
   FirestoreOwnerKnowledgeGraphFactRepository,
 } from '@assistant/firestore';
@@ -46,6 +50,7 @@ import { contactNameRef } from '../../../packages/firestore/src/contact-lookup.j
 import { FirestoreMemoryRepository } from '../../../packages/firestore/src/memory.js';
 import { InstallationStore } from '../../../packages/firestore/src/store.js';
 import { disposeStore, emulatorStore } from '../../../packages/firestore/src/test-store.js';
+import { emailIngestFixture } from '../../../packages/persistence/src/signal-test-scenarios.js';
 
 const SPACE: EmbeddingSpace = {
   provider: 'synthetic',
@@ -569,6 +574,21 @@ for (const driver of ['postgres', 'firestore'] as const) {
           identityAuthority: 'owner' as const,
         })),
       ];
+      const invoiceAt = new Date('2026-11-19T12:00:00Z');
+      const paymentAt = new Date('2026-11-20T12:00:00Z');
+      const invoice = emailIngestFixture(
+        agentId,
+        'Invoice SYN-C4: USD 42.15 is due on November 23, 2026.',
+        invoiceAt,
+      );
+      const receipt = emailIngestFixture(
+        agentId,
+        'Payment received in full for invoice SYN-C4: USD 42.15. Balance due: USD 0.00.',
+        paymentAt,
+      );
+      const signalIds: string[] = [];
+      const signalRepository = () =>
+        store ? createFirestoreSignalRepository(store) : createPostgresSignalRepository(db);
       try {
         if (store) {
           await store.doc('agents', agentId).set({
@@ -596,6 +616,28 @@ for (const driver of ['postgres', 'firestore'] as const) {
         } else {
           await db.insert(contacts).values(seed);
         }
+        for (const source of [invoice, receipt]) {
+          if (store) await store.doc('emailIngest', source.id).set(source);
+          else await db.insert(emailIngest).values(source);
+        }
+        const billInput = {
+          agentId,
+          emailIngestId: invoice.id,
+          subjectPersonIds: [caseyDuplicateId],
+          at: invoiceAt,
+        };
+        const bill = await signalRepository().record(billInput);
+        signalIds.push(bill.id);
+        const paymentInput = {
+          ...billInput,
+          emailIngestId: receipt.id,
+          at: paymentAt,
+          replaces: bill.id,
+        };
+        const payment = await signalRepository().record(paymentInput);
+        signalIds.push(payment.id);
+        const historicalBill = { ...bill, validTo: payment.validFrom, supersededBy: payment.id };
+
         const graphInput = {
           subject: { label: daughterName, contactId: daughterId, kind: 'person' as const },
           predicate: 'daughter_of',
@@ -865,7 +907,7 @@ for (const driver of ['postgres', 'firestore'] as const) {
           expect(staleSubjectWrite.subjectContactId).toBeNull();
           for (const [label, id] of [
             [duplicateLabel, daughterId],
-            [extractedLabel, caseyId],
+            [extractedLabel, caseyDuplicateId],
           ] as const) {
             const marker = await contactNameRef(store, label).get();
             expect(marker.exists).toBe(true);
@@ -970,8 +1012,18 @@ for (const driver of ['postgres', 'firestore'] as const) {
           ).toEqual([]);
         }
         expect(contactAt(afterSave, caseyDuplicateId)).toEqual(contactAt(before, caseyDuplicateId));
-        expect(contactAt(afterExtraction, caseyDuplicateId)).toBeUndefined();
-        expect(contactAt(afterExtraction, caseyId)?.aliases).toEqual([extractedLabel]);
+        expect(contactAt(afterExtraction, caseyDuplicateId)).toEqual(
+          contactAt(before, caseyDuplicateId),
+        );
+        expect(contactAt(afterExtraction, caseyId)).toEqual(contactAt(before, caseyId));
+        const signalQuery = { agentId, personId: caseyDuplicateId };
+        expect(await signalRepository().list({ ...signalQuery, asOf: invoiceAt })).toEqual([
+          historicalBill,
+        ]);
+        expect(await signalRepository().list({ ...signalQuery, asOf: paymentAt })).toEqual([
+          payment,
+        ]);
+        expect(await signalRepository().record(paymentInput)).toEqual(payment);
         for (const candidate of [daughterEvidence, newAliasEvidence])
           expect(factAt(afterSave, candidate.content)?.subjectContactId).toBe(daughterId);
         for (const candidate of [
@@ -1051,6 +1103,8 @@ for (const driver of ['postgres', 'firestore'] as const) {
         else {
           try {
             await db.transaction(async (tx) => {
+              await tx.delete(signals).where(inArray(signals.id, signalIds));
+              await tx.delete(emailIngest).where(inArray(emailIngest.id, [invoice.id, receipt.id]));
               const taskRows = await tx
                 .select({ id: tasks.id })
                 .from(tasks)

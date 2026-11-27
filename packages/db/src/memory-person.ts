@@ -4,7 +4,7 @@ import {
   MAX_RECONCILED_PERSON_MEMORIES,
   normalizeMemoryRelationship,
 } from '@assistant/persistence';
-import { eq, sql } from 'drizzle-orm';
+import { arrayContains, eq, sql } from 'drizzle-orm';
 import type { Db } from './client.js';
 import {
   agents,
@@ -14,6 +14,7 @@ import {
   memories,
   occasions,
   ownerCard,
+  signals,
 } from './schema.js';
 
 /** Called inside the memory writer transaction, after its privacy fence and duplicate check. */
@@ -82,6 +83,12 @@ export async function resolvePostgresMemoryPerson(
       .from(occasions)
       .where(eq(occasions.contactId, duplicateId))
       .limit(1);
+    // Historical bill and payment subjects are durable replay identities.
+    const [signal] = await tx
+      .select({ id: signals.id })
+      .from(signals)
+      .where(arrayContains(signals.subjectPersonIds, [duplicateId]))
+      .limit(1);
     const attached = await tx
       .select({ agentId: memories.agentId, ownerConfirmed: memories.ownerConfirmed })
       .from(memories)
@@ -92,6 +99,7 @@ export async function resolvePostgresMemoryPerson(
       linked ||
       graphSource ||
       occasion ||
+      signal ||
       attached.length > MAX_RECONCILED_PERSON_MEMORIES ||
       attached.some((row) => row.agentId !== input.agentId || row.ownerConfirmed)
     )
