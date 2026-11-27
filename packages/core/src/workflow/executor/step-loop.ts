@@ -48,7 +48,7 @@ import {
 } from '../artifact-intent.js';
 import { remainingBirthdaySaves, requestedBirthdaySaves } from '../birthday-import.js';
 import {
-  bookingDisclosure,
+  bookingDisclosureForRead,
   bookingEvidence,
   bookingModelWindow,
   requiresBookingProjection,
@@ -687,12 +687,6 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     !isForwardedIngest(task) &&
     ownerIntent.separation !== 'unknown' &&
     ownerText.length > 0;
-  const disclosure =
-    directOwner && task.type === 'chat_turn' ? bookingDisclosure(ownerText) : undefined;
-  const lookupEvidence = <T extends ReadToolEvidence>(row: T): T =>
-    disclosure ? bookingEvidence(row) : row;
-  const modelWindow = () =>
-    disclosure ? bookingModelWindow(publicModelWindow(), ownerText) : publicModelWindow();
   const localTransformation =
     directOwner &&
     ownerIntent.authorizedScopes.length === 0 &&
@@ -794,6 +788,14 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
             now: readReferenceAt,
             timeZone: requestTimeZone,
           });
+  const disclosure =
+    directOwner && task.type === 'chat_turn'
+      ? bookingDisclosureForRead(ownerText, rc.resolvedReadIntent, readRequest)
+      : undefined;
+  const lookupEvidence = <T extends ReadToolEvidence>(row: T): T =>
+    disclosure ? bookingEvidence(row) : row;
+  const modelWindow = () =>
+    disclosure ? bookingModelWindow(publicModelWindow(), ownerText) : publicModelWindow();
   let assessmentStepReserve: 1 | 2 = EMAIL_REVIEW_DEFAULT_ASSESSMENT_RESERVE;
   if (readRequest?.emailReview) {
     const originalMaxSteps = task.maxSteps;
@@ -1054,6 +1056,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       ? stageModelFinalResponse(deps, lease, state, rc.window, pending, artifactIntent, readContext)
       : stageFinalResponse(deps, lease, state, rc.window, pending, {
           verifiedCompoundTripChecklist,
+          bookingReadContext: readContext,
         });
   };
   // A conceptual question was explicitly classified before the planner ran.

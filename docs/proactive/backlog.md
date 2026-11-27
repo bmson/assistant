@@ -115,7 +115,10 @@ lookups, and answers an explicit deposit question from one verified booking thre
 keeps supported booking values and headings from mail, including a ticket confirmation title when an
 owner cancels a separate reminder in the same request. Dates, times, references, and addresses use
 bounded source spans. The deterministic booking card validates each displayed span separately and keeps the most complete
-matching check-in or checkout. Conflicting values or incomplete reads leave the card unsaved. Other unrelated answers, non-booking briefing sources,
+matching check-in or checkout. Conflicting times or incomplete reads leave the card unsaved. A request for hotel details or a card
+can include a single verified reservation total from the current booking. The total stays out of
+model inputs, narrow lookups, and briefings. Explicit trip and history reads keep their own
+source contracts. Other unrelated answers, non-booking briefing sources,
 background Gmail ingestion, and historical content remain outside this slice.
 
 ## H · Evaluation

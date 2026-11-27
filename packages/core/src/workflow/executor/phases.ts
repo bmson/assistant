@@ -29,7 +29,7 @@ import {
   type DocumentReadIntent,
   documentReadDispatchFailure,
 } from '../artifact-intent.js';
-import { bookingDisclosure, bookingModelWindow } from '../booking-disclosure.js';
+import { bookingDisclosureForRead, bookingModelWindow } from '../booking-disclosure.js';
 import type {
   ChecklistCancellationResumeProjection,
   ChecklistCorrectionResumeProjection,
@@ -193,13 +193,17 @@ export async function preparePlanningRecall(rc: RunContext): Promise<boolean> {
       clarificationContinuation: state.clarificationContinuation,
     });
   const text = intent.ownerAuthoredText;
+  const ownerWindow = ownerAuthoredWindow(window, intent);
+  const read =
+    rc.resolvedReadIntent?.kind === 'personal'
+      ? rc.resolvedReadIntent.personal
+      : detectPersonalReadRequest(ownerWindow);
   const disclosure =
     task.type === 'chat_turn' && task.trust === 'owner' && intent.separation !== 'unknown'
-      ? bookingDisclosure(text)
+      ? bookingDisclosureForRead(text, rc.resolvedReadIntent, read)
       : undefined;
-  const ownerWindow = ownerAuthoredWindow(window, intent);
   const noRead = explicitlyOptsOutOfRecall(text);
-  const privateRead = task.trust === 'owner' && detectPersonalReadRequest(ownerWindow) !== null;
+  const privateRead = task.trust === 'owner' && read !== null;
   const localTransformation =
     intent.authorizedScopes.length === 0 &&
     isSelfContainedTextTransformation(text, intent.externalText);
@@ -1364,7 +1368,13 @@ export async function runPlanPhase(rc: RunContext): Promise<ExecuteResult | { pl
     task.type === 'chat_turn' &&
     task.trust === 'owner' &&
     rc.ctx.ownerIntent?.separation !== 'unknown' &&
-    bookingDisclosure(ownerText)
+    bookingDisclosureForRead(
+      ownerText,
+      rc.resolvedReadIntent,
+      rc.ctx.ownerIntent && rc.resolvedReadIntent?.kind !== 'personal'
+        ? detectPersonalReadRequest(ownerAuthoredWindow(window, rc.ctx.ownerIntent))
+        : undefined,
+    )
       ? bookingModelWindow(window, ownerText)
       : window;
   const lease = task;

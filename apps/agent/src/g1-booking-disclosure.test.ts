@@ -39,6 +39,9 @@ const INTIMATE = 'Intimate preference: G1-intimate-marker.';
 const FINANCE = 'Bank loan balance: $968.17.';
 const HISTORY = 'Prescription from an old conversation: G1-old-marker.';
 const DEPOSIT = 'Deposit: $113.28';
+const TOTAL = 'Reservation total: $234.56';
+const MIXED_TOTAL = `${TOTAL}, and my g1-jasper credit note should stay private.`;
+const UNBOUND_TOTAL = 'Total $987.65.';
 const LOGISTICS = 'Lantern Hotel check-in is October 24, 2027 at 3:00 PM.';
 const CHECKOUT = 'Check-out: October 27, 2027 at noon.';
 const TIMED_FIELD = 'Check-in: 3 PM';
@@ -56,6 +59,7 @@ const UNLABELLED = 'G1-unlabelled-marker.';
 const BODY = [
   LOGISTICS,
   CHECKOUT,
+  MIXED_TOTAL,
   MIXED_FIELD,
   MIXED_ADDRESS,
   MIXED_REFERENCE,
@@ -73,6 +77,9 @@ const FORBIDDEN = [
   'asthma operation',
   'insulin pump',
   'glucose monitor',
+  'g1-jasper',
+  '987.65',
+  '345.67',
   'g1-saffron',
   'g1-twilight',
   'g1-orchid',
@@ -393,6 +400,14 @@ describe.each([
         expect(ordinary?.text).toMatch(/Lantern Hotel/);
         expect(ordinary?.text).toMatch(/3:00 PM/);
         expectWithheld(ordinary);
+        expect(JSON.stringify(ordinary)).not.toContain('234.56');
+        const details = await ask(
+          'Read the Lantern Hotel confirmation email and tell me the details of my hotel reservation.',
+        );
+        expect(details?.text).toContain(TOTAL);
+        expect(details?.text).toContain(THREAD);
+        expectWithheld(details);
+
         const saveRequest = 'Save a card for my hotel booking in my inbox under G1LANTERN';
         const card = await ask(saveRequest);
         expect(JSON.stringify(card?.parts)).toContain('generated-card');
@@ -412,6 +427,7 @@ describe.each([
           spec?.facts.filter((fact) => fact.id === 'check-in').map((fact) => fact.value),
         ).toEqual([LOGISTICS]);
         expect(JSON.stringify(savedCard?.revision.spec)).toContain(ADDRESS);
+        expect(JSON.stringify(savedCard?.revision.spec)).toContain(TOTAL);
         expectWithheld(savedCard);
 
         const locationFields = Array.from(
@@ -444,17 +460,37 @@ describe.each([
         expect(JSON.stringify(conflictingCard?.parts)).not.toContain('generated-card');
         expectWithheld(conflictingCard);
 
+        mailBody = `${BODY.replace(MIXED_TOTAL, '')}\nUnrelated receipt note.\n${UNBOUND_TOTAL}`;
+        const unverifiedTotalCard = await ask(saveRequest);
+        expect(JSON.stringify(unverifiedTotalCard?.parts)).toContain('generated-card');
+        expect(JSON.stringify(unverifiedTotalCard?.parts)).not.toContain('234.56');
+        expectWithheld(unverifiedTotalCard);
+
+        mailBody = `${BODY}\nHotel total: $345.67.`;
+        const ambiguousTotalCard = await ask(saveRequest);
+        expect(JSON.stringify(ambiguousTotalCard?.parts)).toContain('generated-card');
+        expect(JSON.stringify(ambiguousTotalCard?.parts)).not.toMatch(/234\.56|345\.67/);
+        expectWithheld(ambiguousTotalCard);
+
+        mailBody = `Lantern Hotel reservation confirmation. ${HEALTH_CONTEXT}`;
+        const propertyCard = await ask(saveRequest);
+        expect(JSON.stringify(propertyCard?.parts)).toContain('generated-card');
+        expect(JSON.stringify(propertyCard?.parts)).toContain('Lantern Hotel');
+        expectWithheld(propertyCard);
+
         mailBody = BODY;
         readComplete = false;
         const incompleteCard = await ask(saveRequest);
         expect(JSON.stringify(incompleteCard?.parts)).not.toContain('generated-card');
         expectWithheld(incompleteCard);
+        expect(JSON.stringify(incompleteCard)).not.toContain('234.56');
         readComplete = true;
         const explicit = await ask(
           'Read the Lantern Hotel confirmation email and tell me the deposit amount.',
         );
         expect(explicit?.text).toContain('Deposit: $113.28');
         expect(explicit?.text).toContain(THREAD);
+        expect(explicit?.text).not.toContain('234.56');
         for (const marker of FORBIDDEN) expect(JSON.stringify(explicit)).not.toContain(marker);
         mailBody = BODY.replace(DEPOSIT, '');
         const noDeposit = await ask(
@@ -473,6 +509,7 @@ describe.each([
         ).toBe(true);
         expect(inputs.some((input) => JSON.stringify(input).includes(REFERENCE))).toBe(true);
         expectWithheld(inputs);
+        expect(JSON.stringify(inputs)).not.toContain('234.56');
 
         const now = new Date();
         const checkIn = new Date(now.getTime() + 24 * 60 * 60 * 1000);
@@ -504,7 +541,7 @@ describe.each([
           dates: [
             {
               iso: checkIn.toISOString(),
-              what: `${MIXED_DATE_LABEL}\n${HEALTH_CONTEXT}\n${INTIMATE}\n${DEPOSIT}`,
+              what: `${MIXED_DATE_LABEL}\n${HEALTH_CONTEXT}\n${INTIMATE}\n${DEPOSIT}\n${MIXED_TOTAL}`,
               dateRole: 'event_start',
               lifecycle: 'confirmed',
               bookingIdentity: 'G1LANTERN',
@@ -543,10 +580,12 @@ describe.each([
           expect(briefings[0]?.text).toContain('Lantern Hotel check-in');
           expect(JSON.stringify(briefings[0]?.parts)).toContain('"kind":"briefing"');
           expectWithheld(briefings);
+          expect(JSON.stringify(briefings)).not.toContain('234.56');
         }
         expectWithheld(inputs);
         expect(previews).toHaveLength(2);
         expectWithheld(previews);
+        expect(JSON.stringify(inputs)).not.toContain('234.56');
       } finally {
         await close();
       }

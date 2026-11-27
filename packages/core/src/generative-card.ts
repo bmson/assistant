@@ -4,7 +4,12 @@ import { CardFormSchema } from '@assistant/persistence/card-form';
 import { z } from 'zod';
 import { containsCardSecret, isSensitiveCardFact, publicCardText } from './card-privacy.js';
 import type { ModelRouter } from './model-router/index.js';
-import { bookingEvidence, bookingStayTime } from './workflow/booking-disclosure.js';
+import {
+  bookingEvidence,
+  bookingHotelProperty,
+  bookingStayTime,
+  type VerifiedHotelTotal,
+} from './workflow/booking-disclosure.js';
 import type { ActionEvidence } from './workflow/response-contract.js';
 
 const MAX_CARD_FACT_VALUE = 500;
@@ -751,7 +756,7 @@ function worthTrying(
   return answerText ? answerLooksCardShaped(answerText) : false;
 }
 
-function projectedHotelFacts(source: string): FactSpec[] {
+function projectedHotelFacts(source: string, total?: VerifiedHotelTotal): FactSpec[] {
   type StayTime = NonNullable<ReturnType<typeof bookingStayTime>>;
   const times = new Map<StayTime['kind'], { time: StayTime; value: string }>();
   const otherFacts = new Map<string, string>();
@@ -775,20 +780,29 @@ function projectedHotelFacts(source: string): FactSpec[] {
     }
     times.set(time.kind, { time, value });
   }
-  if (!times.has('check-in')) return [];
+  const properties = new Set(
+    source.split('\n').flatMap((line) => {
+      const property = bookingHotelProperty(line);
+      return property ? [property] : [];
+    }),
+  );
+  const [property] = properties;
+  if (properties.size > 1 || (!times.has('check-in') && !property)) return [];
   const addresses = [...otherFacts.values()].filter((value) =>
     /^(?:(?:hotel|property) )?address\s*:/i.test(value),
   );
   if (addresses.length > 1) return [];
   const facts = [
+    ...(property ? [{ id: 'hotel', label: 'Hotel', value: property }] : []),
     ...[...times.values()].map(({ time, value }) => ({
       id: time.kind,
       label: time.kind === 'check-in' ? 'Check-in' : 'Check-out',
       value,
     })),
     ...addresses.map((value) => ({ id: 'address', label: 'Address', value })),
+    ...(total ? [{ id: 'reservation-total', label: 'Reservation total', value: total.value }] : []),
     ...[...otherFacts.values()]
-      .filter((value) => !addresses.includes(value))
+      .filter((value) => !addresses.includes(value) && (!property || !value.startsWith(property)))
       .map((value, index) => ({ id: `detail-${index + 1}`, label: 'Booking detail', value })),
   ];
   return facts.slice(0, MAX_FACTS_PER_BLOCK).map((fact) => ({
@@ -817,6 +831,7 @@ export async function generateEvidenceCardOutcome(input: {
   evidenceOnly?: boolean;
   /** Use only a deterministic card built from projected current booking fields. */
   projectBookingFields?: boolean;
+  verifiedHotelTotal?: VerifiedHotelTotal;
 }): Promise<GenerateEvidenceCardOutcome> {
   const explicitRequest = input.explicitRequest ?? false;
   const bookingRequest = input.projectBookingFields === true;
@@ -835,7 +850,11 @@ export async function generateEvidenceCardOutcome(input: {
           row.toolName === 'gmail.read_thread',
       )
       .flatMap((row) => {
-        const args = row.args as { startMessageIndex?: number; startMessageOffset?: number } | null;
+        const args = row.args as {
+          threadId?: string;
+          startMessageIndex?: number;
+          startMessageOffset?: number;
+        } | null;
         if (
           bookingRequest &&
           ((args?.startMessageIndex ?? 0) !== 0 || (args?.startMessageOffset ?? 0) !== 0)
@@ -857,7 +876,7 @@ export async function generateEvidenceCardOutcome(input: {
             result.messages.some((message) => message.truncated))
         )
           return [];
-        return result.messages;
+        return result.messages.map((message) => ({ ...message, threadId: args?.threadId }));
       });
     const searchedMail = input.evidence.some(
       (row) => row.fromCurrentTask !== false && row.toolName === 'gmail.search',
@@ -870,12 +889,24 @@ export async function generateEvidenceCardOutcome(input: {
     const confirmations = threadMessages.flatMap((message) =>
       typeof message.text === 'string' &&
       (bookingRequest || message.text.trim().length <= MAX_CARD_FACT_VALUE) &&
-      /\bcheck[ -]?in\b/i.test(message.text)
-        ? [message.text.trim()]
+      (/\bcheck[ -]?in\b/i.test(message.text) ||
+        (bookingRequest &&
+          message.text
+            .split('\n')
+            .some(
+              (line) =>
+                bookingHotelProperty(line) &&
+                /\b(?:booking|reservation) confirmation[.!]?$/i.test(line),
+            )))
+        ? [{ text: message.text.trim(), threadId: message.threadId }]
         : [],
     );
     if (confirmations.length === 1 && confirmations[0]) {
-      const original = confirmations[0];
+      const { text: original, threadId } = confirmations[0];
+      const total =
+        threadId && input.verifiedHotelTotal?.threadId === threadId
+          ? input.verifiedHotelTotal
+          : undefined;
       // Do not promote a complete email body to a public "details" fact.
       // Retain safe check-in sentences when the confirmation contains secrets.
       const details = containsCardSecret(original)
@@ -887,7 +918,7 @@ export async function generateEvidenceCardOutcome(input: {
             .join(' ')
         : original;
       const facts = bookingRequest
-        ? projectedHotelFacts(original)
+        ? projectedHotelFacts(original, total)
         : details
           ? [
               {
@@ -908,7 +939,10 @@ export async function generateEvidenceCardOutcome(input: {
         facts,
         blocks: [{ type: 'facts', factIds: facts.map((fact) => fact.id) }],
       });
-      const validated = validateGroundedCard(spec, original);
+      const validated = validateGroundedCard(
+        spec,
+        total ? `${original}\n${total.value}` : original,
+      );
       if (!validated) return { kind: 'no_op' };
       return {
         kind: 'card',

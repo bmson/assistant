@@ -34,7 +34,7 @@ import {
 import { getQueueNotifier } from '@assistant/core/queue';
 import { isSituationRequest } from '@assistant/core/situations-schema';
 import { buildAutonomyGrant } from '@assistant/core/workflow/autonomy';
-import { bookingDisclosure } from '@assistant/core/workflow/booking-disclosure';
+import { bookingDisclosureForRead } from '@assistant/core/workflow/booking-disclosure';
 import {
   CONVERSATION_REASONING_DIRECTIVE,
   explicitlyOptsOutOfRecall,
@@ -1335,7 +1335,8 @@ export async function handleChatTurn(
     autonomousRequested ||
     forceRequested ||
     (conversationalIntent.separation !== 'unknown' &&
-      bookingDisclosure(conversationalIntent.ownerAuthoredText) !== undefined) ||
+      bookingDisclosureForRead(conversationalIntent.ownerAuthoredText, activeReadIntent) !==
+        undefined) ||
     isSituationRequest(userText) ||
     looksLikeActionRequest(
       userText,

@@ -1,4 +1,6 @@
 import type { ModelMessage } from 'ai';
+import type { ResolvedReadIntent } from './active-read-intent.js';
+import type { PersonalReadRequest } from './read-intent.js';
 
 // Scope this projection to owner-authored booking lookups. It does not grant a
 // tool permission, and source text cannot opt the current turn into disclosure.
@@ -57,6 +59,32 @@ const DEPOSIT_QUESTION =
   /\b(?:what (?:is|was)|what was charged for|how much (?:is|was)|(?:tell|show) me|verify)\s+(?:what\s+)?(?:the |my |our )?(?:hotel |booking |security )?deposit\b/i;
 const DEPOSIT_FACT =
   /^(?:(?:the|a|your|hotel|booking|reservation|security|refundable|required)\s+)*deposit\s*(?:(?:was|is|of|charged|paid)\s+)*[:=–—-]?\s*(?:[$€£]\s*\d[\d,.]*|(?:USD|EUR|GBP|CAD|ISK)\s+\d[\d,.]*|\d[\d,.]*\s+(?:USD|EUR|GBP|CAD|ISK))(?:[.!])?$/i;
+const AMOUNT = String.raw`(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{2})?`;
+const RESERVATION_TOTAL = new RegExp(
+  String.raw`^(?:(?:hotel|booking|reservation)\s+)?total\s*(?:is\s+|:\s*)?(?:[$€£]\s*${AMOUNT}|(?:USD|EUR|GBP|CAD|ISK)\s+${AMOUNT}|${AMOUNT}\s+(?:USD|EUR|GBP|CAD|ISK))(?=$|\s*[;,](?!\d)|\.(?!\d))`,
+  'i',
+);
+
+export interface VerifiedHotelTotal {
+  threadId: string;
+  value: string;
+}
+
+export function bookingTotalFacts(value: string): string[] {
+  const clauses = bookingClauses(value);
+  return clauses.flatMap((clause, index) => {
+    const match = RESERVATION_TOTAL.exec(clause.trim());
+    if (!match) return [];
+    // An unlabeled invoice total needs an adjacent booking field. Other sections
+    // in the same thread can contain their own amounts.
+    if (/^total\b/i.test(match[0])) {
+      const previous = projectBookingClause(clauses[index - 1] ?? '');
+      if (!bookingStayTime(previous) && !bookingHotelProperty(previous)) return [];
+    }
+    return [match[0]];
+  });
+}
+
 const TEXT_FIELDS = new Set([
   'text',
   'subject',
@@ -122,6 +150,42 @@ export function bookingDisclosure(ownerText: string): { depositRequested: boolea
   };
 }
 
+/** The explicit source contract owns multi-source, historical and flight reads. */
+export function bookingDisclosureForRead(
+  text: string,
+  intent?: ResolvedReadIntent,
+  request?: PersonalReadRequest | null,
+) {
+  if (intent && intent.kind !== 'none' && intent.kind !== 'personal') return undefined;
+  const read = request ?? (intent?.kind === 'personal' ? intent.personal : undefined);
+  if (
+    read?.sourceReads ||
+    read?.conversationQuery ||
+    read?.compoundTripDiscovery ||
+    read?.upcomingFlightDiscovery ||
+    read?.answerFocus === 'flight' ||
+    read?.answerFocus === 'trip' ||
+    read?.scopeContext?.kind === 'flight' ||
+    read?.kind === 'memory' ||
+    read?.kind === 'knowledge_graph'
+  )
+    return undefined;
+  return bookingDisclosure(text);
+}
+
+export function hotelTotalRequested(text: string, cardRequested = false): boolean {
+  return (
+    LODGING.test(text) &&
+    !/\b(?:omit|exclude|without|do not (?:show|include)|don't (?:show|include))\b[^.!?\n]{0,70}\b(?:total|cost|price|amounts?|financial)\b/i.test(
+      text,
+    ) &&
+    (cardRequested ||
+      /\b(?:details? (?:of|about|for|on)|(?:hotel|reservation|booking) details|(?:booking|reservation|hotel) total|total (?:cost|price|for))\b/i.test(
+        text,
+      ))
+  );
+}
+
 export function bookingMailTitle(value: string): boolean {
   return BOOKING.test(value) || LODGING.test(value);
 }
@@ -165,10 +229,22 @@ export function bookingSourceLabel(value: string): string {
   return withholdBookingClause(label) ? '' : label;
 }
 
+export function bookingHotelProperty(value: string): string | undefined {
+  const property = PROPERTY_SUFFIX.exec(value.trim())?.[0];
+  return property && !withholdBookingClause(property) ? property : undefined;
+}
+
 export function bookingMailSubject(value: string): string {
   const label = bookingSourceLabel(value);
   const heading = BOOKING_HEADING.exec(label);
-  if (!heading) return bookingLogistics(label);
+  if (!heading) {
+    const property = bookingHotelProperty(label);
+    const rest = property ? label.slice(property.length).trim() : '';
+    if (property && (!rest || /^booking(?:\s+[A-Z0-9][A-Z0-9_-]{2,39})?$/i.test(rest))) {
+      return rest ? `${property} booking` : property;
+    }
+    return bookingLogistics(label);
+  }
   const name = label.slice(0, heading.index).trim();
   if (withholdBookingClause(name) || !PROPERTY_NAME.test(name)) return heading[0];
   return [name, heading[0]].filter(Boolean).join(' ');
@@ -208,7 +284,14 @@ function projectBookingClause(clause: string): string {
     return fact ? property + fact : '';
   }
 
-  if (PROPERTY_SUFFIX.exec(text)?.[0] === text.replace(/\.$/, '')) return text;
+  const hotel = bookingHotelProperty(text);
+  if (hotel) {
+    const rest = text.slice(hotel.length);
+    if (rest === '.' || !rest) return text;
+    const location = /^,\s+([^.!?;,]+)(?:\.)?$/.exec(rest)?.[1];
+    if (location && PROPERTY_NAME.test(location)) return text;
+    if (rest.startsWith(',')) return hotel;
+  }
 
   const heading = BOOKING_HEADING.exec(text);
   if (!heading || heading.index + heading[0].length !== text.replace(/\.$/, '').length) return '';
@@ -277,7 +360,12 @@ export function bookingEvidence<T extends { toolName: string; result?: unknown }
   return { ...row, result: bookingFields(row.result, requiresBookingProjection(row.toolName)) };
 }
 
-function bookingFields(value: unknown, mail = false, field?: string): unknown {
+function bookingFields(
+  value: unknown,
+  mail = false,
+  field?: string,
+  total?: VerifiedHotelTotal,
+): unknown {
   if (typeof value === 'string') {
     if (field !== undefined && !TEXT_FIELDS.has(field)) return value;
     if (mail) {
@@ -291,10 +379,20 @@ function bookingFields(value: unknown, mail = false, field?: string): unknown {
     }
     return bookingText(value);
   }
-  if (Array.isArray(value)) return value.map((item) => bookingFields(item, mail, field));
+  if (Array.isArray(value)) return value.map((item) => bookingFields(item, mail, field, total));
   if (!value || typeof value !== 'object' || value instanceof Date) return value;
+  const object = value as Record<string, unknown>;
   return Object.fromEntries(
-    Object.entries(value).map(([key, item]) => [key, bookingFields(item, mail, key)]),
+    Object.entries(object).map(([key, item]) => [
+      key,
+      key === 'value' &&
+      total &&
+      object.id === 'reservation-total' &&
+      object.source === 'gmail.read_thread' &&
+      item === total.value
+        ? item
+        : bookingFields(item, mail, key, total),
+    ]),
   );
 }
 
@@ -319,6 +417,6 @@ export function bookingModelWindow(window: ModelMessage[], ownerText: string): M
   });
 }
 
-export function isBookingProjectionSafe(value: unknown): boolean {
-  return JSON.stringify(bookingFields(value)) === JSON.stringify(value);
+export function isBookingProjectionSafe(value: unknown, total?: VerifiedHotelTotal): boolean {
+  return JSON.stringify(bookingFields(value, false, undefined, total)) === JSON.stringify(value);
 }
