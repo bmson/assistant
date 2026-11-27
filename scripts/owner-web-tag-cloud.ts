@@ -1,4 +1,5 @@
 /** Existing protected WIF only; no local credential discovery or target selection. */
+
 import { execFile } from 'node:child_process';
 import { lstatSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -6,6 +7,7 @@ import { promisify } from 'node:util';
 import { verifyWifEnvironment } from './owner-editor-release-inventory.js';
 import { createImageResolutionReader } from './owner-release-image-resolution.js';
 import { preloadArchivedOriginalForProtectedRelease } from './owner-restore-target-verify.js';
+import { loadRetainedServingImageEvidence } from './owner-serving-image-evidence.js';
 import { nativeRetirementClient, type RetainedTargetPolicy } from './owner-web-tag-native.js';
 
 const exec = promisify(execFile);
@@ -114,6 +116,11 @@ export async function protectedWebTagCloud(
   const token = await protectedWebTagCredential(mark);
   return {
     ...nativeRetirementClient(token, fetch, undefined, undefined, retainedTarget),
-    ensureImage: createImageResolutionReader(token),
+    ensureImage: createImageResolutionReader(
+      token,
+      fetch,
+      undefined,
+      loadRetainedServingImageEvidence(),
+    ),
   };
 }

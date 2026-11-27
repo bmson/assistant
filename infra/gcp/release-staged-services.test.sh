@@ -672,6 +672,66 @@ assert state['assistant-browser']['image']=='registry/old-browser', state
 assert not any(x[3]=='assistant-web' and 'ASSISTANT_RELEASE_WRITES_PAUSED=false' in x[x.index('--update-env-vars')+1] for x in updates), updates
 PYCASE
 
+# Ordinary API 3 worker fallback is isolated from the default and archive paths.
+(
+  export OWNER_API3_RECOVERY_GENERATION=1 OWNER_API3_RECOVERY_SHA256=synthetic OWNER_WORKER_BASELINE='{}'
+  worker_calls="$TEST_ROOT/reviewed-worker-calls"
+  release_reviewed_worker_transition() {
+    printf '%s %s %s\n' "$1" "$2" "$3" >> "$worker_calls"
+    if [[ "$1" == --forward && "$2" == code ]]; then return "${TEST_CODE_STATUS:-0}"; fi
+    if [[ "$1" == --restore && "$2" == processor ]]; then return "${TEST_RESTORE_STATUS:-0}"; fi
+    return 0
+  }
+  prepare_ordinary_workers() {
+    reset_case
+    prepare_firestore_state
+    export RELEASE_MODULES=browser,code,processor
+    : > "$worker_calls"
+  }
+  expect_worker_steps() {
+    local steps
+    steps="$(cut -d' ' -f1,2 "$worker_calls")"
+    [[ "$steps" == "$1" ]] || fail "unexpected reviewed worker steps: $steps"
+  }
+  prepare_ordinary_workers
+  export FINAL_NEW_PAIR_PROBE_FAIL=1
+  if release_staged_services; then fail 'reviewed preadmission failure must roll back'; fi
+  expect_worker_steps $'--forward browser\n--forward code\n--forward processor\n--restore processor\n--restore code\n--restore browser'
+  assert_old_traffic
+
+  prepare_ordinary_workers
+  if TEST_CODE_STATUS=3 release_staged_services; then fail 'confirmed worker denial must fail the release'; fi
+  expect_worker_steps $'--forward browser\n--forward code\n--restore browser'
+  assert_old_traffic
+
+  prepare_ordinary_workers
+  status=0
+  TEST_CODE_STATUS=75 release_staged_services || status=$?
+  [[ "$status" == 75 ]] || fail 'unknown worker advance must hold delivery'
+  expect_worker_steps $'--forward browser\n--forward code'
+  assert_old_traffic
+
+  prepare_ordinary_workers
+  export FINAL_NEW_PAIR_PROBE_FAIL=1
+  status=0
+  TEST_RESTORE_STATUS=75 release_staged_services || status=$?
+  [[ "$status" == 75 ]] || fail 'unknown worker restore must hold delivery'
+  expect_worker_steps $'--forward browser\n--forward code\n--forward processor\n--restore processor'
+  ! rg -q 'update-traffic assistant-agent .*agent-old=100' "$STUB_RELEASE_CALLS" || fail 'unknown worker rollback restored old agent traffic'
+
+  prepare_ordinary_workers
+  export RESUME_WEB_PROBE_FAIL=1
+  if release_staged_services; then fail 'reviewed postadmission probe failure must fail'; fi
+  expect_worker_steps $'--forward browser\n--forward code\n--forward processor'
+
+  prepare_ordinary_workers
+  unset OWNER_WORKER_BASELINE
+  status=0
+  release_staged_services || status=$?
+  [[ "$status" == 75 && ! -s "$worker_calls" && ! -s "$STUB_SERVICE_UPDATE_CALLS" ]] ||
+    fail 'incomplete ordinary worker evidence reached staging'
+)
+
 # BASIC5 must never enter the staging path outside a paired Firestore release.
 reset_case; TEST_BASIC5_CAPABILITY=true
 if release_staged_services; then fail 'BASIC5 PostgreSQL release must be rejected before staging'; fi
