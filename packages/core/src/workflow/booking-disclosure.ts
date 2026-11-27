@@ -25,7 +25,7 @@ const PROPERTY_SUFFIX =
   /^(?:[\p{Lu}\p{N}][\p{L}\p{N}'’&.-]*[ \t]+){0,7}(?:Hotel|Inn|Resort|Suites|Apartments)\b/u;
 const EVENT_LABEL = /\b(?:check[- ]?(?:in|out)|departure|arrival)\b/i;
 const BOOKING_HEADING =
-  /\b(?:(?:booking|reservation) (?:confirmation|confirmed|cancelled|canceled|rescheduled)|itinerary)\b/i;
+  /\b(?:(?:booking|reservation) (?:confirmation|confirmed|cancelled|canceled|rescheduled)|ticket confirmation|itinerary)\b/i;
 const BOOKING_REFERENCE = /^[A-Za-z0-9][A-Za-z0-9_-]{1,159}$/;
 const BOOKING_FIELDS: ReadonlyArray<[RegExp, RegExp]> = [
   [

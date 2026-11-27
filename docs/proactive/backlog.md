@@ -112,7 +112,8 @@ Each kind follows [target-design.md §4](target-design.md#4-moment-engine-v2): c
 G1's first slice covers fresh private booking lookups and their mail-derived daily briefing entries.
 It projects booking logistics before answer or card composition, excludes older chat context for those
 lookups, and answers an explicit deposit question from one verified booking thread. The text projection
-keeps supported booking values and headings from mail. Dates, times, references, and addresses use
+keeps supported booking values and headings from mail, including a ticket confirmation title when an
+owner cancels a separate reminder in the same request. Dates, times, references, and addresses use
 bounded source spans. The deterministic booking card validates each displayed span separately and keeps the most complete
 matching check-in or checkout. Conflicting values or incomplete reads leave the card unsaved. Other unrelated answers, non-booking briefing sources,
 background Gmail ingestion, and historical content remain outside this slice.
