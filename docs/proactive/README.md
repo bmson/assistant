@@ -132,4 +132,4 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | H1  | Golden-signal benchmark harness                                        | 3     | L    | —          | in progress (S13, S14, S16, S17, S24 on both drivers)         |
 | H2  | Weekly missed-signal audit                                             | 5     | M    | H1         | open                                                          |
 | H3  | Proactive telemetry                                                    | 5     | M    | —          | open                                                          |
-| H4  | Daily canary                                                           | 0     | S    | —          | in review (source checks and one daily health alert)          |
+| H4  | Daily canary                                                           | 0     | S    | —          | in review (25% alert and overall iPhone health status)        |
