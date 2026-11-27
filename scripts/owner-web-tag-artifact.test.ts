@@ -12,6 +12,7 @@ const runId = 123456789;
 const attempt = 1;
 const source = 'a'.repeat(40);
 const token = 'ghs_secret_token_for_test';
+const statelessToken = `ghs_12345_${'a-'.repeat(80)}.${'b_'.repeat(80)}.${'c-'.repeat(80)}`;
 const archive = Buffer.from('bounded test archive bytes');
 const artifactName = `owner-web-tag-creation-${source}-${runId}-${attempt}`;
 const tempDirs: string[] = [];
@@ -22,7 +23,9 @@ function json(value: unknown) {
     headers: { 'Content-Type': 'application/json' },
   });
 }
-function baseFixture(options: { archiveBytes?: Uint8Array; artifacts?: unknown[] } = {}) {
+function baseFixture(
+  options: { archiveBytes?: Uint8Array; artifacts?: unknown[]; token?: string } = {},
+) {
   const bytes = Buffer.from(options.archiveBytes ?? archive);
   const run = {
     id: runId,
@@ -62,7 +65,7 @@ function baseFixture(options: { archiveBytes?: Uint8Array; artifacts?: unknown[]
       return new Response(bytes, { status: 200 });
     throw new Error(`Unexpected request with ${token}`);
   };
-  const read = createProtectedWebTagArtifactReader({ token, request });
+  const read = createProtectedWebTagArtifactReader({ token: options.token ?? token, request });
   return { read, calls, artifact, run, bytes };
 }
 
@@ -71,21 +74,51 @@ afterEach(() => {
 });
 
 describe('protected web-tag artifact transport', () => {
-  it('reads exact run metadata and one digest-bound archive; never forwards auth to blob storage', async () => {
-    const f = baseFixture();
-    const result = await f.read(runId, attempt);
-    expect(result.runMetadata).toEqual(f.run);
-    expect(result.artifactMetadata).toEqual(f.artifact);
-    expect(result.archiveBytes).toEqual(archive);
-    expect(f.calls).toHaveLength(4);
-    for (const call of f.calls.slice(0, 3)) {
-      expect(new URL(call.url).origin).toBe('https://api.github.com');
-      expect(new Headers(call.init.headers).get('Authorization')).toBe(`Bearer ${token}`);
+  it.each([
+    ['legacy', token],
+    ['stateless', statelessToken],
+  ])(
+    'reads one digest-bound archive with %s credentials and never forwards auth to blob storage',
+    async (_format, credential) => {
+      const directory = mkdtempSync(join(tmpdir(), 'web-tag-success-token-'));
+      tempDirs.push(directory);
+      const file = join(directory, 'secure-token');
+      writeFileSync(file, credential, { mode: 0o600 });
+      const f = baseFixture({ token: readProtectedGitHubTokenFile(file) });
+
+      const result = await f.read(runId, attempt);
+      expect(result.runMetadata).toEqual(f.run);
+      expect(result.artifactMetadata).toEqual(f.artifact);
+      expect(result.archiveBytes).toEqual(archive);
+      expect(f.calls).toHaveLength(4);
+      for (const call of f.calls.slice(0, 3)) {
+        expect(new URL(call.url).origin).toBe('https://api.github.com');
+        expect(new Headers(call.init.headers).get('Authorization')).toBe(`Bearer ${credential}`);
+      }
+      const [redirect, blob] = f.calls.slice(2);
+      expect(redirect?.init.redirect).toBe('manual');
+      expect(blob?.init.redirect).toBe('error');
+      expect(new Headers(blob?.init.headers).has('Authorization')).toBe(false);
+    },
+  );
+
+  it('refuses embedded whitespace or header delimiters in the token file and reader', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'web-tag-unsafe-token-'));
+    tempDirs.push(directory);
+    const file = join(directory, 'secure-token');
+    for (const credential of [
+      'ghs_example secret',
+      'ghs_example\r\nExtra: injected',
+      'ghs_example,extra',
+    ]) {
+      writeFileSync(file, credential, { mode: 0o600 });
+      expect(() => readProtectedGitHubTokenFile(file)).toThrow(
+        'Invalid protected GitHub token file',
+      );
+      expect(() => createProtectedWebTagArtifactReader({ token: credential })).toThrow(
+        'Invalid protected GitHub token',
+      );
     }
-    const [redirect, blob] = f.calls.slice(2);
-    expect(redirect?.init.redirect).toBe('manual');
-    expect(blob?.init.redirect).toBe('error');
-    expect(new Headers(blob?.init.headers).has('Authorization')).toBe(false);
   });
 
   it('supports fractional monotonic-clock remainder without an invalid AbortSignal timeout', async () => {

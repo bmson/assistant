@@ -44,7 +44,11 @@ vi.mock('./owner-web-release-native-proof.js', () => ({
 }));
 
 import { registerImageResolution } from './owner-release-image-resolution.js';
-import { runWebTagAdmission, verifyAdmissionContext } from './owner-web-tag-admission.js';
+import {
+  runWebTagAdmission,
+  runWebTagAdmissionCli,
+  verifyAdmissionContext,
+} from './owner-web-tag-admission.js';
 import { HISTORICAL_WEB_TAGS, WEB_SERVICE } from './owner-web-tag-retirement.js';
 
 const hash = (s: string) => createHash('sha256').update(s).digest('hex');
@@ -367,7 +371,7 @@ describe('ordinary recovered canonical admission', () => {
         nativeTagObserved: false,
       },
     ]);
-    expect(mocked.artifact).toHaveBeenCalledExactlyOnceWith(111, 1);
+    expect(mocked.artifact).toHaveBeenCalledExactlyOnceWith(111, 1, expect.any(Function));
     expect(mocked.verifyCurrent).toHaveBeenCalledOnce();
     await runWebTagAdmission('--native-init');
     expect(mocked.initialize).toHaveBeenCalledExactlyOnceWith(
@@ -438,6 +442,65 @@ describe('ordinary recovered canonical admission', () => {
     );
     await expect(runWebTagAdmission('--verify-admission')).rejects.toThrow('barrier incomplete');
     expect(io.patchTraffic).not.toHaveBeenCalled();
+  });
+});
+
+describe('protected CLI failure diagnostics', () => {
+  const fallback =
+    'BASIC5 web alias ownership or retirement/drain barrier stopped; admission is unapproved.';
+  const privateFailure = new Error(
+    'private bearer in /private/token from https://example.invalid/provider',
+  );
+
+  it('reports the cloud credential stage without including the underlying error', async () => {
+    mocked.cloud.mockImplementation(async (mark: (stage: string) => void) => {
+      mark('cloud_access_token');
+      throw privateFailure;
+    });
+    const report = vi.fn<(message: string) => void>();
+    expect(await runWebTagAdmissionCli(['--capture'], report)).toBe(1);
+    expect(report).toHaveBeenCalledExactlyOnceWith(`${fallback} [stage=cloud_credential]\n`);
+  });
+
+  it.each(['github_token_file', 'historical_artifact_metadata', 'historical_artifact_download'])(
+    'reports only the bounded %s stage for historical artifacts',
+    async (stage) => {
+      ordinaryFixture();
+      mocked.artifact.mockImplementation(async (_run, _attempt, mark) => {
+        mark(stage);
+        throw privateFailure;
+      });
+      const report = vi.fn<(message: string) => void>();
+      expect(await runWebTagAdmissionCli(['--capture'], report)).toBe(1);
+      expect(report).toHaveBeenCalledExactlyOnceWith(`${fallback} [stage=${stage}]\n`);
+    },
+  );
+
+  it('does not accept an unrecognized stage as public diagnostic text', async () => {
+    ordinaryFixture();
+    mocked.artifact.mockImplementation(async (_run, _attempt, mark) => {
+      mark(privateFailure.message);
+      throw privateFailure;
+    });
+    const report = vi.fn<(message: string) => void>();
+    expect(await runWebTagAdmissionCli(['--capture'], report)).toBe(1);
+    expect(report).toHaveBeenCalledExactlyOnceWith(`${fallback}\n`);
+  });
+
+  it('distinguishes an ordinary identity failure', async () => {
+    mocked.ordinary.mockImplementation(() => {
+      throw privateFailure;
+    });
+    const report = vi.fn<(message: string) => void>();
+    expect(await runWebTagAdmissionCli(['--capture'], report)).toBe(1);
+    expect(report).toHaveBeenCalledExactlyOnceWith(`${fallback} [stage=ordinary_identity]\n`);
+  });
+
+  it('keeps the generic failure for an unknown step and never emits raw error content', async () => {
+    io.readService.mockRejectedValue(privateFailure);
+    const report = vi.fn<(message: string) => void>();
+    expect(await runWebTagAdmissionCli(['--capture'], report)).toBe(1);
+    expect(report).toHaveBeenCalledExactlyOnceWith(`${fallback}\n`);
   });
 });
 

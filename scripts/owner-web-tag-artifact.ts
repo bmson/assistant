@@ -10,6 +10,8 @@ const MAX_ARCHIVE_BYTES = 4 * 1024 * 1024;
 const TOTAL_BUDGET_MS = 60_000;
 const REQUEST_BUDGET_MS = 15_000;
 const TOKEN_FILE = 'owner-web-tag-github-token';
+// Keep the credential opaque. GitHub App installation tokens may contain a JWT.
+export const PROTECTED_GITHUB_TOKEN_PATTERN = /^[A-Za-z0-9._~-]{1,4096}$/;
 const BLOB_HOST = /^productionresultssa[0-9]+\.blob\.core\.windows\.net$/;
 
 function fail(message = 'Protected creation artifact read unavailable'): never {
@@ -55,10 +57,16 @@ async function readBoundedBody(response: Response, maxBytes: number): Promise<Bu
   return Buffer.concat(chunks, size);
 }
 
+export type ProtectedArtifactStage =
+  | 'github_token_file'
+  | 'historical_artifact_metadata'
+  | 'historical_artifact_download';
+
 export interface ProtectedArtifactReaderOptions {
   token: string;
   request?: typeof fetch;
   now?: () => number;
+  mark?: (stage: ProtectedArtifactStage) => void;
 }
 
 /** Injection seam for offline contract tests; production supplies only the token. */
@@ -66,8 +74,10 @@ export function createProtectedWebTagArtifactReader({
   token,
   request = fetch,
   now = () => performance.now(),
+  mark = () => undefined,
 }: ProtectedArtifactReaderOptions) {
-  if (!/^[A-Za-z0-9_]{1,4096}$/.test(token)) throw new Error('Invalid protected GitHub token');
+  if (!PROTECTED_GITHUB_TOKEN_PATTERN.test(token))
+    throw new Error('Invalid protected GitHub token');
 
   return async function readProtectedWebTagArtifact(runId: number, attempt: number) {
     if (
@@ -108,6 +118,7 @@ export function createProtectedWebTagArtifactReader({
       );
     }
 
+    mark('historical_artifact_metadata');
     const runPath = `/repos/${REPOSITORY}/actions/runs/${runId}/attempts/${attempt}`;
     const runMetadata = record(parseJson(await fetchMetadata(runPath)));
     if (
@@ -152,6 +163,7 @@ export function createProtectedWebTagArtifactReader({
     )
       return fail('Invalid creation artifact identity');
 
+    mark('historical_artifact_download');
     const downloadPath = `/repos/${REPOSITORY}/actions/artifacts/${artifactMetadata.id}/zip`;
     const remaining = Math.floor(Math.min(REQUEST_BUDGET_MS, deadline - now()));
     if (remaining <= 0) return fail('Protected artifact read exceeded its time bound');
@@ -237,7 +249,8 @@ export function readProtectedGitHubTokenFile(file: string): string {
     }
     if (length > 8192) return fail('Invalid protected GitHub token file');
     const token = bytes.subarray(0, length).toString('utf8').trim();
-    if (!/^[A-Za-z0-9_]{1,4096}$/.test(token)) return fail('Invalid protected GitHub token file');
+    if (!PROTECTED_GITHUB_TOKEN_PATTERN.test(token))
+      return fail('Invalid protected GitHub token file');
     return token;
   } finally {
     closeSync(descriptor);
@@ -245,11 +258,16 @@ export function readProtectedGitHubTokenFile(file: string): string {
 }
 
 /** Production API is fixed: no caller-selected host, token source, request or redirect policy. */
-export async function readProtectedWebTagArtifact(runId: number, attempt: number) {
+export async function readProtectedWebTagArtifact(
+  runId: number,
+  attempt: number,
+  mark?: (stage: ProtectedArtifactStage) => void,
+) {
+  mark?.('github_token_file');
   if (!process.env.RUNNER_TEMP) throw new Error('Protected temporary directory unavailable');
   const tokenPath = resolve(process.env.RUNNER_TEMP, TOKEN_FILE);
-  return createProtectedWebTagArtifactReader({ token: readProtectedGitHubTokenFile(tokenPath) })(
-    runId,
-    attempt,
-  );
+  return createProtectedWebTagArtifactReader({
+    token: readProtectedGitHubTokenFile(tokenPath),
+    mark,
+  })(runId, attempt);
 }

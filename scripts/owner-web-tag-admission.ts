@@ -47,7 +47,10 @@ import {
   openPrivateReleasePhaseReceipts,
 } from './owner-web-release-phase-receipts.js';
 import { bindCapturedRetirementToLifecycle } from './owner-web-release-retirement-binding.js';
-import { readProtectedWebTagArtifact } from './owner-web-tag-artifact.js';
+import {
+  type ProtectedArtifactStage,
+  readProtectedWebTagArtifact,
+} from './owner-web-tag-artifact.js';
 import { protectedWebTagCloud, protectedWebTagCredential } from './owner-web-tag-cloud.js';
 import { nativeRetirementClient } from './owner-web-tag-native.js';
 import {
@@ -120,7 +123,24 @@ type Capture = {
   proofs: WebTagCreationProof[];
   ordinaryRecoverySha256?: string;
 };
-export async function runWebTagAdmission(mode: string | undefined) {
+type AdmissionStage =
+  | ProtectedArtifactStage
+  | 'cloud_credential'
+  | 'ordinary_identity'
+  | 'historical_artifact_proof';
+const ADMISSION_STAGES = new Set<AdmissionStage>([
+  'github_token_file',
+  'historical_artifact_metadata',
+  'historical_artifact_download',
+  'historical_artifact_proof',
+  'cloud_credential',
+  'ordinary_identity',
+]);
+
+export async function runWebTagAdmission(
+  mode: string | undefined,
+  mark: (stage: AdmissionStage | undefined) => void = () => undefined,
+) {
   if (
     ![
       '--capture',
@@ -201,6 +221,7 @@ export async function runWebTagAdmission(mode: string | undefined) {
     : undefined;
   const bootstrapEvidence = bootstrap ? bootstrapDigest(bootstrap) : undefined;
   const preclosed = bootstrap?.kind === 'disabled-bootstrap';
+  mark('ordinary_identity');
   const ordinaryRecovery = loadOrdinaryCanonicalRecovery();
   if (
     ordinaryRecovery &&
@@ -212,6 +233,7 @@ export async function runWebTagAdmission(mode: string | undefined) {
       bootstrap.services.web.image !== ordinaryRecovery.canonicalImage)
   )
     throw new Error('Reviewed ordinary canonical identity changed');
+  mark(undefined);
   const candidateAgentImage = String(rec(rec(manifest.components).agent).image);
   if (
     process.env.OWNER_RELEASE_RESTORE_TARGET_PROOF !== undefined &&
@@ -219,7 +241,8 @@ export async function runWebTagAdmission(mode: string | undefined) {
       candidateAgentImage === bootstrap?.services.agent.image)
   )
     throw new Error('Candidate image overlaps the archived original');
-  const io = await protectedWebTagCloud(undefined, 'tagged', true);
+  const io = await protectedWebTagCloud(() => mark('cloud_credential'), 'tagged', true);
+  mark(undefined);
   // Expected parents come only from the verified release/current evidence. Keep raw
   // native responses intact; later semantic checks require this content proof.
   for (const expectedImage of new Set([
@@ -264,9 +287,10 @@ export async function runWebTagAdmission(mode: string | undefined) {
     const cacheKey = `${priorRun}-${priorAttempt}`;
     let artifact = artifactCache.get(cacheKey);
     if (!artifact) {
-      artifact = await readProtectedWebTagArtifact(priorRun, priorAttempt);
+      artifact = await readProtectedWebTagArtifact(priorRun, priorAttempt, mark);
       artifactCache.set(cacheKey, artifact);
     }
+    mark('historical_artifact_proof');
     const { runMetadata: run, artifactMetadata: metadata, archiveBytes } = artifact;
     const workflowRun = rec(metadata.workflow_run);
     const extracted = extractCreationArchive(archiveBytes);
@@ -301,10 +325,12 @@ export async function runWebTagAdmission(mode: string | undefined) {
     });
     if (proof.revision !== revision)
       throw new Error('Prior immutable revision differs from creation receipt');
+    mark(undefined);
     return proof;
   }
   async function verifyOrdinaryBeforeCandidate(raw: unknown) {
     if (!ordinaryRecovery || !bootstrap) throw new Error('Reviewed ordinary canonical required');
+    mark('ordinary_identity');
     const expected = ordinaryRecovery.canonicalRevision;
     const native = await io.readRevision(expected);
     await ensureResolution(native, ordinaryRecovery.canonicalImage);
@@ -322,6 +348,7 @@ export async function runWebTagAdmission(mode: string | undefined) {
       rows[0]?.percent !== 100
     )
       throw new Error('Reviewed canonical route is not the sole untagged allocation');
+    mark(undefined);
     return native;
   }
 
@@ -1175,13 +1202,28 @@ export async function runWebTagAdmission(mode: string | undefined) {
     save(creationPath, receipt, true);
   }
 }
-if (process.argv[1]?.endsWith('/owner-web-tag-admission.ts'))
-  (process.argv.length === 3
-    ? runWebTagAdmission(process.argv[2])
-    : Promise.reject(new Error('Invalid admission arguments'))
-  ).catch(() => {
-    process.stderr.write(
-      'BASIC5 web alias ownership or retirement/drain barrier stopped; admission is unapproved.\n',
+export async function runWebTagAdmissionCli(
+  args: readonly string[],
+  report: (message: string) => void = (message) => process.stderr.write(message),
+) {
+  let stage: AdmissionStage | undefined;
+  try {
+    if (args.length !== 1) throw new Error('Invalid admission arguments');
+    await runWebTagAdmission(args[0], (current) => {
+      stage = current;
+    });
+    return 0;
+  } catch {
+    report(
+      'BASIC5 web alias ownership or retirement/drain barrier stopped; admission is unapproved.' +
+        (stage && ADMISSION_STAGES.has(stage) ? ` [stage=${stage}]` : '') +
+        '\n',
     );
-    process.exitCode = 1;
+    return 1;
+  }
+}
+
+if (process.argv[1]?.endsWith('/owner-web-tag-admission.ts'))
+  void runWebTagAdmissionCli(process.argv.slice(2)).then((status) => {
+    process.exitCode = status;
   });
