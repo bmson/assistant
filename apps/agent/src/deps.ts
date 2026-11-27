@@ -31,6 +31,7 @@ import {
   createPostgresExecutionPersistence,
   createPostgresMcpOAuthRepository,
   createPostgresModelConnectionRepository,
+  createPostgresOccasionCorrectionRepository,
   createPostgresOccasionToolReadRepository,
   createPostgresSelfRepairRepository,
   type Db,
@@ -55,6 +56,7 @@ import {
   FirestoreModelConnectionRepository,
   FirestoreOccasionToolRepository,
   FirestoreOwnerNoticeRepository,
+  FirestoreProfileOccasionCommandRepository,
   FirestoreReminderRepository,
   FirestoreScheduleRepository,
   FirestoreSituationToolRepository,
@@ -111,6 +113,7 @@ import {
   registerPortableGoalTools,
   registerPortableGraphSnapshotTool,
   registerPortableMemoryTools,
+  registerPortableOccasionCorrectionTool,
   registerPortableOccasionTools,
   registerPortableOwnerNotifyTool,
   registerPortableReadResultTool,
@@ -988,6 +991,10 @@ export function composeFirestoreAgent(config: Config): AgentDeps {
   if (persistence.selfRepair) registerSelfRepairTools(registry, persistence.selfRepair);
   const occasions = new FirestoreOccasionToolRepository(store, config.FIRESTORE_AGENT_ID);
   registerPortableOccasionTools(registry, occasions);
+  registerPortableOccasionCorrectionTool(
+    registry,
+    new FirestoreProfileOccasionCommandRepository(store, config.FIRESTORE_AGENT_ID),
+  );
   registerPortableBirthdayOccasionTool(registry, occasions);
   registerPortableContactLookupTool(
     registry,
@@ -1167,6 +1174,7 @@ export function buildDeps(): AgentDeps {
     undefined,
     { oauth: agentMcpOAuth(config, () => createPostgresMcpOAuthRepository(db)) },
   );
+  registerPortableOccasionCorrectionTool(registry, createPostgresOccasionCorrectionRepository(db));
   registerConfiguredGitHubAppTools(registry, config, () => assertPostgresInstallationOwner(db));
   registerAuditTools(registry, createPostgresAuditInvestigationRepository(db));
   registerSelfRepairTools(registry, createPostgresSelfRepairRepository(db));

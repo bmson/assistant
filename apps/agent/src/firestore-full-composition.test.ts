@@ -88,9 +88,11 @@ const PORTABLE_TOOLS = [
   'memory.recall',
   'memory.save',
   'mission.update',
+  'occasions.delete',
   'occasions.list',
   'occasions.list_birthdays',
   'occasions.save',
+  'occasions.update',
   'owner.notify',
   // Calls stage like jobs and keep their state in callSessions.
   'phone.call',

@@ -56,6 +56,7 @@ import {
   validMemoryReadSelection,
 } from './memory-read-answer.js';
 import { guardMutationReply } from './mutation-receipt.js';
+import { occasionCorrectionReply } from './occasion-correction.js';
 import { personCalendarResponse } from './person-calendar.js';
 import { matchesHistoricalMemorySearch, type PersonalReadRequest } from './read-intent.js';
 import { effectiveReminders } from './reminder-state.js';
@@ -5156,6 +5157,13 @@ export function enforceResponseContract(
   evidence: ActionEvidence[],
   opts?: ResponseContractOptions,
 ): ResponseContractResult {
+  const occasionCorrection = occasionCorrectionReply(opts?.admittedMutationText ?? '', evidence);
+  if (occasionCorrection)
+    return {
+      text: occasionCorrection.text,
+      blocked: !occasionCorrection.confirmed,
+      unsupported: [],
+    };
   text = stripBackgroundNoticeEcho(text);
   if (opts?.admittedMutationText !== undefined && !opts.publicActivity) {
     const checked = guardMutationReply(

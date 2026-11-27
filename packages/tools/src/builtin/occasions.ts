@@ -1,11 +1,20 @@
+import {
+  matchesOccasionCorrection,
+  matchesOccasionTarget,
+  parseOccasionCorrection,
+  parseOccasionDeletion,
+} from '@assistant/core';
 import { selectUpcomingOccasions } from '@assistant/core/memory/occasions';
-import type {
-  BirthdayOccasionToolRepository,
-  OccasionToolRepository,
+import {
+  type BirthdayOccasionToolRepository,
+  isOccasionCorrectionDate,
+  type OccasionCorrectionRepository,
+  type OccasionToolRepository,
 } from '@assistant/persistence';
 import { z } from 'zod';
 import { register } from '../register.js';
 import type { ToolRegistry } from '../registry.js';
+import type { ToolContext } from '../types.js';
 
 const MAX_BIRTHDAY_OCCASION_RESULTS = 40;
 
@@ -112,6 +121,106 @@ export function registerPortableOccasionTools(
       },
     },
     { confidentialRead: true },
+  );
+  return registry;
+}
+
+const correctionDate = z.strictObject({
+  month: z.number().int().min(1).max(12),
+  day: z.number().int().min(1).max(31),
+  year: z.number().int().min(1000).max(9999).nullable().optional(),
+});
+
+const savedOccasionTarget = z.strictObject({
+  subject: z.string().trim().min(1).max(120),
+  kind: z.enum(['birthday', 'anniversary', 'custom']),
+  label: z.string().max(120).optional().describe('The existing occasion label, if supplied.'),
+  expectedDate: correctionDate.describe('The saved month/day and optional year.'),
+});
+
+function ownerOccasionExecution(ctx: ToolContext) {
+  if (
+    !ctx.operationId ||
+    !ctx.conversationId ||
+    !ctx.directOwnerChatText ||
+    !ctx.execution ||
+    !ctx.taskLeaseToken ||
+    ctx.trust !== 'owner' ||
+    ctx.tainted ||
+    ctx.ownerIntent?.sourceActor !== 'owner' ||
+    ctx.ownerIntent.separation === 'unknown'
+  )
+    return undefined;
+  return {
+    text: ctx.directOwnerChatText,
+    operation: {
+      taskId: ctx.taskId,
+      dbToolCallId: ctx.execution.dbToolCallId,
+      modelToolCallId: ctx.operationId,
+      taskLeaseToken: ctx.taskLeaseToken,
+    },
+  };
+}
+
+export function registerPortableOccasionCorrectionTool(
+  registry: ToolRegistry,
+  occasions: OccasionCorrectionRepository,
+): ToolRegistry {
+  register(
+    registry,
+    {
+      name: 'occasions.update',
+      description:
+        'Correct the date of one existing saved occasion at the owner’s explicit request. Use their full saved contact name, occasion kind, and old month/day. Ask for missing details. When an old year is supplied, require it to match. When a new year is omitted, preserve the saved year; use null only when the owner requests clearing it.',
+      inputSchema: savedOccasionTarget.extend({
+        date: correctionDate.describe('The corrected month/day and optional replacement year.'),
+      }),
+      risk: 'autonomous',
+      acceptsUntrustedInput: false,
+      transactionalOutcome: true,
+      idempotencyKey: (_args, ctx) => `occasions.update:${ctx.taskId}:${ctx.operationId ?? ''}`,
+      execute: async (args, ctx) => {
+        const execution = ownerOccasionExecution(ctx);
+        if (!execution) return { ok: false, outcome: 'owner_request_required' };
+        const { text, operation } = execution;
+        const operationId = operation.modelToolCallId;
+        const requested = parseOccasionCorrection(text);
+        if (!requested) return { ok: false, outcome: 'owner_details_required', operationId };
+        if (!matchesOccasionCorrection(requested, args))
+          return { ok: false, outcome: 'owner_action_mismatch', operationId };
+        if (!isOccasionCorrectionDate(args.expectedDate) || !isOccasionCorrectionDate(args.date))
+          return { ok: false, outcome: 'invalid_date', operationId };
+        return occasions.correct({ ...args, agentId: ctx.agentId }, operation);
+      },
+    },
+    { ownerOnly: true, confidentialRead: true, writesMemory: true },
+  );
+  register(
+    registry,
+    {
+      name: 'occasions.delete',
+      description:
+        'Remove one saved occasion from People at the owner’s explicit request. Require the full saved contact name, occasion kind or label and saved month/day. Ask for missing details.',
+      inputSchema: savedOccasionTarget,
+      risk: 'autonomous',
+      acceptsUntrustedInput: false,
+      transactionalOutcome: true,
+      idempotencyKey: (_args, ctx) => `occasions.delete:${ctx.taskId}:${ctx.operationId ?? ''}`,
+      execute: async (args, ctx) => {
+        const execution = ownerOccasionExecution(ctx);
+        if (!execution) return { ok: false, outcome: 'owner_request_required' };
+        const { text, operation } = execution;
+        const operationId = operation.modelToolCallId;
+        const requested = parseOccasionDeletion(text);
+        if (!requested) return { ok: false, outcome: 'owner_details_required', operationId };
+        if (!matchesOccasionTarget(requested, args))
+          return { ok: false, outcome: 'owner_action_mismatch', operationId };
+        if (!isOccasionCorrectionDate(args.expectedDate))
+          return { ok: false, outcome: 'invalid_date', operationId };
+        return occasions.delete({ ...args, agentId: ctx.agentId }, operation);
+      },
+    },
+    { ownerOnly: true, confidentialRead: true, writesMemory: true },
   );
   return registry;
 }

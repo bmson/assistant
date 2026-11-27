@@ -1,12 +1,27 @@
 import { randomUUID } from 'node:crypto';
 import type {
+  OccasionChatBinding,
+  OccasionChatOperation,
+  OccasionChatTool,
+  OccasionCorrectionInput,
+  OccasionCorrectionResult,
+  OccasionDeleteInput,
   ProfileOccasionCommandInput,
   ProfileOccasionCommandRepository,
   Records,
 } from '@assistant/persistence';
+import {
+  isOccasionCorrectionDate,
+  matchesSavedOccasion,
+  occasionChatCallState,
+  occasionChatResult,
+  occasionCorrectionReadback,
+  sameOccasionContactName,
+} from '@assistant/persistence';
 import type { DocumentSnapshot, Transaction } from '@google-cloud/firestore';
 import { isEmulatorClosedTransaction } from './emulator-transaction.js';
 import {
+  type OccasionIdentity,
   occasionDateKey,
   occasionDateKeyId,
   resolveOccasionIdentity,
@@ -17,6 +32,7 @@ import { decodeRecord, documentKey, encodeRecord, type InstallationStore } from 
 
 type Occasion = Records['occasions'];
 const MAX_CONTACT_OCCASIONS = 100;
+const CONTACT_SCAN_LIMIT = 5000;
 
 export class OccasionDateCorrectionConflictError extends Error {
   constructor() {
@@ -246,15 +262,6 @@ export class FirestoreProfileOccasionCommandRepository implements ProfileOccasio
         month: input.month,
         day: input.day,
       };
-      const resolved = await resolveOccasionIdentity(
-        tx,
-        this.store,
-        this.configuredAgentId,
-        newIdentity,
-      );
-      if (resolved.ambiguous) throw new Error('Matching occasion records are ambiguous');
-      if (resolved.superseded && resolved.supersededOccasionId !== occasionId)
-        throw new OccasionDateCorrectionConflictError();
       const duplicate = page.docs.some((doc) => {
         if (doc.id === snapshot.id) return false;
         const row = decodeRecord<Partial<Occasion>>(doc.data());
@@ -266,53 +273,9 @@ export class FirestoreProfileOccasionCommandRepository implements ProfileOccasio
           row.day === input.day
         );
       });
-      if (duplicate || (resolved.snapshot && resolved.snapshot.id !== snapshot.id))
-        throw new Error('Matching occasion records are ambiguous');
-      const oldIdentity = {
-        contactId: old.contactId,
-        kind: old.kind,
-        month: old.month,
-        day: old.day,
-      };
-      const oldMarker = await resolveOccasionIdentity(
-        tx,
-        this.store,
-        this.configuredAgentId,
-        oldIdentity,
-      );
-      if (oldMarker.ambiguous) throw new Error('Matching occasion records are ambiguous');
-      if (oldMarker.snapshot && oldMarker.snapshot.id !== snapshot.id)
-        throw new Error('Occasion date marker conflicts with its record');
-      if (
-        oldIdentity.kind !== newIdentity.kind ||
-        oldIdentity.month !== newIdentity.month ||
-        oldIdentity.day !== newIdentity.day
-      ) {
-        tx.set(
-          oldMarker.markerRef,
-          supersededOccasionDateKey(this.configuredAgentId, oldIdentity, occasionId),
-        );
-        if (resolved.superseded)
-          tx.set(
-            resolved.markerRef,
-            occasionDateKey(this.configuredAgentId, newIdentity, occasionId),
-          );
-        else if (resolved.markerExists)
-          tx.set(
-            resolved.markerRef,
-            occasionDateKey(this.configuredAgentId, newIdentity, occasionId),
-          );
-        else
-          tx.create(
-            resolved.markerRef,
-            occasionDateKey(this.configuredAgentId, newIdentity, occasionId),
-          );
-      } else if (!oldMarker.markerExists) {
-        tx.create(
-          oldMarker.markerRef,
-          occasionDateKey(this.configuredAgentId, oldIdentity, occasionId),
-        );
-      }
+      if (duplicate) throw new Error('Matching occasion records are ambiguous');
+      if (!(await this.stageDateChange(tx, old, newIdentity)))
+        throw new OccasionDateCorrectionConflictError();
       tx.update(occasionRef, {
         kind: input.kind,
         label: input.label,
@@ -330,6 +293,239 @@ export class FirestoreProfileOccasionCommandRepository implements ProfileOccasio
     });
   }
 
+  correct(input: OccasionCorrectionInput, operation: OccasionChatOperation) {
+    return this.executeOccasionChat(input, operation, 'occasions.update');
+  }
+
+  delete(input: OccasionDeleteInput, operation: OccasionChatOperation) {
+    return this.executeOccasionChat(input, operation, 'occasions.delete');
+  }
+
+  private async executeOccasionChat(
+    input: OccasionCorrectionInput | OccasionDeleteInput,
+    operation: OccasionChatOperation,
+    tool: OccasionChatTool,
+  ) {
+    if (input.agentId !== this.configuredAgentId) throw new Error('Occasion owner mismatch');
+    const taskRef = this.store.doc('tasks', operation.taskId);
+    const callRef = this.store.doc('toolCalls', operation.dbToolCallId);
+
+    const transact = (phase: 'prepare' | 'commit') =>
+      this.store.db.runTransaction(async (tx) => {
+        await assertWritableOwner(tx, this.store, this.configuredAgentId);
+        const [taskSnapshot, callSnapshot] = await Promise.all([tx.get(taskRef), tx.get(callRef)]);
+        const task = decodeRecord<Records['tasks'] | undefined>(taskSnapshot.data());
+        if (
+          !task ||
+          task.id !== operation.taskId ||
+          task.agentId !== input.agentId ||
+          task.status !== 'running' ||
+          task.trust !== 'owner' ||
+          task.type !== 'chat_turn' ||
+          !task.conversationId ||
+          (task.trigger as { source?: string } | null)?.source !== 'chat' ||
+          task.leaseToken !== operation.taskLeaseToken ||
+          !(task.lockedUntil instanceof Date) ||
+          task.lockedUntil.getTime() <= this.store.now().getTime()
+        )
+          throw new Error('Occasion operation lost its owner chat lease');
+
+        const call = decodeRecord<Records['toolCalls'] | undefined>(callSnapshot.data());
+        const state = occasionChatCallState(call, input, operation, tool);
+        if (state.result) return state.result;
+        const finish = (result: OccasionCorrectionResult) => {
+          const receipt = occasionChatResult(operation, result);
+          tx.update(
+            callRef,
+            encodeRecord({ status: 'succeeded', result: receipt, finishedAt: this.store.now() }),
+          );
+          return receipt;
+        };
+        if (phase === 'prepare') {
+          if (state.binding) return undefined;
+          const target = await this.prepareOccasionTarget(tx, input);
+          if ('outcome' in target) return finish(target);
+          tx.update(
+            callRef,
+            encodeRecord({ decision: { ...state.decision, occasionMutation: target } }),
+          );
+          return undefined;
+        }
+        if (!state.binding) throw new Error('Occasion operation has no bound target');
+        return finish(await this.mutateBoundOccasion(tx, input, state.binding));
+      });
+
+    const prepared = await transact('prepare');
+    if (prepared) return prepared;
+    const committed = await transact('commit');
+    if (!committed) throw new Error('Occasion transaction did not settle its call');
+    return committed;
+  }
+
+  private async prepareOccasionTarget(
+    tx: Transaction,
+    input: OccasionDeleteInput,
+  ): Promise<OccasionChatBinding | OccasionCorrectionResult> {
+    const contacts = await tx.get(this.store.collection('contacts').limit(CONTACT_SCAN_LIMIT + 1));
+    if (contacts.size > CONTACT_SCAN_LIMIT)
+      throw new Error('Occasion contact lookup exceeded bound');
+    const people = contacts.docs.filter((doc) => {
+      const name = doc.get('name');
+      const owner = doc.get('agentId');
+      return (
+        (owner === undefined || owner === this.configuredAgentId) &&
+        typeof name === 'string' &&
+        sameOccasionContactName(name, input.subject)
+      );
+    });
+    if (people.length > 1) return { outcome: 'ambiguous_contact' } as const;
+    const person = people[0];
+    if (!person) return { outcome: 'contact_not_found' } as const;
+    const contactId = person.get('id');
+    if (typeof contactId !== 'string' || documentKey(contactId) !== person.id)
+      throw new Error('Matching person record is malformed');
+
+    const { expectedDate } = input;
+    const identity = {
+      contactId,
+      kind: input.kind,
+      month: expectedDate.month,
+      day: expectedDate.day,
+    };
+    const previous = await resolveOccasionIdentity(
+      tx,
+      this.store,
+      this.configuredAgentId,
+      identity,
+    );
+    if (previous.ambiguous) return { outcome: 'ambiguous_occasion' } as const;
+    if (!previous.snapshot) return { outcome: 'occasion_not_found' } as const;
+    const old = validExisting(
+      previous.snapshot,
+      this.configuredAgentId,
+      contactId,
+      input.kind,
+      expectedDate.month,
+      expectedDate.day,
+    );
+    if (!matchesSavedOccasion(old, input)) return { outcome: 'occasion_not_found' } as const;
+    const expectedVersion = previous.snapshot.updateTime?.valueOf();
+    if (typeof expectedVersion !== 'string')
+      throw new Error('Canonical occasion version unavailable');
+    return { occasionId: old.id, contactId, expectedVersion } satisfies OccasionChatBinding;
+  }
+
+  private async mutateBoundOccasion(
+    tx: Transaction,
+    input: OccasionCorrectionInput | OccasionDeleteInput,
+    binding: OccasionChatBinding,
+  ): Promise<OccasionCorrectionResult> {
+    const { expectedDate } = input;
+    const identity = {
+      contactId: binding.contactId,
+      kind: input.kind,
+      month: expectedDate.month,
+      day: expectedDate.day,
+    };
+    const [previous, contact] = await Promise.all([
+      resolveOccasionIdentity(tx, this.store, this.configuredAgentId, identity),
+      tx.get(this.store.doc('contacts', binding.contactId)),
+    ]);
+    const { snapshot } = previous;
+    const owner = contact.get('agentId');
+    const name = contact.get('name');
+    if (
+      !contact.exists ||
+      contact.get('id') !== binding.contactId ||
+      (owner !== undefined && owner !== this.configuredAgentId) ||
+      typeof name !== 'string' ||
+      !sameOccasionContactName(name, input.subject) ||
+      previous.ambiguous ||
+      !snapshot ||
+      snapshot.id !== documentKey(binding.occasionId) ||
+      snapshot.updateTime?.valueOf() !== binding.expectedVersion
+    )
+      return { outcome: 'stale_target' };
+    const old = validExisting(
+      snapshot,
+      this.configuredAgentId,
+      binding.contactId,
+      input.kind,
+      expectedDate.month,
+      expectedDate.day,
+    );
+    if (!matchesSavedOccasion(old, input)) return { outcome: 'stale_target' };
+
+    if (!('date' in input)) {
+      await this.stageForget(tx, snapshot, old);
+      return { outcome: 'deleted', occasion: occasionCorrectionReadback(old, name) };
+    }
+    const date = {
+      ...input.date,
+      year: input.date.year === undefined ? old.year : input.date.year,
+    };
+    if (!isOccasionCorrectionDate(date)) return { outcome: 'invalid_date' };
+    if (old.month === date.month && old.day === date.day && old.year === date.year)
+      return { outcome: 'unchanged', occasion: occasionCorrectionReadback(old, name) };
+    const destination = {
+      contactId: binding.contactId,
+      kind: input.kind,
+      month: date.month,
+      day: date.day,
+    };
+    if (!(await this.stageDateChange(tx, old, destination, previous)))
+      return { outcome: 'date_conflict' };
+    tx.update(snapshot.ref, { ...date, updatedAt: this.store.now() });
+    return { outcome: 'updated', occasion: occasionCorrectionReadback({ ...old, ...date }, name) };
+  }
+
+  private async stageDateChange(
+    tx: Transaction,
+    old: Occasion,
+    destination: OccasionIdentity,
+    previous?: Awaited<ReturnType<typeof resolveOccasionIdentity>>,
+  ): Promise<boolean> {
+    const { contactId, kind, month, day } = old;
+    const oldIdentity = { contactId, kind, month, day };
+    const oldMarker =
+      previous ??
+      (await resolveOccasionIdentity(tx, this.store, this.configuredAgentId, oldIdentity));
+    if (
+      oldMarker.ambiguous ||
+      oldMarker.superseded ||
+      (oldMarker.snapshot && oldMarker.snapshot.id !== documentKey(old.id))
+    )
+      return false;
+    const activeKey = occasionDateKey(this.configuredAgentId, destination, old.id);
+    if (
+      old.kind === destination.kind &&
+      old.month === destination.month &&
+      old.day === destination.day
+    ) {
+      if (!oldMarker.markerExists) tx.create(oldMarker.markerRef, activeKey);
+      return true;
+    }
+    const resolved = await resolveOccasionIdentity(
+      tx,
+      this.store,
+      this.configuredAgentId,
+      destination,
+    );
+    if (
+      resolved.ambiguous ||
+      (resolved.superseded && resolved.supersededOccasionId !== old.id) ||
+      (resolved.snapshot && resolved.snapshot.id !== documentKey(old.id))
+    )
+      return false;
+    tx.set(
+      oldMarker.markerRef,
+      supersededOccasionDateKey(this.configuredAgentId, oldIdentity, old.id),
+    );
+    if (resolved.markerExists) tx.set(resolved.markerRef, activeKey);
+    else tx.create(resolved.markerRef, activeKey);
+    return true;
+  }
+
   async forget(occasionId: string): Promise<void> {
     const ref = this.store.doc('occasions', occasionId);
     await this.store.db.runTransaction(async (tx) => {
@@ -339,15 +535,16 @@ export class FirestoreProfileOccasionCommandRepository implements ProfileOccasio
       const row = decodeRecord<Partial<Occasion>>(snapshot.data());
       if (row.id !== occasionId || documentKey(row.id) !== snapshot.id)
         throw new Error('Occasion record is malformed');
-      const marker = await tx.get(
-        this.store.doc(
-          'occasionDateKeys',
-          occasionDateKeyId(this.configuredAgentId, row as Occasion),
-        ),
-      );
-      tx.delete(ref);
-      if (marker.exists && marker.get('occasionId') === occasionId) tx.delete(marker.ref);
+      await this.stageForget(tx, snapshot, row as Occasion);
     });
+  }
+
+  private async stageForget(tx: Transaction, snapshot: DocumentSnapshot, row: Occasion) {
+    const marker = await tx.get(
+      this.store.doc('occasionDateKeys', occasionDateKeyId(this.configuredAgentId, row)),
+    );
+    tx.delete(snapshot.ref);
+    if (marker.exists && marker.get('occasionId') === row.id) tx.delete(marker.ref);
   }
 
   async review(occasionId: string, verdict: 'approve' | 'reject'): Promise<void> {
