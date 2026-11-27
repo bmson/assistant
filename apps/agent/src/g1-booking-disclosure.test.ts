@@ -41,12 +41,23 @@ const HISTORY = 'Prescription from an old conversation: G1-old-marker.';
 const DEPOSIT = 'Deposit: $113.28';
 const LOGISTICS = 'Lantern Hotel check-in is October 24, 2027 at 3:00 PM.';
 const CHECKOUT = 'Check-out: October 27, 2027 at noon.';
+const TIMED_FIELD = 'Check-in: 3 PM';
+const MIXED_FIELD = `${TIMED_FIELD}, and I carry an insulin pump.`;
+const ADDRESS = 'Address: 14 Lantern Avenue';
+const MIXED_ADDRESS = `${ADDRESS} because my partner keeps g1-saffron journals there.`;
+const MIXED_SUBJECT = `${SUBJECT} g1-twilight arrangement is underway`;
+const REFERENCE = 'Booking reference: G1LANTERN';
+const MIXED_REFERENCE = `${REFERENCE}, I keep g1-silver reminders.`;
+const MIXED_DATE_LABEL = 'Lantern Hotel check-in requires g1-orchid supplies.';
 const THREAD = 'g1-lantern-thread';
 const MESSAGE = 'g1-lantern-message';
 const UNLABELLED = 'G1-unlabelled-marker.';
 const BODY = [
   LOGISTICS,
   CHECKOUT,
+  MIXED_FIELD,
+  MIXED_ADDRESS,
+  MIXED_REFERENCE,
   HEALTH,
   HEALTH_CONTEXT,
   HOTEL_MENTION,
@@ -58,6 +69,11 @@ const BODY = [
 const FORBIDDEN = [
   'G1-health-marker',
   'asthma operation',
+  'insulin pump',
+  'g1-saffron',
+  'g1-twilight',
+  'g1-orchid',
+  'g1-silver',
   'g1-violets',
   'G1-intimate-marker',
   '968.17',
@@ -180,8 +196,8 @@ function dispatcher(
                   threadId: THREAD,
                   messageId: MESSAGE,
                   from: 'desk@example.invalid',
-                  subject: `${SUBJECT}\n${HEALTH_CONTEXT}`,
-                  snippet: `${LOGISTICS} ${HEALTH_CONTEXT} ${HOTEL_MENTION}\n${HEALTH}\n${FINANCE}\nDeposit: $692.77`,
+                  subject: `${MIXED_SUBJECT}\n${HEALTH_CONTEXT}`,
+                  snippet: `${LOGISTICS} ${MIXED_FIELD} ${HEALTH_CONTEXT} ${HOTEL_MENTION}\n${HEALTH}\n${FINANCE}\nDeposit: $692.77`,
                   date: '2027-10-24',
                 },
               ],
@@ -198,7 +214,7 @@ function dispatcher(
                 {
                   messageId: MESSAGE,
                   from: 'desk@example.invalid',
-                  subject: `${SUBJECT}\n${HEALTH_CONTEXT}`,
+                  subject: `${MIXED_SUBJECT}\n${HEALTH_CONTEXT}`,
                   text: messageBody(),
                   date: '2027-10-24',
                   sourceLength: messageBody().length,
@@ -374,6 +390,8 @@ describe.each([
         const savedCard = await persistence.generatedCards?.get(agentId, cardPart.data.id);
         expect(JSON.stringify(savedCard?.revision.spec)).toContain(LOGISTICS);
         expect(JSON.stringify(savedCard?.revision.spec)).toContain(CHECKOUT);
+        expect(JSON.stringify(savedCard?.revision.spec)).toContain(TIMED_FIELD);
+        expect(JSON.stringify(savedCard?.revision.spec)).toContain(ADDRESS);
         expectWithheld(savedCard);
         const explicit = await ask(
           'Read the Lantern Hotel confirmation email and tell me the deposit amount.',
@@ -396,6 +414,7 @@ describe.each([
             );
           }),
         ).toBe(true);
+        expect(inputs.some((input) => JSON.stringify(input).includes(REFERENCE))).toBe(true);
         expectWithheld(inputs);
 
         const now = new Date();
@@ -407,7 +426,7 @@ describe.each([
           channelMessageId: MESSAGE,
           fromEmail: 'desk@example.invalid',
           fromName: 'Lantern Hotel',
-          subject: `${SUBJECT}\n${HEALTH_CONTEXT}\n${FINANCE}`,
+          subject: `${MIXED_SUBJECT}\n${HEALTH_CONTEXT}\n${FINANCE}`,
           category: 'travel',
           importance: 5,
           contentTrust: 'known',
@@ -428,7 +447,7 @@ describe.each([
           dates: [
             {
               iso: checkIn.toISOString(),
-              what: `Lantern Hotel check-in\n${HEALTH_CONTEXT}\n${INTIMATE}\n${DEPOSIT}`,
+              what: `${MIXED_DATE_LABEL}\n${HEALTH_CONTEXT}\n${INTIMATE}\n${DEPOSIT}`,
               dateRole: 'event_start',
               lifecycle: 'confirmed',
               bookingIdentity: 'G1LANTERN',

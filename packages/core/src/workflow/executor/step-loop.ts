@@ -47,7 +47,12 @@ import {
   requestedConditionalArtifactIntent,
 } from '../artifact-intent.js';
 import { remainingBirthdaySaves, requestedBirthdaySaves } from '../birthday-import.js';
-import { bookingDisclosure, bookingEvidence, bookingModelWindow } from '../booking-disclosure.js';
+import {
+  bookingDisclosure,
+  bookingEvidence,
+  bookingModelWindow,
+  requiresBookingProjection,
+} from '../booking-disclosure.js';
 import { calendarAgendaSummary } from '../calendar-agenda.js';
 import { requestedCardIntent } from '../card-intent.js';
 import { taskBoundCorrectionReadRequest } from '../checklist-correction-resume.js';
@@ -3185,7 +3190,9 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     // unverified prose before the ledger-backed checkpoint runs.
     const sourceFilteredTools = publicOnly
       ? availableToolDefs.filter((tool) => /^web\.(?:search|fetch)$/.test(tool.name))
-      : availableToolDefs;
+      : disclosure
+        ? availableToolDefs.filter((tool) => tool.name !== 'tools.read_result')
+        : availableToolDefs;
     const goalFilteredTools = isUnattendedGoalSession(task)
       ? sourceFilteredTools.filter((tool) => tool.name !== 'goals.update_progress')
       : sourceFilteredTools;
@@ -4502,8 +4509,12 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
               requiredGoalProgressFailure = 'the progress write returned an unfinished job';
             }
           } else {
-            replaceToolResultMessage(rc.window, tc.toolCallId, tc.toolName, outcome.result, {
-              dbToolCallId: outcome.toolCallId,
+            const projectResult = disclosure && requiresBookingProjection(tc.toolName);
+            const modelResult = projectResult
+              ? bookingEvidence({ toolName: tc.toolName, result: outcome.result }).result
+              : outcome.result;
+            replaceToolResultMessage(rc.window, tc.toolCallId, tc.toolName, modelResult, {
+              dbToolCallId: projectResult ? undefined : outcome.toolCallId,
             });
             state.completedToolCallIds.push(outcome.toolCallId);
             journalCall.status = 'settled';

@@ -8,14 +8,42 @@ const OWNER_BOOKING =
   /\b(?:my|our)\b[^.!?\n]{0,100}\b(?:bookings?|reservations?|hotel|lodging|accommodation|check[- ]?in|check[- ]?out|itinerary|inbox|email)\b/i;
 const NAMED_MAIL_READ =
   /\b(?:read|open|find|check|search|look up)\b[^.!?\n]{0,100}\b(?:confirmation|booking|reservation)\s+(?:e-?mail|message|thread)\b/i;
-// Require a booking field, a date/time tied to a booking event, or a booking
-// heading. A property name or a travel noun alone is not evidence of logistics.
-const LOGISTICS_FIELD =
-  /^(?:[-*]\s+)?(?:hotel(?: name)?|property|accommodation|(?:hotel |property )?address|room type|(?:booking|reservation|confirmation) (?:reference|number|code|id)|flight(?: number)?|gate|terminal)\s*:\s*\S/i;
-const LOGISTICS_TIME =
-  /\b(?:check[- ]?(?:in|out)|departure|arrival|departs?|arrives?)\s*(?:(?:is|starts|opens|closes)\s+)?(?:(?:at|on|from|by|until|after)\s+|[:–—-]\s*)?(?:\d|noon\b|midnight\b|(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d)/i;
+// Each match ends at a supported value. The surrounding prose never becomes
+// evidence just because a field name or a time appeared somewhere in it.
+const MONTH = `(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)`;
+const DATE = String.raw`(?:\d{4}-\d{2}-\d{2}|${MONTH}\.?\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s+\d{4})?|\d{1,2}\s+${MONTH}\.?\s+\d{4})`;
+const CLOCK = String.raw`(?:(?:0?[1-9]|1[0-2])(?::[0-5]\d)?\s*(?:a\.?m\.?|p\.?m\.?)|(?:[01]?\d|2[0-3]):[0-5]\d|noon|midnight)`;
+const ZONE = String.raw`(?:[+-]\d{2}:\d{2}|Z\b|\s+(?:UTC|GMT|[ECMP][DS]T)\b)`;
+const DATE_TIME = String.raw`(?:${DATE}(?:(?:\s+at\s+|\s+|T)${CLOCK})?|${CLOCK})(?:${ZONE})?(?![\p{L}\p{N}:])`;
+const TIME_FIELD = new RegExp(
+  String.raw`\b(?:check[- ]?(?:in|out)|departure|arrival|departs?|arrives?)\s*(?:(?:is|starts|opens|closes)\s+)?(?:(?:at|on|from|by|until|after)\s+|[:–—-]\s*)?${DATE_TIME}`,
+  'iu',
+);
+const PROPERTY_NAME =
+  /^[\p{Lu}\p{N}][\p{L}\p{N}'’&.-]*(?:[ \t]+[\p{Lu}\p{N}][\p{L}\p{N}'’&.-]*){0,7}$/u;
+const PROPERTY_SUFFIX =
+  /^(?:[\p{Lu}\p{N}][\p{L}\p{N}'’&.-]*[ \t]+){0,7}(?:Hotel|Inn|Resort|Suites|Apartments)\b/u;
+const EVENT_LABEL = /\b(?:check[- ]?(?:in|out)|departure|arrival)\b/i;
 const BOOKING_HEADING =
-  /^(?:[\p{L}\p{N}'’&(), -]{1,100}\s+)?(?:(?:booking|reservation) (?:confirmation|confirmed|cancelled|canceled|rescheduled)|itinerary)(?:\s*[:#]\s*[\w-]+)?[.!]?$/iu;
+  /\b(?:(?:booking|reservation) (?:confirmation|confirmed|cancelled|canceled|rescheduled)|itinerary)\b/i;
+const BOOKING_REFERENCE = /^[A-Za-z0-9][A-Za-z0-9_-]{1,159}$/;
+const BOOKING_FIELDS: ReadonlyArray<[RegExp, RegExp]> = [
+  [
+    /^(?:(?:hotel|property) )?address\s*:\s*/i,
+    /^\d{1,6}[A-Za-z]?\s+(?:[\p{Lu}\p{N}][\p{L}\p{N}'’.-]*\s+){1,7}?(?:[Aa]ve(?:nue)?|[Ss]t(?:reet)?|[Rr](?:oad|d)|[Dd]r(?:ive)?|[Ll](?:ane|n)|[Bb](?:oulevard|lvd)|[Ww]ay|[Cc](?:ourt|t)|[Pp]lace|[Tt]errace)\b\.?/u,
+  ],
+  [
+    /^(?:booking|reservation|confirmation) (?:reference|number|code|id)\s*:\s*/i,
+    /^(?:(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9][A-Za-z0-9_-]{2,39}|[A-Z]{4,12})(?![\w-])/,
+  ],
+  [/^flight(?: number)?(?:\s*:\s*|\s+)/i, /^[A-Z0-9]{2,3}\s?\d{1,4}[A-Z]?\b/i],
+  [/^(?:gate|terminal|room number)\s*:\s*/i, /^[A-Z]?\d{1,5}[A-Z]?\b/i],
+  [/^(?:duration|stay length)\s*:\s*/i, /^\d{1,3}\s+nights?\b/i],
+  [
+    /^room type\s*:\s*/i,
+    /^(?:(?:standard|deluxe|superior|accessible|family)\s+)?(?:single|double|twin|queen|king|suite|studio)(?:\s+room)?\b/i,
+  ],
+];
 const BOOKING_CONTEXT =
   /\b(?:follows?|precedes?|because|due to|in connection with)\b|\b(?:after|before)\s+(?:the|an?|my|our|your)\b/i;
 const LODGING = /\b(?:hotel|lodging|accommodation)\b/i;
@@ -64,6 +92,7 @@ const TEXT_FIELDS = new Set([
   'calendarLabel',
   'error',
   'preview',
+  'chunk',
   'note',
   'evidenceQuote',
   'statusEvidence',
@@ -114,36 +143,120 @@ function bookingClauses(value: string): string[] {
   return value.split(/(?<=[.!?])(?=[ \t]+\p{Lu})|(?<=;)[ \t]*|\r?\n/gu);
 }
 
-export function bookingText(value: string): string {
-  const clauses = bookingClauses(value);
-  const kept = clauses.filter((clause) => !withholdBookingClause(clause));
-  return kept.length === clauses.length ? value : kept.join('\n').trim();
+export function bookingReference(value: string): boolean {
+  return BOOKING_REFERENCE.test(value);
 }
 
-function gmailEvidence(toolName: string): boolean {
-  return /^gmail\.(?:search|read_thread)$/.test(toolName);
+function firstLabel(value: string): string {
+  return (value.trim().split(/\r?\n|[;,!?]|\s+[–—-]\s+|[.!]\s+/, 1)[0] ?? '')
+    .trim()
+    .replace(/\.$/, '');
+}
+
+/** Display label from already typed booking metadata, with its narrative tail removed. */
+export function bookingSourceLabel(value: string): string {
+  const label =
+    firstLabel(value)
+      .split(
+        /\s+(?:and\s+(?:I|we|my|our|they|you|your)\b|because\b|due to\b|follows?\b|precedes?\b)/i,
+        1,
+      )[0]
+      ?.trim() ?? '';
+  return withholdBookingClause(label) ? '' : label;
+}
+
+export function bookingMailSubject(value: string): string {
+  const label = bookingSourceLabel(value);
+  const heading = BOOKING_HEADING.exec(label);
+  if (!heading) return bookingLogistics(label);
+  const name = label.slice(0, heading.index).trim();
+  if (withholdBookingClause(name) || !PROPERTY_NAME.test(name)) return heading[0];
+  return [name, heading[0]].filter(Boolean).join(' ');
+}
+
+export function bookingOccurrenceLabel(value: string): string {
+  const label = bookingSourceLabel(value);
+  const event = EVENT_LABEL.exec(label);
+  if (!event) return label;
+  const name = label.slice(0, event.index).trim();
+  return [PROPERTY_NAME.test(name) ? name : '', event[0]].filter(Boolean).join(' ');
+}
+
+function projectBookingClause(clause: string): string {
+  const text = clause.trim().replace(/^[-*]\s+/, '');
+  const time = TIME_FIELD.exec(text);
+  const timeLabel = time ? text.slice(0, time.index).trim() : '';
+  if (time && (!timeLabel || PROPERTY_NAME.test(timeLabel))) {
+    const end = time.index + time[0].length;
+    const punctuation = text.slice(end) === '.' ? '.' : '';
+    return [timeLabel, time[0] + punctuation].filter(Boolean).join(' ');
+  }
+
+  for (const [field, value] of BOOKING_FIELDS) {
+    const label = field.exec(text)?.[0];
+    if (!label) continue;
+    const fact = value.exec(text.slice(label.length))?.[0];
+    return fact ? label + fact : '';
+  }
+
+  const property = /^(?:hotel(?: name)?|property|accommodation|location|city)\s*:\s*/i.exec(
+    text,
+  )?.[0];
+  if (property) {
+    const name = firstLabel(text.slice(property.length));
+    const fact = PROPERTY_SUFFIX.exec(name)?.[0] ?? (PROPERTY_NAME.test(name) ? name : '');
+    return fact ? property + fact : '';
+  }
+
+  if (PROPERTY_SUFFIX.exec(text)?.[0] === text.replace(/\.$/, '')) return text;
+
+  const heading = BOOKING_HEADING.exec(text);
+  if (!heading || heading.index + heading[0].length !== text.replace(/\.$/, '').length) return '';
+  const prefix = text.slice(0, heading.index).trim();
+  return !prefix || PROPERTY_NAME.test(prefix) ? text : '';
+}
+
+function bookingLogistics(value: string): string {
+  return bookingClauses(value)
+    .map(projectBookingClause)
+    .filter((fact) => fact && !withholdBookingClause(fact))
+    .join('\n');
+}
+
+export function bookingText(value: string): string {
+  const clauses = bookingClauses(value);
+  const kept = clauses.map((clause) => {
+    const projected = projectBookingClause(clause);
+    return projected && !withholdBookingClause(projected)
+      ? projected
+      : withholdBookingClause(clause)
+        ? ''
+        : clause;
+  });
+  return kept.every((clause, index) => clause === clauses[index])
+    ? value
+    : kept.filter(Boolean).join('\n').trim();
+}
+
+export function requiresBookingProjection(toolName: string): boolean {
+  return /^gmail\.(?:search|read_thread)$/.test(toolName) || toolName === 'tools.read_result';
 }
 
 export function bookingEvidence<T extends { toolName: string; result?: unknown }>(row: T): T {
-  return { ...row, result: bookingFields(row.result, gmailEvidence(row.toolName)) };
+  return { ...row, result: bookingFields(row.result, requiresBookingProjection(row.toolName)) };
 }
 
 function bookingFields(value: unknown, mail = false, field?: string): unknown {
   if (typeof value === 'string') {
     if (field !== undefined && !TEXT_FIELDS.has(field)) return value;
-    if (mail && (field === 'text' || field === 'body' || field === 'snippet')) {
-      // Mail can contain unlabelled notes and continuations. Project booking
-      // lines only, even when a line has no recognized sensitive vocabulary.
-      return bookingClauses(value)
-        .map((clause) => clause.trim())
-        .filter(
-          (clause) =>
-            !withholdBookingClause(clause) &&
-            (LOGISTICS_FIELD.test(clause) ||
-              LOGISTICS_TIME.test(clause) ||
-              BOOKING_HEADING.test(clause)),
-        )
-        .join('\n');
+    if (mail) {
+      if (field === 'subject') return bookingMailSubject(value);
+      if (field === 'fromName') return bookingSourceLabel(value);
+      if (field === 'preview' || field === 'chunk') return ''; // Serialized fragments have no field boundaries.
+      if (field === 'from' || field === 'to')
+        return /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/.exec(value)?.[0] ?? '';
+      if (field === 'text' || field === 'body' || field === 'snippet' || field === 'quote')
+        return bookingLogistics(value);
     }
     return bookingText(value);
   }
@@ -162,7 +275,10 @@ export function bookingModelWindow(window: ModelMessage[], ownerText: string): M
       return {
         ...message,
         content: message.content.map((part) =>
-          bookingFields(part, part.type === 'tool-result' && gmailEvidence(part.toolName)),
+          bookingFields(
+            part,
+            part.type === 'tool-result' && requiresBookingProjection(part.toolName),
+          ),
         ) as typeof message.content,
       };
     }

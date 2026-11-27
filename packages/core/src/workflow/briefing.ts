@@ -61,7 +61,14 @@ import {
 import { isFlightLikeCalendarEvent } from '../proactive/flight-calendar.js';
 import { briefingLifeContext } from '../proactive/life-context.js';
 import { type ProactiveNotifier, pingOwner } from '../proactive/notify.js';
-import { bookingMailTitle, bookingText } from './booking-disclosure.js';
+import {
+  bookingMailSubject,
+  bookingMailTitle,
+  bookingOccurrenceLabel,
+  bookingReference,
+  bookingSourceLabel,
+  bookingText,
+} from './booking-disclosure.js';
 import {
   agendaSection,
   type BriefingCard,
@@ -725,7 +732,7 @@ function upcomingFrom(
         typeof date.iso !== 'string' ||
         typeof date.what !== 'string' ||
         typeof date.bookingIdentity !== 'string' ||
-        !date.bookingIdentity.trim()
+        !bookingReference(date.bookingIdentity.trim())
       )
         continue;
       const declaredCivilDate = typeof date.civilDate === 'string' ? date.civilDate : undefined;
@@ -840,7 +847,7 @@ function cancelledBookingDates(
         date.lifecycle !== 'cancelled' ||
         typeof date.what !== 'string' ||
         typeof date.bookingIdentity !== 'string' ||
-        !date.bookingIdentity.trim() ||
+        !bookingReference(date.bookingIdentity.trim()) ||
         typeof date.iso !== 'string'
       )
         continue;
@@ -1157,8 +1164,10 @@ export async function runBriefing(
         ? {
             ...row,
             fromEmail: bookingText(row.fromEmail) || 'Your booking',
-            fromName: row.fromName === null ? null : bookingText(row.fromName),
-            subject: bookingText(row.subject),
+            fromName: row.fromName === null ? null : bookingSourceLabel(row.fromName),
+            subject: /\b(?:hotel|lodging|accommodation)\b/i.test(row.subject)
+              ? bookingMailSubject(row.subject)
+              : bookingText(row.subject),
           }
         : row,
     );
@@ -1248,7 +1257,7 @@ export async function runBriefing(
     // descriptive fields cross into the digest, its draft, and new suggestions.
     const discloseBooking = (entry: UpcomingDate): UpcomingDate[] => {
       if (!entry.bookingKey && !bookingMailTitle(entry.what)) return [entry];
-      const what = bookingText(entry.what);
+      const what = bookingOccurrenceLabel(entry.what);
       return what ? [{ ...entry, what, from: bookingText(entry.from) || 'your booking' }] : [];
     };
     upcoming = upcoming.flatMap(discloseBooking);

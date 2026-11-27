@@ -4,6 +4,7 @@ import { CardFormSchema } from '@assistant/persistence/card-form';
 import { z } from 'zod';
 import { containsCardSecret, isSensitiveCardFact, publicCardText } from './card-privacy.js';
 import type { ModelRouter } from './model-router/index.js';
+import { bookingEvidence } from './workflow/booking-disclosure.js';
 import type { ActionEvidence } from './workflow/response-contract.js';
 
 const FactSchema = z.object({
@@ -761,15 +762,19 @@ export async function generateEvidenceCardOutcome(input: {
   answerText?: string;
   /** Refreshes must ground in new reads, never the old card/request text. */
   evidenceOnly?: boolean;
+  /** Use only a deterministic card built from projected current booking fields. */
+  projectBookingFields?: boolean;
 }): Promise<GenerateEvidenceCardOutcome> {
   const explicitRequest = input.explicitRequest ?? false;
+  const bookingRequest = input.projectBookingFields === true;
   if (!worthTrying(input.sourceText, input.evidence, explicitRequest, input.answerText))
     return { kind: 'no_op' };
   // A single short hotel confirmation already has a coherent, bounded layout.
   // Copy its literal details into a native card without asking a model to
   // rewrite dates, amounts or booking identifiers.
   if (explicitRequest && /\bhotel\b/i.test(input.sourceText.split('\n')[0] ?? '')) {
-    const threadMessages = input.evidence
+    const sourceEvidence = bookingRequest ? input.evidence.map(bookingEvidence) : input.evidence;
+    const threadMessages = sourceEvidence
       .filter(
         (row) =>
           row.fromCurrentTask !== false &&
@@ -802,14 +807,19 @@ export async function generateEvidenceCardOutcome(input: {
       const original = confirmations[0];
       // Do not promote a complete email body to a public "details" fact.
       // Retain safe check-in sentences when the confirmation contains secrets.
-      const details = containsCardSecret(original)
+      const details = bookingRequest
         ? original
-            .split(/(?<=[.!?])\s+|\n+/)
-            .filter(
-              (sentence) => /\bcheck[ -]?in\b/i.test(sentence) && !containsCardSecret(sentence),
-            )
-            .join(' ')
-        : original;
+            .split('\n')
+            .filter((line) => !containsCardSecret(line))
+            .join('\n')
+        : containsCardSecret(original)
+          ? original
+              .split(/(?<=[.!?])\s+|\n+/)
+              .filter(
+                (sentence) => /\bcheck[ -]?in\b/i.test(sentence) && !containsCardSecret(sentence),
+              )
+              .join(' ')
+          : original;
       if (!details) return { kind: 'no_op' };
       const spec = GenerativeCardSpecV1Schema.parse({
         version: 1,
@@ -844,6 +854,8 @@ export async function generateEvidenceCardOutcome(input: {
       };
     }
   }
+  // Booking cards come only from projected source fields and fixed labels.
+  if (bookingRequest) return { kind: 'no_op' };
   const groundedOnAnswer = !hasCurrentEvidence(input.evidence) && Boolean(input.answerText?.trim());
   const corpus = evidenceText(input.evidence, input.sourceText, explicitRequest, input.answerText);
   try {

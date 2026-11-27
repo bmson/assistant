@@ -1539,6 +1539,9 @@ export async function stageModelFinalResponse(
       sourceKey: task.externalEventId ?? task.id,
       explicitRequest: Boolean(refreshCardId) || cardRequested,
       evidenceOnly: Boolean(refreshCardId),
+      projectBookingFields: Boolean(
+        disclosure || (refreshCardId && bookingDisclosure(sourceText.split('\n')[0] ?? '')),
+      ),
       // A turn that called no tool has only its own reply to stand on. The
       // composer admits it as evidence in that case alone, under the same
       // verbatim rule, which is what the phone's hand-written kinds used to do

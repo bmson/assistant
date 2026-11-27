@@ -8,7 +8,7 @@ import {
 } from '../model-router/audit-graders.js';
 import type { PublicActivityScopeData } from './active-read-intent.js';
 import { billingAuditProjection, renderBillingAudit } from './billing-audit.js';
-import { bookingDepositFacts, bookingMailTitle } from './booking-disclosure.js';
+import { bookingDepositFacts, bookingMailSubject, bookingMailTitle } from './booking-disclosure.js';
 import type { BriefingCalendarEvent } from './briefing.js';
 import { calendarEventAnalysisResponse } from './calendar-event-analysis.js';
 import {
@@ -1401,7 +1401,7 @@ export function verifiedBookingDeposit(
     matchingGmailThreadRows(searches, current)
       .flatMap((row) => resultItems(row, 'messages'))
       .filter((message) => {
-        const subject = stringField(message, 'subject').toLowerCase();
+        const subject = bookingMailSubject(stringField(message, 'subject')).toLowerCase();
         return (
           bookingMailTitle(subject) &&
           request.queryTerms.length > 0 &&
