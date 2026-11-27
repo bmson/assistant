@@ -76,7 +76,7 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | A13 | Owner time zone in every card                                          | 0     | S    | —          | in review (owner time in calendar, briefing and Pulse cards)  |
 | A14 | Brief calendar answers                                                 | 1     | M    | —          | in review (compact agenda and calendar recovery)              |
 | A15 | Each turn answers its own message                                      | 0     | M    | —          | in review (originating turns and independent read requests)   |
-| A16 | Weather plausibility                                                   | 0     | S    | —          | in review (hourly snow corroboration)                         |
+| A16 | Weather plausibility                                                   | 0     | S    | —          | in review (daily, current and hourly snow evidence)           |
 | A17 | Texts only for urgent items                                            | 0     | S    | —          | in review (urgent SMS quota and retry checks)                 |
 | B1  | Calendar connection health and warning                                 | 1     | S    | —          | open                                                          |
 | B2  | Household calendar setup and classification                            | 1     | M    | B1         | open                                                          |
