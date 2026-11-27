@@ -6,6 +6,7 @@ set -euo pipefail
 if [ "${EVENT_NAME:?EVENT_NAME is required}" != "pull_request" ]; then
   echo "ios=true" >> "${GITHUB_OUTPUT:?GITHUB_OUTPUT is required}"
   echo "native_controls=false" >> "$GITHUB_OUTPUT"
+  echo "noticing=false" >> "$GITHUB_OUTPUT"
   exit 0
 fi
 
@@ -25,4 +26,12 @@ if grep -Eq '^(apps/ios/AssistantUITestHost/|apps/ios/AssistantUITests/|apps/ios
   echo "native_controls=true" >> "$GITHUB_OUTPUT"
 else
   echo "native_controls=false" >> "$GITHUB_OUTPUT"
+fi
+
+# Noticing has its own fixture smoke in the ordinary PR check. Approval-only
+# changes and the duplicate push check do not need to run that fixture.
+if grep -Eq '^(apps/ios/AssistantUITestHost/|apps/ios/AssistantUITests/|apps/ios/Assistant\.xcodeproj/project\.pbxproj$|apps/ios/Assistant\.xcodeproj/xcshareddata/xcschemes/AssistantUIFixtures\.xcscheme$|apps/ios/Assistant/(AppModel\.swift|Views/MoreView\.swift|Design/AssistantTheme\.swift|Models/APIModels\.swift|Networking/APIClient\.swift)$|\.github/workflows/ios\.yml$|infra/ios-native-controls\.py$|infra/ios-detect-changes(\.test)?\.sh$)' <<<"$changed_paths"; then
+  echo "noticing=true" >> "$GITHUB_OUTPUT"
+else
+  echo "noticing=false" >> "$GITHUB_OUTPUT"
 fi

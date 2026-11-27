@@ -552,6 +552,10 @@ for (const [driver, fixture] of [
               },
               { agentId: f.owner, now },
             );
+          expect(await monitor(at(PULSE_INTERVAL_MS - 1))).toMatchObject({
+            signals: [],
+            notified: false,
+          });
           expect(await monitor(at(PULSE_INTERVAL_MS))).toMatchObject({
             signals: ['Pulse: overdue.'],
             notified: true,
@@ -590,7 +594,6 @@ for (const [driver, fixture] of [
           const owner = { id: f.owner, name: 'Private name', timezone: 'America/Los_Angeles' };
           const first = new Date('2026-11-19T07:58:00.000Z');
           const at = (minutes: number) => new Date(first.getTime() + minutes * 60_000);
-          const eraseMail = await f.mail(at(-8 * 60));
           const send = vi.fn(
             async (_alert: unknown): Promise<{ ok: boolean; status: number }> => ({
               ok: true,
@@ -607,7 +610,7 @@ for (const [driver, fixture] of [
             notificationOutbox: f.persistence.notificationOutbox,
             admitHealthCanary: healthCanaryAdmission(async () => owner, policy, repo),
           };
-          let held = 2;
+          let held = 0.999999;
           const run = async (now: Date) => {
             vi.setSystemTime(now);
             return runAssistantHealthMonitor(
@@ -630,14 +633,21 @@ for (const [driver, fixture] of [
             vi.setSystemTime(now);
             return drainPushNotificationOutbox(channel, now);
           };
-          const firstRed = await run(first);
-          expect(firstRed.signals).toEqual(
+          expect((await run(at(-1))).signals).toEqual([]);
+          expect(send).not.toHaveBeenCalled();
+          held = 1;
+          expect((await run(first)).signals).toEqual([
+            'Budget holds reached 25% of the daily spending cap.',
+          ]);
+          expect(send).toHaveBeenCalledOnce();
+          const eraseMail = await f.mail(at(-8 * 60));
+          held = 2;
+          expect((await run(at(1))).signals).toEqual(
             expect.arrayContaining([
               expect.stringContaining('Mail processing'),
-              expect.stringContaining('25%'),
+              'Budget holds exceed 25% of the daily spending cap.',
             ]),
           );
-          await run(at(1));
           expect(send).toHaveBeenCalledOnce();
           expect(send).toHaveBeenLastCalledWith(
             expect.objectContaining({

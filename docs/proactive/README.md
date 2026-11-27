@@ -67,7 +67,7 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | A4  | Stop mirroring secondary-chat replies into the primary chat            | 0     | M    | —          | in review (private answer-ready push)                         |
 | A5  | Checklist dedupe ignores trailing punctuation                          | 0     | S    | —          | in review                                                     |
 | A6  | Guard against promises without a tool call                             | 2     | M    | —          | in review (cancel and delete receipt checks)                  |
-| A7  | Self-repair cadence respects its daily limit                           | 0     | S    | —          | in review                                                     |
+| A7  | Self-repair cadence respects its daily limit                           | 0     | S    | —          | in review (keep follow-ups due at the daily dispatch limit)   |
 | A8  | Truthful "Needs you" count; archive needs_attention in Firestore       | 1     | M    | —          | in review (consistent counts and attention archival)          |
 | A9  | Firestore parity for every route the phone calls                       | 1     | M    | —          | in review (native route and method checks)                    |
 | A10 | Retire `morning-brief` in Firestore                                    | 0     | S    | —          | in review                                                     |
@@ -76,7 +76,7 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | A13 | Owner time zone in every card                                          | 0     | S    | —          | in review (owner time in calendar, briefing and Pulse cards)  |
 | A14 | Brief calendar answers                                                 | 1     | M    | —          | in review (compact agenda and calendar recovery)              |
 | A15 | Each turn answers its own message                                      | 0     | M    | —          | in review (originating turns and independent read requests)   |
-| A16 | Weather plausibility                                                   | 0     | S    | —          | in review (hourly snow corroboration)                         |
+| A16 | Weather plausibility                                                   | 0     | S    | —          | in review (daily, current and hourly snow evidence)           |
 | A17 | Texts only for urgent items                                            | 0     | S    | —          | in review (urgent SMS quota and retry checks)                 |
 | B1  | Calendar connection health and warning                                 | 1     | S    | —          | open                                                          |
 | B2  | Household calendar setup and classification                            | 1     | M    | B1         | open                                                          |
@@ -87,7 +87,7 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | B7  | News profile and feeds; public reads without approval                  | 4     | M    | —          | open                                                          |
 | B8  | HealthKit sleep and activity (opt-in)                                  | 4     | L    | G2         | open                                                          |
 | B9  | Mail coverage and ingest health                                        | 1     | M    | A11        | open                                                          |
-| C1  | Typed `signals` store                                                  | 2     | L    | —          | open                                                          |
+| C1  | Typed `signals` store                                                  | 2     | L    | —          | invoice/payment contract in review                            |
 | C2  | Email taxonomy v2 and extractors                                       | 2     | L    | A11, C1    | in review (#910, plus authenticated practice-change evidence) |
 | C3  | Close obligations by evidence                                          | 2     | M    | C1, C2     | open                                                          |
 | C4  | People cleanup                                                         | 1     | M    | —          | open                                                          |
@@ -132,4 +132,4 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | H1  | Golden-signal benchmark harness                                        | 3     | L    | —          | in progress (S13, S14, S16, S17, S24 on both drivers)         |
 | H2  | Weekly missed-signal audit                                             | 5     | M    | H1         | open                                                          |
 | H3  | Proactive telemetry                                                    | 5     | M    | —          | open                                                          |
-| H4  | Daily canary                                                           | 0     | S    | —          | in review (source checks and one daily health alert)          |
+| H4  | Daily canary                                                           | 0     | S    | —          | in review (25% alert and overall iPhone health status)        |

@@ -1,6 +1,7 @@
 /** Bind the existing captured retirement executor to this run's lifecycle receipt. */
 import {
   acceptCapturedRetirement,
+  acceptOrdinaryRecoveredRetirement,
   beginCapturedRetirement,
   bindCapturedRetirementOperation,
   type Snapshot,
@@ -66,6 +67,9 @@ export function bindCapturedRetirementToLifecycle(
   let attempted: State | undefined,
     bound: State | undefined,
     delegated = false;
+  const ordinaryRecovery = prior.context.currentBinding?.ordinaryRecoverySha256;
+  let ordinaryDrainStarted = false,
+    ordinaryDrainCompleted = false;
   const markUnresolved = () => {
     const unresolved = bound ?? attempted;
     if (!unresolved || unresolved.retirementAttempt?.outcome === 'unknown') return;
@@ -77,6 +81,7 @@ export function bindCapturedRetirementToLifecycle(
     readService: () => io.readService(),
     readRevision: (revision) => io.readRevision(revision),
     patchTraffic: async (body) => {
+      if (ordinaryRecovery) throw new Error('Reviewed ordinary retirement must have no write');
       if (delegated) throw new Error('Captured retirement is single-attempt');
       requireCurrentPromotion(prior, body);
       delegated = true;
@@ -114,12 +119,30 @@ export function bindCapturedRetirementToLifecycle(
         throw new Error('Captured retirement operation is unresolved; release is held');
       }
     },
-    drain: (seconds) => io.drain(seconds),
+    drain: async (seconds) => {
+      if (!ordinaryRecovery) return io.drain(seconds);
+      if (seconds !== 600 || ordinaryDrainStarted)
+        throw new Error('Reviewed ordinary retirement requires one full drain');
+      ordinaryDrainStarted = true;
+      await io.drain(seconds);
+      ordinaryDrainCompleted = true;
+    },
   };
   return {
     io: wrapped,
     markUnresolved,
     complete(result: RetirementResult, after: Snapshot) {
+      if (ordinaryRecovery) {
+        if (!ordinaryDrainCompleted)
+          throw new Error('Reviewed ordinary retirement drain is unconfirmed');
+        const settled = acceptOrdinaryRecoveredRetirement(prior, after, {
+          ...result,
+          beforeReceipt: prior.receipt,
+          sha256: ordinaryRecovery,
+        });
+        receipts.recordCheckpoint(settled);
+        return settled;
+      }
       if (
         bound?.retirementAttempt?.outcome !== 'attempted' ||
         typeof bound.retirementAttempt.operation !== 'string' ||

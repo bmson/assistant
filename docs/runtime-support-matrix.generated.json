@@ -7,11 +7,11 @@
     "apps/agent/src/index.ts": "bc65b1a16ba83c6351a74e2c071189fb4288d5d3ec2c4425accc185da77fe6ab",
     "apps/web/lib/server.ts": "bd24d03d7dbe4fef6c74e907a14a4ff7445aac65389614b3c01770693e2b7c5f",
     "apps/web/proxy.ts": "c46e2ade7507e1f1f64a1dd7864ede35cb485908d799cf1a63f401773ece057a",
-    "packages/db/drizzle/meta/_journal.json": "01afe22ee85b59f1f6cfdef77c8d7be25a9dbf41d3010b7995f1736d39f1dac9",
-    "infra/gcp/release-contracts.json": "e5028ef1d69a1d6eac7818fb309d72f15a40c10bb71bd45121345bc036ba2ccd"
+    "packages/db/drizzle/meta/_journal.json": "4e97d063f2c1f91338c5d89e9f3b278305ac3d74b849006db21c09437f77d754",
+    "infra/gcp/release-contracts.json": "cd059f14fc48f19ee35ea53369494958fcd0bbbd829819dc5cde9d7bf4892099"
   },
-  "latestPostgresMigration": "0141_bill_email_evidence",
-  "postgresSchemaVersion": 141,
+  "latestPostgresMigration": "0142_signal_store",
+  "postgresSchemaVersion": 142,
   "releaseContracts": {
     "agent": {
       "apiContract": 3,
@@ -20,8 +20,8 @@
         "max": 3
       },
       "postgresSchema": {
-        "min": 141,
-        "max": 141
+        "min": 142,
+        "max": 142
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -32,8 +32,8 @@
         "max": 3
       },
       "postgresSchema": {
-        "min": 141,
-        "max": 141
+        "min": 142,
+        "max": 142
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -44,8 +44,8 @@
         "max": 1
       },
       "postgresSchema": {
-        "min": 141,
-        "max": 141
+        "min": 142,
+        "max": 142
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -56,8 +56,8 @@
         "max": 1
       },
       "postgresSchema": {
-        "min": 141,
-        "max": 141
+        "min": 142,
+        "max": 142
       },
       "currentPostgresSchemaCompatible": true
     },
@@ -68,8 +68,8 @@
         "max": 1
       },
       "postgresSchema": {
-        "min": 141,
-        "max": 141
+        "min": 142,
+        "max": 142
       },
       "currentPostgresSchemaCompatible": true
     }

@@ -74,6 +74,7 @@ export type Context = {
     revisionSha256: string;
     reviewedEvidenceSha256: string;
     preclosed: boolean;
+    ordinaryRecoverySha256?: string;
     reclosed?: {
       predecessorRevision: string;
       predecessorRevisionSha256: string;
@@ -250,6 +251,10 @@ function context(c: Context) {
         c.currentBinding.proof.image,
       ),
     );
+    if (c.currentBinding.ordinaryRecoverySha256 !== undefined) {
+      hash(c.currentBinding.ordinaryRecoverySha256);
+      assert(!c.currentBinding.preclosed && !c.currentBinding.reclosed);
+    }
     const reclosed = c.currentBinding.reclosed;
     if (reclosed) {
       hash(reclosed.predecessorRevisionSha256);
@@ -358,6 +363,8 @@ export function captureLifecycle(c: Context, s: Snapshot): State {
       !Object.hasOwn(s.revisions, releaseIdentity(c, 'R').revision),
   );
   assert(s.desired.every((r) => r.revision === c.canonical));
+  if (c.currentBinding?.ordinaryRecoverySha256)
+    assert(s.desired.length === 1 && s.desired[0]?.tag === '');
   if (c.currentBinding?.reclosed)
     assert(
       s.admissionDisabled &&
@@ -695,6 +702,46 @@ export function acceptCapturedRetirement(
   );
   return advance(s, 'retired', after, retired);
 }
+/** Observe the previously reviewed alias closure without inventing a retirement operation. */
+export function acceptOrdinaryRecoveredRetirement(
+  s: State,
+  fresh: Snapshot,
+  evidence: {
+    sha256: string;
+    action: string;
+    drainSeconds: number;
+    drainCompleted: boolean;
+    beforeReceipt: string;
+    serviceEtag: string;
+    serviceGeneration: string;
+  },
+): State {
+  verifyLifecycleState(s);
+  hash(evidence.sha256);
+  assert(
+    s.context.currentBinding?.ordinaryRecoverySha256 === evidence.sha256 &&
+      !s.context.currentBinding.preclosed &&
+      !s.pending &&
+      !s.retirementAttempt &&
+      !s.admissionPossible &&
+      s.phase === 'promotedP' &&
+      evidence.action === 'already_absent' &&
+      evidence.drainSeconds === 600 &&
+      evidence.drainCompleted === true &&
+      evidence.beforeReceipt === s.receipt &&
+      evidence.serviceEtag === s.snapshot.etag &&
+      evidence.serviceGeneration === s.snapshot.generation &&
+      equal(fresh, s.snapshot),
+  );
+  const p = releaseIdentity(s.context, 'P');
+  assert(
+    equal(rows(fresh.desired), [row(p.revision, p.tag, 100)]) &&
+      Object.keys(fresh.tagUris).length === 1 &&
+      fresh.tagUris[p.tag],
+  );
+  return advance(s, 'retired', fresh);
+}
+
 /** Existing agent/readiness and immediate retirement stability proofs remain external prerequisites. */
 export function acceptAgentReady(
   s: State,

@@ -320,9 +320,15 @@ export function proactiveWarnings(
 
 export async function dailyBudgetHoldHealth(
   readTotals: CostRepository['totals'],
-): Promise<DailyBudgetHoldHealth> {
+): Promise<DailyBudgetHoldHealth | 'at_threshold'> {
   try {
-    return classifyDailyBudgetHolds(await readTotals());
+    const totals = await readTotals();
+    const state = classifyDailyBudgetHolds(totals);
+    // H4 requires holds strictly below a quarter of a positive daily cap.
+    if (state === 'within_limit' && totals.dailyHeldUsd === totals.dailyLimitUsd / 4) {
+      return 'at_threshold';
+    }
+    return state;
   } catch {
     return 'unavailable';
   }

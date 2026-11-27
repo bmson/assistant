@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { z } from 'zod';
 import { ExactTimestamp, parseExactTimestamp } from './exact-timestamp.js';
 import { parseGoogleCalendarConnection } from './google-calendar-connection.js';
 import {
@@ -13,6 +14,58 @@ import { toolCallReceiptKeyId } from './tool-call-receipts.js';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const FINGERPRINT = /^[a-f0-9]{64}$/;
 
+const signalId = z.string().regex(FINGERPRINT);
+const signalInstant = z.string().datetime({ precision: 3 });
+const portableSignalFields = z
+  .object({
+    version: z.literal(1),
+    id: signalId,
+    agentId: z.string().uuid(),
+    subjectPersonIds: z.array(z.string().refine((id) => Boolean(id.trim()))).min(1),
+    sourceRefs: z.tuple([z.object({ kind: z.literal('email'), id: z.string().min(1) }).strict()]),
+    billIdentity: signalId,
+    amountMinor: z.number().int().nonnegative(),
+    currency: z.literal('USD'),
+    at: signalInstant,
+    validFrom: signalInstant,
+    validTo: signalInstant.nullable(),
+    supersededBy: signalId.nullable(),
+  })
+  .strict();
+const portableSignalSchema = z.discriminatedUnion('kind', [
+  portableSignalFields.extend({ kind: z.literal('bill'), dueDate: z.iso.date() }),
+  portableSignalFields.extend({ kind: z.literal('payment'), dueDate: z.null() }),
+]);
+
+function decodedData(record: MigrationRecord): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(record.data).map(([key, value]) => [key, deserializeMigrationValue(value)]),
+  );
+}
+/** SQL keeps query fields alongside the canonical JSON. Firestore uses the JSON itself. */
+export function portableSignal(record: MigrationRecord) {
+  const data = decodedData(record);
+  const signal = portableSignalSchema.parse(data.record);
+  const expectedId = createHash('sha256')
+    .update(JSON.stringify([signal.agentId, signal.kind, signal.billIdentity]))
+    .digest('hex');
+  if (
+    signal.id !== record.id ||
+    signal.id !== data.id ||
+    signal.id !== expectedId ||
+    signal.agentId !== data.agentId ||
+    signal.kind !== data.kind ||
+    signal.at !== data.at ||
+    JSON.stringify(signal.subjectPersonIds) !== JSON.stringify(data.subjectPersonIds) ||
+    JSON.stringify(signal.subjectPersonIds) !==
+      JSON.stringify([...new Set(signal.subjectPersonIds)].sort()) ||
+    (signal.validTo === null) !== (signal.supersededBy === null) ||
+    (signal.kind === 'payment' && signal.supersededBy !== null)
+  )
+    throw new Error('Invalid signal migration identity or projection');
+  return signal;
+}
+
 /**
  * Complete installation coverage for the PostgreSQL schema. Adding a table to
  * the schema must also add its ownership, identity, and Firestore representation
@@ -25,6 +78,7 @@ export const MIGRATION_TABLES = [
     id: 'agent_id',
     scope: 'agent',
   },
+  { table: 'signals', collection: 'signals', id: 'id', scope: 'agent' },
   { table: 'agents', collection: 'agents', id: 'id', scope: 'agent' },
   { table: 'ambient_snapshots', collection: 'ambientSnapshots', id: 'id', scope: 'agent' },
   { table: 'anomalies', collection: 'anomalies', id: 'id', scope: 'agent' },
@@ -930,10 +984,6 @@ export function validateMigrationReferences(
     )
       throw new Error(`Inconsistent ${record.table}/${record.id} parent linkage: ${field}`);
   };
-  const decodedData = (record: MigrationRecord): Record<string, unknown> =>
-    Object.fromEntries(
-      Object.entries(record.data).map(([key, value]) => [key, deserializeMigrationValue(value)]),
-    );
   const ownerCallGrantKey = (
     ownerId: string,
     approvalId: string,
@@ -1025,6 +1075,7 @@ export function validateMigrationReferences(
     'recall_surfaces',
     'schedules',
     'self_maintenance',
+    'signals',
     'situation_packs',
     'skills',
     'suggestions',
@@ -1042,6 +1093,23 @@ export function validateMigrationReferences(
         parseGoogleCalendarConnection(decodedData(record).state, sourceAgentId);
       } catch {
         throw new Error('Invalid Google Calendar migration state');
+      }
+    }
+    if (record.table === 'signals') {
+      const signal = portableSignal(record);
+      if (signal.supersededBy) {
+        const target = linked('signals', signal.supersededBy);
+        const payment = target && portableSignal(target);
+        if (
+          payment?.kind !== 'payment' ||
+          payment.agentId !== signal.agentId ||
+          payment.billIdentity !== signal.billIdentity ||
+          payment.amountMinor !== signal.amountMinor ||
+          payment.validFrom !== signal.validTo ||
+          payment.validFrom <= signal.validFrom ||
+          JSON.stringify(payment.subjectPersonIds) !== JSON.stringify(signal.subjectPersonIds)
+        )
+          throw new Error('Invalid signal migration supersession');
       }
     }
     if (record.table === 'contacts') parseContactIdentityAuthority(record.data.identityAuthority);
