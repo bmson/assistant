@@ -1094,7 +1094,7 @@ describe('frozen proactive replay', () => {
             runBriefing(
               {
                 db,
-                ...(driver === 'firestore' ? { persistence } : {}),
+                persistence,
                 router: forbidden('delivery-only briefing model calls'),
                 notifyOwner,
               },
@@ -1225,12 +1225,16 @@ describe('frozen proactive replay', () => {
                 return post(input);
               });
           } else {
-            const transact = db.transaction.bind(db);
-            const withdrawThenPublish: typeof db.transaction = async (work, config) => {
-              await db.delete(messages).where(eq(messages.id, sourceId));
-              return transact(work, config);
-            };
-            withdrawal = vi.spyOn(db, 'transaction').mockImplementationOnce(withdrawThenPublish);
+            // The SQL job reads security candidates after delivery discovery.
+            const emailSync = persistence.emailSync;
+            if (!emailSync) throw new Error('Missing email source repository');
+            const readSecurity = emailSync.listSecurityAttentionCandidates.bind(emailSync);
+            withdrawal = vi
+              .spyOn(emailSync, 'listSecurityAttentionCandidates')
+              .mockImplementationOnce(async (...args) => {
+                await db.delete(messages).where(eq(messages.id, sourceId));
+                return readSecurity(...args);
+              });
           }
           try {
             expect((await deliveryBriefing()).outcome).toEqual({ kind: 'quiet' });
