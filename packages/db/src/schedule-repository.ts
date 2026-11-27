@@ -296,7 +296,7 @@ export function createPostgresScheduleRepository(db: Db): DigestScheduleReposito
           .update(schedules)
           .set({
             enabled: input.enabled,
-            lastRunAt: input.now,
+            ...(input.mode !== 'rebase-missed-briefing' ? { lastRunAt: input.now } : {}),
             nextRunAt: input.nextRunAt,
             updatedAt: input.now,
           })

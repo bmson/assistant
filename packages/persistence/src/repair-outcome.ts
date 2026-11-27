@@ -52,6 +52,38 @@ const next: Record<RepairStage, string> = {
   unknown:
     'Open Improvements to inspect the recorded evidence. The failed stage is not established.',
 };
+const PUBLISHER_PERMISSIONS_REQUIRED =
+  "GitHub publishing permission denied. Check the repair publisher token's repository write access.";
+const SANDBOX_SETUP_FAILED = 'Hosted sandbox setup failed. No coding result was published.';
+const PROTECTED_PATCH_REJECTED = 'Hosted result contains duplicate or protected paths';
+export const PROTECTED_REPAIR_TARGET =
+  'The fix targets protected code. It requires a separate owner-led change.';
+
+const protectedRepairNextStep =
+  'Review the diagnosis in Improvements before making a separate owner-led change.';
+
+function blockedByProtectedTarget(issue: RepairIssue): boolean {
+  return issue.status === 'blocked' && issue.data.lastError === PROTECTED_REPAIR_TARGET;
+}
+
+/** Explicit owner decisions and intervention keep their original delivery route. */
+export function repairNoticeNeedsOwner(issue: RepairIssue): boolean {
+  if (
+    issue.data.ownerActionRequired ||
+    issue.status === 'pr_open' ||
+    blockedByProtectedTarget(issue)
+  )
+    return true;
+  if (issue.status === 'monitoring') return Boolean(issue.data.mergeSha && issue.data.monitoringAt);
+  return (
+    issue.status === 'failed' &&
+    (issue.data.hostedReview?.approved === false ||
+      issue.data.lastError === PUBLISHER_PERMISSIONS_REQUIRED ||
+      issue.data.lastError === SANDBOX_SETUP_FAILED ||
+      issue.data.lastError === PROTECTED_PATCH_REJECTED)
+  );
+}
+
 export function repairOutcome(issue: RepairIssue, failureStage?: RepairStage): RepairOutcome {
   let stage = stages[issue.status];
   if (!stage && ['failed', 'blocked'].includes(issue.status)) {
@@ -92,28 +124,22 @@ export function repairOutcome(issue: RepairIssue, failureStage?: RepairStage): R
     message = issue.data.lastError ?? 'The investigation is blocked pending an owner action.';
     nextStep = issue.data.ownerActionRequired;
   }
+  if (blockedByProtectedTarget(issue)) {
+    message = 'The proposed repair targets protected code. No coding run was dispatched.';
+    nextStep = protectedRepairNextStep;
+  }
   // Only known internal outcomes are exposed. Arbitrary provider errors may
   // contain secrets; hiding those must not hide a confirmed sandbox failure.
-  if (
-    issue.status === 'failed' &&
-    issue.data.lastError ===
-      "GitHub publishing permission denied. Check the repair publisher token's repository write access."
-  ) {
+  if (issue.status === 'failed' && issue.data.lastError === PUBLISHER_PERMISSIONS_REQUIRED) {
     message = 'GitHub did not permit the repair to publish code.';
     nextStep =
       'Grant the repair publisher Contents and Pull requests write access to the configured repository, then retry in Improvements.';
   }
-  if (
-    issue.status === 'failed' &&
-    issue.data.lastError === 'Hosted sandbox setup failed. No coding result was published.'
-  ) {
+  if (issue.status === 'failed' && issue.data.lastError === SANDBOX_SETUP_FAILED) {
     message = 'The coding sandbox could not start. No code was published.';
     nextStep = 'Check the coding provider setup before retrying this report.';
   }
-  if (
-    issue.status === 'failed' &&
-    issue.data.lastError === 'Hosted result contains duplicate or protected paths'
-  ) {
+  if (issue.status === 'failed' && issue.data.lastError === PROTECTED_PATCH_REJECTED) {
     message = 'The proposed patch included duplicate or protected files. No PR was published.';
     nextStep = 'This change needs owner-led source review before another coding attempt.';
   }

@@ -4,11 +4,20 @@ import { CardFormSchema } from '@assistant/persistence/card-form';
 import { z } from 'zod';
 import { containsCardSecret, isSensitiveCardFact, publicCardText } from './card-privacy.js';
 import type { ModelRouter } from './model-router/index.js';
+import {
+  bookingEvidence,
+  bookingHotelProperty,
+  bookingStayTime,
+  type VerifiedHotelTotal,
+} from './workflow/booking-disclosure.js';
 import type { ActionEvidence } from './workflow/response-contract.js';
+
+const MAX_CARD_FACT_VALUE = 500;
+const MAX_FACTS_PER_BLOCK = 8;
 
 const FactSchema = z.object({
   id: z.string().regex(/^[a-z0-9_-]{1,40}$/),
-  value: z.string().trim().min(1).max(500),
+  value: z.string().trim().min(1).max(MAX_CARD_FACT_VALUE),
   label: z.string().trim().min(1).max(60).optional(),
   source: z.string().trim().min(1).max(80),
   sensitive: z.boolean().default(false),
@@ -27,7 +36,10 @@ const AuthoredLabel = z.string().trim().min(1).max(60);
  */
 const LEAF_BLOCKS = [
   z.object({ type: z.literal('hero'), titleFact: z.string(), subtitleFact: z.string().optional() }),
-  z.object({ type: z.literal('facts'), factIds: z.array(z.string()).min(1).max(8) }),
+  z.object({
+    type: z.literal('facts'),
+    factIds: z.array(z.string()).min(1).max(MAX_FACTS_PER_BLOCK),
+  }),
   z.object({ type: z.literal('timeline'), factIds: z.array(z.string()).min(1).max(8) }),
   z.object({
     type: z.literal('score'),
@@ -744,6 +756,62 @@ function worthTrying(
   return answerText ? answerLooksCardShaped(answerText) : false;
 }
 
+function projectedHotelFacts(source: string, total?: VerifiedHotelTotal): FactSpec[] {
+  type StayTime = NonNullable<ReturnType<typeof bookingStayTime>>;
+  const times = new Map<StayTime['kind'], { time: StayTime; value: string }>();
+  const otherFacts = new Map<string, string>();
+  const covers = (more: StayTime, less: StayTime) =>
+    more.bound === less.bound &&
+    (['property', 'date', 'clock', 'zone'] as const).every(
+      (key) => !less.keys[key] || more.keys[key] === less.keys[key],
+    );
+  for (const value of source.split('\n')) {
+    if (!value || value.length > MAX_CARD_FACT_VALUE || containsCardSecret(value)) continue;
+    const time = bookingStayTime(value);
+    if (!time) {
+      const key = normalized(value);
+      if (!otherFacts.has(key)) otherFacts.set(key, value);
+      continue;
+    }
+    const existing = times.get(time.kind);
+    if (existing) {
+      if (covers(existing.time, time)) continue;
+      if (!covers(time, existing.time)) return [];
+    }
+    times.set(time.kind, { time, value });
+  }
+  const properties = new Set(
+    source.split('\n').flatMap((line) => {
+      const property = bookingHotelProperty(line);
+      return property ? [property] : [];
+    }),
+  );
+  const [property] = properties;
+  if (properties.size > 1 || (!times.has('check-in') && !property)) return [];
+  const addresses = [...otherFacts.values()].filter((value) =>
+    /^(?:(?:hotel|property) )?address\s*:/i.test(value),
+  );
+  if (addresses.length > 1) return [];
+  const facts = [
+    ...(property ? [{ id: 'hotel', label: 'Hotel', value: property }] : []),
+    ...[...times.values()].map(({ time, value }) => ({
+      id: time.kind,
+      label: time.kind === 'check-in' ? 'Check-in' : 'Check-out',
+      value,
+    })),
+    ...addresses.map((value) => ({ id: 'address', label: 'Address', value })),
+    ...(total ? [{ id: 'reservation-total', label: 'Reservation total', value: total.value }] : []),
+    ...[...otherFacts.values()]
+      .filter((value) => !addresses.includes(value) && (!property || !value.startsWith(property)))
+      .map((value, index) => ({ id: `detail-${index + 1}`, label: 'Booking detail', value })),
+  ];
+  return facts.slice(0, MAX_FACTS_PER_BLOCK).map((fact) => ({
+    ...fact,
+    source: 'gmail.read_thread',
+    sensitive: false,
+  }));
+}
+
 export async function generateEvidenceCardOutcome(input: {
   router: ModelRouter;
   /** The task paying for the call; absent for work no task owns (mail). */
@@ -761,27 +829,54 @@ export async function generateEvidenceCardOutcome(input: {
   answerText?: string;
   /** Refreshes must ground in new reads, never the old card/request text. */
   evidenceOnly?: boolean;
+  /** Use only a deterministic card built from projected current booking fields. */
+  projectBookingFields?: boolean;
+  verifiedHotelTotal?: VerifiedHotelTotal;
 }): Promise<GenerateEvidenceCardOutcome> {
   const explicitRequest = input.explicitRequest ?? false;
+  const bookingRequest = input.projectBookingFields === true;
   if (!worthTrying(input.sourceText, input.evidence, explicitRequest, input.answerText))
     return { kind: 'no_op' };
   // A single short hotel confirmation already has a coherent, bounded layout.
   // Copy its literal details into a native card without asking a model to
   // rewrite dates, amounts or booking identifiers.
   if (explicitRequest && /\bhotel\b/i.test(input.sourceText.split('\n')[0] ?? '')) {
-    const threadMessages = input.evidence
+    const sourceEvidence = bookingRequest ? input.evidence.map(bookingEvidence) : input.evidence;
+    const threadMessages = sourceEvidence
       .filter(
         (row) =>
-          row.fromCurrentTask !== false &&
+          (bookingRequest ? row.fromCurrentTask === true : row.fromCurrentTask !== false) &&
           row.status === 'succeeded' &&
           row.toolName === 'gmail.read_thread',
       )
       .flatMap((row) => {
+        const args = row.args as {
+          threadId?: string;
+          startMessageIndex?: number;
+          startMessageOffset?: number;
+        } | null;
+        if (
+          bookingRequest &&
+          ((args?.startMessageIndex ?? 0) !== 0 || (args?.startMessageOffset ?? 0) !== 0)
+        )
+          return [];
         const result = row.result as {
           error?: unknown;
-          messages?: Array<{ text?: unknown }>;
+          complete?: boolean;
+          hasMore?: boolean;
+          truncated?: boolean;
+          messages?: Array<{ text?: unknown; truncated?: boolean }>;
         } | null;
-        return !result?.error && Array.isArray(result?.messages) ? result.messages : [];
+        if (!result || result.error || !Array.isArray(result.messages)) return [];
+        if (
+          bookingRequest &&
+          (result.complete !== true ||
+            result.hasMore ||
+            result.truncated ||
+            result.messages.some((message) => message.truncated))
+        )
+          return [];
+        return result.messages.map((message) => ({ ...message, threadId: args?.threadId }));
       });
     const searchedMail = input.evidence.some(
       (row) => row.fromCurrentTask !== false && row.toolName === 'gmail.search',
@@ -793,13 +888,25 @@ export async function generateEvidenceCardOutcome(input: {
       return { kind: 'no_op' };
     const confirmations = threadMessages.flatMap((message) =>
       typeof message.text === 'string' &&
-      message.text.trim().length <= 500 &&
-      /\bcheck[ -]?in\b/i.test(message.text)
-        ? [message.text.trim()]
+      (bookingRequest || message.text.trim().length <= MAX_CARD_FACT_VALUE) &&
+      (/\bcheck[ -]?in\b/i.test(message.text) ||
+        (bookingRequest &&
+          message.text
+            .split('\n')
+            .some(
+              (line) =>
+                bookingHotelProperty(line) &&
+                /\b(?:booking|reservation) confirmation[.!]?$/i.test(line),
+            )))
+        ? [{ text: message.text.trim(), threadId: message.threadId }]
         : [],
     );
     if (confirmations.length === 1 && confirmations[0]) {
-      const original = confirmations[0];
+      const { text: original, threadId } = confirmations[0];
+      const total =
+        threadId && input.verifiedHotelTotal?.threadId === threadId
+          ? input.verifiedHotelTotal
+          : undefined;
       // Do not promote a complete email body to a public "details" fact.
       // Retain safe check-in sentences when the confirmation contains secrets.
       const details = containsCardSecret(original)
@@ -810,24 +917,32 @@ export async function generateEvidenceCardOutcome(input: {
             )
             .join(' ')
         : original;
-      if (!details) return { kind: 'no_op' };
+      const facts = bookingRequest
+        ? projectedHotelFacts(original, total)
+        : details
+          ? [
+              {
+                id: 'details',
+                label: 'Reservation details',
+                value: details,
+                source: 'gmail.read_thread',
+              },
+            ]
+          : [];
+      if (!facts.length) return { kind: 'no_op' };
       const spec = GenerativeCardSpecV1Schema.parse({
         version: 1,
         title: 'Hotel reservation',
         icon: 'calendar',
         accessibilityLabel: 'Hotel reservation from the email confirmation',
         sourceLabel: 'Email confirmation',
-        facts: [
-          {
-            id: 'details',
-            label: 'Reservation details',
-            value: details,
-            source: 'gmail.read_thread',
-          },
-        ],
-        blocks: [{ type: 'facts', factIds: ['details'] }],
+        facts,
+        blocks: [{ type: 'facts', factIds: facts.map((fact) => fact.id) }],
       });
-      const validated = validateGroundedCard(spec, original);
+      const validated = validateGroundedCard(
+        spec,
+        total ? `${original}\n${total.value}` : original,
+      );
       if (!validated) return { kind: 'no_op' };
       return {
         kind: 'card',
@@ -837,13 +952,17 @@ export async function generateEvidenceCardOutcome(input: {
           revisionId: randomUUID(),
           spec: validated,
           sourceFingerprint: createHash('sha256')
-            .update(input.sourceKey ?? `gmail.read_thread\n${details}`)
+            .update(
+              input.sourceKey ?? `gmail.read_thread\n${facts.map((fact) => fact.value).join('\n')}`,
+            )
             .digest('hex'),
           grounding: 'evidence',
         },
       };
     }
   }
+  // Booking cards come only from projected source fields and fixed labels.
+  if (bookingRequest) return { kind: 'no_op' };
   const groundedOnAnswer = !hasCurrentEvidence(input.evidence) && Boolean(input.answerText?.trim());
   const corpus = evidenceText(input.evidence, input.sourceText, explicitRequest, input.answerText);
   try {

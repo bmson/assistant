@@ -200,7 +200,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore memory extracti
           role: index % 2 === 0 ? 'user' : 'assistant',
           parts: [],
           text: `${marker}: ${options.source ?? `line ${index} of a conversation worth remembering`}`,
-          origin: 'chat',
+          origin: index % 2 === 0 ? (options.trust === undefined ? 'owner' : 'chat') : 'assistant',
           channelMessageId: null,
           embedding: null,
           hiddenAt: null,
@@ -332,7 +332,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore memory extracti
     const external = await conversation('EXTERNAL', { trust: 'external' });
     const owned = await conversation('OWNED', {
       source:
-        'Sam prefers aisle seats, and Maya is training for the Berlin marathon. Maya’s birthday is June 9.',
+        'Sam prefers aisle seats, and my sister Maya is training for the Berlin marathon. Maya’s birthday is June 9.',
     });
     const { router, calls } = scriptedRouter({
       OWNED: {
@@ -594,7 +594,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore memory extracti
   });
 
   it('saves occasion-only output before checkpointing and validates new people against source text', async () => {
-    const source = 'The owner says Élín’s birthday is June 9.';
+    const source = 'My friend Élín’s birthday is June 9.';
     const conversationId = await conversation('OCCASION_ONLY', { source });
     const { router } = scriptedRouter({
       OCCASION_ONLY: { occasions: [{ subject: 'Élín', month: 6, day: 9 }] },
@@ -710,7 +710,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore memory extracti
     const prepared = await store.collection('preparedMemoryExtractions').get();
     expect(prepared.size).toBe(1);
     expect(prepared.docs[0]?.get('sourceHash')).toMatch(/^[a-f0-9]{64}$/);
-    expect(prepared.docs[0]?.get('extractionVersion')).toBe('memory-extraction-v3');
+    expect(prepared.docs[0]?.get('extractionVersion')).toBe('memory-extraction-v4');
     const preparedFact = prepared.docs[0]?.get('payload').facts[0];
     expect(preparedFact.embeddingSpaceKey).toBe(embeddingSpaceIdentityKey(SPACE));
 

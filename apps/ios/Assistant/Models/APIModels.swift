@@ -1181,6 +1181,11 @@ struct BootstrapResponse: Codable, Sendable {
     let conversation: ConversationView
 }
 
+struct ActivityDiagnostic: Codable, Identifiable, Sendable {
+    let id: String
+    let text: String
+}
+
 struct ActivityItem: Codable, Identifiable, Sendable {
     let id: String
     let type: String
@@ -1200,6 +1205,7 @@ struct ActivityItem: Codable, Identifiable, Sendable {
     let source: String?
     let externalEventId: String?
     let estimatedCostOperationId: String?
+    let diagnostics: [ActivityDiagnostic]?
 
     init(
         id: String,
@@ -1219,7 +1225,8 @@ struct ActivityItem: Codable, Identifiable, Sendable {
         conversationId: String? = nil,
         source: String? = nil,
         externalEventId: String? = nil,
-        estimatedCostOperationId: String? = nil
+        estimatedCostOperationId: String? = nil,
+        diagnostics: [ActivityDiagnostic]? = nil
     ) {
         self.id = id
         self.type = type
@@ -1239,6 +1246,7 @@ struct ActivityItem: Codable, Identifiable, Sendable {
         self.source = source
         self.externalEventId = externalEventId
         self.estimatedCostOperationId = estimatedCostOperationId
+        self.diagnostics = diagnostics
     }
 
     var displayTitle: String {
@@ -1971,6 +1979,7 @@ struct ActivityStatusResponse: Codable, Sendable {
     let hasPendingApproval: Bool
     let hasActiveAutonomy: Bool
     let stuckWaiting: Bool
+    var diagnostics: [ActivityDiagnostic]? = nil
     var estimatedCostOperationId: String? = nil
 }
 
@@ -2039,7 +2048,8 @@ extension ActivityItem {
             conversationId: conversationId,
             source: source,
             externalEventId: externalEventId,
-            estimatedCostOperationId: status.status == "waiting_estimated_cost" ? Self.validCostOperationID(status.estimatedCostOperationId) : nil
+            estimatedCostOperationId: status.status == "waiting_estimated_cost" ? Self.validCostOperationID(status.estimatedCostOperationId) : nil,
+            diagnostics: status.diagnostics ?? diagnostics
         )
     }
 
@@ -4207,6 +4217,7 @@ struct NoticingHealth: Decodable, Sendable {
     }
     let canaries: Canaries?
     let briefing: Briefing?
+    let healthy: Bool?
     let dailyBudgetHolds: String?
     let lastMailAt: String?
     let mailEligibleIntake24h: Int?
@@ -4236,7 +4247,8 @@ struct NoticingHealth: Decodable, Sendable {
 
     var dailyBudgetHoldsLabel: String {
         switch dailyBudgetHolds {
-        case "within_limit": return "At or below 25% of daily cap"
+        case "within_limit": return "Within daily holds target"
+        case "at_threshold": return "At 25% of daily cap"
         case "above_threshold": return "Over 25% of daily cap"
         case "paused": return "Daily spending cap is zero"
         case "uncapped": return "No daily cap"

@@ -10,6 +10,7 @@ import {
   embeddingSpaceIdentityKey,
   findCardForm,
   googleCalendarConnectionAfterMigration,
+  householdHandoffAfterTransfer,
   type MigrationBundle,
   type MigrationRecord,
   type MigrationTarget,
@@ -18,6 +19,7 @@ import {
   PreciseMigrationTimestamp,
   parseOwnerEditorEpochCursor,
   parseOwnerEditorOperationRecord,
+  portableSignal,
   snapshotEmbeddingSpace,
   tableDefinition,
   validateMigrationBundle,
@@ -466,6 +468,7 @@ function materialize(
   const data = Object.fromEntries(
     Object.entries(record.data).map(([key, value]) => [key, deserializeMigrationValue(value)]),
   );
+  if (record.table === 'signals') return portableSignal(record);
   if (record.table === 'mcp_connections') delete data.oauthState;
   if (record.table === 'google_calendar_connections') {
     data.state = googleCalendarConnectionAfterMigration(data.state, String(data.agentId));
@@ -545,6 +548,8 @@ function projectRecord(
   const data =
     (record.table === 'memories' && memoryProjections.get(record.id)) ||
     materialize(record, bundle.manifest.source.embeddingSpace);
+  if (record.table === 'household_handoffs')
+    return householdHandoffAfterTransfer(data, record.id, 'import', bundle.manifest.target);
   if (bundle.manifest.formatVersion >= 3 && record.table === 'knowledge_graph_sources') {
     const memoryId = data.memoryId;
     const memory = typeof memoryId === 'string' ? memoryProjections.get(memoryId) : undefined;

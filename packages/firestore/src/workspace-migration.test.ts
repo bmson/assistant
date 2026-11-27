@@ -22,6 +22,7 @@ import {
   serializeMigrationValue,
   serializeMigrationVector,
   toolCallReceiptKeyId,
+  validateMigrationReferences,
 } from '@assistant/persistence';
 import { FieldValue, Timestamp } from '@google-cloud/firestore';
 import { describe, expect, it, vi } from 'vitest';
@@ -3105,7 +3106,7 @@ describe('Firestore card-form migration preview', () => {
 });
 
 it.skipIf(!enabled)(
-  'imports readable owner-bound Calendar consent while invalidating callback and refresh execution state',
+  'imports owner-bound household Calendar choices while invalidating OAuth execution state',
   async () => {
     const store = emulatorStore();
     const target = {
@@ -3155,6 +3156,33 @@ it.skipIf(!enabled)(
         }) as Record<string, SerializedValue>,
         checksum: '',
       });
+      const household = {
+        revision: randomUUID(),
+        choices: [
+          { id: 'family@example.test', purpose: 'household' },
+          { id: 'school@example.test', purpose: 'school' },
+          { id: 'activity@example.test', purpose: 'activity' },
+          { id: 'holidays@example.test', purpose: 'holidays' },
+        ],
+      };
+      addRecord(source, {
+        table: 'google_household_calendar_choices',
+        collection: 'googleHouseholdCalendarChoices',
+        id: ownerId,
+        data: serializeMigrationValue({
+          agentId: ownerId,
+          settings: { ...household, connectionId },
+        }) as Record<string, SerializedValue>,
+        checksum: '',
+      });
+      const wrongOwner = source.records.map((record) =>
+        record.table === 'google_household_calendar_choices'
+          ? { ...record, data: { ...record.data, agentId: randomUUID() } }
+          : record,
+      );
+      expect(() => validateMigrationReferences(wrongOwner, ownerId)).toThrow(
+        'Invalid household Calendar migration owner',
+      );
       const result = await importWorkspaceBundle(store, source, {
         sourceAgentId: ownerId,
         target,
@@ -3166,6 +3194,7 @@ it.skipIf(!enabled)(
       expect(restored).toMatchObject({
         adopted: true,
         revision: 4,
+        household,
         connection: {
           id: connectionId,
           credentialVersion: 3,

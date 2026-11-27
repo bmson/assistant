@@ -68,6 +68,7 @@ test('frozen schema-128 bridge ranges still permit rollback after additive 129',
 test('old artifact declarations remain insufficient for 129; future schema remains rejected', () => {
   const historical = structuredClone(contract);
   for (const name of selected) historical.components[name].schema.postgres.max = 128;
+  for (const name of ['agent', 'web']) historical.components[name].schema.postgres.min = 128;
   assert.throws(() => validateManifest(manifest(129, historical)), /incompatible.*129/);
   assert.throws(() => validateManifest(manifest(133)), /incompatible.*133/);
   const webOnly = createManifest({

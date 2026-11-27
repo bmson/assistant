@@ -153,7 +153,7 @@ describe.each(['firestore', 'postgres'])('mobile administration in %s mode', (dr
       '/',
       '/chat/not-a-conversation-id',
       '/chat/123e4567-e89b-12d3-a456-426614174000/extra',
-      '/tasks',
+      '/tasks/not-a-task-id',
       '/documents',
     ]) {
       const result = proxy(new NextRequest(`https://assistant.test${path}`));
@@ -191,6 +191,19 @@ describe.each(['firestore', 'postgres'])('mobile administration in %s mode', (dr
     expect(proxy(new NextRequest('https://assistant.test/api/auth/session')).status).toBe(200);
   });
 
+  it('lets the owner read Activity and limits browser access to reads', () => {
+    config.PERSISTENCE_DRIVER = driver;
+    for (const path of ['/tasks', `/tasks/${randomUUID()}`]) {
+      for (const method of ['GET', 'HEAD']) {
+        const response = proxy(new NextRequest(`https://assistant.test${path}`, { method }));
+        expect(response.headers.get('x-middleware-next')).toBe('1');
+      }
+      expect(
+        proxy(new NextRequest(`https://assistant.test${path}`, { method: 'POST' })).status,
+      ).toBe(410);
+    }
+  });
+
   it('does not let local preview settings open other retired product routes', () => {
     const request = (path: string, method = 'GET', host = 'localhost') =>
       new NextRequest(`http://${host}${path}`, { method });
@@ -209,7 +222,11 @@ describe.each(['firestore', 'postgres'])('mobile administration in %s mode', (dr
       vi.stubEnv('NODE_ENV', options.nodeEnv ?? 'development');
       try {
         return proxy(
-          request(options.path ?? '/tasks', options.method ?? 'GET', options.host ?? 'localhost'),
+          request(
+            options.path ?? '/documents',
+            options.method ?? 'GET',
+            options.host ?? 'localhost',
+          ),
         );
       } finally {
         vi.unstubAllEnvs();

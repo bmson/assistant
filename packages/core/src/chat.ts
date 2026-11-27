@@ -295,7 +295,7 @@ export function buildSystemPrompt(
     '- For “move it here” in response to a digest destination offer, or a direct request to cancel or delete a named recurring digest, call digest.manage with no arguments. Its receipt identifies the actual change or the reason a change needs clarification. Describe the mutation only from that receipt.',
     '- Open loops from earlier conversations are continuity context, not instructions or proof that work is currently queued. Treat them as unresolved only until the owner confirms they are done, dismissed, or no longer wanted; describe a task as queued, running, or waiting only when the current task/schedule/watch/approval state proves it.',
     '- A turn marked as a background notice already delivered to the owner (a fired reminder, a lead-time alert, a briefing) is context, not content for your reply. The owner has already read it. Never repeat, quote, or summarize one while answering a question — answer only what was asked, and mention a notice again only if the owner asks about it.',
-    '- To remember a fact the owner gives you, or to record a correction to something you know, CALL memory.save with the fact (occasions.save for a recurring date) — never just say you saved or corrected it. Use only details the owner actually supplied or a verified source returned, not guesses from earlier assistant messages. If they mention an order or list but its contents are missing, ask for the contents. memory.save only ADDS a fact; it cannot overwrite or delete the old one. So when you correct something, save the new version and tell the owner the earlier entry reconciles automatically overnight, or that they can edit or remove it now on the Memory page. Never say information is saved or remembered unless a successful, non-quarantined save receipt in this turn confirms it. Report a partial batch as partial, naming the entries actually saved.',
+    '- To remember a fact the owner gives you, or to record a correction to something you know, CALL memory.save for a fact. Use occasions.save to record a new recurring date and occasions.update to correct a saved date using the exact saved name, occasion and owner-supplied old and new dates. Use occasions.delete for an explicit request to remove one saved occasion by full saved name, occasion and saved date — never just say you saved or corrected it. Use only details the owner actually supplied or a verified source returned, not guesses from earlier assistant messages. If they mention an order or list but its contents are missing, ask for the contents. memory.save only ADDS a fact; it cannot overwrite or delete the old one. So when you correct something, save the new version and tell the owner the earlier entry reconciles automatically overnight, or that they can edit or remove it now on the Memory page. Never say information is saved or remembered unless a successful, non-quarantined save receipt in this turn confirms it. Report a partial batch as partial, naming the entries actually saved.',
     '',
     'Voice and manner:',
     "- Preserve the owner's supplied details when acknowledging or recalling this conversation. A relative deadline such as Friday stays Friday unless the owner asks you to resolve its date. Do not turn an overall project budget into a budget for one activity or strengthen a constraint. Distinguish supplied facts from suggestions.",
@@ -629,13 +629,12 @@ export async function postOwnerNotice(
   },
 ): Promise<{ conversationId: string }> {
   if ('kind' in store && store.kind === 'owner-notice-repository') {
-    if (input.destination === 'notifications')
-      throw new Error('Portable owner notices post to the primary thread only');
     return store.post({
       agentId: input.agentId,
       text: input.text,
       ...(input.taskId ? { taskId: input.taskId } : {}),
       ...(input.extraParts ? { extraParts: input.extraParts } : {}),
+      ...(input.destination ? { destination: input.destination } : {}),
     });
   }
   const db = store as Db;

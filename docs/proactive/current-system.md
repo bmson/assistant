@@ -63,9 +63,9 @@ There is no news source. `web.search` is registered as `autonomous` (`packages/t
 
 ### 3.4 Location and weather
 
-- `refreshAmbientSnapshot` (`packages/core/src/memory/ambient.ts:489-507`) needs a fresh location ping inside `LOCATION_RETENTION_DAYS`. Without one it clears the snapshot, and the job reports `ambient: no fresh location — snapshot cleared` (`packages/core/src/memory/jobs.ts:729-747`). On Nov 18, 4 of 11 runs produced weather.
+- `refreshAmbientSnapshot` first uses a usable phone ping. If none exists, it can use the town or city the authenticated owner saved and enabled in Home weather under Settings. Home weather is labeled separately from current location. It expires at Home’s local date boundary and the cached result is bound to the saved choice’s revision. Disabling or removing Home immediately stops serving its cached forecast. With neither source, the job clears the snapshot. Daily Home weather still needs observation across actual days. Settings also lets the owner confirm, edit and remove named schools, workplaces and regular venues by address. Those addresses support owner review and workspace transfer. Home weather uses the separate Home opt-in.
 - Weather is Open-Meteo for "now and today at the last location". There is no forecast for an event's place and time.
-- WMO codes map to words with no plausibility check (`ambient.ts:37-62`): code 75 became "heavy snow" in a coastal city at 8–13 °C (A16).
+- In the Nov 18 audit, WMO code 75 produced “heavy snow” with a daily range of 8–13 °C. The weather parser now checks unrounded temperatures. A daily minimum above 3 °C makes a snow code uncertain in that day’s forecast, current conditions and hourly detail. An uncorroborated snow code produces one diagnostic per provider response (A16).
 
 ### 3.5 Device
 
@@ -85,6 +85,8 @@ There is no news source. `web.search` is registered as `autonomous` (`packages/t
 - Overlaps are not a moment kind; only the briefing mentions them.
 
 ### 4.2 Daily briefing (`packages/core/src/workflow/briefing.ts`)
+
+- A wake or cron occurrence can publish on its intended owner-local date. If the worker resumes on a later day, it records the unpublished occurrence as aborted. A previously committed briefing remains available through its original receipt. When the scheduler itself misses a day, the next sweep advances to the current day’s slot without consuming that day’s early wake.
 
 - **Composition.** Deterministic, with no tools (`:97`): agenda, coverage, overlaps, weather (from the ambient snapshot), needs-you, mail worth reading, "coming up" (dates extracted from mail), goals that moved.
 - **Life context** (since #910). `briefingLifeContext` (`packages/core/src/proactive/life-context.ts`, called at `briefing.ts:1091`) adds up to six upcoming occasions and up to five open commitments. Occasions must be owner-confirmed or owner-sourced and inside their lead window (capped at 30 days). Commitments are due within 7 days, or undated and stale.
@@ -186,4 +188,4 @@ Only with the owner's consent, and read-only by default:
 
 Do not send chat turns, approve, or edit anything in production to test a change. Every chat turn can text the owner (A17), and test turns pollute memory, People and self-repair.
 
-The authenticated Noticing status also reads local evidence for the last successful scheduled Pulse, the Google Calendar connection, the opt-in phone calendar snapshot, cached weather, and urgent text quota. A quiet Pulse writes the same completion receipt as a delivered Pulse. Phone calendar freshness uses the capture time and checks the matching cache against current sharing consent. Weather freshness uses the ambient cache and the latest usable location, with the existing 90-minute cache window. The SMS count measures reservations against the owner's local-day limit of three. Google Calendar status reflects the stored connection and does not contact Google. The scheduled health monitor shares these checks and posts deduplicated diagnostics in Notifications. Red checks share one generic push per owner-local day. The push worker checks that a red condition is still open and applies quiet hours and the ambient cap before every send attempt. The independent outage watchdog covers overdue briefings.
+The authenticated Noticing status also reads local evidence for the last successful scheduled Pulse, the Google Calendar connection, the opt-in phone calendar snapshot, cached weather, and urgent text quota. A quiet Pulse writes the same completion receipt as a delivered Pulse. Phone calendar freshness uses the capture time and checks the matching cache against current sharing consent. Weather freshness uses the 90-minute ambient cache and checks its source against the latest usable location or the enabled Home and its local date. The SMS count measures reservations against the owner's local-day limit of three. Google Calendar status reflects the stored connection and does not contact Google. The scheduled health monitor shares these checks and posts deduplicated diagnostics in Notifications. Red checks share one generic push per owner-local day. The push worker checks that a red condition is still open and applies quiet hours and the ambient cap before every send attempt. The independent outage watchdog covers overdue briefings.

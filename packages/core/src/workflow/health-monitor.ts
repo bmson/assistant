@@ -23,6 +23,7 @@ import {
 import { and, eq, gte, inArray, isNull, lt, ne, notInArray, or, sql } from 'drizzle-orm';
 import { loadConfig } from '../config.js';
 import { pendingKnowledgeGraphSourceCount } from '../memory/knowledge-graph.js';
+import { GOOGLE_CALENDAR_RECONNECT_NOTICE } from '../proactive/canaries.js';
 import type { ProactiveNotifier } from '../proactive/notify.js';
 import {
   assessProactiveCanaries,
@@ -32,7 +33,6 @@ import {
   proactiveCanaryProblems,
   sqlMailHealthCounts,
 } from '../proactive/pipeline-health.js';
-import { notifyOwnerInNotifications } from './anomaly.js';
 
 /** A completed graph extraction may hold a five-minute lease; ten minutes is actionable. */
 const STALE_GRAPH_PENDING_MS = 10 * 60 * 1000;
@@ -188,6 +188,8 @@ export async function runAssistantHealthMonitor(
     canaries?: ProactiveCanaryRepository;
     readTotals?: CostRepository['totals'];
     ownerTimeZone?: () => Promise<string>;
+    saveDiagnostic?: (id: string, text: string) => Promise<void>;
+    saveOwnerNotice?: (id: string, text: string) => Promise<boolean>;
     notifyOwner?: ProactiveNotifier;
   },
   opts: { agentId: string; taskId?: string; now?: Date },
@@ -301,13 +303,15 @@ export async function runAssistantHealthMonitor(
   }
 
   const canaryReminderBefore = new Date(now.getTime() - MAIL_ALERT_RENOTIFY_MS);
-  if (budget === 'above_threshold' || budget === 'unavailable') {
+  const budgetProblem = {
+    at_threshold: 'Budget holds reached 25% of the daily spending cap.',
+    above_threshold: 'Budget holds exceed 25% of the daily spending cap.',
+    unavailable: 'Daily budget holds could not be checked.',
+  };
+  if (budget === 'at_threshold' || budget === 'above_threshold' || budget === 'unavailable') {
     signals.push({
       kind: 'proactive_canary_budget',
-      detail:
-        budget === 'above_threshold'
-          ? 'Budget holds exceed 25% of the daily spending cap.'
-          : 'Daily budget holds could not be checked.',
+      detail: budgetProblem[budget],
       notificationDueBefore: canaryReminderBefore,
     });
   }
@@ -329,18 +333,20 @@ export async function runAssistantHealthMonitor(
   });
   if (notify.length) {
     try {
-      await health.notify({
-        agentId: opts.agentId,
-        text: [
-          '⚠️ Assistant health needs attention:',
-          ...notify.map((signal) => `• ${signal.detail}`),
-          'These are deterministic checks; no configuration was changed automatically.',
-        ].join('\n'),
-        ...(opts.taskId ? { taskId: opts.taskId } : {}),
-      });
+      const text = [
+        '⚠️ Assistant health needs attention:',
+        ...notify.map((signal) => `• ${signal.detail}`),
+        'These are deterministic checks; no configuration was changed automatically.',
+      ].join('\n');
+      await deps.saveDiagnostic?.(
+        `assistant-health:${notify
+          .map(({ kind }) => kind)
+          .sort()
+          .join(',')}`,
+        text,
+      );
     } catch (error) {
-      // The alert is not considered delivered until the durable owner message
-      // exists. Releasing just this claim lets the normal task retry report it.
+      // Releasing the claim after a failed Activity write lets the next attempt report it.
       await health.release({
         agentId: opts.agentId,
         kinds: notify.map((signal) => signal.kind),
@@ -370,7 +376,23 @@ export async function runAssistantHealthMonitor(
     }
   }
 
-  return { signals: signals.map((signal) => signal.detail), notified: notify.length > 0 };
+  let savedReconnectNotice = false;
+  if (canaries?.googleCalendar.state === 'expired' && deps.canaries && deps.saveOwnerNotice) {
+    // A prior provider outage may already own the diagnostic cooldown. Recheck the
+    // grant and key the owner's instruction to that connection across jobs and retries.
+    const connection = (await deps.canaries.google.get(opts.agentId))?.connection;
+    if (connection?.status === 'reconnect_required') {
+      savedReconnectNotice = await deps.saveOwnerNotice(
+        `calendar-reconnect:${opts.agentId}:${connection.id}`,
+        GOOGLE_CALENDAR_RECONNECT_NOTICE,
+      );
+    }
+  }
+
+  return {
+    signals: signals.map((signal) => signal.detail),
+    notified: notify.length > 0 || savedReconnectNotice,
+  };
 }
 
 /** The PostgreSQL implementation of the monitor's persistence. */
@@ -394,7 +416,6 @@ function postgresAssistantHealth(db: Db): AssistantHealthRepository {
           ),
         );
     },
-    notify: ({ agentId, text, taskId }) => notifyOwnerInNotifications(db, agentId, text, taskId),
   };
 }
 

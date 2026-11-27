@@ -35,7 +35,7 @@ await withMobileSmokeServer(async (baseUrl, serverRunning) => {
       await page.waitForURL(`${baseUrl}/settings`);
       await page.getByRole('heading', { name: 'Settings', exact: true }).waitFor();
       await page.getByRole('heading', { name: 'Mobile app connection', exact: true }).waitFor();
-      for (const name of ['Chat', 'Memory', 'Settings', 'Audit trail']) {
+      for (const name of ['Chat', 'Activity', 'Memory', 'Settings', 'Audit trail']) {
         const link = page
           .getByRole('navigation', { name: 'Main navigation' })
           .getByRole('link', { name, exact: true });
@@ -45,6 +45,16 @@ await withMobileSmokeServer(async (baseUrl, serverRunning) => {
       const viewportMeta = await page.locator('meta[name="viewport"]').getAttribute('content');
       if (viewportMeta?.includes('user-scalable=no'))
         throw new Error('Browser zoom must remain available');
+      await page
+        .getByRole('navigation', { name: 'Main navigation' })
+        .getByRole('link', { name: 'Activity', exact: true })
+        .click();
+      await page.waitForURL(`${baseUrl}/tasks`);
+      await page.getByRole('heading', { name: 'Activity', exact: true }).waitFor();
+      await page
+        .getByRole('navigation', { name: 'Filter activity' })
+        .getByRole('link', { name: 'Needs you', exact: true })
+        .waitFor();
       await page
         .getByRole('navigation', { name: 'Main navigation' })
         .getByRole('link', { name: 'Audit trail' })
@@ -137,8 +147,18 @@ await withMobileSmokeServer(async (baseUrl, serverRunning) => {
           throw new Error(`Browse mutation ${method} ${path} must be rejected before dispatch`);
       }
     }
+    const missingTask = '00000000-0000-4000-8000-000000000098';
+    for (const path of ['/tasks', `/tasks/${missingTask}`]) {
+      const result = await request(path, {
+        method: 'POST',
+        headers: { 'next-action': 'smoke-must-not-dispatch' },
+      });
+      if (result.status() !== 410 || result.headers().location)
+        throw new Error(`Activity mutation POST ${path} must stay unavailable`);
+    }
     for (const path of [
-      '/tasks',
+      '/tasks/not-a-task-id',
+      `/tasks/${missingTask}/extra`,
       '/documents',
       '/people/not-an-id',
       `/people/${missingPerson}/extra`,
@@ -160,7 +180,7 @@ await withMobileSmokeServer(async (baseUrl, serverRunning) => {
     if (!health.ok()) throw new Error('Backend health check failed');
     if (failures.length) throw new Error(failures.join('\n'));
     console.log(
-      'Owner chat, chat history, Memory navigation, Settings, mobile access, audit filters, and browser zoom passed at three viewport sizes; exact Memory browse content, mutation denials, and unrelated retired routes passed.',
+      'Owner chat, Activity, chat history, Memory navigation, Settings, mobile access, audit filters, and browser zoom passed at three viewport sizes. Memory browse content, Activity and Memory write denials, and retired routes passed.',
     );
   } finally {
     await browser.close();

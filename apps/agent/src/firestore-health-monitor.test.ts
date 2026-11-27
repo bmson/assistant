@@ -6,6 +6,7 @@ import {
   createFirestoreExecutionPersistence,
   FirestoreScheduleRepository,
 } from '@assistant/firestore';
+import { taskActivityDiagnostics } from '@assistant/persistence';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { runAssistantHealthMonitor } from '../../../packages/core/src/workflow/health-monitor.js';
 import type { InstallationStore } from '../../../packages/firestore/src/store.js';
@@ -64,30 +65,42 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore assistant healt
     resetConfigForTest();
   });
 
-  const monitor = (now: Date) =>
-    runAssistantHealthMonitor(
+  const monitor = async (now: Date) => {
+    const { task } = await persistence.tasks.createTask({
+      agentId,
+      type: 'scheduled',
+      trust: 'assistant',
+      trigger: { source: 'schedule', payload: { job: 'health.monitor' } },
+    });
+    return runAssistantHealthMonitor(
       {
         db,
         ...(persistence.assistantHealth
           ? { health: persistence.assistantHealth, graphSync: persistence.graphSync }
           : {}),
+        saveDiagnostic: async (id, text) => {
+          expect(
+            await persistence.tasks.appendActivityDiagnostic({
+              agentId,
+              taskId: task.id,
+              diagnostic: { id, text },
+            }),
+          ).toBe(true);
+        },
       },
       { agentId, now },
     );
+  };
 
-  async function notificationTexts(): Promise<string[]> {
-    const conversations = await store
-      .collection('conversations')
-      .where('agentId', '==', agentId)
-      .where('title', '==', 'Notifications')
-      .get();
-    const id = conversations.docs[0]?.get('id');
-    if (!id) return [];
-    const messages = await store.collection('messages').where('conversationId', '==', id).get();
-    return messages.docs
-      .map((doc) => ({ text: String(doc.get('text')), at: doc.get('createdAt').toMillis() }))
-      .sort((a, b) => a.at - b.at)
-      .map((row) => row.text);
+  async function diagnosticTexts(): Promise<string[]> {
+    const rows = await store.collection('tasks').where('agentId', '==', agentId).get();
+    expect((await store.collection('messages').get()).empty).toBe(true);
+    return rows.docs
+      .sort(
+        (left, right) =>
+          (left.get('createdAt')?.toMillis() ?? 0) - (right.get('createdAt')?.toMillis() ?? 0),
+      )
+      .flatMap((row) => taskActivityDiagnostics(row.get('state')).map(({ text }) => text));
   }
 
   async function seedIncident(now: Date) {
@@ -151,7 +164,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore assistant healt
     const first = await monitor(firstNow);
     expect(first.notified).toBe(true);
     expect(first.signals).toHaveLength(5);
-    const [notice] = await notificationTexts();
+    const [notice] = await diagnosticTexts();
     expect(notice).toContain('1 GraphRAG source quarantined after bounded retries');
     expect(notice).toContain('verification was unavailable 2 times');
     expect(notice).toContain('2 required-action steps');
@@ -170,7 +183,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore assistant healt
       notified: true,
       signals: [expect.stringContaining('quarantined')],
     });
-    expect(await notificationTexts()).toHaveLength(2);
+    expect(await diagnosticTexts()).toHaveLength(2);
 
     await store.doc('knowledgeGraphSources', memoryId).update({ status: 'ready' });
     expect(await monitor(new Date(firstNow.getTime() + 8 * 24 * HOUR + 1))).toEqual({
@@ -234,9 +247,9 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)('Firestore assistant healt
     });
     expect(await executeTask(deps, task.id)).toEqual({
       outcome: 'done',
-      detail: 'health monitor: notified owner about 5 signal(s)',
+      detail: 'health monitor: recorded 5 signal(s)',
     });
-    expect(await notificationTexts()).toHaveLength(1);
+    expect(await diagnosticTexts()).toHaveLength(1);
     expect(sqlAccesses).toEqual([]);
   });
 });

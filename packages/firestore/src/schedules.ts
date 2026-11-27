@@ -531,7 +531,7 @@ export class FirestoreScheduleRepository implements DigestScheduleRepository {
         ...current,
         enabled: input.enabled,
         nextRunAt: input.nextRunAt,
-        lastRunAt: input.now,
+        lastRunAt: input.mode === 'rebase-missed-briefing' ? current.lastRunAt : input.now,
         updatedAt: input.now,
       };
       tx.update(

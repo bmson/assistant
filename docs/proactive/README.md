@@ -51,9 +51,19 @@ Critical paths: A1 → A11 → C2 → D7 (money) and B2 → C6 → D3 (conflict 
 - Chat isolation, checklist deduplication, and self-repair pacing. [A4 private replies](https://github.com/bmson/assistant/pull/948), [A5 checklist](https://github.com/bmson/assistant/pull/944), [A7 pacing](https://github.com/bmson/assistant/pull/947), [A15 originating turn](https://github.com/bmson/assistant/pull/965), [A15 read isolation](https://github.com/bmson/assistant/pull/969).
 - Intake health, local time, weather evidence, and urgent delivery. [A11 mail pipeline](https://github.com/bmson/assistant/pull/957), [A13 owner time](https://github.com/bmson/assistant/pull/952), [A13 Pulse time](https://github.com/bmson/assistant/pull/968), [A16 weather](https://github.com/bmson/assistant/pull/945), [A17 urgent SMS](https://github.com/bmson/assistant/pull/950), [H4 canaries](https://github.com/bmson/assistant/pull/966).
 
+The B2 iPhone preview uses the connected personal Google account. It accepts Household, School, Activity and Holidays detail choices for calendars owned by that account and work free/busy choices for readable sources. Unclassified and ignored calendars contribute neither events nor busy times to this preview. Spouse consent, other categories, on-call import and the owner’s full roster are open. The choices have their own record on each store so the existing connection payload stays readable by earlier OAuth code.
+
+The B2 reader bridge preserves newer saved purpose values on both stores. A reader that lacks the purpose excludes that calendar before fetching details, reports incomplete coverage, and refuses edits to the affected setup. Use the reader bridge or newer readers when rolling back after new purposes are saved.
+
+Creating School, Activity or Holidays requires `GOOGLE_HOUSEHOLD_EXTENDED_PURPOSES_ENABLED=true` and a version 2 phone request. Version 2 clients can read and remove existing choices with the flag off. A self-hosted production operator must also set `GOOGLE_HOUSEHOLD_EXTENDED_PURPOSES_COMPATIBILITY_CONFIRMED=true` after recording the qualification below. Both settings default to false. Set them in the web process environment. The confirmation records the operator’s qualification of that installation.
+
+Record the exact image digests of every reachable reader and approved rollback target, including directly reachable revisions and any services or jobs that use the Calendar connection. Qualify them on the installed storage driver and schema with all three purposes saved. Use the reader bridge or a newer compatible build as the rollback target. Rehearse backup and restore into an isolated installation with compatible tooling, then reopen the same saved choices. Keep PostgreSQL migration 0143 applied when rolling back the binary. Firestore schema version 1 alone does not establish reader compatibility. A pre-B2 OAuth runtime can refresh credentials without touching the separate choices record. A disconnect or reconnect through that runtime can leave the record attached to the previous connection, where the picker will no longer use it.
+
+Keep the flag off while replacing or draining incompatible readers. Before rolling back, close write admission, drain in-flight requests, and restore only qualified images. Turning the flag off does not erase choices or suppress their preview. Clear the compatibility setting when changing the qualified images, rollback targets, or recovery tooling and requalify before enabling again.
+
 The Phase 0 gate requires seven actual days of evidence covering daily briefing delivery, chat isolation, cost holds under 25% of the daily cap, extraction on days with eligible mail, and zero texts for routine replies. Record owner and household opt-ins before using their optional sources or delivery channels.
 
-H1 covers five of 28 synthetic scenarios on PostgreSQL and Firestore. The seven on-time replay deliveries per driver include both D7 bill reminders. Production recall remains unmeasured. [H1 replay](https://github.com/bmson/assistant/pull/972), [D7 bill timing](https://github.com/bmson/assistant/pull/974), [scorecard and coverage](golden-signals.md#running-the-replay).
+The local H1 replay at `2dda415724793cb713f7489baabbcd8fea8fd400` covered six of 28 synthetic scenarios on both PostgreSQL and Firestore. Five passed, and S08 recorded a missing revised-date stack item. Each driver measured 7/8 recall, 7/7 precision, and zero quiet violations. The remaining 22 scenarios are unimplemented. Production recall remains unmeasured. [H1 replay](https://github.com/bmson/assistant/pull/972), [D7 bill timing](https://github.com/bmson/assistant/pull/974), [scorecard and coverage](golden-signals.md#running-the-replay).
 
 ## Status board
 
@@ -64,10 +74,10 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | A1  | Reconcile cost holds; holds scoped to their period                     | 0     | L    | —          | in review (settlement and period-specific Costs warning)      |
 | A2  | Wake parked work when caps change; honest parked notice                | 0     | M    | —          | in review (cap-change wake and recorded spend/holds notice)   |
 | A3  | Outage watchdog and "while I was away" digest                          | 0     | M    | H4         | in review (outage alert and recovery by source receipt time)  |
-| A4  | Stop mirroring secondary-chat replies into the primary chat            | 0     | M    | —          | in review (private answer-ready push)                         |
+| A4  | Stop mirroring secondary-chat replies into the primary chat            | 0     | M    | —          | in review (private push and Firestore Notifications)          |
 | A5  | Checklist dedupe ignores trailing punctuation                          | 0     | S    | —          | in review                                                     |
 | A6  | Guard against promises without a tool call                             | 2     | M    | —          | in review (cancel and delete receipt checks)                  |
-| A7  | Self-repair cadence respects its daily limit                           | 0     | S    | —          | in review                                                     |
+| A7  | Self-repair cadence respects its daily limit                           | 0     | S    | —          | in review (keep follow-ups due at the daily dispatch limit)   |
 | A8  | Truthful "Needs you" count; archive needs_attention in Firestore       | 1     | M    | —          | in review (consistent counts and attention archival)          |
 | A9  | Firestore parity for every route the phone calls                       | 1     | M    | —          | in review (native route and method checks)                    |
 | A10 | Retire `morning-brief` in Firestore                                    | 0     | S    | —          | in review                                                     |
@@ -76,28 +86,28 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | A13 | Owner time zone in every card                                          | 0     | S    | —          | in review (owner time in calendar, briefing and Pulse cards)  |
 | A14 | Brief calendar answers                                                 | 1     | M    | —          | in review (compact agenda and calendar recovery)              |
 | A15 | Each turn answers its own message                                      | 0     | M    | —          | in review (originating turns and independent read requests)   |
-| A16 | Weather plausibility                                                   | 0     | S    | —          | in review (hourly snow corroboration)                         |
+| A16 | Weather plausibility                                                   | 0     | S    | —          | in review (daily, current and hourly snow evidence)           |
 | A17 | Texts only for urgent items                                            | 0     | S    | —          | in review (urgent SMS quota and retry checks)                 |
 | B1  | Calendar connection health and warning                                 | 1     | S    | —          | open                                                          |
-| B2  | Household calendar setup and classification                            | 1     | M    | B1         | open                                                          |
+| B2  | Household calendar setup and classification                            | 1     | M    | B1         | Household, Work, School, Activity, Holidays and Ignore        |
 | B3  | Reliable iPhone calendar snapshots                                     | 1     | M    | —          | open                                                          |
 | B4  | iPhone Contacts import (opt-in)                                        | 4     | M    | C4         | open                                                          |
-| B5  | Places and home-place weather fallback                                 | 1     | M    | —          | open                                                          |
+| B5  | Places and home-place weather fallback                                 | 1     | M    | —          | in progress (Home and Saved places local)                     |
 | B6  | Weather at each outdoor event's place and time                         | 1     | S    | B5         | open                                                          |
 | B7  | News profile and feeds; public reads without approval                  | 4     | M    | —          | open                                                          |
 | B8  | HealthKit sleep and activity (opt-in)                                  | 4     | L    | G2         | open                                                          |
 | B9  | Mail coverage and ingest health                                        | 1     | M    | A11        | open                                                          |
-| C1  | Typed `signals` store                                                  | 2     | L    | —          | open                                                          |
+| C1  | Typed `signals` store                                                  | 2     | L    | —          | invoice/payment contract in review                            |
 | C2  | Email taxonomy v2 and extractors                                       | 2     | L    | A11, C1    | in review (#910, plus authenticated practice-change evidence) |
 | C3  | Close obligations by evidence                                          | 2     | M    | C1, C2     | open                                                          |
-| C4  | People cleanup                                                         | 1     | M    | —          | open                                                          |
+| C4  | People cleanup                                                         | 1     | M    | —          | in review (chat and extraction identity safeguards)           |
 | C5  | Rebuild occasions                                                      | 1     | M    | C4         | open (#910: only confirmed occasions surface)                 |
 | C6  | Household model and who-an-event-is-for                                | 2     | L    | B2         | open                                                          |
 | C7  | Time-off and coverage model                                            | 2     | M    | C6         | open                                                          |
 | C8  | Relationship cadence                                                   | 4     | M    | C4         | open                                                          |
 | D1  | Moment framework v2 (scoring, horizons, lead policy)                   | 3     | M    | C1         | open                                                          |
 | D2  | 14-day change detection and change digest                              | 3     | M    | D1         | open                                                          |
-| D3  | Conflict proposals                                                     | 3     | L    | C6, D1     | open                                                          |
+| D3  | Conflict proposals                                                     | 3     | L    | C6, D1     | dormant schema-146 foundation in local review                 |
 | D4  | Leave-by with live traffic                                             | 3     | M    | B5, D1     | open                                                          |
 | D5  | Weather impact on outdoor events                                       | 3     | M    | B6, D1     | open                                                          |
 | D6  | Occasions and gifts                                                    | 3     | M    | C5, D1     | open                                                          |
@@ -114,22 +124,22 @@ Status values: `open`, `in progress`, `in review`, `done`. Size: S ≤ 1 day, M 
 | E3  | Weekly review and monthly renewals                                     | 5     | S    | E1         | open                                                          |
 | E4  | Card actions                                                           | 3     | M    | —          | open                                                          |
 | E5  | Proactive settings and Noticing health card on iOS                     | 3     | M    | H4         | in progress (source and producer health on the phone)         |
-| E6  | Internal notices out of the owner's chats                              | 3     | S    | A4         | open                                                          |
+| E6  | Internal notices out of the owner's chats                              | 3     | S    | A4         | in progress (Activity diagnostics and Calendar owner notices) |
 | E7  | Per-person and per-day views                                           | 4     | M    | C6         | open                                                          |
 | E8  | Actionable push notifications                                          | 4     | M    | E4         | open                                                          |
 | E9  | More shows only meaningful automations                                 | 3     | S    | A10        | in review (native Automations list)                           |
-| F1  | Tools: `memory.forget`, `contacts.update`, `occasions.update`/`delete` | 2     | M    | —          | open                                                          |
+| F1  | Tools: `memory.forget`, `contacts.update`, `occasions.update`/`delete` | 2     | M    | —          | open (recoverable owner-chat occasion update and delete)      |
 | F2  | Routing: topic watches, digests, cancel and delete paths               | 2     | M    | —          | in progress (digest lifecycle)                                |
 | F3  | Reply integrity                                                        | 2     | M    | A4         | open                                                          |
 | F4  | Dictated email bodies stay verbatim                                    | 2     | S    | —          | open                                                          |
 | F5  | Follow-up context and spoken register                                  | 5     | M    | A15        | open                                                          |
 | F6  | Model evaluation for proactive jobs                                    | 4     | M    | H1         | open                                                          |
 | F7  | Relative dates in every calendar and mail path                         | 2     | S    | —          | in review (spelled day and week intervals)                    |
-| G1  | Sensitive-topic filter                                                 | 4     | M    | —          | open                                                          |
+| G1  | Sensitive-topic filter                                                 | 4     | M    | —          | in review (booking lookup and briefing candidate)             |
 | G2  | Health data minimization                                               | 4     | M    | —          | open                                                          |
 | G3  | Permissions live in policy, not memory                                 | 5     | S    | —          | open                                                          |
 | G4  | Household consent and visibility                                       | 5     | S    | B2         | open                                                          |
-| H1  | Golden-signal benchmark harness                                        | 3     | L    | —          | in progress (S13, S14, S16, S17, S24 on both drivers)         |
+| H1  | Golden-signal benchmark harness                                        | 3     | L    | —          | in progress (6 of 28 measured on both drivers)                |
 | H2  | Weekly missed-signal audit                                             | 5     | M    | H1         | open                                                          |
 | H3  | Proactive telemetry                                                    | 5     | M    | —          | open                                                          |
-| H4  | Daily canary                                                           | 0     | S    | —          | in review (source checks and one daily health alert)          |
+| H4  | Daily canary                                                           | 0     | S    | —          | in review (25% alert and overall iPhone health status)        |

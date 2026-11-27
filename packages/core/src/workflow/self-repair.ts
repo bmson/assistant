@@ -6,7 +6,7 @@ import type {
   RepairReport,
   SelfRepairRepository,
 } from '@assistant/persistence';
-import { repairOutcome, repairPathBlocked } from '@assistant/persistence';
+import { PROTECTED_REPAIR_TARGET, repairOutcome, repairPathBlocked } from '@assistant/persistence';
 import { z } from 'zod';
 import { readAuditInvestigation, scrubAudit } from '../audit-investigation.js';
 import {
@@ -536,7 +536,7 @@ export async function runRepairCycle(
         'blocked',
         {
           ...data,
-          lastError: 'The fix targets protected code. It requires a separate owner-led change.',
+          lastError: PROTECTED_REPAIR_TARGET,
         },
         now,
       );

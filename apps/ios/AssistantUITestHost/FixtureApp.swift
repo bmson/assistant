@@ -16,7 +16,9 @@ private struct FixtureArguments {
             guard allowed.contains(key), values[key] == nil else { return nil }
             values[key] = args[index + 1]
         }
-        guard let scene = values["--fixture-case"], ["approvals", "proactive"].contains(scene),
+        let scenes = ["approvals", "proactive", "household-calendar",
+                      "noticing-healthy", "noticing-attention", "noticing-unavailable"]
+        guard let scene = values["--fixture-case"], scenes.contains(scene),
               let theme = values["--fixture-theme"], ["light", "dark"].contains(theme),
               let text = values["--fixture-text-size"], ["default", "AX1", "AX5"].contains(text),
               let nonce = values["--fixture-nonce"],
@@ -65,6 +67,11 @@ private struct FixtureRoot: View {
                 if arguments.scene == "approvals", let model {
                     NavigationStack { ApprovalsView().environment(model) }
                         .accessibilityIdentifier("fixture.surface.approvals")
+                } else if arguments.scene == "household-calendar", let model {
+                    NavigationStack { GoogleCalendarConnectionView() }
+                        .environment(model)
+                } else if arguments.scene.hasPrefix("noticing-"), let model {
+                    NavigationStack { NoticingHealthView().environment(model) }
                 } else {
                     ScrollView {
                         ProactiveAlertContent(category: "calendar", urgency: "for_your_attention",
@@ -105,7 +112,11 @@ private struct FixtureRoot: View {
                 activity: .init(items: [], archivedCount: 0), goals: .init(items: [], archivedCount: 0),
                 approvals: .init(pending: [pending], resolved: []),
                 documents: .init(documents: [], stats: .init(total: 0, ready: 0, pending: 0, chunks: 0), primaryConversationId: "synthetic-main"))
-            FixtureTransport.state.install(try JSONEncoder().encode(overview))
+            FixtureTransport.state.install(
+                try JSONEncoder().encode(overview),
+                householdCalendar: arguments.scene == "household-calendar",
+                noticing: try noticingResponse()
+            )
             let configuration = URLSessionConfiguration.ephemeral
             configuration.protocolClasses = [FixtureTransport.self]
             configuration.urlCache = nil; configuration.httpCookieStorage = nil
@@ -122,12 +133,30 @@ private struct FixtureRoot: View {
                     recordStore: FixtureCalendarRecords(), installationID: "synthetic-installation"),
                 captureCurrentPlace: { nil },
                 cardFormMobileSessionFactory: { _, _ in throw APIError.invalidResponse })
-            guard await model.refreshOverview(reportFailure: false),
-                  model.pendingApprovalCount == 1, registrations == 1,
-                  FixtureTransport.state.violations == 0 else { throw APIError.invalidResponse }
+            if arguments.scene == "household-calendar" {
+                await model.refreshAll(reportFailure: false)
+                guard model.bootstrap?.identity.id == "synthetic-owner" else { throw APIError.invalidResponse }
+            } else {
+                guard await model.refreshOverview(reportFailure: false),
+                      model.pendingApprovalCount == 1, registrations == 1 else { throw APIError.invalidResponse }
+            }
+            guard FixtureTransport.state.violations == 0 else { throw APIError.invalidResponse }
             self.model = model
             ready = true
         } catch { failed = true }
+    }
+
+    private func noticingResponse() throws -> Data? {
+        guard arguments.scene.hasPrefix("noticing-") else { return nil }
+        let needsAttention = arguments.scene == "noticing-attention"
+        var fields: [String: Any] = [
+            "mailReceived7d": 0, "mailScored7d": 0, "mailProcessed7d": 0, "mailPendingOver6h7d": 0,
+            "momentsDelivered24h": 0, "pingsHeld24h": 0, "pushDevices": 0,
+            "dailyBudgetHolds": needsAttention ? "at_threshold" : "within_limit",
+            "warnings": needsAttention ? ["Pending cost estimates hold exactly 25% of today’s budget."] : []
+        ]
+        if arguments.scene != "noticing-unavailable" { fields["healthy"] = !needsAttention }
+        return try JSONSerialization.data(withJSONObject: fields)
     }
 }
 #else

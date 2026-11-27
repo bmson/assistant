@@ -14,6 +14,7 @@ import {
   requestedBillingAuditMonths,
   resolveBillingAuditScope,
 } from './billing-audit.js';
+import { bookingDisclosure } from './booking-disclosure.js';
 import {
   type CalendarEventAnalysisRequest,
   parseCalendarWeekdayCount,
@@ -2516,6 +2517,24 @@ function detectPersonalReadRequestInternal(
       return request;
     }
   }
+  const namedHotel = bookingDisclosure(latest)
+    ? /\b(?:read|open|find|check)\s+(?:the\s+)?([\p{L}\p{N}'’ -]{1,72}\s+hotel)\s+(?:(?:booking|reservation)\s+)?confirmation\s+(?:e-?mail|message|thread)\b/iu
+        .exec(latest)?.[1]
+        ?.trim()
+    : undefined;
+  if (
+    namedHotel &&
+    !emailReadProhibited &&
+    !READ_THEN_MUTATION.test(readThenMutationText(latest))
+  ) {
+    return {
+      kind: 'email',
+      queryTerms: [namedHotel],
+      firstToolName: 'gmail.search',
+      requiresThreadRead: true,
+      mailQuery: `"${namedHotel}" {booking reservation confirmation}`,
+    };
+  }
   // A saved card copied from a personally requested mailbox reservation is
   // composed by the finalizer after these reads. It is not a separate external
   // mutation, so enforcing its source reads must not turn it into a tool-less
@@ -3036,7 +3055,9 @@ function detectPersonalReadRequestInternal(
     requiresThreadRead:
       kind === 'calendar_email' ||
       (kind === 'email' &&
-        (verification || /\b(?:when|where|what time|details?|what does|what did)\b/i.test(latest))),
+        (verification ||
+          bookingDisclosure(latest)?.depositRequested === true ||
+          /\b(?:when|where|what time|details?|what does|what did)\b/i.test(latest))),
     ...(calendarBriefing ? { includeCalendarBriefing: true } : {}),
     ...(compactCalendarBriefing ? { compactCalendarBriefing: true } : {}),
     ...(includeCalendarLocations ? { includeCalendarLocations: true } : {}),

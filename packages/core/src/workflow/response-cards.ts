@@ -702,6 +702,7 @@ export function weatherResponseCards(ambient?: string): ResponseCard[] {
     humidity,
   ] = weather;
   const location =
+    /^Saved home for weather: (.+)$/m.exec(ambient)?.[1]?.trim() ||
     /Owner's current location:\s*(?:near\s+)?([^,(\n.]+)/i.exec(ambient)?.[1]?.trim() ||
     'Right now';
   // "Coming days: Tue 16–23°C, partly cloudy; Wed ..." becomes one

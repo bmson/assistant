@@ -8,6 +8,15 @@ import {
 } from '../model-router/audit-graders.js';
 import type { PublicActivityScopeData } from './active-read-intent.js';
 import { billingAuditProjection, renderBillingAudit } from './billing-audit.js';
+import {
+  bookingDepositFacts,
+  bookingEvidence,
+  bookingHotelProperty,
+  bookingMailSubject,
+  bookingMailTitle,
+  bookingTotalFacts,
+  type VerifiedHotelTotal,
+} from './booking-disclosure.js';
 import type { BriefingCalendarEvent } from './briefing.js';
 import { calendarEventAnalysisResponse } from './calendar-event-analysis.js';
 import {
@@ -47,6 +56,7 @@ import {
   validMemoryReadSelection,
 } from './memory-read-answer.js';
 import { guardMutationReply } from './mutation-receipt.js';
+import { occasionCorrectionReply } from './occasion-correction.js';
 import { personCalendarResponse } from './person-calendar.js';
 import { matchesHistoricalMemorySearch, type PersonalReadRequest } from './read-intent.js';
 import { effectiveReminders } from './reminder-state.js';
@@ -1395,6 +1405,97 @@ function matchingGmailThreadRows(
       record(row.result)?.complete === true
     );
   });
+}
+
+/** Show one explicitly requested deposit only from one fully read booking thread. */
+export function verifiedBookingDeposit(
+  request: PersonalReadRequest,
+  evidence: ActionEvidence[],
+): string | undefined {
+  if (request.scopeIssue || request.temporalIssue || request.kind === 'calendar') return undefined;
+  const current = currentSuccessfulEvidence(evidence);
+  const searches = matchingGmailSearchRows(request, current);
+  if (!gmailMetadataCoverageComplete(searches)) return undefined;
+
+  const candidates = new Set(
+    searches
+      .flatMap((row) => resultItems(row, 'results'))
+      .map((item) => stringField(item, 'threadId')),
+  );
+  if (candidates.size !== 1) return undefined;
+  const [threadId] = candidates;
+  if (!threadId || !/^[A-Za-z0-9_-]+$/.test(threadId)) return undefined;
+  const facts = new Set(
+    matchingGmailThreadRows(searches, current)
+      .flatMap((row) => resultItems(row, 'messages'))
+      .filter((message) => {
+        const subject = bookingMailSubject(stringField(message, 'subject')).toLowerCase();
+        return (
+          bookingMailTitle(subject) &&
+          request.queryTerms.length > 0 &&
+          request.queryTerms.every((term) => subject.includes(term.toLowerCase()))
+        );
+      })
+      .flatMap((message) => bookingDepositFacts(rawStringField(message, 'text')))
+      .map((fact) => fact.trim().replace(/[!.]$/, '')),
+  );
+  if (facts.size !== 1) return undefined;
+  return `${[...facts][0]}. [Booking email](https://mail.google.com/mail/u/0/#all/${threadId})`;
+}
+
+/** A total is usable only from one complete, current confirmation selected by the read. */
+export function verifiedHotelBookingTotal(
+  request: PersonalReadRequest,
+  evidence: ActionEvidence[],
+): VerifiedHotelTotal | undefined {
+  if (request.scopeIssue || request.temporalIssue || request.kind === 'calendar') return undefined;
+  const current = currentSuccessfulEvidence(evidence);
+  const searches = matchingGmailSearchRows(request, current);
+  if (!gmailMetadataCoverageComplete(searches)) return undefined;
+  const threadIds = new Set(
+    searches
+      .flatMap((row) => resultItems(row, 'results'))
+      .map((hit) => stringField(hit, 'threadId'))
+      .filter(Boolean),
+  );
+  const [threadId] = threadIds;
+  if (threadIds.size !== 1 || !threadId || !/^[A-Za-z0-9_-]+$/.test(threadId)) return undefined;
+
+  const reads = matchingGmailThreadRows(searches, current).filter((row) => {
+    const args = record(row.args);
+    const result = record(row.result);
+    return (
+      row.fromCurrentTask === true &&
+      !args?.startMessageIndex &&
+      !args?.startMessageOffset &&
+      result?.hasMore !== true &&
+      result?.truncated !== true
+    );
+  });
+  if (reads.length !== 1) return undefined;
+  const [read] = reads;
+  if (!read) return undefined;
+  const messages = resultItems(read, 'messages');
+  if (messages.length !== 1 || messages.some((message) => message.truncated === true))
+    return undefined;
+  const projected = resultItems(bookingEvidence(read), 'messages')[0];
+  const message = messages[0];
+  if (!projected || !message) return undefined;
+  const subject = stringField(projected, 'subject');
+  const property = bookingHotelProperty(subject);
+  if (!property || !/\b(?:reservation|booking|confirmation)\b/i.test(subject)) return undefined;
+  const logistics = rawStringField(projected, 'text');
+  if (
+    !logistics
+      .split('\n')
+      .some((line) => bookingHotelProperty(line)?.toLowerCase() === property.toLowerCase()) ||
+    !/\bcheck[ -]?in\b/i.test(logistics)
+  )
+    return undefined;
+  const values = new Set(bookingTotalFacts(rawStringField(message, 'text')));
+  if (values.size !== 1) return undefined;
+  const [value] = values;
+  return value ? { threadId, value } : undefined;
 }
 
 function gmailMetadataCoverageComplete(searches: ActionEvidence[]): boolean {
@@ -5075,6 +5176,13 @@ export function enforceResponseContract(
   evidence: ActionEvidence[],
   opts?: ResponseContractOptions,
 ): ResponseContractResult {
+  const occasionCorrection = occasionCorrectionReply(opts?.admittedMutationText ?? '', evidence);
+  if (occasionCorrection)
+    return {
+      text: occasionCorrection.text,
+      blocked: !occasionCorrection.confirmed,
+      unsupported: [],
+    };
   text = stripBackgroundNoticeEcho(text);
   if (opts?.admittedMutationText !== undefined && !opts.publicActivity) {
     const checked = guardMutationReply(

@@ -1,8 +1,16 @@
-import { type AmbientSnapshotRow, ambientSnapshots, type Db } from '@assistant/db';
+import {
+  type AmbientSnapshotRow,
+  ambientSnapshots,
+  type Db,
+  lockPostgresPrivacyObservationFence,
+  readPostgresHomeWeather,
+} from '@assistant/db';
 import {
   type AmbientSnapshotRepository,
+  type HomeWeatherSettings,
   isOwnerContextRepository,
   type OwnerContextRepository,
+  type OwnerLocationPing,
 } from '@assistant/persistence';
 import { eq } from 'drizzle-orm';
 import { loadConfig } from '../config.js';
@@ -69,6 +77,10 @@ const SNOW_CODES = new Set([71, 73, 75, 77, 85, 86]);
 // Above this threshold the provider's snow code needs corroboration beyond
 // the near-surface evidence available here. A conflict does not imply rain.
 const MAX_SNOW_CORROBORATION_TEMP_C = 3;
+
+function minimumRulesOutSnow(lowC: number | undefined): boolean {
+  return typeof lowC === 'number' && Number.isFinite(lowC) && lowC > MAX_SNOW_CORROBORATION_TEMP_C;
+}
 
 function condition(code: number, snowSupported: boolean) {
   return SNOW_CODES.has(code) && !snowSupported
@@ -137,6 +149,7 @@ export interface WeatherNow {
   forecast: WeatherDay[];
   /** IANA zone the local times above are in (Open-Meteo `timezone`). */
   timezone?: string;
+  todayDate?: string;
   /** Full hour rows are emitted only when requested. */
   hourly?: WeatherHour[];
 }
@@ -173,7 +186,11 @@ interface HourlyWeather {
   wind_speed_10m?: number[];
 }
 
-function parseHourly(hourly?: HourlyWeather, units?: Record<string, string>): WeatherHour[] {
+function parseHourly(
+  hourly: HourlyWeather | undefined,
+  units: Record<string, string> | undefined,
+  datesWithWarmMinimum: ReadonlySet<string>,
+): WeatherHour[] {
   const toCelsius = (value: number, unit?: string) =>
     unit === '°F' ? ((value - 32) * 5) / 9 : value;
   const tempUnit = units?.temperature_2m;
@@ -200,7 +217,12 @@ function parseHourly(hourly?: HourlyWeather, units?: Record<string, string>): We
         ...(typeof feels === 'number' && Number.isFinite(feels)
           ? { feelsLikeC: Math.round(toCelsius(feels, units?.apparent_temperature)) }
           : {}),
-        ...condition(code, knownTemperatureUnit && tempC <= MAX_SNOW_CORROBORATION_TEMP_C),
+        ...condition(
+          code,
+          knownTemperatureUnit &&
+            tempC <= MAX_SNOW_CORROBORATION_TEMP_C &&
+            !datesWithWarmMinimum.has(parsed[1]),
+        ),
         precipProbability: hourly?.precipitation_probability?.[index] ?? 0,
         windKmh: Math.round(hourly?.wind_speed_10m?.[index] ?? 0),
       };
@@ -255,7 +277,14 @@ export async function fetchWeather(
   const cur = data.current;
   const day = data.daily;
   if (!cur || typeof cur.temperature_2m !== 'number') return null;
-  const hours = parseHourly(data.hourly, data.hourly_units);
+  // A warm daily minimum contradicts any same-day snow hour. Compare the
+  // provider's Celsius values before rounding either temperature for display.
+  const datesWithWarmMinimum = new Set<string>();
+  for (const [index, date] of (day?.time ?? []).entries()) {
+    const lowC = day?.temperature_2m_min?.[index];
+    if (minimumRulesOutSnow(lowC)) datesWithWarmMinimum.add(date);
+  }
+  const hours = parseHourly(data.hourly, data.hourly_units, datesWithWarmMinimum);
   const dailyCondition = (code: number, date: string | undefined, lowC: number | undefined) =>
     condition(
       code,
@@ -289,7 +318,18 @@ export async function fetchWeather(
   const currentCondition =
     cur.weather_code == null
       ? today
-      : condition(cur.weather_code, cur.temperature_2m <= MAX_SNOW_CORROBORATION_TEMP_C);
+      : condition(
+          cur.weather_code,
+          cur.temperature_2m <= MAX_SNOW_CORROBORATION_TEMP_C &&
+            !minimumRulesOutSnow(day?.temperature_2m_min?.[0]),
+        );
+  if (
+    [currentCondition, today, ...forecast, ...hours].some(
+      (reading) => reading.description === UNCERTAIN_PRECIPITATION,
+    )
+  ) {
+    console.warn('Weather provider snow code lacked supporting temperature evidence');
+  }
   return {
     tempC: Math.round(cur.temperature_2m),
     ...currentCondition,
@@ -307,6 +347,7 @@ export async function fetchWeather(
       : {}),
     forecast,
     ...(typeof data.timezone === 'string' ? { timezone: data.timezone } : {}),
+    ...(typeof day?.time?.[0] === 'string' ? { todayDate: day.time[0] } : {}),
     ...(opts.hourly ? { hourly: hours } : {}),
   };
 }
@@ -513,6 +554,57 @@ function persistableWeather(weather: WeatherNow): Omit<WeatherNow, 'hourly'> {
   return rest;
 }
 
+export async function getEnabledHomeWeather(
+  store: Db | OwnerContextRepository,
+  agentId: string,
+): Promise<HomeWeatherSettings | null> {
+  const home = isOwnerContextRepository(store)
+    ? await store.getHomeWeather?.(agentId)
+    : await readPostgresHomeWeather(store, agentId);
+  return home?.enabled ? home : null;
+}
+
+export interface AmbientWeatherSources {
+  location?: { capturedAt?: string };
+  home?: { revision?: string };
+  weather?: { fetchedAt?: string; timezone?: string; todayDate?: string } | null;
+}
+
+function isLocalWeatherToday(
+  weather: { timezone?: string; todayDate?: string } | null | undefined,
+  now: Date,
+): boolean {
+  if (!weather?.timezone || !weather.todayDate) return false;
+  try {
+    const localDate = new Intl.DateTimeFormat('sv-SE', {
+      timeZone: weather.timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(now);
+    return weather.todayDate === localDate;
+  } catch {
+    return false;
+  }
+}
+
+/** A saved Home may be used only while the exact owner's choice still authorizes it. */
+export function matchesAmbientSource(
+  sources: AmbientWeatherSources | null | undefined,
+  ping: OwnerLocationPing | null,
+  home: HomeWeatherSettings | null,
+): boolean {
+  if (ping) return sources?.location?.capturedAt === ping.capturedAt.toISOString();
+  return Boolean(home && sources?.home?.revision === home.revision);
+}
+
+export function ambientWeatherOnLocalDate(
+  sources: AmbientWeatherSources | null | undefined,
+  now: Date,
+): boolean {
+  return !sources?.home || isLocalWeatherToday(sources.weather, now);
+}
+
 export interface AmbientSnapshotResult {
   computed: boolean;
   hasLocation: boolean;
@@ -522,8 +614,8 @@ export interface AmbientSnapshotResult {
 
 /**
  * Code job `ambient.refresh`: compile the current ambient block and cache it.
- * No location → the snapshot is cleared (nothing to serve) rather than kept
- * stale. Weather failures degrade to a location-only block (never old weather).
+ * A usable ping takes precedence over an owner-enabled Home. With neither source,
+ * clear the snapshot. Weather failures never reuse earlier readings.
  */
 export async function refreshAmbientSnapshot(
   deps: {
@@ -540,16 +632,12 @@ export async function refreshAmbientSnapshot(
 
   return withSpan('ambient.refresh', {}, async () => {
     await deps.heartbeat?.();
+    const context = portable?.ownerContext ?? db;
     const retentionDays = loadConfig().LOCATION_RETENTION_DAYS;
-    const ping = await latestLocation(
-      portable?.ownerContext ?? db,
-      opts.agentId,
-      retentionDays,
-      undefined,
-      now,
-    );
-    if (!ping) {
-      // No fresh location — clear any stale snapshot so nothing outdated is served.
+    const ping = await latestLocation(context, opts.agentId, retentionDays, undefined, now);
+    const home = ping ? null : await getEnabledHomeWeather(context, opts.agentId);
+    const source = ping ?? home;
+    if (!source) {
       if (portable) await portable.snapshots.clear(opts.agentId);
       else await db.delete(ambientSnapshots).where(eq(ambientSnapshots.agentId, opts.agentId));
       return { computed: false, hasLocation: false, hasWeather: false, flags: {} };
@@ -557,15 +645,16 @@ export async function refreshAmbientSnapshot(
 
     let weather: WeatherNow | null = null;
     try {
-      weather = await fetchWeather(Number(ping.lat), Number(ping.lng), deps.fetchImpl);
-    } catch (err) {
-      console.error('ambient: weather fetch failed — location-only block', err);
+      weather = await fetchWeather(Number(source.lat), Number(source.lng), deps.fetchImpl);
+      if (home && !isLocalWeatherToday(weather, now)) weather = null;
+    } catch {
+      console.error('ambient: weather fetch failed');
     }
     await deps.heartbeat?.();
 
     const precipName = weather?.dailyPrecipitationType === 'unspecified' ? 'precipitation' : 'rain';
     const flags: Record<string, boolean> = {
-      has_location: true,
+      has_location: Boolean(ping),
       has_weather: weather !== null,
       raining_now: weather ? isWet(weather.code) : false,
       raining_soon: weather
@@ -573,8 +662,12 @@ export async function refreshAmbientSnapshot(
         : false,
     };
 
-    const locationLine = formatLocationLine(ping, now) ?? '';
-    const lines = ['Right now (ambient context — transient, not a stored fact):', locationLine];
+    const lines = home
+      ? [`Saved home for weather: Home · ${home.city}`]
+      : [
+          'Right now (ambient context — transient, not a stored fact):',
+          ping && formatLocationLine(ping, now),
+        ];
     if (weather) {
       lines.push(
         `Weather there: ${weather.description}, ${weather.tempC}°C (today ${weather.lowC}–${weather.highC}°C, ` +
@@ -603,40 +696,38 @@ export async function refreshAmbientSnapshot(
     }
     const block = lines.filter(Boolean).join('\n');
     const sources = {
-      location: { capturedAt: ping.capturedAt.toISOString(), label: ping.label },
+      ...(ping
+        ? { location: { capturedAt: ping.capturedAt.toISOString(), label: ping.label } }
+        : {}),
+      ...(home ? { home: { revision: home.revision } } : {}),
       weather: weather ? { ...persistableWeather(weather), fetchedAt: now.toISOString() } : null,
     };
+    const snapshot = { agentId: opts.agentId, block, flags, sources, computedAt: now };
     if (portable) {
-      await portable.snapshots.save({
-        agentId: opts.agentId,
-        block,
-        flags,
-        sources,
-        computedAt: now,
-      });
-      return { computed: true, hasLocation: true, hasWeather: weather !== null, flags };
+      await portable.snapshots.save(snapshot);
+    } else {
+      const save = (store: Pick<Db, 'insert'>) =>
+        store
+          .insert(ambientSnapshots)
+          .values(snapshot)
+          .onConflictDoUpdate({
+            target: ambientSnapshots.agentId,
+            set: { block, flags, sources, computedAt: now },
+          });
+      if (home) {
+        await db.transaction(async (tx) => {
+          await lockPostgresPrivacyObservationFence(tx, opts.agentId);
+          const current = await readPostgresHomeWeather(tx, opts.agentId);
+          if (!current?.enabled || current.revision !== home.revision)
+            throw new Error('Home weather settings changed during refresh');
+          await save(tx);
+        });
+      } else {
+        await save(db);
+      }
     }
 
-    await db
-      .insert(ambientSnapshots)
-      .values({
-        agentId: opts.agentId,
-        block,
-        flags,
-        sources,
-        computedAt: now,
-      })
-      .onConflictDoUpdate({
-        target: ambientSnapshots.agentId,
-        set: {
-          block,
-          flags,
-          sources,
-          computedAt: now,
-        },
-      });
-
-    return { computed: true, hasLocation: true, hasWeather: weather !== null, flags };
+    return { computed: true, hasLocation: Boolean(ping), hasWeather: weather !== null, flags };
   });
 }
 
@@ -668,14 +759,15 @@ export async function getAmbientBlock(
     undefined,
     now,
   );
-  if (!ping) return undefined;
-  const sources = snap?.sources as { location?: { capturedAt?: string } } | undefined;
+  const home = !ping && snap?.block ? await getEnabledHomeWeather(store, agentId) : null;
+  const sources = snap?.sources as AmbientWeatherSources | undefined;
   if (
     snap?.block &&
     now.getTime() >= snap.computedAt.getTime() &&
     now.getTime() - snap.computedAt.getTime() <= ttl &&
-    sources?.location?.capturedAt === ping.capturedAt.toISOString()
+    matchesAmbientSource(sources, ping, home)
   ) {
+    if (!ping) return ambientWeatherOnLocalDate(sources, now) ? snap.block : undefined;
     // Weather may remain cached, but the location's age must advance with time.
     return snap.block.replace(
       /^Owner's current location:.*$/m,
@@ -683,7 +775,7 @@ export async function getAmbientBlock(
     );
   }
   // Stale/absent snapshot: fall back to the freshest location on its own.
-  return formatLocationLine(ping, now);
+  return ping ? formatLocationLine(ping, now) : undefined;
 }
 
 /** The derived flags from the current snapshot (empty when none/stale). */

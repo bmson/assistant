@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type {
+  AppendActivityDiagnosticInput,
   ScheduledFollowUpInput,
   TaskLease,
   TaskOutcome,
@@ -7,10 +8,14 @@ import type {
   TaskWake,
 } from '@assistant/persistence';
 import {
+  activityDiagnosticDeduplicationKey,
+  activityRetriesExhaustedDiagnostic,
+  isActivityDiagnosticJob,
   missionTaskTerminalReport,
   newTaskRecord,
   normalizeTaskBudget,
   pulseCompletionFor,
+  recordTaskActivityDiagnostic,
   redactTerminalArrivalTask,
 } from '@assistant/persistence';
 import { and, desc, eq, inArray, isNull, lt, lte, notInArray, or, sql } from 'drizzle-orm';
@@ -388,9 +393,25 @@ export async function recordFailedAttempt(
         conversationId: tasks.conversationId,
         status: tasks.status,
         attempt: tasks.attempt,
+        queueGeneration: tasks.queueGeneration,
+        trust: tasks.trust,
+        trigger: tasks.trigger,
+        state: tasks.state,
       });
     if (!updated) return 'lost_lease';
     if (updated.status !== 'needs_attention') return 'retry';
+    if (isActivityDiagnosticJob(updated)) {
+      const diagnostic = activityRetriesExhaustedDiagnostic(updated.queueGeneration);
+      const state = recordTaskActivityDiagnostic(updated.state, diagnostic);
+      await tx
+        .update(tasks)
+        .set({
+          ...(state ? { state } : {}),
+          attentionNotifiedAt: sql`now()`,
+        })
+        .where(eq(tasks.id, updated.id));
+      return 'dead_letter';
+    }
 
     const isMission = updated.type === 'mission';
     const parent =
@@ -547,6 +568,45 @@ export async function findDueTasks(db: Db, limit = 10): Promise<TaskRow[]> {
     .limit(limit);
 }
 
+async function appendActivityDiagnostic(
+  db: Db,
+  input: AppendActivityDiagnosticInput,
+): Promise<boolean> {
+  return db.transaction(async (tx) => {
+    const [task] = await tx
+      .select()
+      .from(tasks)
+      .where(
+        and(
+          eq(tasks.id, input.taskId),
+          eq(tasks.agentId, input.agentId),
+          input.leaseToken
+            ? and(
+                eq(tasks.status, 'running'),
+                eq(tasks.leaseToken, input.leaseToken),
+                sql`${tasks.lockedUntil} > now()`,
+              )
+            : undefined,
+        ),
+      )
+      .for('update');
+    if (!task || !isActivityDiagnosticJob(task)) return false;
+    const state = recordTaskActivityDiagnostic(task.state, input.diagnostic);
+    if (!state) return true;
+    const name = activityDiagnosticDeduplicationKey(input.agentId, input.diagnostic.id);
+    if (name) {
+      const [inserted] = await tx
+        .insert(maintenanceCursors)
+        .values({ name, cursor: task.id })
+        .onConflictDoNothing({ target: maintenanceCursors.name })
+        .returning({ name: maintenanceCursors.name });
+      if (!inserted) return true;
+    }
+    await tx.update(tasks).set({ state }).where(eq(tasks.id, task.id));
+    return true;
+  });
+}
+
 export function createPostgresTaskRepository(db: Db): TaskRepository {
   return {
     ...createPostgresTaskLeaseRepository(db),
@@ -580,6 +640,7 @@ export function createPostgresTaskRepository(db: Db): TaskRepository {
     parkForBudget: (...args) => parkForBudget(db, ...args),
     sleepTask: (...args) => sleepTask(db, ...args),
     completeTask: (...args) => completeTask(db, ...args),
+    appendActivityDiagnostic: (input) => appendActivityDiagnostic(db, input),
     markTaskNeedsAttention: (...args) => markTaskNeedsAttention(db, ...args),
     parkForEvent: (...args) => parkForEvent(db, ...args),
     markAttentionNotified: (...args) => markAttentionNotified(db, ...args),

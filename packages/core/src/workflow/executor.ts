@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { TaskRow } from '@assistant/db';
 import { createPostgresExecutionPersistence } from '@assistant/db';
-import type { ExecutionContextRepository } from '@assistant/persistence';
+import { type ExecutionContextRepository, isActivityDiagnosticJob } from '@assistant/persistence';
 import type { ModelMessage } from 'ai';
 import { BudgetReservationError } from '../cost.js';
 import { isForwardedIngest } from '../email-provenance.js';
@@ -309,7 +309,7 @@ export async function executeTask(
           }
           const disposition = await recordFailedAttempt(persistence.tasks, task, String(err));
           if (disposition === 'lost_lease') return LOST_LEASE;
-          if (disposition === 'dead_letter') {
+          if (disposition === 'dead_letter' && !isActivityDiagnosticJob(task)) {
             // Retry budget exhausted: the task is now needs_attention and will not
             // self-resume. Every other terminal/park branch notifies the owner, so
             // this one must too — otherwise the request dies silently in its thread.

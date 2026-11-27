@@ -193,7 +193,7 @@ describe('offline bounded first-failure context diagnostics', () => {
     ['ACTIONS_ID_TOKEN_REQUEST_TOKEN', 'PRIVATE/token', 'ctx_oidc_request_token_shape'],
     ['ACTIONS_ID_TOKEN_REQUEST_TOKEN', undefined, 'ctx_oidc_request_token_shape'],
     ['ACTIONS_ID_TOKEN_REQUEST_TOKEN', 'x'.repeat(16385), 'ctx_oidc_request_token_shape'],
-    ['GH_TOKEN', 'PRIVATE.token', 'ctx_github_token_shape'],
+    ['GH_TOKEN', 'PRIVATE token', 'ctx_github_token_shape'],
     ['GH_TOKEN', undefined, 'ctx_github_token_shape'],
     ['GH_TOKEN', 'x'.repeat(4097), 'ctx_github_token_shape'],
   ];

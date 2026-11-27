@@ -60,6 +60,7 @@
     "./workflow/approval-policies": "./src/workflow/approvals.ts",
     "./workflow/approvals": "./src/workflow/approvals.ts",
     "./workflow/autonomy": "./src/workflow/autonomy.ts",
+    "./workflow/booking-disclosure": "./src/workflow/booking-disclosure.ts",
     "./workflow/dispatch": "./src/workflow/dispatch.ts",
     "./workflow/executor": "./src/workflow/executor.ts",
     "./workflow/improve": "./src/workflow/improve.ts",

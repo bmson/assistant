@@ -1,6 +1,6 @@
 import { ambientSnapshots, createDb, type Db, locationPings } from '@assistant/db';
 import { eq } from 'drizzle-orm';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { getAgent } from '../chat.js';
 import { weatherResponseCards } from '../workflow/response-cards.js';
 import {
@@ -311,9 +311,39 @@ describe('ambient — hourly forecast evidence', () => {
       hourly_units: { temperature_2m: '°C' },
       hourly: { time: ['2026-08-29T02:00'], temperature_2m: [-2], weather_code: [75] },
     });
-    expect((await fetchWeather(37, -122, impl))?.forecast[0]?.description).toBe(
-      'precipitation type uncertain',
-    );
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const weather = await fetchWeather(37, -122, impl, { hourly: true });
+      expect(weather?.forecast[0]?.description).toBe('precipitation type uncertain');
+      expect(weather?.hourly?.[0]).toMatchObject({
+        tempC: -2,
+        code: -1,
+        description: 'precipitation type uncertain',
+      });
+      expect(warn.mock.calls).toEqual([
+        ['Weather provider snow code lacked supporting temperature evidence'],
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it.each([71, 73, 75, 77, 85, 86])('checks the daily minimum for snow code %i', async (code) => {
+    for (const [minimum, expectedCode] of [
+      [3.1, -1],
+      [3, code],
+    ] as const) {
+      const { impl } = urlSpy({
+        ...DAILY_BODY,
+        current: { temperature_2m: -2, weather_code: code },
+        daily: { ...DAILY_BODY.daily, temperature_2m_min: [minimum, 9] },
+        hourly: { time: ['2026-08-28T02:00'], temperature_2m: [-2], weather_code: [code] },
+        hourly_units: { temperature_2m: '°C' },
+      });
+      const weather = await fetchWeather(37, -122, impl, { hourly: true });
+      expect(weather?.code).toBe(expectedCode);
+      expect(weather?.hourly?.[0]?.code).toBe(expectedCode);
+    }
   });
 
   it('keeps an unverified snow signal uncertain when no hourly block or units are returned', async () => {

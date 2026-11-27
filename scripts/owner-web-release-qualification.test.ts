@@ -39,7 +39,7 @@ function envFixture(): NodeJS.ProcessEnv {
     GCP_DEPLOY_SERVICE_ACCOUNT: 'deploy@bmson-assistant.iam.gserviceaccount.com',
     ACTIONS_ID_TOKEN_REQUEST_URL: 'https://fixed.actions.githubusercontent.com/token?api-version=2',
     ACTIONS_ID_TOKEN_REQUEST_TOKEN: 'PRIVATEISSUERTOKEN',
-    GH_TOKEN: 'PRIVATE_GITHUB_TOKEN',
+    GH_TOKEN: 'PRIVATE_TEST.segment-one.segment_two',
   };
 }
 const keys = generateKeyPairSync('rsa', { modulusLength: 2048 });
@@ -295,7 +295,8 @@ describe('offline complete probe wiring with only manifest verification mocked',
         u.hostname === 'token.actions.githubusercontent.com'
       )
         expect(auth).toBeNull();
-      if (u.hostname === 'api.github.com') expect(auth).toBe('Bearer PRIVATE_GITHUB_TOKEN');
+      if (u.hostname === 'api.github.com')
+        expect(auth).toBe('Bearer PRIVATE_TEST.segment-one.segment_two');
       if (u.hostname === 'run.googleapis.com') expect(auth).toBe('Bearer PRIVATENATIVE');
     }
     expect(JSON.stringify(report)).not.toContain('PRIVATE');

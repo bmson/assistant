@@ -1,10 +1,11 @@
 import { createHash } from 'node:crypto';
-import type { ActivityTaskRecord } from './task-activity.js';
+import type { ActivityTaskRecord, TaskActivityDiagnostic } from './task-activity.js';
 import { needsYouTaskStatuses } from './task-activity.js';
 
 export class TaskDiscoveryInputError extends Error {}
 
 export type TaskDiscoveryRow = Omit<ActivityTaskRecord, 'trigger'> & {
+  diagnostics?: TaskActivityDiagnostic[];
   estimatedCostOperationId?: string | null;
   createdAt: Date | null;
   conversationId: string | null;

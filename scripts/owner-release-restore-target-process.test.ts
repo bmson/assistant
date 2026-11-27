@@ -285,9 +285,14 @@ function runFixture(root: string) {
   );
 
   const stub = (name: string, text: string) => writeFileSync(from('scripts', name), text);
+  cpSync(
+    from('infra', 'gcp', 'api3-recovery-proof.mjs'),
+    from('infra', 'gcp', 'api3-recovery-proof.fixture-original.mjs'),
+  );
   writeFileSync(
     from('infra', 'gcp', 'api3-recovery-proof.mjs'),
     [
+      'export * from "./api3-recovery-proof.fixture-original.mjs";',
       `export const protectedRecoveryReview = () => (${JSON.stringify(candidate)});`,
       'export function readBoundedJSON() { throw Error("unexpected alternate selector stage"); }',
       'export function verifyPromotionManifest() { throw Error("unexpected alternate selector stage"); }',

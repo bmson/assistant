@@ -43,6 +43,8 @@ jobs:
     outputs:
       ios: ${{ steps.filter.outputs.ios }}
       native_controls: ${{ steps.filter.outputs.native_controls }}
+      calendar_smoke: ${{ steps.filter.outputs.calendar_smoke }}
+      noticing: ${{ steps.filter.outputs.noticing }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -62,8 +64,10 @@ jobs:
     needs: changes
     if: needs.changes.outputs.ios == 'true'
     runs-on: macos-latest
-    # Fixed aggregate of the existing ordinary/native phases, sharing one warm destination.
-    timeout-minutes: 80
+    # Each independent fixture smoke adds ten minutes to run, three to clean up and one to upload.
+    timeout-minutes: >-
+      ${{ needs.changes.outputs.calendar_smoke == 'true' && needs.changes.outputs.noticing == 'true' && 108 ||
+      (needs.changes.outputs.calendar_smoke == 'true' || needs.changes.outputs.noticing == 'true') && 94 || 80 }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
@@ -115,6 +119,7 @@ jobs:
       # the tests pass, not to produce a shippable artifact. Releases are signed
       # and uploaded from Xcode; see apps/ios/docs/shipping.md.
       - name: Build and test
+        id: app_tests
         timeout-minutes: 40
         env:
           DESTINATION_UDID: ${{ steps.simulator.outputs.udid }}
@@ -179,6 +184,71 @@ jobs:
         with:
           name: native-controls-capability-${{ github.sha }}
           path: ${{ steps.native_cleanup.outputs.upload }}
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Test household calendar choices
+        id: calendar_smoke
+        if: >-
+          ${{ !cancelled() && steps.app_tests.outcome == 'success' &&
+          needs.changes.outputs.calendar_smoke == 'true' &&
+          (steps.native_controls.outcome == 'skipped' || steps.native_cleanup.outcome == 'success') }}
+        timeout-minutes: 10
+        env:
+          DESTINATION_UDID: ${{ steps.simulator.outputs.udid }}
+          EXPECTED_HEAD: ${{ github.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 -c 'import os,time,pathlib; pathlib.Path(os.environ["RUNNER_TEMP"],"household-calendar-smoke-start").write_text(str(time.time()))'
+          python3 infra/ios-native-controls.py run-calendar
+
+      - name: Close household calendar fixture resources
+        id: calendar_cleanup
+        if: always() && steps.calendar_smoke.outcome != 'skipped' && steps.calendar_smoke.outcome != ''
+        timeout-minutes: 3
+        run: python3 infra/ios-native-controls.py cleanup-calendar
+
+      - name: Preserve household calendar smoke evidence
+        if: always() && steps.calendar_smoke.outcome != 'skipped' && steps.calendar_smoke.outcome != ''
+        timeout-minutes: 1
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
+        with:
+          name: ios-household-calendar-smoke-${{ github.sha }}
+          path: ${{ steps.calendar_cleanup.outputs.upload }}
+          retention-days: 14
+          if-no-files-found: error
+
+      # Reuse the warm destination after the qualification phase has released
+      # it. The smoke builds its own fixtures even if qualification was skipped.
+      - name: Test Noticing health states
+        id: noticing
+        if: >-
+          ${{ !cancelled() && steps.app_tests.outcome == 'success' &&
+          needs.changes.outputs.noticing == 'true' &&
+          (steps.native_controls.outcome == 'skipped' || steps.native_cleanup.outcome == 'success') &&
+          (steps.calendar_smoke.outcome == 'skipped' || steps.calendar_cleanup.outcome == 'success') }}
+        timeout-minutes: 10
+        env:
+          DESTINATION_UDID: ${{ steps.simulator.outputs.udid }}
+          EXPECTED_HEAD: ${{ github.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 -c 'import os,time,pathlib; pathlib.Path(os.environ["RUNNER_TEMP"],"noticing-smoke-start").write_text(str(time.time()))'
+          python3 infra/ios-native-controls.py run-noticing
+
+      - name: Close Noticing fixture resources
+        id: noticing_cleanup
+        if: always() && steps.noticing.outcome != 'skipped' && steps.noticing.outcome != ''
+        timeout-minutes: 3
+        run: python3 infra/ios-native-controls.py cleanup-noticing
+
+      - name: Preserve Noticing smoke evidence
+        if: always() && steps.noticing.outcome != 'skipped' && steps.noticing.outcome != ''
+        timeout-minutes: 1
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4
+        with:
+          name: ios-noticing-smoke-${{ github.sha }}
+          path: ${{ steps.noticing_cleanup.outputs.upload }}
           retention-days: 14
           if-no-files-found: error
 
