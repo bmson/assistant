@@ -48,11 +48,13 @@ export {
   postgresActiveGraphWhere,
 } from './graph-recall-repository.js';
 export { createPostgresHistoryRecallRepository } from './history-recall-repository.js';
+export { createPostgresHouseholdHandoffRepository } from './household-handoffs.js';
 export { assertPostgresInstallationOwner } from './installation-owner.js';
 export { createPostgresKnowledgeGraphSyncRepository } from './knowledge-graph-sync-repository.js';
 export { createPostgresLocationPingRepository } from './location-ping-repository.js';
 export * from './mcp-oauth-repository.js';
 export { createPostgresMemoryEmbeddingRefreshRepository } from './memory-embedding-refresh-repository.js';
+export { resolvePostgresMemoryPerson } from './memory-person.js';
 export { createPostgresMemorySupersedeRepository } from './memory-supersede-repository.js';
 export { createPostgresMemoryToolRepository } from './memory-tool-repository.js';
 export { createPostgresMessageRepository } from './message-repository.js';
@@ -69,8 +71,10 @@ export * from './owner-call-operation-repository.js';
 export { createPostgresOwnerCardCompilationRepository } from './owner-card-compilation-repository.js';
 export { lockPostgresOwnerChatAction } from './owner-chat-action-lock.js';
 export {
+  createPostgresHomeWeatherRepository,
   createPostgresOwnerContextRepository,
   listEligibleOwnerCommitments,
+  readPostgresHomeWeather,
 } from './owner-context-repository.js';
 export * from './owner-editor-graph.js';
 export * from './owner-editor-memory.js';
@@ -103,6 +107,7 @@ export { createPostgresRecallSurfacingRepository } from './recall-surfacing-repo
 export { createPostgresReminderRepository } from './reminder-repository.js';
 export * from './research-assignment-repository.js';
 export { assertPostgresRestoreRehearsalReadOnly } from './restore-readonly.js';
+export { createPostgresSavedPlacesRepository } from './saved-places.js';
 export { createPostgresScheduleRepository } from './schedule-repository.js';
 export * from './schema.js';
 export { createPostgresSecurityIncidentRepository } from './security-incident-repository.js';

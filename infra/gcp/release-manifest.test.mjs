@@ -73,7 +73,7 @@ test('manifest rejects mutable tags, missing selected images, incompatible schem
     contract,
     schemaVersion: CURRENT_SCHEMA,
   });
-  pair.components.web.peerApi.min = 2;
+  pair.components.web.peerApi = { min: 2, max: 2 };
   assert.throws(() => validateManifest(pair), /new web and agent API contracts are incompatible/);
 });
 
@@ -86,7 +86,7 @@ test('a selected worker outside its schema range fails closed', () => {
     contract,
     schemaVersion: CURRENT_SCHEMA,
   });
-  manifest.components.processor.schema.max = CURRENT_SCHEMA - 1;
+  manifest.components.processor.schema = { min: CURRENT_SCHEMA - 1, max: CURRENT_SCHEMA - 1 };
   assert.throws(() => validateManifest(manifest), /processor is incompatible with postgres schema/);
 });
 

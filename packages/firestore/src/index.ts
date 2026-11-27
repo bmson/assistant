@@ -57,6 +57,7 @@ export { FirestoreGraphCuriosityRepository } from './graph-curiosity.js';
 export { FirestoreGraphDateBackfillRepository } from './graph-date-backfill.js';
 export { FirestoreGraphRecallRepository } from './graph-recall.js';
 export { FirestoreHistoryRecallRepository } from './history-recall.js';
+export { createFirestoreHouseholdHandoffRepository } from './household-handoffs.js';
 export { FirestoreImportOverviewRepository } from './import-overview.js';
 export { FirestoreImportCommandRepository, FirestoreImportJobRepository } from './imports.js';
 export { assertFirestoreInstallationOwner } from './installation-owner.js';
@@ -173,6 +174,7 @@ export {
   type RuntimeDataIssue,
   type RuntimeDataPreflight,
 } from './runtime-data-preflight.js';
+export { createFirestoreSavedPlacesRepository } from './saved-places.js';
 export { FirestoreScheduleRepository } from './schedules.js';
 export { FirestoreSelfImprovementRepository } from './self-improvement.js';
 export { FirestoreSelfMaintenanceRepository } from './self-maintenance.js';

@@ -47,6 +47,12 @@ import {
   requestedConditionalArtifactIntent,
 } from '../artifact-intent.js';
 import { remainingBirthdaySaves, requestedBirthdaySaves } from '../birthday-import.js';
+import {
+  bookingDisclosureForRead,
+  bookingEvidence,
+  bookingModelWindow,
+  requiresBookingProjection,
+} from '../booking-disclosure.js';
 import { calendarAgendaSummary } from '../calendar-agenda.js';
 import { requestedCardIntent } from '../card-intent.js';
 import { taskBoundCorrectionReadRequest } from '../checklist-correction-resume.js';
@@ -782,6 +788,14 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
             now: readReferenceAt,
             timeZone: requestTimeZone,
           });
+  const disclosure =
+    directOwner && task.type === 'chat_turn'
+      ? bookingDisclosureForRead(ownerText, rc.resolvedReadIntent, readRequest)
+      : undefined;
+  const lookupEvidence = <T extends ReadToolEvidence>(row: T): T =>
+    disclosure ? bookingEvidence(row) : row;
+  const modelWindow = () =>
+    disclosure ? bookingModelWindow(publicModelWindow(), ownerText) : publicModelWindow();
   let assessmentStepReserve: 1 | 2 = EMAIL_REVIEW_DEFAULT_ASSESSMENT_RESERVE;
   if (readRequest?.emailReview) {
     const originalMaxSteps = task.maxSteps;
@@ -983,7 +997,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
           readRows.push(compoundTripExtractionEvidence(compoundTripExtraction));
         const independentlyChecked = enforcePersonalReadResponse(
           readRequest,
-          readRows.map((row) => ({ ...row, result: row.result })),
+          readRows.map((row) => lookupEvidence({ ...row, result: row.result })),
         );
         const receipts = proofRows
           .filter(
@@ -1022,7 +1036,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       const current = await evidence.taskEvidence({ agentId: task.agentId, taskId: task.id });
       const cards = responseCardsForFinal({
         ownerTimeZone: requestTimeZone,
-        evidence: current.map((row) => ({ ...row, fromCurrentTask: true })),
+        evidence: current.map((row) => lookupEvidence({ ...row, fromCurrentTask: true })),
         readRequest,
         requestText: ownerText,
       });
@@ -1042,6 +1056,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       ? stageModelFinalResponse(deps, lease, state, rc.window, pending, artifactIntent, readContext)
       : stageFinalResponse(deps, lease, state, rc.window, pending, {
           verifiedCompoundTripChecklist,
+          bookingReadContext: readContext,
         });
   };
   // A conceptual question was explicitly classified before the planner ran.
@@ -1131,6 +1146,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   const fallbackRecallMode =
     recallMode === 'automatic' || recallMode === 'continuation' ? recallMode : undefined;
   if (
+    !disclosure &&
     fallbackRecallMode &&
     shouldRunFallbackRecall({
       mode: fallbackRecallMode,
@@ -1721,10 +1737,12 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       liveLookup ||
       futureWatchIntent !== null ||
       birthdaySaves.length > 0
-        ? (await evidence.taskEvidence({ agentId: task.agentId, taskId: task.id })).map((row) => ({
-            ...row,
-            fromCurrentTask: true,
-          }))
+        ? (await evidence.taskEvidence({ agentId: task.agentId, taskId: task.id }))
+            .map((row) => ({
+              ...row,
+              fromCurrentTask: true,
+            }))
+            .map(lookupEvidence)
         : [];
     const correctionProjection = rc.checklistCorrection;
     const cancellationProjection = rc.checklistCancellation;
@@ -3104,12 +3122,14 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       buildSystemPrompt(
         { ...agent, timezone: requestTimeZone },
         {
-          ownerCard: !state.untrustedContext ? ownerCard : undefined,
-          recall: !state.untrustedContext ? recallBlock : undefined,
-          openLoops: !state.untrustedContext ? openLoops : undefined,
+          ownerCard: !state.untrustedContext && !disclosure ? ownerCard : undefined,
+          recall: !state.untrustedContext && !disclosure ? recallBlock : undefined,
+          openLoops: !state.untrustedContext && !disclosure ? openLoops : undefined,
           skills:
-            !state.untrustedContext || explicitlyRequestedSkillRetrieved ? skillsBlock : undefined,
-          ambient: !state.untrustedContext ? ambientBlock : undefined,
+            !disclosure && (!state.untrustedContext || explicitlyRequestedSkillRetrieved)
+              ? skillsBlock
+              : undefined,
+          ambient: !state.untrustedContext && !disclosure ? ambientBlock : undefined,
           tainted: state.untrustedContext,
           // Only the dashboard gets the companion persona and cue vocabulary;
           // email/SMS/goal sessions must never learn the tags exist.
@@ -3173,7 +3193,9 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
     // unverified prose before the ledger-backed checkpoint runs.
     const sourceFilteredTools = publicOnly
       ? availableToolDefs.filter((tool) => /^web\.(?:search|fetch)$/.test(tool.name))
-      : availableToolDefs;
+      : disclosure
+        ? availableToolDefs.filter((tool) => tool.name !== 'tools.read_result')
+        : availableToolDefs;
     const goalFilteredTools = isUnattendedGoalSession(task)
       ? sourceFilteredTools.filter((tool) => tool.name !== 'goals.update_progress')
       : sourceFilteredTools;
@@ -3573,7 +3595,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       stepResult = await router.step(role, {
         taskId: task.id,
         system,
-        messages: publicModelWindow(),
+        messages: modelWindow(),
         tools: toolSet as never,
         toolChoice:
           readAnswerTurn || airportClarificationTurn
@@ -3667,7 +3689,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
         stepResult = await router.step(role, {
           taskId: task.id,
           system: `${system}\n\nAnswer this conceptual question directly. The previous tool call was not executed. Return only the answer; no tools or action promises.`,
-          messages: publicModelWindow(),
+          messages: modelWindow(),
           tools: {},
           toolChoice: 'none',
           critical,
@@ -3707,7 +3729,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       stepResult = await router.step(role, {
         taskId: task.id,
         system: `${system}\n\nThis is an explicit artifact request. Call ${forcedArtifact.toolName} now. Do not answer with prose until that tool call has been emitted.`,
-        messages: publicModelWindow(),
+        messages: modelWindow(),
         tools: toolSet as never,
         toolChoice: { type: 'tool', toolName: forcedArtifact.toolName },
         forceFallback: useForcedToolFallback,
@@ -3750,7 +3772,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       stepResult = await router.step(role, {
         taskId: task.id,
         system: `${system}\n\nYou claimed an approval exists, but no tool call created it. Emit the actual gated tool call now. Never write an approval code or approval-page notice yourself; the runtime creates those after the tool call.`,
-        messages: publicModelWindow(),
+        messages: modelWindow(),
         tools: toolSet as never,
         toolChoice: 'required',
         forceFallback: useForcedToolFallback,
@@ -3782,7 +3804,7 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
       stepResult = await router.step(role, {
         taskId: task.id,
         system: `${system}\n\nThis request needs an action, not a summary. Emit the appropriate tool call now; do not answer in prose until you have.`,
-        messages: publicModelWindow(),
+        messages: modelWindow(),
         tools: toolSet as never,
         toolChoice: 'required',
         forceFallback: useForcedToolFallback,
@@ -4490,8 +4512,12 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
               requiredGoalProgressFailure = 'the progress write returned an unfinished job';
             }
           } else {
-            replaceToolResultMessage(rc.window, tc.toolCallId, tc.toolName, outcome.result, {
-              dbToolCallId: outcome.toolCallId,
+            const projectResult = disclosure && requiresBookingProjection(tc.toolName);
+            const modelResult = projectResult
+              ? bookingEvidence({ toolName: tc.toolName, result: outcome.result }).result
+              : outcome.result;
+            replaceToolResultMessage(rc.window, tc.toolCallId, tc.toolName, modelResult, {
+              dbToolCallId: projectResult ? undefined : outcome.toolCallId,
             });
             state.completedToolCallIds.push(outcome.toolCallId);
             journalCall.status = 'settled';
@@ -4951,10 +4977,9 @@ export async function runStepLoop(rc: RunContext, plan: Plan | null): Promise<Ex
   // never replace it with generic progress prose or ask the owner to choose a
   // provider. Goal sessions retain their stricter progress-persistence path.
   if (readRequest && !isUnattendedGoalSession(task)) {
-    let readToolEvidence = await evidence.taskEvidence({
-      agentId: task.agentId,
-      taskId: task.id,
-    });
+    let readToolEvidence = (
+      await evidence.taskEvidence({ agentId: task.agentId, taskId: task.id })
+    ).map(lookupEvidence);
     if (compoundTripExtraction)
       readToolEvidence = [
         ...readToolEvidence,

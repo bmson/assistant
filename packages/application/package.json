@@ -20,6 +20,8 @@
     "./security-incidents": "./src/security-incidents.ts",
     "./calendar-duplicates": "./src/calendar-duplicates.ts",
     "./goals": "./src/goals.ts",
+    "./saved-places": "./src/saved-places.ts",
+    "./home-weather": "./src/home-weather.ts",
     "./health": "./src/health.ts",
     "./imports": "./src/imports.ts",
     "./knowledge-graph": "./src/knowledge-graph.ts",
@@ -50,7 +52,9 @@
     "./owner-editor-domain": "./src/owner-editor-domain.ts",
     "./phone-call-owner-grants": "./src/phone-call-owner-grants.ts",
     "./approval-policy-presentation": "./src/approval-policy-presentation.ts",
-    "./google-calendar-connection": "./src/google-calendar-connection.ts"
+    "./google-calendar-connection": "./src/google-calendar-connection.ts",
+    "./google-household-calendar": "./src/google-household-calendar.ts",
+    "./household-handoff": "./src/household-handoff.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"

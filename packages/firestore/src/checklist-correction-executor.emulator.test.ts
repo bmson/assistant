@@ -73,6 +73,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
             workspacePrefix: 'owner',
             browserProfilePath: null,
             credentialRefs: {},
+            homeWeather: null,
             createdAt: now,
             updatedAt: now,
           };
@@ -614,6 +615,7 @@ describe.skipIf(!process.env.FIRESTORE_EMULATOR_HOST)(
             workspacePrefix: 'owner',
             browserProfilePath: null,
             credentialRefs: {},
+            homeWeather: null,
             createdAt: now,
             updatedAt: now,
           };

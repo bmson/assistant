@@ -26,6 +26,14 @@ vi.mock('@/lib/mobile-access-token', () => ({
 }));
 vi.mock('@/lib/server', () => ({
   getWorkspaceSettings: async () => ({ policies: [] }),
+  savedPlacesSettingsPorts: async () => ({
+    agentId: 'fixture',
+    repository: { list: async () => ({ generation: null, places: [] }) },
+  }),
+  homeWeatherSettingsPorts: async () => ({
+    agentId: 'fixture',
+    repository: { getHomeWeather: async () => null },
+  }),
   listOwnerMcpConnections: state.connections,
   isMcpOAuthConfigured: () => false,
 }));

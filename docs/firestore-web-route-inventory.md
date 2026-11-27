@@ -2,6 +2,10 @@
 
 > Historical source inventory, last updated 2026-09-26. Route totals and classifications below are retained as a dated snapshot, not a current route-drift check or production receipt. Reconcile against `apps/web/app` and the proxy before relying on an individual row. See the [runtime support matrix](runtime-support-matrix.md) and [cutover checklist](firestore-cutover-checklist.md).
 
+## November 19 mobile addition
+
+`GET` and `PUT /api/mobile/v1/connections/google-calendar/household` use the authenticated owner's personal Google connection repository in either store. Setup exposes roster metadata and saved choices. A dated preview uses those choices to request household event details and work free/busy. An unavailable roster cannot establish completeness or accept edits.
+
 ## November 18 mobile additions
 
 | Route                                                                                                                                    | Firestore behavior                                                                                                                                                                  |

@@ -38,6 +38,8 @@ Every new store is a port in `packages/persistence` with two adapters: PostgreSQ
 
 ### 3.1 `signals`
 
+The invoice and payment records are portable. Workspace export retains canonical signal identities and supersession links. Firestore import uses the same owner, kind, time and subject fields as live signal reads.
+
 ```ts
 interface Signal {
   id: string;

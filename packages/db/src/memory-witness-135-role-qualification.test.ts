@@ -7,10 +7,16 @@ import { drizzle } from 'drizzle-orm/postgres-js';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import postgres from 'postgres';
 import { expect, it } from 'vitest';
+import { emailIngestFixture } from '../../persistence/src/signal-test-scenarios.js';
+import { createPostgresHouseholdHandoffRepository } from './household-handoffs.js';
 import {
   qualifyMemoryWitnessRoleImages,
   runMemoryWitnessMigrationImage,
 } from './memory-witness-role-qualification.js';
+import { createPostgresHomeWeatherRepository } from './owner-context-repository.js';
+import { createPostgresSavedPlacesRepository } from './saved-places.js';
+import * as schema from './schema.js';
+import { createPostgresSignalRepository } from './signals.js';
 import { allocateTestTarget, assertAllocatedTestTarget } from './test-target.js';
 
 const folder = fileURLToPath(new URL('../drizzle/', import.meta.url));
@@ -54,7 +60,7 @@ async function dropOwnedDatabase(
 }
 
 it.skipIf(!imagesReceipt)(
-  'qualifies the schema 142 migration image, runtime readiness, and generic write compatibility',
+  'qualifies the schema 146 migration image, runtime readiness, and generic write compatibility',
   async () => {
     assertAllocatedTestTarget({
       databaseUrl: process.env.DATABASE_URL,
@@ -82,7 +88,7 @@ it.skipIf(!imagesReceipt)(
       | undefined;
     try {
       await admin`SET statement_timeout = '15s'`;
-      prefixDir = await mkdtemp(join(tmpdir(), 'assistant-memory-witness-role-142-'));
+      prefixDir = await mkdtemp(join(tmpdir(), 'assistant-memory-witness-role-146-'));
       await admin.unsafe(`CREATE DATABASE "${target.databaseName}"`);
       created = true;
       await admin.unsafe(
@@ -95,8 +101,8 @@ it.skipIf(!imagesReceipt)(
       });
       await client`SET statement_timeout = '30s'`;
 
-      // The populated historical 0134 prefix remains unchanged. The current
-      // schema 142 image must apply the witness, Calendar, cost, MCP OAuth, bill evidence and signal migrations.
+      // Seed the historical 0134 state, complete the exact B5 prefix, and
+      // populate B5 settings before the 146 image advances the same database.
       const forwardEntries = journal.entries.slice(135);
       expect(forwardEntries.map((entry: { tag: string }) => entry.tag)).toEqual([
         '0135_memory_write_witness',
@@ -107,6 +113,10 @@ it.skipIf(!imagesReceipt)(
         '0140_cost_event_accounted_at',
         '0141_bill_email_evidence',
         '0142_signal_store',
+        '0143_google_household_calendar_choices',
+        '0144_home_weather',
+        '0145_saved_places',
+        '0146_household_handoffs',
       ]);
       const expectedForwardLedger = await Promise.all(
         forwardEntries.map(async (entry: { tag: string; when: number }) => ({
@@ -172,24 +182,30 @@ it.skipIf(!imagesReceipt)(
       await client`
         INSERT INTO mcp_connections (id,agent_id,name,endpoint,status,bearer_token_encrypted)
         VALUES (${legacyMcpId},${owner},'Fixture MCP','https://mcp.invalid/', 'ready','sealed-fixture')`;
-      await client.end({ timeout: 5 });
-      client = undefined;
-
-      await runMemoryWitnessMigrationImage(imagesReceipt as string, target.databaseUrl);
-      await runMemoryWitnessMigrationImage(imagesReceipt as string, target.databaseUrl);
-      client = postgres(target.databaseUrl, {
-        max: 1,
-        connect_timeout: 10,
-        onnotice: () => {},
-      });
-      await client`SET statement_timeout = '15s'`;
-      const firstForward = expectedForwardLedger[0];
-      if (!firstForward) throw new Error('Schema 142 forward migration tail is missing.');
-      const forwardLedger = await client`
-        SELECT hash,created_at::text AS "createdAt" FROM drizzle.__drizzle_migrations
-        WHERE created_at >= ${firstForward.createdAt}
-        ORDER BY created_at,id`;
-      expect([...forwardLedger]).toEqual(expectedForwardLedger);
+      const b5Entries = journal.entries.slice(0, 146);
+      expect(b5Entries.at(-1)?.tag).toBe('0145_saved_places');
+      for (const entry of b5Entries.slice(prefixEntries.length))
+        await writeFile(
+          join(prefixDir, `${entry.tag}.sql`),
+          await readFile(join(folder, `${entry.tag}.sql`)),
+        );
+      await writeFile(
+        join(prefixDir, 'meta/_journal.json'),
+        JSON.stringify({ ...journal, entries: b5Entries }),
+      );
+      await bounded(
+        'populated B5 prefix construction',
+        90_000,
+        migrate(drizzle(client), { migrationsFolder: prefixDir }),
+      );
+      const b5db = drizzle(client, { schema });
+      const [legacyHome] = await client`
+        SELECT home_weather AS choice, home_weather IS NULL AS "isSqlNull"
+        FROM agents WHERE id=${owner}`;
+      expect(legacyHome).toEqual({ choice: null, isSqlNull: true });
+      const [legacySavedPlaces] = await client`
+        SELECT count(*)::int AS count FROM saved_places WHERE agent_id=${owner}`;
+      expect(legacySavedPlaces?.count).toBe(0);
       const [calendarTable] = await client`
         SELECT to_regclass('public.google_calendar_connections')::text AS "tableName"`;
       expect(calendarTable?.tableName).toBe('google_calendar_connections');
@@ -202,9 +218,98 @@ it.skipIf(!imagesReceipt)(
         flow: null,
       };
       await client`INSERT INTO google_calendar_connections (agent_id,state) VALUES (${owner},${JSON.stringify(calendarState)}::text::jsonb)`;
+      const householdSettings = {
+        connectionId: randomUUID(),
+        revision: randomUUID(),
+        choices: [{ id: 'family@example.test', purpose: 'household' }],
+      };
+      await client`
+        INSERT INTO google_household_calendar_choices (agent_id, settings)
+        VALUES (${owner}, ${JSON.stringify(householdSettings)}::text::jsonb)`;
+      const home = {
+        city: 'Juniper Bay',
+        enabled: true,
+        revision: randomUUID(),
+        lat: 38.5,
+        lng: -120.5,
+      };
+      expect(await createPostgresHomeWeatherRepository(b5db).setHomeWeather(owner, home)).toBe(
+        true,
+      );
+      const place = {
+        id: randomUUID(),
+        revision: randomUUID(),
+        details: {
+          category: 'school' as const,
+          label: 'Fixture School',
+          address: '1 Fixture Lane',
+        },
+      };
+      expect(
+        await createPostgresSavedPlacesRepository(b5db).change(owner, {
+          ...place,
+          generation: null,
+          expectedRevision: null,
+        }),
+      ).toBe(true);
+      const observed = new Date('2026-11-19T12:00:00Z');
+      const mail = emailIngestFixture(
+        owner,
+        'Invoice SYN-104: USD 42.15 is due on November 23, 2026.',
+        observed,
+      );
+      await b5db.insert(schema.emailIngest).values(mail);
+      const signal = await createPostgresSignalRepository(b5db).record({
+        agentId: owner,
+        emailIngestId: mail.id,
+        at: observed,
+        subjectPersonIds: ['fixture-owner'],
+      });
+      const ledger = (connection: ReturnType<typeof postgres>) => connection`
+        SELECT hash,created_at::text AS "createdAt" FROM drizzle.__drizzle_migrations
+        ORDER BY created_at,id`;
+      const b5Ledger = [...(await ledger(client))];
+      const [predecessorHandoffTable] =
+        await client`SELECT to_regclass('public.household_handoffs') AS "tableName"`;
+      expect(predecessorHandoffTable?.tableName).toBeNull();
+      const lastMigration = expectedForwardLedger.at(-1);
+      expect(lastMigration).toEqual({
+        hash: '676b1049e2e167c5213fa062018282f261922be2b4d6261fdd55d40a4d831eb8',
+        createdAt: '1795711047896',
+      });
+      const expectedLedger = [...b5Ledger, lastMigration];
+      await client.end({ timeout: 5 });
+      client = undefined;
+
+      await runMemoryWitnessMigrationImage(imagesReceipt as string, target.databaseUrl);
+      client = postgres(target.databaseUrl, { max: 1, connect_timeout: 10, onnotice: () => {} });
+      await client`SET statement_timeout = '15s'`;
+      expect([...(await ledger(client))]).toEqual(expectedLedger);
+      await client.end({ timeout: 5 });
+      client = undefined;
+
+      await runMemoryWitnessMigrationImage(imagesReceipt as string, target.databaseUrl);
+      client = postgres(target.databaseUrl, { max: 1, connect_timeout: 10, onnotice: () => {} });
+      await client`SET statement_timeout = '15s'`;
+      const forwardLedger = (await ledger(client)).slice(prefixEntries.length);
+      expect([...forwardLedger]).toEqual(expectedForwardLedger);
+      expect([...(await ledger(client))]).toEqual(expectedLedger);
+      const upgraded = drizzle(client, { schema });
+      expect(await createPostgresHouseholdHandoffRepository(upgraded).read(owner)).toBeNull();
+      expect(await createPostgresHomeWeatherRepository(upgraded).getHomeWeather(owner)).toEqual(
+        home,
+      );
+      expect(await createPostgresSavedPlacesRepository(upgraded).list(owner)).toEqual({
+        generation: null,
+        places: [place],
+      });
+      expect(await createPostgresSignalRepository(upgraded).get(owner, signal.id)).toEqual(signal);
       const [calendarAfter] =
         await client`SELECT state FROM google_calendar_connections WHERE agent_id=${owner}`;
       expect(calendarAfter?.state).toEqual(calendarState);
+      const [householdAfter] = await client`
+        SELECT settings FROM google_household_calendar_choices WHERE agent_id = ${owner}`;
+      expect(householdAfter?.settings).toEqual(householdSettings);
       const budgetTables = await client`
         SELECT table_name AS "tableName" FROM information_schema.tables
         WHERE table_schema='public' AND table_name LIKE 'estimated_cost_%'
@@ -278,7 +383,7 @@ it.skipIf(!imagesReceipt)(
       const proofDirectory = process.env.ASSISTANT_MEMORY_WITNESS_PROOF_DIR;
       if (proofDirectory) {
         await writeFile(
-          join(proofDirectory, 'schema-142-forward-upgrade.json'),
+          join(proofDirectory, 'schema-146-forward-upgrade.json'),
           `${JSON.stringify(
             {
               prefixLastMigration: prefixEntries.at(-1)?.tag,
@@ -286,9 +391,15 @@ it.skipIf(!imagesReceipt)(
               appliedForwardLedger: [...forwardLedger],
               calendarTable: calendarTable?.tableName,
               disconnectedCalendarStateReadback: calendarAfter?.state,
+              householdChoicesReadback: householdAfter?.settings,
               estimatedCostTables: budgetTables.map((row) => row.tableName),
               historicalUnknownReservationReadback: legacyReservation,
               legacyCostEventReadback: legacyCostEvent,
+              oldOwnerHasNoHandoff: true,
+              populatedB5RowsPreserved: true,
+              repeatLedgerUnchanged: true,
+              legacySavedPlacesStartEmpty: legacySavedPlaces?.count === 0,
+              legacyHomeWeatherStartsUnconfigured: legacyHome?.isSqlNull,
               legacyMcpRecordPreserved: legacyMcpConnection?.oauthState === null,
               legacyMemoryWitnessRemainsSqlNull: legacyAfter?.witnessIsSqlNull,
             },
@@ -363,12 +474,12 @@ it.skipIf(!imagesReceipt)(
     if (cleanupErrors.length)
       throw new AggregateError(cleanupErrors, 'Memory witness role qualification cleanup failed.');
   },
-  // Budget: 90s prefix migration + 45s fixture DDL + 90s legacy row setup
+  // Budget: two 90s prefix migrations + 45s fixture DDL + 150s fixture population
   // + 15s post-migration readback + 2 x 95s migration-image passes (10s
   // create, 5s inspect, 45s attach, 5s exit inspect, 30s cleanup) + 40s
   // runtime image starts + 45s readiness + 80s runtime-container cleanup
   // (10s logs and 30s exact close per role) + 300s for at most 20 host SQL
   // statements at the helper's 15s statement timeout + 50s fixture
-  // drop/client close/temp cleanup = 945s; reserve 15s diagnostics margin.
-  960_000,
+  // drop/client close/temp cleanup = 1095s; reserve 45s diagnostics margin.
+  1_140_000,
 );

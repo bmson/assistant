@@ -1,4 +1,5 @@
 import {
+  DAILY_BRIEFING,
   type GoalOccurrenceGuard,
   REPAIR_POLL_INTERVAL_MS,
   type ScheduleRecord,
@@ -10,7 +11,7 @@ import { InboundEventSchema } from '../events.js';
 import { isCodeJobEnabled } from '../memory/jobs.js';
 import type { AutonomyGrant } from './autonomy.js';
 import { deriveTaskTitle, type TaskType } from './machine.js';
-import { nextRun } from './schedule-time.js';
+import { nextRun, startOfZonedDay, zonedParts } from './schedule-time.js';
 
 export interface ScheduledTaskTemplate {
   type?: TaskType;
@@ -57,9 +58,31 @@ export async function runScheduleBatch(
       await repository.initialize(row, nextRun(row.cron, timezone, now), now);
   }
   const fired: Array<{ schedule: string; taskId: string }> = [];
-  for (const row of await repository.listDue(now, batch)) {
-    if (!scheduleCanRun(row) || !row.nextRunAt) continue;
-    const template = (row.taskTemplate ?? {}) as ScheduledTaskTemplate;
+  for (const candidate of await repository.listDue(now, batch)) {
+    if (!scheduleCanRun(candidate) || !candidate.nextRunAt) continue;
+    const template = (candidate.taskTemplate ?? {}) as ScheduledTaskTemplate;
+    let row = candidate;
+    if (
+      row.name === DAILY_BRIEFING &&
+      template.job === 'briefing.compose' &&
+      zonedParts(timezone, candidate.nextRunAt).date < zonedParts(timezone, now).date
+    ) {
+      // A stopped scheduler must not spend today's firing on an earlier date.
+      // Rebase without stamping lastRunAt, so a pre-cron foreground open can
+      // still claim today's occurrence. Both writes use the schedule fence.
+      const start = startOfZonedDay(timezone, now);
+      const rebased = await repository.commitOccurrence({
+        expected: row,
+        now,
+        mode: 'rebase-missed-briefing',
+        nextRunAt: nextRun(row.cron, timezone, new Date(start.getTime() - 1)),
+        enabled: true,
+        task: null,
+      });
+      if (!rebased) continue;
+      row = rebased.schedule;
+    }
+    if (!row.nextRunAt || row.nextRunAt > now) continue;
     // A second report or restored checkpoint may have armed this occurrence early.
     // The stored last firing survives retries and is fenced by commitOccurrence.
     if (

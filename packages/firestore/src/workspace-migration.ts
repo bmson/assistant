@@ -10,6 +10,7 @@ import {
   embeddingSpaceIdentityKey,
   findCardForm,
   googleCalendarConnectionAfterMigration,
+  householdHandoffAfterTransfer,
   type MigrationBundle,
   type MigrationRecord,
   type MigrationTarget,
@@ -547,6 +548,8 @@ function projectRecord(
   const data =
     (record.table === 'memories' && memoryProjections.get(record.id)) ||
     materialize(record, bundle.manifest.source.embeddingSpace);
+  if (record.table === 'household_handoffs')
+    return householdHandoffAfterTransfer(data, record.id, 'import', bundle.manifest.target);
   if (bundle.manifest.formatVersion >= 3 && record.table === 'knowledge_graph_sources') {
     const memoryId = data.memoryId;
     const memory = typeof memoryId === 'string' ? memoryProjections.get(memoryId) : undefined;

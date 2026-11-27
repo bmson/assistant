@@ -309,10 +309,22 @@ beforeAll(async () => {
     const expectedBillHash = createHash('sha256')
       .update(await readFile(join(folder, '0141_bill_email_evidence.sql')))
       .digest('hex');
-    const expectedFinalHash = createHash('sha256')
+    const expectedSignalsHash = createHash('sha256')
       .update(await readFile(join(folder, '0142_signal_store.sql')))
       .digest('hex');
-    expect(journal.entries.at(-1)?.tag).toBe('0142_signal_store');
+    const expectedHouseholdCalendarHash = createHash('sha256')
+      .update(await readFile(join(folder, '0143_google_household_calendar_choices.sql')))
+      .digest('hex');
+    const expectedHomeWeatherHash = createHash('sha256')
+      .update(await readFile(join(folder, '0144_home_weather.sql')))
+      .digest('hex');
+    const expectedSavedPlacesHash = createHash('sha256')
+      .update(await readFile(join(folder, '0145_saved_places.sql')))
+      .digest('hex');
+    const expectedFinalHash = createHash('sha256')
+      .update(await readFile(join(folder, '0146_household_handoffs.sql')))
+      .digest('hex');
+    expect(journal.entries.at(-1)?.tag).toBe('0146_household_handoffs');
     const [endpoint] = await client`
       SELECT hash FROM drizzle.__drizzle_migrations ORDER BY id DESC LIMIT 1`;
     expect(endpoint?.hash).toBe(expectedFinalHash);
@@ -323,7 +335,7 @@ beforeAll(async () => {
       SELECT hash,created_at::text AS "createdAt"
       FROM drizzle.__drizzle_migrations ORDER BY id`;
     expect(ledgerBeforeRerun).toHaveLength(journal.entries.length);
-    expect(ledgerBeforeRerun.slice(-9).map(({ hash }) => hash)).toEqual([
+    expect(ledgerBeforeRerun.slice(-13).map(({ hash }) => hash)).toEqual([
       expectedOwnerMemoryHash,
       expectedWitnessHash,
       expectedCalendarHash,
@@ -332,6 +344,10 @@ beforeAll(async () => {
       expectedResearchHash,
       expectedAccountingHash,
       expectedBillHash,
+      expectedSignalsHash,
+      expectedHouseholdCalendarHash,
+      expectedHomeWeatherHash,
+      expectedSavedPlacesHash,
       expectedFinalHash,
     ]);
     await client.end();

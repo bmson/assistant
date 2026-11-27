@@ -218,6 +218,8 @@ export function proxy(request: NextRequest) {
       ['GET', 'DELETE'].includes(request.method)) ||
     (path === '/api/mobile/v1/connections/google-calendar' &&
       ['GET', 'DELETE'].includes(request.method)) ||
+    (path === '/api/mobile/v1/connections/google-calendar/household' &&
+      ['GET', 'PUT'].includes(request.method)) ||
     (path === '/api/mobile/v1/connections/google-calendar/connect' && request.method === 'POST') ||
     (path === '/api/mobile/v1/connections/google-calendar/flow' &&
       ['GET', 'DELETE'].includes(request.method)) ||
