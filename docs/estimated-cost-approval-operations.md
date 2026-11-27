@@ -24,6 +24,8 @@ The protected job reads two specific generations from the reviewed evidence buck
 
 Retain complete runnable copies of the current, candidate and recovery images, including their manifests, configs, layers, attestations and signature evidence. Before removing a retention tag or scheduling registry cleanup, verify that each active service and job still has a retrievable recovery image from persistent storage. Keep the signed identity records and rehearsal receipts alongside the image references.
 
+If web admission stops, its log can identify the failed check by stage. The `github_token_file` stage checks the runner's private token file. The `historical_artifact_metadata`, `historical_artifact_download` and `historical_artifact_proof` stages distinguish finding the historical run, downloading its archive and verifying its contents. These diagnostics omit credential values and artifact addresses.
+
 ## Baseline provisioning
 
 `scripts/estimated-cost-baseline-operator.ts` uses the existing verified human account, fixed `bmson-assistant` / `assistant-production` target, exact clean main source, current recovery/index inventory and reviewed native service snapshot. It refuses credential overrides, impersonation and alternate targets. All operator files must be bounded, private, regular files; retain them outside the repository. No new IAM grant or credential is part of this command.
