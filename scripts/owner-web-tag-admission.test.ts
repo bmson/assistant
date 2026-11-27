@@ -43,12 +43,43 @@ vi.mock('./owner-web-release-native-proof.js', () => ({
   projectNativeWebSnapshot: mocked.project,
 }));
 
+import { registerImageResolution } from './owner-release-image-resolution.js';
 import { runWebTagAdmission, verifyAdmissionContext } from './owner-web-tag-admission.js';
 import { HISTORICAL_WEB_TAGS, WEB_SERVICE } from './owner-web-tag-retirement.js';
 
 const hash = (s: string) => createHash('sha256').update(s).digest('hex');
-const source = 'a'.repeat(40),
-  newImage = `us-west1-docker.pkg.dev/bmson-assistant/assistant/web@sha256:${'b'.repeat(64)}`;
+const source = 'a'.repeat(40);
+const webImageRoot = 'us-west1-docker.pkg.dev/bmson-assistant/assistant/web';
+const ociManifest = 'application/vnd.oci.image.manifest.v1+json';
+const child = JSON.stringify({
+  schemaVersion: 2,
+  mediaType: ociManifest,
+  config: {
+    digest: `sha256:${'b'.repeat(64)}`,
+    size: 1,
+    mediaType: 'application/vnd.oci.image.config.v1+json',
+  },
+  layers: [
+    {
+      digest: `sha256:${'b'.repeat(64)}`,
+      size: 1,
+      mediaType: 'application/vnd.oci.image.layer.v1.tar',
+    },
+  ],
+});
+const index = JSON.stringify({
+  schemaVersion: 2,
+  mediaType: 'application/vnd.oci.image.index.v1+json',
+  manifests: [
+    {
+      digest: `sha256:${hash(child)}`,
+      size: Buffer.byteLength(child),
+      mediaType: ociManifest,
+      platform: { os: 'linux', architecture: 'amd64' },
+    },
+  ],
+});
+const newImage = `${webImageRoot}@sha256:${hash(index)}`;
 const candidate = 'candidate-123-1',
   resume = 'resume-123-1';
 const uri = (tag: string) => `https://${tag}---assistant-web-3gimfiaifa-uw.a.run.app`;
@@ -133,7 +164,7 @@ beforeEach(() => {
     components: {
       web: {
         image: newImage,
-        digest: `sha256:${'b'.repeat(64)}`,
+        digest: `sha256:${hash(index)}`,
         apiContract: 1,
         peerApi: { min: 1, max: 1 },
         schema: { min: 1, max: 1 },
@@ -503,6 +534,60 @@ describe('paired native admission command', () => {
       receipt.records.map((r: { legacyBarrierCompleted: boolean }) => r.legacyBarrierCompleted),
     ).toEqual([false, true]);
     expect(saved).not.toContain('private-never-publish');
+  });
+  it('binds protected shell resume recording to the exact alias and verified native child', async () => {
+    await completeBarrier();
+    const expected = 'assistant-web-r-123-1-aaaaaaaa';
+    setService(
+      [
+        { tag: candidate, revision: 'assistant-web-new-paused', percent: 100 },
+        { tag: resume, revision: 'assistant-web-new-resume' },
+      ],
+      newImage,
+    );
+    vi.stubEnv('OWNER_TAG_EXPECTED_RESUME_REVISION', expected);
+    await expect(runWebTagAdmission('--record-resume')).rejects.toThrow('exact protected revision');
+
+    setService(
+      [
+        { tag: candidate, revision: 'assistant-web-new-paused', percent: 100 },
+        { tag: resume, revision: expected },
+      ],
+      newImage,
+    );
+    const resolved = registerImageResolution(
+      newImage,
+      Buffer.from(index),
+      Buffer.from(child),
+    ).resolved;
+    const readback = revision(expected, resolved, false, true);
+    const resolvedNative = {
+      ...readback,
+      containers: readback.containers.map((container) => ({ ...container, name: 'web-1' })),
+      containerStatuses: [{ name: 'web-1', imageDigest: newImage }],
+    };
+    native[expected] = resolvedNative;
+    await expect(runWebTagAdmission('--record-resume')).rejects.toThrow('Immutable image');
+    native[expected] = {
+      ...resolvedNative,
+      containerStatuses: [{ name: 'web-1', imageDigest: resolved }],
+      containers: resolvedNative.containers.map((container) => ({
+        ...container,
+        env: container.env.map((entry) =>
+          entry.name === 'ASSISTANT_RELEASE_SOURCE_SHA'
+            ? { ...entry, value: '9'.repeat(40) }
+            : entry,
+        ),
+      })),
+    };
+    await expect(runWebTagAdmission('--record-resume')).rejects.toThrow('source identity');
+    native[expected] = {
+      ...resolvedNative,
+      containerStatuses: [{ name: 'web-1', imageDigest: resolved }],
+    };
+    await runWebTagAdmission('--record-resume');
+    const { records } = JSON.parse(readFileSync(join(temp, 'owner-web-tag-creation.json'), 'utf8'));
+    expect(records[1]).toMatchObject({ revision: expected, image: newImage, writesPaused: false });
   });
   it('fails before patch for changed UID or unsafe old native timeout', async () => {
     await runWebTagAdmission('--capture');

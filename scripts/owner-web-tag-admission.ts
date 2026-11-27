@@ -1113,8 +1113,17 @@ export async function runWebTagAdmission(mode: string | undefined) {
   const tag = `${kind}-${runId}-${runAttempt}`,
     live = snapshot.rows.filter((row) => row.tag === tag);
   if (live.length !== 1 || !live[0]?.uri) throw new Error('Created alias identity unverified');
-  const row = live[0],
-    native = await io.readRevision(row.revision);
+  const row = live[0];
+  const expectedResume = process.env.OWNER_TAG_EXPECTED_RESUME_REVISION;
+  if (
+    kind === 'resume' &&
+    expectedResume !== undefined &&
+    (expectedResume !== `assistant-web-r-${runId}-${runAttempt}-${source.slice(0, 8)}` ||
+      row.revision !== expectedResume ||
+      row.percent !== 0)
+  )
+    throw new Error('Observed resume alias differs from the exact protected revision');
+  const native = await io.readRevision(row.revision);
   if (!row.uri) throw new Error('Created alias URI missing');
   immutableWebRevision(native, row.revision, image, kind === 'candidate');
   if (

@@ -76,9 +76,12 @@ if a[:3]==['run','revisions','describe']:
    svc['revisions'][svc['revision']]={'env':dict(svc.get('env',{}))}; save()
   if revision in svc['revisions']:
    env=svc['revisions'][revision].get('env',{})
-   spec={'containers':[{'image':svc['revisions'][revision].get('image','legacy-image'),'env':[{'name':k,'value':v} for k,v in env.items()]}]}
+   image=svc['revisions'][revision].get('image','legacy-image')
+   if revision=='assistant-web-new2' and os.getenv('STUB_RESUME_REVISION_CHILD')=='1':
+    image=image.split('@')[0]+'@sha256:'+'c'*64
+   spec={'containers':[{'image':image,'env':[{'name':k,'value':v} for k,v in env.items()]}]}
    if os.getenv('STUB_WEB_TIMEOUT_MISSING')!='1': spec['timeoutSeconds']=int(os.getenv('STUB_WEB_TIMEOUT_SECONDS','300'))
-   print(json.dumps({'metadata':{'name':revision},'spec':spec})); sys.exit(0)
+   print(json.dumps({'metadata':{'name':revision},'spec':spec,'status':{'imageDigest':image}})); sys.exit(0)
   for stage in svc.get('staged',[]):
    if revision==stage['revision']:
     env=stage.get('env',{})
@@ -280,7 +283,10 @@ release_verify_owned_web_tag_admission() {
 release_record_owned_web_tag() {
   printf 'record:%s:%s:%s:%s:%s:%s\n' "$1" "$2" "$3" "$4" "$5" "${FAIL_CANDIDATE_RECEIPT:-0}:${FAIL_RESUME_RECEIPT:-0}" >>"$STUB_ADMISSION_CALLS"
   if [[ "$1" == candidate && "${FAIL_CANDIDATE_RECEIPT:-0}" == 1 ]]; then return 1; fi
-  if [[ "$1" == resume && "${FAIL_RESUME_RECEIPT:-0}" == 1 ]]; then return 1; fi
+  if [[ "$1" == resume ]]; then
+    [[ "${OWNER_TAG_EXPECTED_RESUME_REVISION:-}" == assistant-web-new2 ]] || return 1
+    [[ "${FAIL_RESUME_RECEIPT:-0}" != 1 ]] || return 1
+  fi
   return 0
 }
 v1_job='{"spec":{"template":{"spec":{"template":{"spec":{"containers":[{"image":"registry/v1-image"}]}}}}}}'
@@ -293,7 +299,7 @@ reset_case() {
 JSON
  unset FAIL_AGENT_BUILD FAIL_AGENT_STAGE UNHEALTHY_AGENT UNHEALTHY_WEB UNHEALTHY_LIVE_WEB \
     CANDIDATE_WEB_PROBE_FAIL FINAL_NEW_PAIR_PROBE_FAIL RESUME_WEB_PROBE_FAIL RESUME_LIVE_PROBE_FAIL \
-    FAIL_AGENT_PROMOTE FAIL_WEB_PROMOTE FAIL_REPAUSE FAIL_RESUME_DRAIN STUB_WEB_TIMEOUT_SECONDS STUB_WEB_TIMEOUT_MISSING \
+    FAIL_AGENT_PROMOTE FAIL_WEB_PROMOTE FAIL_REPAUSE FAIL_RESUME_DRAIN STUB_WEB_TIMEOUT_SECONDS STUB_WEB_TIMEOUT_MISSING STUB_RESUME_REVISION_CHILD \
     FAIL_WORKER_UPDATE STALE_WORKER_IMAGE FAIL_TAG_REMOVAL MUTATE_TRAFFIC_AFTER_TAG_REMOVAL \
     ADD_FOREIGN_TAG_TO_PROMOTED_REVISION FAIL_RESUME_STAGE_UNCERTAIN REASSIGN_RESUME_TAG_ON_REPAUSE AGENT_IMAGE_PUSH_DIGEST \
     FAIL_ADMISSION_CAPTURE FAIL_ADMISSION_RETIRE FAIL_ADMISSION_VERIFY FAIL_CANDIDATE_RECEIPT FAIL_RESUME_RECEIPT FAIL_AGENT_READY_RECEIPT OWNED_TAGS_ALREADY_ABSENT \
@@ -597,8 +603,13 @@ import json,sys
 p=sys.argv[1]; s=json.load(open(p))
 open(p,'w').write(json.dumps(s))
 PY
-export OWNED_TAGS_ALREADY_ABSENT=1
-release_staged_services || fail 'Firestore compatible pair should promote'
+export OWNED_TAGS_ALREADY_ABSENT=1 STUB_RESUME_REVISION_CHILD=1
+release_staged_services || fail 'Firestore compatible pair should promote with a native-verified resolved child'
+gcloud run revisions describe assistant-web-new2 --format=json | node -e '
+  const r=JSON.parse(require("node:fs").readFileSync(0,"utf8"));
+  if(!r.spec.containers[0].image.endsWith("@sha256:"+"c".repeat(64))||
+     r.status.imageDigest!==r.spec.containers[0].image) process.exit(2);
+' || fail 'resumed immutable revision fixture must report the child for both image fields'
 python3 - "$TEST_ROOT/manifest.json" <<'PY'
 import json,sys
 m=json.load(open(sys.argv[1])); assert m['storageDriver']=='firestore'; assert m['schemaVersion']==1
@@ -818,6 +829,7 @@ import sys
 calls=open(sys.argv[1]).read().splitlines(); events=open(sys.argv[2]).read().splitlines()
 assert not any('assistant-web-new2=100' in x for x in calls), calls
 assert any(x.startswith('record:resume:') for x in events), events
+assert not any(x=='native-phase:closeR' for x in events), events
 PYCASE
 reset_case; prepare_firestore_state; export RELEASE_MODULES=browser FAIL_AGENT_READY_RECEIPT=1
 if release_staged_services; then fail 'failed paired agent readiness receipt must prevent unpaused creation'; fi
